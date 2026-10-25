@@ -24,6 +24,7 @@ type CompletedWorkerBusy struct {
 	ServerStartedAt string
 	BusySince       int64
 	TurnEnded       int64
+	Baseline        string
 }
 
 type ConfigApproval struct {
@@ -102,6 +103,18 @@ type MemberWatchError struct {
 	UpdatedAt int64
 }
 
+type MergeQueueEntry struct {
+	ID            int64
+	ProjectID     int64
+	TaskID        int64
+	Repo          string
+	TargetBranch  string
+	EnteredAt     int64
+	CreatedAt     int64
+	DequeuedAt    int64
+	DequeueReason string
+}
+
 type Message struct {
 	ID          int64
 	TaskID      int64
@@ -165,11 +178,12 @@ type NoticeNotification struct {
 }
 
 type PrBodyMarker struct {
-	TaskID      int64
-	Repo        string
-	PrUrl       string
-	MarkerToken string
-	UpdatedAt   int64
+	TaskID           int64
+	Repo             string
+	PrUrl            string
+	MarkerToken      string
+	UpdatedAt        int64
+	ValidationDigest string
 }
 
 type PrObservation struct {
@@ -213,6 +227,11 @@ type Project struct {
 	Kind             string
 	DownAt           int64
 	ProjectUuid      string
+}
+
+type ProjectHistoryRevision struct {
+	ProjectID int64
+	Revision  int64
 }
 
 type ProjectRepo struct {
@@ -646,6 +665,7 @@ type ValidationFixRound struct {
 	DedupeKey        string
 	MessageID        int64
 	CreatedAt        int64
+	MemberHeadsJson  string
 }
 
 type ValidationStageResult struct {

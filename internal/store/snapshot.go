@@ -3,13 +3,17 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,10 +63,13 @@ type TaskSnapshot struct {
 }
 
 type projectSnapshot struct {
-	Version int                  `toml:"version"`
-	Project Project              `toml:"project"`
-	Members []ProjectRepo        `toml:"members,omitempty"`
-	State   projectStateSnapshot `toml:"state"`
+	Version int `toml:"version"`
+	// StateDigest covers everything except the capture time. It precedes every
+	// table, so an unchanged check reads only the header of a large snapshot.
+	StateDigest string               `toml:"state_digest,omitempty"`
+	Project     Project              `toml:"project"`
+	Members     []ProjectRepo        `toml:"members,omitempty"`
+	State       projectStateSnapshot `toml:"state"`
 }
 
 type projectStateSnapshot struct {
@@ -72,6 +79,10 @@ type projectStateSnapshot struct {
 	Decisions            []decisionSnapshot      `toml:"decisions,omitempty"`
 	Notices              []noticeSnapshot        `toml:"notices,omitempty"`
 	DecisionNoticeCursor int64                   `toml:"decision_notice_cursor"`
+	// HistoryRevision changes with every write to the Project's Notices or
+	// Decisions (migration 00069). The digest covers it instead of that
+	// history, which can hold thousands of open Notices. Zero means unknown.
+	HistoryRevision int64 `toml:"-"`
 }
 
 // Project snapshots are recovery input, not an unbounded audit log. Keep all
@@ -420,21 +431,30 @@ func (db *DB) persistProject(ctx context.Context, projectID int64, projectLockHe
 			return err
 		}
 	}
-	if snapshot.State, err = db.projectStateSnapshot(ctx, projectID); err != nil {
+	if snapshot.State, err = db.projectLiveStateSnapshot(ctx, projectID); err != nil {
 		return err
 	}
+	historyRead := snapshot.State.HistoryRevision == 0
+	if historyRead {
+		if err := db.readProjectHistorySnapshot(ctx, projectID, &snapshot.State); err != nil {
+			return err
+		}
+	}
+	snapshot.StateDigest = projectSnapshotDigest(snapshot)
 	path := db.ProjectSnapshotPath(project.Name)
 	// Unchanged state keeps its capture time, so the write below is skipped.
 	// Recovery orders snapshots by that time; equal state cannot reorder them.
-	if data, err := os.ReadFile(path); err == nil {
-		var previous projectSnapshot
-		if _, err := toml.Decode(string(data), &previous); err == nil && previous.State.CapturedAt != 0 {
-			unchanged := snapshot
-			unchanged.State.CapturedAt = previous.State.CapturedAt
-			var encoded bytes.Buffer
-			if err := toml.NewEncoder(&encoded).Encode(unchanged); err == nil && bytes.Equal(encoded.Bytes(), data) {
-				return nil
-			}
+	// A Project with thousands of open Notices must not decode its whole
+	// snapshot or read its history on every Task write, so only the recorded
+	// digest is compared.
+	if recordedProjectSnapshotDigest(path) == snapshot.StateDigest {
+		return nil
+	}
+	// History read after its revision can only be newer than the digest
+	// claims, which costs at most one more rewrite.
+	if !historyRead {
+		if err := db.readProjectHistorySnapshot(ctx, projectID, &snapshot.State); err != nil {
+			return err
 		}
 	}
 	if projectLockHeld {
@@ -485,7 +505,11 @@ func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, s
 	if err != nil {
 		return err
 	}
-	snapshot.Project = project
+	// The caller's digest stays valid unless the Project row changed meanwhile.
+	if project != snapshot.Project || snapshot.StateDigest == "" {
+		snapshot.Project = project
+		snapshot.StateDigest = projectSnapshotDigest(snapshot)
+	}
 	var encoded bytes.Buffer
 	if err := toml.NewEncoder(&encoded).Encode(snapshot); err != nil {
 		return err
@@ -493,12 +517,66 @@ func (db *DB) writeProjectSnapshotLocked(ctx context.Context, projectID int64, s
 	return atomicfile.Write(db.ProjectSnapshotPath(project.Name), encoded.Bytes(), 0o600)
 }
 
+func projectSnapshotDigest(snapshot projectSnapshot) string {
+	snapshot.StateDigest = ""
+	snapshot.State.CapturedAt = 0
+	if snapshot.State.HistoryRevision != 0 {
+		snapshot.State.Decisions, snapshot.State.Notices = nil, nil
+	}
+	// %#v covers every field whatever its encoding tags, and these snapshot
+	// types hold only values, so equal state always prints identically.
+	digest := sha256.New()
+	fmt.Fprintf(digest, "%#v", snapshot)
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+// recordedProjectSnapshotDigest returns "" when the snapshot is missing,
+// unreadable or written before digests were recorded.
+func recordedProjectSnapshotDigest(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	header := make([]byte, 512)
+	n, _ := io.ReadFull(file, header)
+	scalars, _, found := bytes.Cut(header[:n], []byte("\n["))
+	if !found {
+		return ""
+	}
+	var recorded struct {
+		Version     int    `toml:"version"`
+		StateDigest string `toml:"state_digest"`
+	}
+	if _, err := toml.Decode(string(scalars), &recorded); err != nil || recorded.Version != 1 {
+		return ""
+	}
+	return recorded.StateDigest
+}
+
 func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
+	state, err := db.projectLiveStateSnapshot(ctx, projectID)
+	if err != nil {
+		return projectStateSnapshot{}, err
+	}
+	if err := db.readProjectHistorySnapshot(ctx, projectID, &state); err != nil {
+		return projectStateSnapshot{}, err
+	}
+	return state, nil
+}
+
+// projectLiveStateSnapshot reads the Project state other than its Notice and
+// Decision history, and the revision of that history.
+func (db *DB) projectLiveStateSnapshot(ctx context.Context, projectID int64) (projectStateSnapshot, error) {
+	state := projectStateSnapshot{CapturedAt: time.Now().UnixNano()}
+	err := db.QueryRowContext(ctx, `SELECT revision FROM project_history_revisions WHERE project_id=?`, projectID).Scan(&state.HistoryRevision)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return projectStateSnapshot{}, err
+	}
 	sandboxes, err := db.Sandboxes(ctx, projectID)
 	if err != nil {
 		return projectStateSnapshot{}, err
 	}
-	state := projectStateSnapshot{CapturedAt: time.Now().UnixNano()}
 	for _, sandbox := range sandboxes {
 		state.Sandboxes = append(state.Sandboxes, sandboxSnapshot(sandbox))
 	}
@@ -509,66 +587,90 @@ func (db *DB) projectStateSnapshot(ctx context.Context, projectID int64) (projec
 	for _, lease := range leases {
 		state.ResourceLeases = append(state.ResourceLeases, resourceLeaseSnapshotFromLease(lease))
 	}
-	decisionRows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? AND
-		(answered_at=0 AND obsolete_at=0 OR id IN (
-			SELECT id FROM decisions WHERE project_id=? ORDER BY id DESC LIMIT ?
-		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
-	if err != nil {
-		return projectStateSnapshot{}, err
-	}
-	for decisionRows.Next() {
-		decision, err := decisionRow(decisionRows)
-		if err != nil {
-			_ = decisionRows.Close()
-			return projectStateSnapshot{}, err
-		}
-		state.Decisions = append(state.Decisions, decisionSnapshot(decision))
-	}
-	if err := decisionRows.Err(); err != nil {
-		_ = decisionRows.Close()
-		return projectStateSnapshot{}, err
-	}
-	if err := decisionRows.Close(); err != nil {
-		return projectStateSnapshot{}, err
-	}
-	noticeRows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
-		FROM notices WHERE project_id=? AND
-		(acked_at IS NULL OR id IN (
-			SELECT id FROM notices WHERE project_id=? ORDER BY id DESC LIMIT ?
-		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
-	if err != nil {
-		return projectStateSnapshot{}, err
-	}
-	for noticeRows.Next() {
-		var notice Notice
-		var taskID, deliveredAt, ackedAt sql.NullInt64
-		if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
-			_ = noticeRows.Close()
-			return projectStateSnapshot{}, err
-		}
-		if taskID.Valid {
-			notice.TaskID = taskID.Int64
-		}
-		if deliveredAt.Valid {
-			notice.DeliveredAt = deliveredAt.Int64
-		}
-		if ackedAt.Valid {
-			notice.AckedAt = ackedAt.Int64
-		}
-		state.Notices = append(state.Notices, noticeSnapshot(notice))
-	}
-	if err := noticeRows.Err(); err != nil {
-		_ = noticeRows.Close()
-		return projectStateSnapshot{}, err
-	}
-	if err := noticeRows.Close(); err != nil {
-		return projectStateSnapshot{}, err
-	}
 	err = db.QueryRowContext(ctx, `SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?`, projectID).Scan(&state.DecisionNoticeCursor)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return projectStateSnapshot{}, err
 	}
 	return state, nil
+}
+
+// readProjectHistorySnapshot adds unanswered and recent Decisions and open and
+// recent Notices to state.
+func (db *DB) readProjectHistorySnapshot(ctx context.Context, projectID int64, state *projectStateSnapshot) error {
+	decisionRows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? AND
+		(answered_at=0 AND obsolete_at=0 OR id IN (
+			SELECT id FROM decisions WHERE project_id=? ORDER BY id DESC LIMIT ?
+		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
+	if err != nil {
+		return err
+	}
+	for decisionRows.Next() {
+		decision, err := decisionRow(decisionRows)
+		if err != nil {
+			_ = decisionRows.Close()
+			return err
+		}
+		state.Decisions = append(state.Decisions, decisionSnapshot(decision))
+	}
+	if err := decisionRows.Err(); err != nil {
+		_ = decisionRows.Close()
+		return err
+	}
+	if err := decisionRows.Close(); err != nil {
+		return err
+	}
+	// Read open Notices from their index range and the recent tail from the
+	// Project id index. A single OR filter made SQLite walk every Notice of
+	// the Project on each snapshot.
+	notices := map[int64]Notice{}
+	for _, query := range []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+			FROM notices INDEXED BY notices_open_idx WHERE project_id=? AND acked_at IS NULL`, []any{projectID}},
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+			FROM notices INDEXED BY notices_project_id_idx WHERE project_id=? ORDER BY id DESC LIMIT ?`, []any{projectID, projectSnapshotHistoryLimit}},
+	} {
+		noticeRows, err := db.QueryContext(ctx, query.sql, query.args...)
+		if err != nil {
+			return err
+		}
+		for noticeRows.Next() {
+			var notice Notice
+			var taskID, deliveredAt, ackedAt sql.NullInt64
+			if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+				_ = noticeRows.Close()
+				return err
+			}
+			if taskID.Valid {
+				notice.TaskID = taskID.Int64
+			}
+			if deliveredAt.Valid {
+				notice.DeliveredAt = deliveredAt.Int64
+			}
+			if ackedAt.Valid {
+				notice.AckedAt = ackedAt.Int64
+			}
+			notices[notice.ID] = notice
+		}
+		if err := noticeRows.Err(); err != nil {
+			_ = noticeRows.Close()
+			return err
+		}
+		if err := noticeRows.Close(); err != nil {
+			return err
+		}
+	}
+	noticeIDs := make([]int64, 0, len(notices))
+	for id := range notices {
+		noticeIDs = append(noticeIDs, id)
+	}
+	slices.Sort(noticeIDs)
+	for _, id := range noticeIDs {
+		state.Notices = append(state.Notices, noticeSnapshot(notices[id]))
+	}
+	return nil
 }
 
 func (db *DB) BackupDaily(now time.Time) error {
@@ -975,7 +1077,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1156,8 +1258,12 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if fixRound.ChangeTaskID != 0 && fixRound.ChangeTaskID != task.ID {
 				return fmt.Errorf("validation fix round in snapshot for t%d belongs to Task %d", task.Seq, fixRound.ChangeTaskID)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt); err != nil {
+			memberHeads, err := marshalValidationMemberHeads(fixRound.MemberHeads)
+			if err != nil {
+				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json) VALUES(?,?,?,?,?,?,?,?,?)`,
+				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt, memberHeads); err != nil {
 				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
 			}
 		}

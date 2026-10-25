@@ -29,7 +29,14 @@ func (s *Service) relabelProjectTabs(ctx context.Context, db *store.DB, project 
 		}
 		return
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
+	// Only a Task whose pane label is live can own a tab.
+	var paneLabels []string
+	for _, pane := range snapshot.Panes {
+		if pane.Label != "" {
+			paneLabels = append(paneLabels, pane.Label)
+		}
+	}
+	tasks, err := db.TasksWithPaneLabels(ctx, project.ID, paneLabels)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("posse: could not reconcile tab labels for Project %s: tasks: %v", project.Name, err)

@@ -518,7 +518,7 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 				ref = "refs/remotes/origin/" + project.DefaultBranch
 			}
 			if _, err := gitOutput(ctx, project.Root, "worktree", "add", "--detach", "--lock", "--reason", fmt.Sprintf("posse: held by t%d", task.Seq), sandbox.Path, ref); err != nil {
-				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Git could not create the Sandbox worktree"); breakErr != nil {
+				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Git could not create the Sandbox worktree", err); breakErr != nil {
 					return sandbox, errors.Join(err, breakErr)
 				}
 				continue
@@ -530,7 +530,7 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 			return sandbox, err
 		}
 		if err := resetSandbox(ctx, sandbox.Path, project, cleanMode); err != nil {
-			if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state"); breakErr != nil {
+			if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state", err); breakErr != nil {
 				return sandbox, errors.Join(err, breakErr)
 			}
 			continue
@@ -861,7 +861,7 @@ func releaseSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 			// can be fetched; never quarantine it as broken during local recovery.
 			return killed, err
 		}
-		if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset during release"); breakErr != nil {
+		if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset during release", err); breakErr != nil {
 			return killed, errors.Join(err, breakErr)
 		}
 		if approvedDiscard {
@@ -1012,7 +1012,7 @@ func unlockRegisteredSandbox(ctx context.Context, repo, path string, seq int) er
 	return unlockTaskSandbox(ctx, repo, path, seq)
 }
 
-func breakSandbox(ctx context.Context, db *store.DB, project store.Project, task store.Task, sandbox store.Sandbox, reason string) error {
+func breakSandbox(ctx context.Context, db *store.DB, project store.Project, task store.Task, sandbox store.Sandbox, reason string, cause error) error {
 	if sandbox.State != "held" || sandbox.TaskID != task.ID {
 		return store.ErrStateRace
 	}
@@ -1037,8 +1037,21 @@ func breakSandbox(ctx context.Context, db *store.DB, project store.Project, task
 	}); err != nil {
 		return err
 	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "sandbox_broken", Summary: fmt.Sprintf("sandbox-%d: %s", sandbox.Number, reason), DataJSON: `{}`})
+	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "sandbox_broken", Summary: sandboxBrokenSummary(project, sandbox, reason, cause), DataJSON: `{}`})
 	return err
+}
+
+// sandboxBrokenSummary states why the Sandbox was quarantined and the commands
+// that recover it. Workspace Sandboxes cannot be repaired, only pruned.
+func sandboxBrokenSummary(project store.Project, sandbox store.Sandbox, reason string, cause error) string {
+	summary := fmt.Sprintf("sandbox-%d: %s", sandbox.Number, reason)
+	if cause != nil {
+		summary += ": " + truncate(strings.TrimSpace(cause.Error()), 400)
+	}
+	if project.IsWorkspace() {
+		return summary + ". Remove it with `posse pool prune --yes` once its work is saved"
+	}
+	return summary + fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`, or remove it with `posse pool prune --yes`", sandbox.Number)
 }
 
 func skippedPruneBranch(item pruneItem, reason string) error {
@@ -1406,7 +1419,7 @@ func verifyOwnedProcessSet(roots []ownedProcessRoot, retained []ownedProcess, tr
 			} else if err != nil {
 				return fmt.Errorf("verify unretained process %d during teardown: %w", pid, err)
 			}
-			return fmt.Errorf("unverified process %d appeared during teardown; preserving Task data", pid)
+			return fmt.Errorf("unverified process %d %s; preserving Task data", pid, authorization.unverifiedProcessState(pid))
 		}
 		alive, err := process.handle.Alive()
 		if err != nil {

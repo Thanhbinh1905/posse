@@ -67,7 +67,7 @@ One Review Task in a Review Loop that records a verdict for one exact Change hea
 _Avoid_: Pass, iteration, rereview
 
 **Fix Round**:
-One instruction Posse or the Lead queues to a Change Worker to fix failed CI checks or selected Finding Patterns for one head, within a per-Project budget.
+One instruction Posse or the Lead queues to a Change Worker to fix failed CI checks or selected Finding Patterns for one head (one head per changed Member in a workspace), within a per-Project budget.
 _Avoid_: Retry, fix attempt
 
 **Finding Pattern**:
@@ -122,6 +122,10 @@ _Avoid_: Worktree (when the reusable unit is meant), lease
 To integrate a Change Task's change into the Project through the Project's merge mode, either a pull request or a local merge. A pull request has Merged once the forge reports it merged, whatever its Worker is doing at the time.
 Formerly: Land.
 _Avoid_: Deliver
+
+**Merge Queue**:
+Posse's FIFO queue per target branch of done Change Tasks whose PR is behind that target; only its head is asked to merge the target. Used only when `defaults.require_current_target` is on.
+_Avoid_: Forge merge queue, merge train
 
 **Orphan**:
 Work a Worker made on a merged Task beyond what merged, such as later commits or uncommitted changes; the User decides whether it becomes a new Task or is discarded. Formerly: Leftover.

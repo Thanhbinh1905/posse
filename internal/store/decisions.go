@@ -278,13 +278,16 @@ func (db *DB) Decision(ctx context.Context, projectID, id int64) (Decision, erro
 	return decisionRow(db.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=?`, projectID, id))
 }
 
+const reviewCapNoticesQuery = `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM tasks t INDEXED BY tasks_project_state_idx JOIN notices n INDEXED BY notices_task_kind_idx ON n.task_id=t.id AND n.kind='review_cap_reached'
+		WHERE t.project_id=? AND n.project_id=t.project_id AND t.type='change' AND t.state<>'torn-down'
+		ORDER BY n.id`
+
 // ReviewCapNotices returns cap Notices regardless of the general decision cursor,
 // so a newer exact-head cap cannot be skipped by older reconciliation state.
+// Torn-down Tasks are excluded, so the scan does not grow with Project history.
 func (db *DB) ReviewCapNotices(ctx context.Context, projectID int64) ([]Notice, error) {
-	rows, err := db.QueryContext(ctx, `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
-		FROM notices n JOIN tasks t ON t.id=n.task_id
-		WHERE n.project_id=? AND n.kind='review_cap_reached' AND t.type='change' AND t.state<>'torn_down'
-		ORDER BY n.id`, projectID)
+	rows, err := db.QueryContext(ctx, reviewCapNoticesQuery, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -300,17 +303,21 @@ func (db *DB) ReviewCapNotices(ctx context.Context, projectID int64) ([]Notice, 
 	return notices, rows.Err()
 }
 
+const decisionSourceNoticesQuery = `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM notices n WHERE n.project_id=? AND n.id>COALESCE((SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?),0)
+		UNION
+		SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM tasks t INDEXED BY tasks_project_state_idx JOIN notices n INDEXED BY notices_task_kind_idx ON n.task_id=t.id AND n.kind='merge_ready'
+		WHERE t.project_id=? AND n.project_id=t.project_id AND t.state IN ('done','merging') AND t.autonomy_land<>'auto'
+		AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
+		ORDER BY 1`
+
 // DecisionSourceNotices returns unevaluated Notices and merge_ready Notices
 // without a Decision, even if the cursor advanced before reconciliation completed.
+// Each half reads its own index range: Notices past the cursor, and the
+// merge_ready Notices of merge-ready Tasks, never the Project's whole history.
 func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Notice, error) {
-	rows, err := db.QueryContext(ctx, `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
-		FROM notices n WHERE n.project_id=? AND (
-		n.id>COALESCE((SELECT last_notice_id FROM decision_notice_cursors WHERE project_id=?),0)
-		OR (n.kind='merge_ready'
-			AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=n.task_id AND t.state IN ('done','merging') AND t.autonomy_land<>'auto')
-			AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id))
-		)
-		ORDER BY n.id`, projectID, projectID)
+	rows, err := db.QueryContext(ctx, decisionSourceNoticesQuery, projectID, projectID, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -326,15 +333,17 @@ func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Not
 	return result, rows.Err()
 }
 
+const unansweredWorkerExitedNoticesQuery = `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM tasks t INDEXED BY tasks_project_state_idx JOIN notices n INDEXED BY notices_task_kind_idx ON n.task_id=t.id AND n.kind='worker_exited'
+		WHERE t.project_id=? AND n.project_id=t.project_id AND t.state IN ('done','merging')
+		AND (json_extract(n.data_json,'$.task_launches')=t.launches OR (json_type(n.data_json,'$.task_launches') IS NULL AND t.launches=1))
+		AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
+		ORDER BY n.id`
+
 // UnansweredWorkerExitedNotices returns completion Notices skipped by an older
 // decision cursor, unless their Task has since reopened or a Decision exists.
 func (db *DB) UnansweredWorkerExitedNotices(ctx context.Context, projectID int64) ([]Notice, error) {
-	rows, err := db.QueryContext(ctx, `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
-		FROM notices n JOIN tasks t ON t.id=n.task_id
-		WHERE n.project_id=? AND n.kind='worker_exited' AND t.state IN ('done','merging')
-		AND (json_extract(n.data_json,'$.task_launches')=t.launches OR (json_type(n.data_json,'$.task_launches') IS NULL AND t.launches=1))
-		AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
-		ORDER BY n.id`, projectID)
+	rows, err := db.QueryContext(ctx, unansweredWorkerExitedNoticesQuery, projectID)
 	if err != nil {
 		return nil, err
 	}

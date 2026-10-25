@@ -628,6 +628,19 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`DROP TABLE model_error_episodes`,
 		`DROP TABLE publish_pre_push_heads`,
 		`DROP TABLE notice_delivery_receipts`,
+		`DROP TRIGGER project_history_revision_decision_delete`,
+		`DROP TRIGGER project_history_revision_decision_update`,
+		`DROP TRIGGER project_history_revision_decision_insert`,
+		`DROP TRIGGER project_history_revision_notice_delete`,
+		`DROP TRIGGER project_history_revision_notice_update`,
+		`DROP TRIGGER project_history_revision_notice_insert`,
+		`DROP TRIGGER project_history_revision_project_insert`,
+		`DROP TABLE project_history_revisions`,
+		`DROP INDEX notices_task_kind_idx`,
+		`DROP INDEX notices_sandbox_episode_idx`,
+		`DROP INDEX notices_project_id_idx`,
+		`ALTER TABLE pr_body_markers DROP COLUMN validation_digest`,
+		`DROP TABLE merge_queue_entries`,
 		`DROP TABLE research_attempts`,
 		`DROP TABLE member_watch_errors`,
 		`DROP TABLE validation_stage_results`,
@@ -761,6 +774,19 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`DROP TABLE review_receipts`,
 		`DROP INDEX notice_delivery_active_destination_idx`,
 		`CREATE UNIQUE INDEX notice_delivery_one_active_destination_idx ON notice_delivery_receipts(project_id, destination) WHERE state IN ('claimed','printed')`,
+		`DROP TRIGGER project_history_revision_decision_delete`,
+		`DROP TRIGGER project_history_revision_decision_update`,
+		`DROP TRIGGER project_history_revision_decision_insert`,
+		`DROP TRIGGER project_history_revision_notice_delete`,
+		`DROP TRIGGER project_history_revision_notice_update`,
+		`DROP TRIGGER project_history_revision_notice_insert`,
+		`DROP TRIGGER project_history_revision_project_insert`,
+		`DROP TABLE project_history_revisions`,
+		`DROP INDEX notices_task_kind_idx`,
+		`DROP INDEX notices_sandbox_episode_idx`,
+		`DROP INDEX notices_project_id_idx`,
+		`ALTER TABLE pr_body_markers DROP COLUMN validation_digest`,
+		`DROP TABLE merge_queue_entries`,
 		`DROP TABLE research_attempts`,
 		`DROP TABLE member_watch_errors`,
 		`DROP TABLE validation_stage_results`,
@@ -940,6 +966,19 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE repo_watch_state DROP COLUMN checkout_checked_at`,
 		`ALTER TABLE project_repos DROP COLUMN origin_host`,
 		`DROP TABLE member_pr_poll_state`,
+		`DROP TRIGGER project_history_revision_decision_delete`,
+		`DROP TRIGGER project_history_revision_decision_update`,
+		`DROP TRIGGER project_history_revision_decision_insert`,
+		`DROP TRIGGER project_history_revision_notice_delete`,
+		`DROP TRIGGER project_history_revision_notice_update`,
+		`DROP TRIGGER project_history_revision_notice_insert`,
+		`DROP TRIGGER project_history_revision_project_insert`,
+		`DROP TABLE project_history_revisions`,
+		`DROP INDEX notices_task_kind_idx`,
+		`DROP INDEX notices_sandbox_episode_idx`,
+		`DROP INDEX notices_project_id_idx`,
+		`ALTER TABLE pr_body_markers DROP COLUMN validation_digest`,
+		`DROP TABLE merge_queue_entries`,
 		`DROP TABLE research_attempts`,
 		`DROP TABLE member_watch_errors`,
 		`DROP TABLE validation_stage_results`,
@@ -1789,5 +1828,38 @@ func TestConcurrentTaskSequenceAllocationSerializesAndBothTasksSucceed(t *testin
 	}
 	if !seen[1] || !seen[2] {
 		t.Fatalf("allocated sequences = %#v, want 1 and 2", seen)
+	}
+}
+
+func TestActiveWorkerCountHoldsSlotForDoneAndMergingChangeTasks(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []State{StateDone, StateMerging} {
+		id, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Change " + string(state), ShortName: "change-" + string(state)}, func(int) (bool, error) { return false, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+			t.Fatal(err)
+		}
+		if state == StateMerging {
+			if err := db.Transition(ctx, id, StateDone, StateMerging, "cli", "merging"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 2 {
+		t.Fatalf("done and merging Change Tasks must hold slots: count=%d err=%v", count, err)
 	}
 }

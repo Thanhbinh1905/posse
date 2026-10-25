@@ -33,6 +33,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 	budgetCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 	defer cancel()
 	defer func() { returnedErr = reconcileError(returnedErr) }()
+	baselines := captureTurnEndBaselines(budgetCtx, db, projectID)
 	snapshot, err := adapter.Snapshot(budgetCtx)
 	if err != nil {
 		return RunResult{}, err
@@ -60,7 +61,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
 		}
 	}
-	notices, err := ReconcileSnapshot(budgetCtx, db, projectID, snapshot, now, idleAfter)
+	notices, err := ReconcileSnapshot(withTurnEndBaselines(withBackgroundJobDetector(budgetCtx, adapter), baselines), db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
 		return result, errors.Join(returnedErr, err)
@@ -140,6 +141,14 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 			failures = append(failures, fmt.Errorf("reconcile Task %s: %w", taskID(task.Seq), err))
 		}
 	}
+	// Task observation writes refresh only Task snapshots. Repair the Project
+	// snapshot once per pass, in case an earlier write committed without it.
+	if err := reconcileWorkDeferred(ctx); err != nil {
+		return notices, errors.Join(append(failures, err)...)
+	}
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		failures = append(failures, fmt.Errorf("persist Project snapshot: %w", err))
+	}
 	return notices, errors.Join(failures...)
 }
 
@@ -194,7 +203,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if found && pane.Agent != "" {
 		status = pane.AgentStatus
 	}
-	resumed, err := db.ObserveCompletedWorker(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, now)
+	fingerprint := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
+	if status == "idle" || status == "done" {
+		fingerprint = turnEndFingerprint(ctx, task, fingerprint)
+	}
+	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, fingerprint, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
@@ -253,7 +266,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		serverStartedAt = snapshot.ServerStartedAt
 	}
 	idleSince := task.IdleSince
-	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
+	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") && !paneHasBackgroundJob(ctx, pane) {
 		if idleSince == 0 {
 			idleSince = now.UnixMilli()
 		}

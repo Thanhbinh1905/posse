@@ -169,6 +169,7 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			fixture.requireCurrentTarget(t)
 			if scenario.conflicting {
 				path := filepath.Join(fixture.worktree, "README.md")
 				if err := os.WriteFile(path, []byte("Task README update\n"), 0o600); err != nil {
@@ -225,6 +226,108 @@ func TestPRWatchBlocksStaleChecksAndQueuesTargetMergeForCleanAndConflictingBranc
 				}
 			}
 		})
+	}
+}
+
+// With defaults.require_current_target off, a clean-but-behind PR keeps its
+// green checks and gets no instruction, while a conflicting PR is asked to
+// merge the target without entering the merge queue.
+func TestPRWatchWithoutCurrentTargetRuleAsksOnlyConflictingBranches(t *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		conflicting bool
+		mergeable   string
+	}{
+		{name: "behind but clean", mergeable: "MERGEABLE"},
+		{name: "conflicting", conflicting: true, mergeable: "CONFLICTING"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if scenario.conflicting {
+				path := filepath.Join(fixture.worktree, "README.md")
+				if err := os.WriteFile(path, []byte("Task README update\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, fixture.worktree, "add", "README.md")
+				gitTest(t, fixture.worktree, "commit", "-m", "change README")
+				fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+			}
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+			}
+			targetTip := fixture.advanceTarget(t, scenario.conflicting, true)
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", scenario.mergeable, "", fixture.headSHA)
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observation, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID)
+			if err != nil || decodeChecks(observation.Checks).State != "SUCCESS" {
+				t.Fatalf("behind PR checks were not kept: observation=%#v err=%v", observation, err)
+			}
+			if places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID); err != nil || len(places[fixture.task.ID]) != 0 {
+				t.Fatalf("Task entered the merge queue without the current-target rule: %#v err=%v", places, err)
+			}
+			notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var queued int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if !scenario.conflicting {
+				if queued != 0 || countNoticeKind(notices, "merge_ready") != 1 {
+					t.Fatalf("clean-but-behind PR: queued instructions=%d merge_ready=%d, want 0 and 1", queued, countNoticeKind(notices, "merge_ready"))
+				}
+				return
+			}
+			if countNoticeKind(notices, "pr_conflict") != 1 || countNoticeKind(notices, "merge_ready") != 0 {
+				t.Fatalf("conflicting PR notices = %#v", notices)
+			}
+			var body string
+			if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil || queued != 1 {
+				t.Fatalf("conflicting PR instructions = %d, %v; want one", queued, err)
+			}
+			if !strings.Contains(body, "Merge origin/main") || !strings.Contains(body, targetTip) {
+				t.Fatalf("conflict instruction does not ask to merge the target: %s", body)
+			}
+		})
+	}
+}
+
+func TestPRWatchDequeuesRedMergeQueueHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+	}
+	if err := fixture.db.EnterMergeQueue(ctx, fixture.task.ID, "", "main", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID); err != nil || len(places[fixture.task.ID]) != 1 {
+		t.Fatalf("Task did not enter the merge queue: %#v err=%v", places, err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	var reason string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT dequeue_reason FROM merge_queue_entries WHERE task_id=?`, fixture.task.ID).Scan(&reason); err != nil || reason != "checks_failed" {
+		t.Fatalf("red head was not dequeued: reason=%q err=%v", reason, err)
+	}
+	if places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID); err != nil || len(places[fixture.task.ID]) != 0 {
+		t.Fatalf("red head still holds a queue place: %#v err=%v", places, err)
 	}
 }
 
@@ -297,6 +400,7 @@ func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) 
 
 func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	fixture.requireCurrentTarget(t)
 	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
 	}
@@ -321,6 +425,138 @@ func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
 	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
 		t.Fatalf("target advance during CI produced merge-ready evidence: notices=%#v err=%v", notices, err)
+	}
+}
+
+// GitHub reports the PR open, then the target advances before Posse
+// refetches it. The new tip may hold the PR's own squash merge, so the poll
+// queries again instead of asking the PR to merge its own merge (#482).
+func TestPRWatchRequeriesPRWhoseTargetAdvancedDuringQuery(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		merged     bool
+		wantRounds int
+	}{
+		{name: "merged during query", merged: true},
+		{name: "still open behind", wantRounds: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			fixture.requireCurrentTarget(t)
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+			}
+			worktree := filepath.Join(fixture.root, "squash-merge")
+			gitTest(t, fixture.repo, "worktree", "add", "--detach", worktree, "refs/heads/main")
+			gitTest(t, worktree, "merge", "--squash", fixture.headSHA)
+			gitTest(t, worktree, "commit", "-m", "squash merge t1")
+			merge := strings.TrimSpace(gitTest(t, worktree, "rev-parse", "HEAD"))
+			t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", merge)
+			if scenario.merged {
+				fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, fixture.headSHA)
+				if err := os.Rename(fixture.ghState, fixture.ghState+".next"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+			cfg, err := config.Load(fixture.home, fixture.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+				t.Fatal(err)
+			}
+			observation, err := fixture.db.LatestPRObservation(ctx, fixture.task.ID)
+			if err != nil || (scenario.merged && observation.State != "MERGED") || (!scenario.merged && decodeChecks(observation.Checks).State != "STALE") {
+				t.Fatalf("observation after the target advanced during the query = %#v err=%v", observation, err)
+			}
+			var entries, rounds int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM merge_queue_entries WHERE task_id=? AND dequeued_at=0),(SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness')`, fixture.task.ID, fixture.task.ID).Scan(&entries, &rounds); err != nil {
+				t.Fatal(err)
+			}
+			if rounds != scenario.wantRounds || entries != scenario.wantRounds {
+				t.Fatalf("live merge queue entries=%d merge-target instructions=%d, want %d each", entries, rounds, scenario.wantRounds)
+			}
+		})
+	}
+}
+
+// t1 contains the target tip and t2 lacks it. Another merge advances the
+// target during the forge query, so t1 is also behind. The pass that saw the
+// move must not promote t2 ahead of t1, which signalled done first (#482).
+func TestPRWatchKeepsDoneOrderWhenTargetAdvancesDuringQuery(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	fixture.requireCurrentTarget(t)
+	firstTip := fixture.advanceTarget(t, false, true)
+	gitTest(t, fixture.worktree, "merge", "--no-edit", firstTip)
+	freshHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "PR opened"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pr_url='https://github.com/acme/shop/pull/17', gated_sha=? WHERE id=?`, freshHead, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	secondID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Second change", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main", PRURL: "https://github.com/acme/shop/pull/18", GatedSHA: fixture.headSHA, AutonomyMerge: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}} {
+		if step.to == store.StateDone {
+			if _, err := fixture.db.AddSignal(ctx, secondID, "done", "second done", nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := fixture.db.Transition(ctx, secondID, step.from, step.to, step.source, "second Task"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advance := filepath.Join(fixture.root, "target-advance")
+	if err := os.WriteFile(filepath.Join(advance, "other-merge.txt"), []byte("another PR\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, advance, "add", "other-merge.txt")
+	gitTest(t, advance, "commit", "-m", "another PR merged")
+	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", strings.TrimSpace(gitTest(t, advance, "rev-parse", "HEAD")))
+	response := map[string]any{"data": map[string]any{"repo1": map[string]any{
+		"pr1": stackedWatchPull("https://github.com/acme/shop/pull/17", "OPEN", freshHead, "main", ""),
+		"pr2": stackedWatchPull("https://github.com/acme/shop/pull/18", "OPEN", fixture.headSHA, "main", ""),
+	}}}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.ghState, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	rounds := map[int]int{}
+	rows, err := fixture.db.QueryContext(ctx, `SELECT t.seq,COUNT(r.id) FROM tasks t LEFT JOIN validation_fix_rounds r ON r.ship_task_id=t.id AND r.kind='freshness' GROUP BY t.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq, count int
+		if err := rows.Scan(&seq, &count); err != nil {
+			t.Fatal(err)
+		}
+		rounds[seq] = count
+	}
+	places, err := fixture.db.MergeQueuePlaces(ctx, fixture.project.ID)
+	if err != nil || rounds[1] != 1 || rounds[2] != 0 || len(places[fixture.task.ID]) != 1 || !places[fixture.task.ID][0].Head() {
+		t.Fatalf("merge-target instructions by Task = %v, queue places = %#v err=%v; want only t1, the queue head", rounds, places, err)
 	}
 }
 

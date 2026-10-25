@@ -1,18 +1,24 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
+	"github.com/thanhbinh1905/posse/internal/usage"
 )
 
 type projectSummary struct {
@@ -55,23 +61,26 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 }
 
 type activeTaskSummary struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	State string `json:"state"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	State      string `json:"state"`
+	MergeQueue string `json:"merge_queue,omitempty"`
 }
 
 type taskSummary struct {
-	ID      string   `json:"id"`
-	Type    string   `json:"type"`
-	State   string   `json:"state"`
-	Title   string   `json:"title"`
-	Name    string   `json:"name"`
-	PRState string   `json:"pr_state,omitempty"`
-	Profile string   `json:"profile,omitempty"`
-	Branch  string   `json:"branch,omitempty"`
-	Reason  string   `json:"reason,omitempty"`
-	Issues  []string `json:"issues,omitempty"`
-	Refs    []string `json:"refs,omitempty"`
+	ID      string       `json:"id"`
+	Type    string       `json:"type"`
+	State   string       `json:"state"`
+	Title   string       `json:"title"`
+	Name    string       `json:"name"`
+	PRState string       `json:"pr_state,omitempty"`
+	Queue   string       `json:"merge_queue,omitempty"`
+	Profile string       `json:"profile,omitempty"`
+	Branch  string       `json:"branch,omitempty"`
+	Reason  string       `json:"reason,omitempty"`
+	Issues  []string     `json:"issues,omitempty"`
+	Refs    []string     `json:"refs,omitempty"`
+	Usage   usage.Counts `json:"usage"`
 }
 
 type noticeSummary struct {
@@ -168,10 +177,14 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
+	queuePlaces, err := db.MergeQueuePlaces(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
-		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task)}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID])}
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
@@ -224,7 +237,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 				}
 				attention = append(attention, taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason})
 			} else {
-				active = append(active, activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
+				active = append(active, activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), MergeQueue: mergeQueueLabel(queuePlaces[task.ID])})
 			}
 		}
 		pending, err := db.UndeliveredNotices(ctx.Context, project.ID)
@@ -414,9 +427,13 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	queuePlaces, err := db.MergeQueuePlaces(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
-		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Profile: task.Profile}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(task, cfg)}
 		if taskNeedsUser(task) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
@@ -475,6 +492,18 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 	return "waiting for a Worker slot", nil
 }
 
+func taskUsage(task store.Task, cfg config.Config) usage.Counts {
+	kind := task.AgentSessionKind
+	if kind == "" {
+		if plan, err := task.AdmittedPlan(); err == nil && plan != nil {
+			kind = plan.Launch.Profile.Kind
+		} else if profile, ok := cfg.Profiles[task.Profile]; ok {
+			kind = profile.Kind
+		}
+	}
+	return usage.Read(kind, agentSessionID(kind, task.AgentSession), task.WorktreePath)
+}
+
 func (s *Service) show(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("show", args, map[string]flagSpec{"full": {boolean: true}})
 	if err != nil {
@@ -513,7 +542,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		return err
 	}
 	id := taskIDString(task.Seq)
-	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile}
+	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return admittedPlanFailure(err)
@@ -532,6 +561,22 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		if parsed.Bool("full") {
 			view["plan"] = plan
+			if !ctx.JSON {
+				readable, err := planWithTextInputs(plan)
+				if err != nil {
+					return err
+				}
+				view["plan"] = readable
+			}
+		}
+	}
+	if taskNeedsUser(task) {
+		reason, err := taskFailureReason(ctx.Context, db, task)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			view["reason"] = reason
 		}
 	}
 	if children, err := taskResearchViews(ctx.Context, db, task); err != nil {
@@ -592,6 +637,11 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 	}
 	if task.Type == "change" {
+		validation, err := validationSummaryFor(ctx.Context, db, task)
+		if err != nil {
+			return err
+		}
+		view["validation"] = validation.view()
 		receipts, err := db.ReviewReceipts(ctx.Context, task.ID)
 		if err != nil {
 			return err
@@ -650,6 +700,11 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			return err
 		}
 		view["pr"] = pr
+	}
+	if queue, err := mergeQueueView(ctx.Context, db, task); err != nil {
+		return err
+	} else if len(queue) > 0 {
+		view["merge_queue"] = queue
 	}
 	if project.IsWorkspace() {
 		repos, err := db.TaskRepos(ctx.Context, task.ID)
@@ -804,6 +859,51 @@ func noticeTaskName(ctx context.Context, db *store.DB, projectID, id int64) stri
 		return ""
 	}
 	return taskDisplayName(task)
+}
+
+// planWithTextInputs renders each frozen input as text so `show --full` is
+// readable; input bytes that are not valid UTF-8 stay base64 under bytes_base64.
+func planWithTextInputs(plan *taskplan.Plan) (any, error) {
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return nil, err
+	}
+	view, err := axi.ParseOrderedJSON(bytes.NewReader(encoded))
+	if err != nil {
+		return nil, err
+	}
+	root, ok := view.(axi.Object)
+	if !ok {
+		return view, nil
+	}
+	for _, field := range root {
+		inputs, ok := field.Value.([]any)
+		if field.Key != "inputs" || !ok {
+			continue
+		}
+		for _, item := range inputs {
+			input, ok := item.(axi.Object)
+			if !ok {
+				continue
+			}
+			for index, entry := range input {
+				if entry.Key != "bytes" {
+					continue
+				}
+				encoded, _ := entry.Value.(string)
+				raw, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil {
+					continue
+				}
+				if utf8.Valid(raw) {
+					input[index] = axi.Field{Key: "text", Value: string(raw)}
+				} else {
+					input[index] = axi.Field{Key: "bytes_base64", Value: encoded}
+				}
+			}
+		}
+	}
+	return root, nil
 }
 
 func taskNeedsUser(task store.Task) bool {

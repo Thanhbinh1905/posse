@@ -170,16 +170,28 @@ WHERE f.ship_task_id=? ORDER BY COALESCE(parent.seq,p.seq),f.seq`, taskID)
 // ReviewFixRoundForTask returns the latest still-applicable whole-pattern fix
 // instruction, if one was delivered after the Worker's previous done Signal.
 func (db *DB) ReviewFixRoundForTask(ctx context.Context, taskID int64) (ValidationFixRound, bool, error) {
-	var round ValidationFixRound
-	err := db.QueryRowContext(ctx, `SELECT r.id,r.ship_task_id,r.kind,r.seq,r.expected_base_head,r.dedupe_key,r.message_id,r.created_at
-FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id
-WHERE r.ship_task_id=? AND r.kind='review' AND m.status='delivered'
-AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0)
-ORDER BY r.id DESC LIMIT 1`, taskID, taskID).Scan(&round.ID, &round.ChangeTaskID, &round.Kind, &round.Seq, &round.ExpectedBaseHead, &round.DedupeKey, &round.MessageID, &round.CreatedAt)
+	round, err := scanReviewFixRound(db.QueryRowContext(ctx, deliveredReviewFixRoundSQL, taskID, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ValidationFixRound{}, false, nil
 	}
 	return round, err == nil, err
+}
+
+const deliveredReviewFixRoundSQL = `SELECT r.id,r.ship_task_id,r.kind,r.seq,r.expected_base_head,r.dedupe_key,r.message_id,r.created_at,r.member_heads_json
+FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id
+WHERE r.ship_task_id=? AND r.kind='review' AND m.status='delivered'
+AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0)
+ORDER BY r.id DESC LIMIT 1`
+
+func scanReviewFixRound(row *sql.Row) (ValidationFixRound, error) {
+	var round ValidationFixRound
+	var memberHeads string
+	if err := row.Scan(&round.ID, &round.ChangeTaskID, &round.Kind, &round.Seq, &round.ExpectedBaseHead, &round.DedupeKey, &round.MessageID, &round.CreatedAt, &memberHeads); err != nil {
+		return ValidationFixRound{}, err
+	}
+	var err error
+	round.MemberHeads, err = unmarshalValidationMemberHeads(memberHeads)
+	return round, err
 }
 
 // ReviewFixInstructionPending reports whether an unanswered Review fix message
@@ -362,12 +374,7 @@ func nullableDecisionID(id int64) any {
 // applyReviewFixResolutionsTx requires exactly one answer for every pattern in
 // the latest delivered Review Fix instruction, and no answers for other patterns.
 func applyReviewFixResolutionsTx(ctx context.Context, tx *writeTx, taskID int64, input *ReviewFixResolutionsInput) error {
-	var round ValidationFixRound
-	err := tx.QueryRowContext(ctx, `SELECT r.id,r.ship_task_id,r.kind,r.seq,r.expected_base_head,r.dedupe_key,r.message_id,r.created_at
-FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id
-WHERE r.ship_task_id=? AND r.kind='review' AND m.status='delivered'
-AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0)
-ORDER BY r.id DESC LIMIT 1`, taskID, taskID).Scan(&round.ID, &round.ChangeTaskID, &round.Kind, &round.Seq, &round.ExpectedBaseHead, &round.DedupeKey, &round.MessageID, &round.CreatedAt)
+	round, err := scanReviewFixRound(tx.QueryRowContext(ctx, deliveredReviewFixRoundSQL, taskID, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
 		if input != nil {
 			return fmt.Errorf("%w: no delivered Review fix instruction is pending", ErrReviewResolutionsInvalid)
@@ -380,7 +387,42 @@ ORDER BY r.id DESC LIMIT 1`, taskID, taskID).Scan(&round.ID, &round.ChangeTaskID
 	if input == nil {
 		return ErrReviewResolutionsRequired
 	}
-	if input.ExpectedBaseHead != round.ExpectedBaseHead || !validValidationSHA(input.ExpectedBaseHead) || !validValidationSHA(input.ActualHead) {
+	if input.ExpectedBaseHead != round.ExpectedBaseHead || !validValidationSHA(input.ExpectedBaseHead) {
+		return fmt.Errorf("%w: Review fix head binding changed", ErrReviewResolutionsInvalid)
+	}
+	if len(round.MemberHeads) > 0 || len(input.Members) > 0 {
+		err = checkReviewFixMemberHeadsTx(ctx, tx, taskID, round.MemberHeads, input.Members)
+	} else {
+		err = checkReviewFixHeadTx(ctx, tx, taskID, input)
+	}
+	if err != nil {
+		return err
+	}
+	selected, err := reviewFixPatternSequences(round.DedupeKey, round.ExpectedBaseHead)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrReviewResolutionsInvalid, err)
+	}
+	answers := make(map[int]ReviewFixResolution, len(input.Patterns))
+	for _, answer := range input.Patterns {
+		seq, ok := reviewPatternSequence(answer.Pattern)
+		if !ok || (answer.Status != "fixed" && answer.Status != "disputed") {
+			return fmt.Errorf("%w: each answer needs a P-n pattern and fixed or disputed status", ErrReviewResolutionsInvalid)
+		}
+		if !selected[seq] {
+			return fmt.Errorf("%w: pattern %s was not selected by the pending instruction", ErrReviewResolutionsInvalid, answer.Pattern)
+		}
+		if _, exists := answers[seq]; exists {
+			return fmt.Errorf("%w: duplicate answer for pattern P-%d", ErrReviewResolutionsInvalid, seq)
+		}
+		answers[seq] = answer
+	}
+	return applyReviewFixAnswersTx(ctx, tx, taskID, selected, answers)
+}
+
+// checkReviewFixHeadTx binds a single-repository fix answer to its head and,
+// under full-pipeline, to the private candidate that holds it.
+func checkReviewFixHeadTx(ctx context.Context, tx *writeTx, taskID int64, input *ReviewFixResolutionsInput) error {
+	if !validValidationSHA(input.ActualHead) {
 		return fmt.Errorf("%w: Review fix head binding changed", ErrReviewResolutionsInvalid)
 	}
 	var planJSON string
@@ -405,24 +447,46 @@ ORDER BY r.id DESC LIMIT 1`, taskID, taskID).Scan(&round.ID, &round.ChangeTaskID
 			return fmt.Errorf("%w: private candidate does not match the Review fix head", ErrReviewResolutionsInvalid)
 		}
 	}
-	selected, err := reviewFixPatternSequences(round.DedupeKey, round.ExpectedBaseHead)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrReviewResolutionsInvalid, err)
+	return nil
+}
+
+// checkReviewFixMemberHeadsTx requires one answer head for every Member the
+// workspace fix instruction named. A Member bound to a private candidate must
+// answer from that same active candidate at its current head.
+func checkReviewFixMemberHeadsTx(ctx context.Context, tx *writeTx, taskID int64, expected []ValidationFixMemberHead, actual []ReviewFixMemberHead) error {
+	if len(expected) == 0 || len(actual) != len(expected) {
+		return fmt.Errorf("%w: Review fix Member heads changed", ErrReviewResolutionsInvalid)
 	}
-	answers := make(map[int]ReviewFixResolution, len(input.Patterns))
-	for _, answer := range input.Patterns {
-		seq, ok := reviewPatternSequence(answer.Pattern)
-		if !ok || (answer.Status != "fixed" && answer.Status != "disputed") {
-			return fmt.Errorf("%w: each answer needs a P-n pattern and fixed or disputed status", ErrReviewResolutionsInvalid)
-		}
-		if !selected[seq] {
-			return fmt.Errorf("%w: pattern %s was not selected by the pending instruction", ErrReviewResolutionsInvalid, answer.Pattern)
-		}
-		if _, exists := answers[seq]; exists {
-			return fmt.Errorf("%w: duplicate answer for pattern P-%d", ErrReviewResolutionsInvalid, seq)
-		}
-		answers[seq] = answer
+	answers := make(map[string]ReviewFixMemberHead, len(actual))
+	for _, member := range actual {
+		answers[member.Repository] = member
 	}
+	for _, member := range expected {
+		answer, found := answers[member.Repository]
+		if !found || answer.CandidateID != member.CandidateID || !validValidationSHA(answer.ActualHead) {
+			return fmt.Errorf("%w: Review fix binding changed for Member %s", ErrReviewResolutionsInvalid, member.Repository)
+		}
+		if member.CandidateID == 0 {
+			continue
+		}
+		var candidateHead, candidateState string
+		err := tx.QueryRowContext(ctx, `SELECT candidate_sha,state FROM validation_candidates WHERE id=? AND task_id=? AND repo=?`, member.CandidateID, taskID, member.Repository).Scan(&candidateHead, &candidateState)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: Member %s private candidate is missing", ErrReviewResolutionsInvalid, member.Repository)
+		}
+		if err != nil {
+			return err
+		}
+		if candidateHead != answer.ActualHead || candidateState != ValidationCandidateActive {
+			return fmt.Errorf("%w: Member %s private candidate does not match the Review fix head", ErrReviewResolutionsInvalid, member.Repository)
+		}
+	}
+	return nil
+}
+
+// applyReviewFixAnswersTx records one answer for every selected pattern on all
+// of its open findings, including those of patterns merged into it.
+func applyReviewFixAnswersTx(ctx context.Context, tx *writeTx, taskID int64, selected map[int]bool, answers map[int]ReviewFixResolution) error {
 	sequences := make([]int, 0, len(selected))
 	for seq := range selected {
 		sequences = append(sequences, seq)

@@ -66,7 +66,7 @@ func (s *Service) releaseSandboxWithAuthorization(ctx context.Context, db *store
 		if errors.Is(err, errSandboxDefaultRefUnavailable) {
 			return killed, err
 		}
-		if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset during release"); breakErr != nil {
+		if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset during release", err); breakErr != nil {
 			return killed, errors.Join(err, breakErr)
 		}
 		if approvedDiscard {
@@ -128,7 +128,7 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 				return nil, fmt.Errorf("could not verify unretained Sandbox process %d: %w", pid, aliveErr)
 			}
 			if alive {
-				return nil, fmt.Errorf("unverified process %d appeared in the Sandbox; preserving its work", pid)
+				return nil, fmt.Errorf("unverified process %d %s; preserving its work", pid, authorization.unverifiedProcessState(pid))
 			}
 			continue
 		}
@@ -189,13 +189,9 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 		if len(survivors) == 0 {
 			return processLabels(allPIDs), nil
 		}
-		stillAlive, err := sandboxHandlesInSandbox(handles, root)
-		if err != nil {
-			return nil, err
-		}
-		if len(stillAlive) == 0 {
-			return nil, fmt.Errorf("unverified Sandbox processes appeared during teardown: %v", survivors)
-		}
+		// A short-lived process (a shell prompt helper after the Worker exits)
+		// can be alive for a single poll. Keep polling until the deadline
+		// instead of failing on the first sighting; nothing unretained is signaled.
 		time.Sleep(25 * time.Millisecond)
 	}
 	survivors, err := sandboxProcessIDs(root)
@@ -205,6 +201,20 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 	survivors, err = excludeTaskProcessTree(survivors, excludedPIDs)
 	if err != nil {
 		return nil, err
+	}
+	stillAlive, err := sandboxHandlesInSandbox(handles, root)
+	if err != nil {
+		return nil, err
+	}
+	if len(stillAlive) == 0 && len(survivors) > 0 {
+		verb := "are running"
+		for _, pid := range survivors {
+			if !authorization.predatesTeardown(pid) {
+				verb = "appeared during teardown"
+				break
+			}
+		}
+		return nil, fmt.Errorf("unverified Sandbox processes %s: %v", verb, survivors)
 	}
 	return processLabels(allPIDs), fmt.Errorf("sandbox processes survived teardown: %v", survivors)
 }
@@ -293,7 +303,7 @@ func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxPr
 				return fmt.Errorf("cannot verify Sandbox process %d during teardown: %w", pid, aliveErr)
 			}
 			if alive {
-				return fmt.Errorf("unverified process %d appeared in the Sandbox during teardown; preserving its work", pid)
+				return fmt.Errorf("unverified process %d %s; preserving its work", pid, authorization.unverifiedProcessState(pid))
 			}
 			continue
 		}

@@ -59,6 +59,61 @@ func (m *Manager) AcquireGitRef(ctx context.Context, repository, ref string, req
 	return m.DB.AcquireResourceLease(ctx, request)
 }
 
+// LeaseRequest is one resource of an atomic AcquireAll. Path is canonicalized;
+// a non-empty Ref selects a Git ref of Repository instead of a path.
+type LeaseRequest struct {
+	Path       string
+	Repository string
+	Ref        string
+	Request    store.ResourceLeaseRequest
+}
+
+// AcquireAll claims every resource in one transaction so a command either holds
+// all of its leases or none, and persists the Project snapshot once.
+func (m *Manager) AcquireAll(ctx context.Context, requests []LeaseRequest) ([]store.ResourceLease, error) {
+	if err := m.EnsureSandboxLeases(ctx); err != nil {
+		return nil, err
+	}
+	resolved := make([]store.ResourceLeaseRequest, 0, len(requests))
+	for _, item := range requests {
+		request := item.Request
+		if item.Ref == "" {
+			canonical, err := CanonicalPath(item.Path)
+			if err != nil {
+				return nil, err
+			}
+			request.ResourceType = store.ResourcePath
+			request.ScopeRoot = ""
+			request.ScopePath = canonical
+		} else {
+			commonDir, err := RepositoryCommonDir(ctx, item.Repository)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateGitRef(ctx, item.Repository, item.Ref); err != nil {
+				return nil, err
+			}
+			request.ResourceType = store.ResourceGitRef
+			request.ScopeRoot = commonDir
+			request.ScopePath = strings.TrimPrefix(item.Ref, "refs/")
+		}
+		resolved = append(resolved, request)
+	}
+	leases, err := m.DB.AcquireResourceLeases(ctx, resolved)
+	if err != nil && len(leases) > 0 {
+		// The claims committed but the snapshot write failed. Callers never see
+		// the leases on error, so release them rather than strand custody.
+		_ = m.DB.ReleaseResourceLeases(context.WithoutCancel(ctx), leases)
+		return nil, err
+	}
+	return leases, err
+}
+
+// ReleaseAll releases leases in one transaction.
+func (m *Manager) ReleaseAll(ctx context.Context, leases []store.ResourceLease) error {
+	return m.DB.ReleaseResourceLeases(ctx, leases)
+}
+
 func (m *Manager) EnsureSandboxLeases(ctx context.Context) error {
 	sandboxes, err := m.DB.SandboxResourceOwners(ctx)
 	if err != nil {
@@ -66,13 +121,13 @@ func (m *Manager) EnsureSandboxLeases(ctx context.Context) error {
 	}
 	active := make(map[int64]bool, len(sandboxes))
 	for _, sandbox := range sandboxes {
+		if sandbox.State == "broken" {
+			continue
+		}
 		active[sandbox.ID] = true
 		owner := fmt.Sprintf("%s sandbox-%d", sandbox.ProjectName, sandbox.Number)
 		if sandbox.TaskSeq > 0 {
 			owner += fmt.Sprintf(" (t%d)", sandbox.TaskSeq)
-		}
-		if sandbox.State == "broken" {
-			owner += " (quarantined)"
 		}
 		_, err := m.EnsureSandboxPath(ctx, sandbox.Path, store.ResourceLeaseRequest{
 			OwnerProjectID: sandbox.ProjectID,

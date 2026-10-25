@@ -455,6 +455,10 @@ func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64
 		switch task.State {
 		case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled:
 			activeTaskIDs[task.ID] = true
+		case store.StateDone, store.StateMerging:
+			if task.Type == "change" {
+				activeTaskIDs[task.ID] = true
+			}
 		}
 	}
 	sandboxes, err := db.Sandboxes(ctx, projectID)

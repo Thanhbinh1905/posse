@@ -124,31 +124,37 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 		selected = append(selected, seq)
 	}
 	sort.Ints(selected)
-	targets, err := changeCandidateTargets(ctx, db, project, change)
+	head, members, err := reviewFixHeads(ctx, db, project, change)
 	if err != nil {
 		return reviewFixQueued{}, err
 	}
-	if len(targets) != 1 {
-		return reviewFixQueued{}, axi.Failure("review_fix_unsupported", "Review fix currently requires one repository candidate", false)
-	}
-	head := targets[0].Commit
-	candidatePath := ""
-	if fullPipelineSelected(change, "") {
-		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
-		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
-			return reviewFixQueued{}, axi.Failure("candidate_missing", "full-pipeline Review fixes require an active private candidate", false)
-		}
-		if candidate.State != store.ValidationCandidateActive {
-			return reviewFixQueued{}, axi.Failure("candidate_not_active", "Review fixes cannot edit a promoted candidate", false)
-		}
-		head, candidatePath = candidate.CandidateSHA, candidate.WorktreePath
-	}
 	var body strings.Builder
-	fmt.Fprintf(&body, "Posse queued a whole-pattern Review fix for Task t%d.\n\nExpected base head: %s\n", change.Seq, head)
-	if candidatePath != "" {
-		fmt.Fprintf(&body, "Private candidate checkout: `%s`\n\nEdit and commit only in this private candidate checkout. Do not publish directly or edit the Task Sandbox branch. A new candidate head must complete Review -> test -> docs -> lint before `posse publish` can promote it.\n", candidatePath)
+	fmt.Fprintf(&body, "Posse queued a whole-pattern Review fix for Task t%d.\n\n", change.Seq)
+	if len(members) == 0 {
+		fmt.Fprintf(&body, "Expected base head: %s\n", head.ExpectedBaseHead)
+		if head.checkout != "" {
+			fmt.Fprintf(&body, "Private candidate checkout: `%s`\n\nEdit and commit only in this private candidate checkout. Do not publish directly or edit the Task Sandbox branch. A new candidate head must complete Review -> test -> docs -> lint before `posse publish` can promote it.\n", head.checkout)
+		} else {
+			body.WriteString("Fix the selected classes on the Task branch, commit the changes and signal done again.\n")
+		}
 	} else {
-		body.WriteString("Fix the selected classes on the Task branch, commit the changes and signal done again.\n")
+		candidates, branches := false, false
+		for _, member := range members {
+			fmt.Fprintf(&body, "Member %s expected base head: %s\n", member.Repository, member.ExpectedBaseHead)
+			if member.CandidateID > 0 {
+				candidates = true
+				fmt.Fprintf(&body, "Member %s private candidate checkout: `%s`\n", member.Repository, member.checkout)
+			} else {
+				branches = true
+				fmt.Fprintf(&body, "Member %s Task branch checkout: `%s`\n", member.Repository, member.checkout)
+			}
+		}
+		if candidates {
+			body.WriteString("\nEdit and commit each full-pipeline Member only in its private candidate checkout. Do not publish directly or edit those Members' Task branches. Each new candidate head must complete Review -> test -> docs -> lint before `posse publish --repo <member>` can promote it.\n")
+		}
+		if branches {
+			body.WriteString("\nFix the other Members on their Task branch and commit the changes there.\n")
+		}
 	}
 	body.WriteString("\nFix every instance of each selected pattern, including any unlisted instances you find. For every pattern, write one answer with status `fixed` or `disputed` in a `posse.review-resolutions.v1` JSON file, then signal done with `--resolutions <file>`. A missing or extra answer is refused.\n")
 	for _, seq := range selected {
@@ -171,15 +177,23 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	for i, seq := range selected {
 		patternNames[i] = "P-" + strconv.Itoa(seq)
 	}
-	dedupe := "review:" + head + ":" + strings.Join(patternNames, ",")
-	var result store.QueueValidationFixResult
-	if capAuthorized {
-		result, err = db.QueueValidationFixInstruction(ctx, change.ID, "review", head, dedupe, strings.TrimSpace(body.String()))
-	} else if taskUsesSharedReviewRepairCap(change) {
-		result, err = db.QueueValidationFixInstructionWithSharedBudget(ctx, change.ID, "review", head, dedupe, strings.TrimSpace(body.String()), maxRounds, maxRounds)
-	} else {
-		result, err = db.QueueValidationFixInstructionWithinBudget(ctx, change.ID, "review", head, dedupe, strings.TrimSpace(body.String()), maxRounds)
+	expected := head.ExpectedBaseHead
+	memberHeads := make([]store.ValidationFixMemberHead, len(members))
+	for i, member := range members {
+		memberHeads[i] = member.ValidationFixMemberHead
 	}
+	if len(memberHeads) > 0 {
+		expected = store.ValidationMemberHeadsDigest(memberHeads)
+	}
+	dedupe := "review:" + expected + ":" + strings.Join(patternNames, ",")
+	var budget, sharedBudget *int
+	if !capAuthorized {
+		budget = &maxRounds
+		if taskUsesSharedReviewRepairCap(change) {
+			sharedBudget = &maxRounds
+		}
+	}
+	result, err := db.QueueReviewFixInstruction(ctx, change.ID, expected, memberHeads, dedupe, strings.TrimSpace(body.String()), budget, sharedBudget)
 	if err != nil {
 		return reviewFixQueued{}, err
 	}
@@ -201,6 +215,73 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 		return reviewFixQueued{}, axi.Failure("review_fix_duplicate", "the same whole-pattern fix instruction already exists for this head", false)
 	}
 	return reviewFixQueued{MessageID: result.MessageID, Seq: result.Seq, Selected: patternNames}, nil
+}
+
+// reviewFixHead is the head a Review fix instruction is issued for, with the
+// checkout where the Worker applies it: the private candidate under
+// full-pipeline, otherwise the Task branch.
+type reviewFixHead struct {
+	store.ValidationFixMemberHead
+	checkout string
+}
+
+// reviewFixHeads returns the single-repository head, or one head per changed
+// workspace Member. A full-pipeline lane binds its active private candidate.
+func reviewFixHeads(ctx context.Context, db *store.DB, project store.Project, change store.Task) (reviewFixHead, []reviewFixHead, error) {
+	targets, err := changeCandidateTargets(ctx, db, project, change)
+	if err != nil {
+		return reviewFixHead{}, nil, err
+	}
+	if !project.IsWorkspace() {
+		if len(targets) != 1 {
+			return reviewFixHead{}, nil, axi.Failure("review_fix_unsupported", "Review fix requires one repository head", false)
+		}
+		head := reviewFixHead{ValidationFixMemberHead: store.ValidationFixMemberHead{ExpectedBaseHead: targets[0].Commit}}
+		if fullPipelineSelected(change, "") {
+			candidate, err := activeReviewFixCandidate(ctx, db, change, "")
+			if err != nil {
+				return reviewFixHead{}, nil, err
+			}
+			head.ExpectedBaseHead, head.CandidateID, head.checkout = candidate.CandidateSHA, candidate.ID, candidate.WorktreePath
+		}
+		return head, nil, nil
+	}
+	repos, err := db.TaskRepos(ctx, change.ID)
+	if err != nil {
+		return reviewFixHead{}, nil, err
+	}
+	checkouts := map[string]string{}
+	for _, repo := range repos {
+		checkouts[repo.Repo] = repo.WorktreePath
+	}
+	members := make([]reviewFixHead, 0, len(targets))
+	for _, target := range targets {
+		member := reviewFixHead{ValidationFixMemberHead: store.ValidationFixMemberHead{Repository: target.Repository, ExpectedBaseHead: target.Commit}, checkout: checkouts[target.Repository]}
+		if fullPipelineSelected(change, target.Repository) {
+			candidate, err := activeReviewFixCandidate(ctx, db, change, target.Repository)
+			if err != nil {
+				return reviewFixHead{}, nil, err
+			}
+			member.ExpectedBaseHead, member.CandidateID, member.checkout = candidate.CandidateSHA, candidate.ID, candidate.WorktreePath
+		}
+		members = append(members, member)
+	}
+	return reviewFixHead{}, members, nil
+}
+
+func activeReviewFixCandidate(ctx context.Context, db *store.DB, change store.Task, repo string) (store.ValidationCandidate, error) {
+	label := ""
+	if repo != "" {
+		label = " for Member " + repo
+	}
+	candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo)
+	if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+		return store.ValidationCandidate{}, axi.Failure("candidate_missing", "full-pipeline Review fixes require an active private candidate"+label, false)
+	}
+	if candidate.State != store.ValidationCandidateActive {
+		return store.ValidationCandidate{}, axi.Failure("candidate_not_active", "Review fixes cannot edit a promoted candidate"+label, false)
+	}
+	return candidate, nil
 }
 
 func reviewBriefIntent(plan *taskplan.Plan) string {

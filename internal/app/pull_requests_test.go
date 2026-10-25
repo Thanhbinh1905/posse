@@ -22,6 +22,7 @@ func TestPRMergeRefusesStaleHeadBeforeGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\ngate = [\"touch "+gateMarker+"\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fixture.requireCurrentTarget(t)
 	targetTip := fixture.advanceTarget(t, false, true)
 	code, output, stderr := fixture.run("merge", "t1")
 	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
@@ -42,6 +43,7 @@ func TestNoMistakesMergeRefusesStaleHeadAndSkipsRebaseOnRecovery(t *testing.T) {
 	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, prURL, ""); err != nil {
 		t.Fatal(err)
 	}
+	fixture.requireCurrentTarget(t)
 	targetTip := fixture.advanceTarget(t, false, true)
 	code, output, stderr := fixture.run("merge", "t1")
 	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
@@ -123,6 +125,7 @@ func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 		"## Proof\n\n" + proof + "\n\n" +
 		"## Risk And Rollback\n\n" + risk + "\n\n" +
 		"## Documentation\n\n- [x] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
+	expectedBody = withValidationBlock(expectedBody, fixture.headSHA)
 	token := managedPublishTokenFromLog(string(log))
 	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
 		t.Fatalf("PR body did not match the tokenized seven-section template: %q", log)
@@ -145,6 +148,7 @@ func TestPublishWithoutOptionalBodyFieldsWritesDefaults(t *testing.T) {
 		"## Proof\n\n_No proof supplied._\n\n" +
 		"## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR\n\n" +
 		"## Documentation\n\n- [ ] Documentation updated for this change\n- [ ] CLAUDE.md/AGENTS.md updated if needed\n"
+	expectedBody = withValidationBlock(expectedBody, fixture.headSHA)
 	token := managedPublishTokenFromLog(string(log))
 	if token == "" || !strings.Contains(string(log), "--body "+managedPublishBody(expectedBody, token)) {
 		t.Fatalf("PR body did not include the tokenized optional-field defaults: %q", log)
@@ -1279,6 +1283,24 @@ func removeFixtureTaskPane(fixture *prMergeFixture) {
 	}
 }
 
+// requireCurrentTarget enables ADR 0019's current-target rule, which is off
+// by default, in the fixture's User config.
+func (fixture *prMergeFixture) requireCurrentTarget(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(fixture.home, "config.toml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(string(content), "[defaults]\n", "[defaults]\nrequire_current_target = true\n", 1)
+	if updated == string(content) {
+		t.Fatalf("fixture config has no [defaults] table: %s", content)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (fixture *prMergeFixture) installFakeGH(t *testing.T) {
 	t.Helper()
 	if err := os.MkdirAll(fixture.bin, 0o700); err != nil {
@@ -1296,6 +1318,8 @@ case "$1 $2" in
       git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_ADVANCE_SHA:refs/heads/${POSSE_TEST_GH_ADVANCE_BRANCH:-main}" >/dev/null
     fi
     cat "$POSSE_TEST_GH_STATE"
+    # A .next state answers every later query, as after a merge.
+    if [ -e "$POSSE_TEST_GH_STATE.next" ]; then mv "$POSSE_TEST_GH_STATE.next" "$POSSE_TEST_GH_STATE"; fi
     if [ -e "$POSSE_TEST_GH_STATE.exit" ]; then printf 'GraphQL request returned errors\n' >&2; exit 1; fi ;;
   "pr list")
     if [ "${POSSE_TEST_GH_FILTER_BASE:-}" = "1" ]; then
@@ -1458,4 +1482,11 @@ func (fixture *prMergeFixture) run(args ...string) (int, string, string) {
 	}
 	code := cli.Run(args)
 	return code, fixture.output.String(), fixture.errOut.String()
+}
+
+// withValidationBlock appends the Validation block a Change Task without a plan
+// renders at head.
+func withValidationBlock(body, head string) string {
+	block := validationSummary{Head: head, Review: "unknown", Findings: map[string]int{}, CI: "unknown"}.markdown()
+	return strings.TrimRight(body, "\n") + "\n\n" + block + "\n"
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -70,14 +71,11 @@ func (s *Service) autoTeardownMergedTasks(ctx context.Context, db *store.DB, pro
 	if s.Herdr == nil {
 		return nil
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
+	tasks, err := db.TasksInState(ctx, project.ID, store.StateMerged)
 	if err != nil {
 		return err
 	}
 	for _, task := range tasks {
-		if task.State != store.StateMerged {
-			continue
-		}
 		mergedPR := task.MergeMode == "pr" || task.MergeMode == "no-mistakes"
 		if project.IsWorkspace() {
 			repos, err := db.TaskRepos(ctx, task.ID)
@@ -435,10 +433,12 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not confirm Herdr ownership for pane %s", pane.PaneID), true, err.Error())
 		}
 		finalPane, finalFound := snapshotPane(finalSnapshot, pane.PaneID)
-		finalName := snapshotAgentName(finalSnapshot, pane.PaneID)
 		finalTaskPane := finalFound && ownsTaskPane(finalSnapshot, project, task, taskTabs(finalSnapshot, project, task), finalPane)
 		finalForeignShell := finalFound && shellOnlyPaneInSandbox(finalSnapshot, finalPane, heldSandbox.Path)
-		if !finalFound || finalName != currentAgentName || finalPane.Agent != currentPane.Agent || foreignShellPane && !finalForeignShell || !foreignShellPane && !finalTaskPane {
+		// Herdr can drop or re-report an agent between snapshots; ownsTaskPane
+		// already rejects a pane whose agent belongs to another Task, so only
+		// a pane that stopped being the Task's (or a foreign shell) is refused.
+		if !finalFound || foreignShellPane && !finalForeignShell || !foreignShellPane && !finalTaskPane {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("foreground process %d in Sandbox pane %s changed Herdr ownership during verification", foreground, pane.PaneID), false, "Stop or inspect the unrelated agent, preserve its work, then retry Teardown")
 		}
 		// Backfill a legacy Task's shell image, or record a respawned upgraded
@@ -907,6 +907,57 @@ func snapshotAgentName(snapshot herdr.Snapshot, paneID string) string {
 	}
 	return ""
 }
+
+// stopFailedStartProcesses stops the processes of a Task whose start failed
+// before any Worker received its Brief. It applies Teardown's ownership checks,
+// so a foreign process in the pane or Sandbox is preserved and reported.
+func (s *Service) stopFailedStartProcesses(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	held, err := taskSandboxHeldBy(ctx, db, task)
+	if err != nil {
+		return err
+	}
+	var authorization *sandboxProcessAuthorization
+	signalGuard := taskProcessSignalGuard(nil)
+	if held {
+		authorization = newSandboxProcessAuthorization()
+		defer authorization.Close()
+		if err := s.verifySandboxForegroundOwnershipWithAuthorization(ctx, db, project, task, authorization); err != nil {
+			return err
+		}
+		signalGuard = authorization.guardSignal
+	}
+	preserved, err := stopTaskProcessContainmentWithGuard(ctx, task, signalGuard)
+	if err != nil {
+		return err
+	}
+	excluded := taskProcessDetailsPIDSet(preserved)
+	if held {
+		if _, err := stopSandboxProcessesAuthorized(task.WorktreePath, authorization, excluded); err != nil {
+			return err
+		}
+	}
+	_, err = stopTaskScratchProcessesAuthorized(home, project, task, authorization, excluded)
+	return err
+}
+
+// waitTaskPanesGone verifies Herdr removed the Task's panes, allowing it a
+// moment to notice that the stopped shell exited.
+func (s *Service) waitTaskPanesGone(ctx context.Context, project store.Project, task store.Task) (teardownPanes, error) {
+	deadline := time.Now().Add(failedStartPaneRemovalWait)
+	for {
+		result, err := s.verifyTaskPanesGone(ctx, project, task)
+		if err == nil || !time.Now().Before(deadline) || ctx.Err() != nil {
+			return result, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+const failedStartPaneRemovalWait = 5 * time.Second
 
 func (s *Service) verifyTaskPanesGone(ctx context.Context, project store.Project, task store.Task) (teardownPanes, error) {
 	plan, err := s.planTaskPaneTeardown(ctx, project, task)

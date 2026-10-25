@@ -813,10 +813,9 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("warm cleanup lost the ignored marker: %q %v", got, err)
 	}
 	assertWorkerSleepsStopped(t, sleepPIDs)
-	// The deliberate restart can leave a generic recovery Notice. A long
-	// teardown can also outlast Watch's bounded wait and leave a retryable
-	// teardown-in-progress Notice. Drain only those known transient Notices
-	// before checking the next Worker's completion delivery.
+	// The deliberate restart can leave a generic recovery Notice. Drain only
+	// that known transient Notice before checking the next Worker's completion
+	// delivery. A Teardown outlasting Watch's bounded wait raises no Notice.
 	recoveryDB, err := store.OpenReadOnly(home)
 	if err != nil {
 		t.Fatal(err)
@@ -829,10 +828,6 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	for _, notice := range pendingNotices {
 		switch notice.Kind {
 		case "recovery":
-		case "pr_watch_failing":
-			if !strings.Contains(notice.Summary, "active Task Teardown: Task Teardown is in progress") {
-				t.Fatalf("unexpected Watch failure before the next Worker: %#v", notice)
-			}
 		default:
 			t.Fatalf("unexpected undelivered Notice before the next Worker: %#v", notice)
 		}

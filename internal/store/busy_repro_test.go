@@ -258,3 +258,102 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 		t.Fatalf("got %d unexpected non-busy errors under load", otherErrCount)
 	}
 }
+
+// A bounded autocommit write, such as the Watch progress heartbeat, waits on
+// the lock in short steps but must keep retrying until its own deadline, as
+// bounded transactions do, rather than fail after the first short wait.
+func TestBoundedExecRetriesContentionWithinItsDeadline(t *testing.T) {
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `UPDATE projects SET name=name WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(3 * ObservationWriteBusyTimeout)
+		_ = writer.Rollback()
+	}()
+	boundedCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(boundedCtx, `UPDATE projects SET last_activity_at=? WHERE id=?`, 1, project.ID); err != nil {
+		t.Fatalf("bounded write behind a %s writer failed within its 1s deadline: %v", 3*ObservationWriteBusyTimeout, err)
+	}
+	<-released
+
+	writer, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(ctx, `UPDATE projects SET name=name WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	shortCtx, cancelShort := context.WithTimeout(ctx, 400*time.Millisecond)
+	defer cancelShort()
+	started := time.Now()
+	if _, err := db.ExecContext(shortCtx, `UPDATE projects SET last_activity_at=? WHERE id=?`, 2, project.ID); !errors.Is(err, ErrBusy) {
+		t.Fatalf("bounded write behind a held writer = %v, want retryable ErrBusy", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded write waited %s past its 400ms deadline", elapsed)
+	}
+}
+
+// Every reconciliation ensures the lease of every held Sandbox. Confirming an
+// existing lease must not queue behind another writer for the write lock.
+func TestEnsuringExistingSandboxLeaseDoesNotWaitForWriter(t *testing.T) {
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Lease", MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, err := db.AcquireSandbox(ctx, project.ID, taskID, filepath.Join(t.TempDir(), "pool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ResourceLeaseRequest{ResourceType: ResourcePath, ScopePath: sandbox.Path, OwnerProjectID: project.ID, OwnerTaskID: taskID, Owner: "shop sandbox-1 (t1)", SourceKey: fmt.Sprintf("sandbox:%d", sandbox.ID), SandboxID: sandbox.ID}
+	created, err := db.EnsureSandboxResourceLease(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.ExecContext(ctx, `UPDATE projects SET name=name WHERE id=?`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	boundedCtx, cancel := context.WithTimeout(ctx, ObservationWriteBusyTimeout)
+	defer cancel()
+	ensured, err := db.EnsureSandboxResourceLease(boundedCtx, request)
+	if err != nil {
+		t.Fatalf("ensuring an existing Sandbox lease waited for the write lock: %v", err)
+	}
+	if ensured.ID != created.ID || ensured.CustodyToken != created.CustodyToken {
+		t.Fatalf("ensured lease = %#v, want existing %#v", ensured, created)
+	}
+}

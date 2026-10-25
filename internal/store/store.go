@@ -386,7 +386,7 @@ func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxW
 		return false, nil
 	}
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
 		return false, err
 	}
 	if active >= maxWorkers {
@@ -970,7 +970,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	}
 	if maxWorkers > 0 && task.State != StateQueued {
 		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND state IN ('spawning','working','needs-decision','blocked','stalled')`, projectID).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
 			return 0, 0, err
 		}
 		if active >= maxWorkers {
@@ -1341,6 +1341,10 @@ func (db *DB) BreakSandbox(ctx context.Context, sandboxID, taskID int64) error {
 	}
 	if count != 1 {
 		return ErrStateRace
+	}
+	// A quarantined Sandbox holds no resource lease; only a Task-owned Sandbox does.
+	if err := db.releaseSandboxLeaseTx(ctx, tx, sandboxID); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -2047,7 +2051,7 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			return "", err
 		}
 		if taskType == "change" {
-			if err := upsertCompletedWorkerTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false); err != nil {
+			if err := upsertCompletedWorkerTurn(ctx, tx, task.ID, transitionID, paneID, server, time.Now().UnixMilli(), false, ""); err != nil {
 				return "", err
 			}
 		}
@@ -2653,6 +2657,10 @@ func (db *DB) MarkClaimedMessageDelivered(ctx context.Context, messageID int64, 
 	return db.PersistProject(ctx, projectID)
 }
 
+func (db *DB) OpenNoticeCount(ctx context.Context, projectID int64) (int64, error) {
+	return db.queries.OpenNoticeCount(ctx, projectID)
+}
+
 func (db *DB) Notices(ctx context.Context, projectID int64, openOnly bool) ([]Notice, error) {
 	notices := make([]Notice, 0)
 	if openOnly {
@@ -2673,6 +2681,17 @@ func (db *DB) Notices(ctx context.Context, projectID int64, openOnly bool) ([]No
 		}
 	}
 	return notices, nil
+}
+
+// SandboxMissingEpisodeOpen reports whether the Task's latest Sandbox
+// availability Notice records a disappearance that no recovery has closed.
+func (db *DB) SandboxMissingEpisodeOpen(ctx context.Context, projectID, taskID int64) (bool, error) {
+	var kind string
+	err := db.QueryRowContext(ctx, `SELECT kind FROM notices INDEXED BY notices_sandbox_episode_idx WHERE task_id=? AND kind IN ('sandbox_missing','sandbox_recovered') AND project_id=? ORDER BY id DESC LIMIT 1`, taskID, projectID).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return kind == "sandbox_missing", err
 }
 
 func (db *DB) UndeliveredNotices(ctx context.Context, projectID int64) ([]Notice, error) {
@@ -2997,6 +3016,42 @@ func (db *DB) Tasks(ctx context.Context, projectID int64, includeFinished bool) 
 	return tasks, nil
 }
 
+// TasksInState reads one state's Tasks from the Project state index, so
+// per-command maintenance does not load the Project's torn-down history.
+func (db *DB) TasksInState(ctx context.Context, projectID int64, state State) ([]Task, error) {
+	rows, err := db.queries.TasksInState(ctx, dbgen.TasksInStateParams{ProjectID: projectID, State: string(state)})
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		tasks = append(tasks, taskFromDB(row))
+	}
+	return tasks, nil
+}
+
+// TasksWithPaneLabels returns the Project's Tasks, in any state, whose pane
+// label is one of labels. Callers matching live panes read only the Tasks
+// those panes can belong to rather than the Project's whole history.
+func (db *DB) TasksWithPaneLabels(ctx context.Context, projectID int64, labels []string) ([]Task, error) {
+	if len(labels) == 0 {
+		return []Task{}, nil
+	}
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.queries.TasksWithPaneLabels(ctx, dbgen.TasksWithPaneLabelsParams{ProjectID: projectID, LabelsJson: string(encoded)})
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		tasks = append(tasks, taskFromDB(row))
+	}
+	return tasks, nil
+}
+
 func (db *DB) LiveTasks(ctx context.Context, projectID int64) ([]Task, error) {
 	rows, err := db.queries.LiveTasks(ctx, projectID)
 	if err != nil {
@@ -3075,12 +3130,20 @@ func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, w
 	}
 	if unchanged {
 		// A prior database update may have committed before its snapshot write failed.
-		return db.PersistTask(ctx, taskID)
+		return db.persistTaskRow(ctx, taskID)
 	}
 	if err := db.writeTaskObservation(ctx, taskID, paneID, workspaceID, agentSession, agentSessionKind, agentAbsentSince, idleSince, agentServerStartedAt, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("write Task observation: %w", err)
 	}
-	return db.PersistTask(ctx, taskID)
+	return db.persistTaskRow(ctx, taskID)
+}
+
+// persistTaskRow refreshes only the Task snapshot after a write confined to
+// the Task row. The Project snapshot holds no Task rows, and rebuilding it
+// reads every open Notice, so per-Task observation writes leave it to
+// PersistProject callers.
+func (db *DB) persistTaskRow(ctx context.Context, taskID int64) error {
+	return db.persistTask(ctx, taskID, false)
 }
 
 func (db *DB) writeTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string, updatedAt int64) error {
@@ -3162,21 +3225,21 @@ func (db *DB) UpdateProgress(ctx context.Context, taskID int64, outputHash, work
 	if err := db.queries.UpdateProgress(ctx, dbgen.UpdateProgressParams{LastOutputHash: outputHash, LastWorktreeHash: worktreeHash, LastProgressAt: at, UpdatedAt: at, ID: taskID}); err != nil {
 		return err
 	}
-	return db.PersistTask(ctx, taskID)
+	return db.persistTaskRow(ctx, taskID)
 }
 
 func (db *DB) ResetProgress(ctx context.Context, taskID int64) error {
 	if err := db.queries.ResetProgress(ctx, dbgen.ResetProgressParams{UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
 		return err
 	}
-	return db.PersistTask(ctx, taskID)
+	return db.persistTaskRow(ctx, taskID)
 }
 
 func (db *DB) ResetTaskProgress(ctx context.Context, taskID int64) error {
 	if err := db.queries.ResetTaskProgress(ctx, dbgen.ResetTaskProgressParams{UpdatedAt: time.Now().UnixMilli(), ID: taskID}); err != nil {
 		return err
 	}
-	return db.PersistTask(ctx, taskID)
+	return db.persistTaskRow(ctx, taskID)
 }
 
 type Notice struct {

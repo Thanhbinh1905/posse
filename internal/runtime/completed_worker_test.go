@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -124,5 +127,77 @@ func TestCompletedWorkerBoundaryMustMatchPaneAndCompletion(t *testing.T) {
 				t.Fatalf("old turn boundary reopened changed completion identity: %#v %v", current, err)
 			}
 		})
+	}
+}
+
+// snapshotThenAdapter runs after once the pass has taken its snapshot.
+type snapshotThenAdapter struct {
+	*herdr.Fake
+	after func()
+}
+
+func (a *snapshotThenAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
+	snapshot, err := a.Fake.Snapshot(ctx)
+	if a.after != nil {
+		a.after()
+		a.after = nil
+	}
+	return snapshot, err
+}
+
+// Regression for #492: the pass snapshot still reports the ended turn as idle
+// while direct User input starts a new turn that commits before the pass reads
+// the repository. That commit must not become the turn-end baseline.
+func TestCompletedWorkerTurnEndBaselinePredatesSnapshot(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	git := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", task.WorktreePath}, args...)...)
+		command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=Posse", "GIT_AUTHOR_EMAIL=posse@example.test", "GIT_COMMITTER_NAME=Posse", "GIT_COMMITTER_EMAIL=posse@example.test")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	commit := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(task.WorktreePath, name), []byte(name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		git("add", name)
+		git("commit", "-q", "-m", name)
+	}
+	if err := os.MkdirAll(task.WorktreePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git("init", "-q")
+	commit("done.txt")
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "Worker done"); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "idle"}}}
+	adapter := &snapshotThenAdapter{Fake: fake}
+	if _, err := Run(ctx, db, adapter, project.ID, 0, 0, time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	adapter.after = func() { commit("direct-input.txt") }
+	if _, err := Run(ctx, db, adapter, project.ID, 0, 0, time.Now(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := db.Task(ctx, project.ID, "t1"); err != nil || current.State != store.StateDone {
+		t.Fatalf("stale idle snapshot changed completed Task: %#v %v", current, err)
+	}
+	fake.SnapshotValue.Panes[0].AgentStatus = "working"
+	notices, err := Run(ctx, db, adapter, project.ID, 0, 0, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current, err := db.Task(ctx, project.ID, "t1"); err != nil || current.State != store.StateWorking {
+		t.Fatalf("new turn that committed did not reopen the Task: %#v %v", current, err)
+	}
+	if len(notices.Notices) != 1 || notices.Notices[0].Kind != "worker_resumed" {
+		t.Fatalf("new turn Notices = %#v; want one worker_resumed", notices.Notices)
 	}
 }

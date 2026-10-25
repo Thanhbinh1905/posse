@@ -40,6 +40,9 @@ type Service struct {
 	maintenanceCancels   map[string]context.CancelFunc
 	maintenanceWG        sync.WaitGroup
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
+	// DetachQueuedLaunch runs each queued Task start in its own session. The
+	// posse binary sets it; unit tests keep the start in-process.
+	DetachQueuedLaunch bool
 }
 
 func New(home string, adapter herdr.Adapter) *Service {
@@ -137,6 +140,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "lowkey", Usage: "$ lowkey on|off|status", Summary: "Toggle or inspect persisted Lead lowkey mode without restarting.", Handler: s.lowkey},
 		{Name: "list", Usage: "$ list [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, model-error recovery episode, undelivered messages, Signals and transitions.", Handler: s.show},
+		{Name: "diff", Usage: "$ diff <task> [--stat]", Summary: "Print a Task's diff against its base, or a per-Member diff for a Workspace Task.", Handler: s.diff},
 		{Name: "accept", Usage: "$ accept <task> [--user-approved <quote>]", Summary: "Record User acceptance of a publication-bound Research Report after independent review.", Handler: s.acceptReport},
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Worker's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
@@ -443,8 +447,12 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 }
 
+// projectRecoveryWait bounds how long a command waits for another process's
+// Project recovery before returning a retryable error.
+var projectRecoveryWait = 60 * time.Second
+
 func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Project) error {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(projectRecoveryWait)
 	for {
 		claim, err := db.ProjectRecovery(ctx, project.ID)
 		if err != nil {
@@ -454,7 +462,7 @@ func waitProjectRecovery(ctx context.Context, db *store.DB, project store.Projec
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("project recovery is still running for %s", project.Name)
+			return axi.Failure("project_recovery_running", fmt.Sprintf("project recovery is still running for %s", project.Name), true, "Retry the command once recovery completes; check `posse status`")
 		}
 		select {
 		case <-ctx.Done():

@@ -47,9 +47,12 @@ type Defaults struct {
 	MergeMode           string `toml:"merge_mode" json:"merge_mode"`
 	TargetBranch        string `toml:"target_branch" json:"target_branch"`
 	MergeMethod         string `toml:"merge_method" json:"merge_method"`
-	Forge               string `toml:"forge" json:"forge"`
-	PRPoll              string `toml:"pr_poll" json:"pr_poll"`
-	Review              string `toml:"review" json:"review"`
+	// RequireCurrentTarget enables ADR 0019's current-target rule and the
+	// ADR 0031 merge queue; off by default.
+	RequireCurrentTarget bool   `toml:"require_current_target" json:"require_current_target"`
+	Forge                string `toml:"forge" json:"forge"`
+	PRPoll               string `toml:"pr_poll" json:"pr_poll"`
+	Review               string `toml:"review" json:"review"`
 }
 
 type ReviewLoop struct {
@@ -645,7 +648,7 @@ func defaultMap() map[string]any {
 		"lowkey":          map[string]any{"lead": false},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
-			"merge_method": "squash", "forge": "auto", "pr_poll": "2m", "review": "none",
+			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
 		},
 		"kinds": map[string]any{
 			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryWatch, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},

@@ -105,15 +105,21 @@ func systemWatchProcesses(home string) ([]watchProcess, error) {
 			continue
 		}
 		root := filepath.Join(watchProcRoot, entry.Name())
-		environment, err := os.ReadFile(filepath.Join(root, "environ"))
+		command, err := os.ReadFile(filepath.Join(root, "cmdline"))
 		if err != nil {
 			continue // Processes can exit between ReadDir and inspection.
 		}
-		command, err := os.ReadFile(filepath.Join(root, "cmdline"))
+		args := splitProcessArgs(string(command))
+		// Reading every process environment makes discovery scale with the
+		// machine's total environment size, so skip non-Watch commands first.
+		if !isWatchCommandArgs(args) {
+			continue
+		}
+		environment, err := os.ReadFile(filepath.Join(root, "environ"))
 		if err != nil {
 			continue
 		}
-		process, found := watchFromArgs(pid, splitProcessArgs(string(command)), parseProcessEnvironment(string(environment)), home)
+		process, found := watchFromArgs(pid, args, parseProcessEnvironment(string(environment)), home)
 		if !found {
 			continue
 		}
@@ -208,10 +214,15 @@ func splitProcessArgs(raw string) []string {
 	return args
 }
 
+// isWatchCommandArgs reports whether args name a Watch command. The former
+// name is recognized for ownership discovery and the supervised poller's narrow
+// re-entry adapter, never as general CLI input.
+func isWatchCommandArgs(args []string) bool {
+	return len(args) >= 2 && (args[1] == "watch" || args[1] == "lookout" || args[1] == "_claude-stop")
+}
+
 func watchFromArgs(pid int, args []string, environment map[string]string, home string) (watchProcess, bool) {
-	// The former name is recognized for ownership discovery and the supervised
-	// poller's narrow re-entry adapter, never as general CLI input.
-	if len(args) < 2 || (args[1] != "watch" && args[1] != "lookout" && args[1] != "_claude-stop") || !sameWatchHome(processHome(environment), home) {
+	if !isWatchCommandArgs(args) || !sameWatchHome(processHome(environment), home) {
 		return watchProcess{}, false
 	}
 	// Pre-upgrade supervised processes retain their private binding names.

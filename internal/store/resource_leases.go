@@ -94,6 +94,15 @@ func (db *DB) EnsureSandboxResourceLease(ctx context.Context, request ResourceLe
 	if err := validateResourceLeaseRequest(request); err != nil {
 		return ResourceLease{}, err
 	}
+	// Every reconciliation ensures every held Sandbox. Confirm an existing
+	// lease from a read so routine passes do not queue for the write lock.
+	if existing, err := db.queries.ResourceLeaseBySource(ctx, request.SourceKey); err == nil {
+		if lease := resourceLeaseFromSource(existing); sameSandboxResourceLease(lease, request) {
+			return lease, nil
+		}
+	} else if !IsNotFound(err) {
+		return ResourceLease{}, err
+	}
 	token := fmt.Sprintf("sandbox:%d", request.SandboxID)
 	return db.claimResourceLease(ctx, request, token, true)
 }
@@ -107,38 +116,98 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 		return ResourceLease{}, err
 	}
 	defer tx.Rollback()
-	queries := dbgen.New(tx)
+	lease, inserted, err := claimResourceLeaseTx(ctx, tx, request, token, ensure, pid, bootID, startTime, now)
+	if err != nil {
+		return ResourceLease{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ResourceLease{}, err
+	}
+	if !inserted {
+		return lease, nil
+	}
+	if err := db.PersistProject(ctx, request.OwnerProjectID); err != nil {
+		return lease, err
+	}
+	return lease, nil
+}
 
+// AcquireResourceLeases claims every request in one transaction: either all
+// leases are recorded or none is. Each affected Project snapshot is rewritten
+// once, after the commit.
+func (db *DB) AcquireResourceLeases(ctx context.Context, requests []ResourceLeaseRequest) ([]ResourceLease, error) {
+	for _, request := range requests {
+		if err := validateResourceLeaseRequest(request); err != nil {
+			return nil, err
+		}
+	}
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	tokens := make([]string, len(requests))
+	for i := range requests {
+		token, err := newResourceLeaseToken()
+		if err != nil {
+			return nil, err
+		}
+		tokens[i] = token
+	}
+	pid := os.Getpid()
+	bootID, startTime, _ := ProcessIdentityForPID(pid)
+	now := time.Now().UnixMilli()
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	leases := make([]ResourceLease, 0, len(requests))
+	for i, request := range requests {
+		lease, _, err := claimResourceLeaseTx(ctx, tx, request, tokens[i], false, pid, bootID, startTime, now)
+		if err != nil {
+			return nil, err
+		}
+		leases = append(leases, lease)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := db.persistProjects(ctx, resourceLeaseProjects(leases)); err != nil {
+		return leases, err
+	}
+	return leases, nil
+}
+
+// claimResourceLeaseTx records one lease inside tx. inserted is false when ensure
+// matched an existing identical lease.
+func claimResourceLeaseTx(ctx context.Context, tx *writeTx, request ResourceLeaseRequest, token string, ensure bool, pid int, bootID, startTime string, now int64) (lease ResourceLease, inserted bool, err error) {
+	queries := dbgen.New(tx)
 	if request.IntentID != 0 {
 		var intentExists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intents WHERE id=?)`, request.IntentID).Scan(&intentExists); err != nil {
-			return ResourceLease{}, err
+			return ResourceLease{}, false, err
 		}
 		if !intentExists {
-			return ResourceLease{}, ErrStateRace
+			return ResourceLease{}, false, ErrStateRace
 		}
 	}
 	if existing, lookupErr := queries.ResourceLeaseBySource(ctx, request.SourceKey); lookupErr == nil {
 		lease := resourceLeaseFromSource(existing)
-		if !ensure || lease.ResourceType != request.ResourceType || lease.ScopeRoot != request.ScopeRoot || lease.ScopePath != request.ScopePath || lease.OwnerProjectID != request.OwnerProjectID || lease.SandboxID != request.SandboxID {
-			return ResourceLease{}, &ResourceLeaseConflict{Lease: lease}
+		if !ensure || !sameSandboxResourceLease(lease, request) {
+			return ResourceLease{}, false, &ResourceLeaseConflict{Lease: lease}
 		}
-		if err := tx.Commit(); err != nil {
-			return ResourceLease{}, err
-		}
-		return lease, nil
+		return lease, false, nil
 	} else if !IsNotFound(lookupErr) {
-		return ResourceLease{}, lookupErr
+		return ResourceLease{}, false, lookupErr
 	}
 
 	conflicts, err := queries.ResourceLeasesByScope(ctx, dbgen.ResourceLeasesByScopeParams{ResourceType: request.ResourceType, ScopeRoot: request.ScopeRoot})
 	if err != nil {
-		return ResourceLease{}, err
+		return ResourceLease{}, false, err
 	}
 	for _, current := range conflicts {
 		lease := resourceLeaseFromScope(current)
 		if resourceScopesOverlap(request.ScopePath, lease.ScopePath) {
-			return ResourceLease{}, &ResourceLeaseConflict{Lease: lease}
+			return ResourceLease{}, false, &ResourceLeaseConflict{Lease: lease}
 		}
 	}
 	result, err := queries.InsertResourceLease(ctx, dbgen.InsertResourceLeaseParams{
@@ -149,25 +218,44 @@ func (db *DB) claimResourceLease(ctx context.Context, request ResourceLeaseReque
 		OwnerStartTime: startTime, Custody: ResourceCustodyHeld, AcquiredAt: now,
 	})
 	if err != nil {
-		return ResourceLease{}, err
+		return ResourceLease{}, false, err
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
-		return ResourceLease{}, err
+		return ResourceLease{}, false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return ResourceLease{}, err
-	}
-	lease := ResourceLease{
+	return ResourceLease{
 		ID: id, ResourceType: request.ResourceType, ScopeRoot: request.ScopeRoot, ScopePath: request.ScopePath,
 		OwnerProjectID: request.OwnerProjectID, OwnerTaskID: request.OwnerTaskID, Owner: request.Owner,
 		SourceKey: request.SourceKey, CustodyToken: token, IntentID: request.IntentID, SandboxID: request.SandboxID,
 		OwnerPID: pid, OwnerBootID: bootID, OwnerStartTime: startTime, Custody: ResourceCustodyHeld, AcquiredAt: now,
+	}, true, nil
+}
+
+func resourceLeaseProjects(leases []ResourceLease) []int64 {
+	var projects []int64
+	seen := map[int64]bool{}
+	for _, lease := range leases {
+		if !seen[lease.OwnerProjectID] {
+			seen[lease.OwnerProjectID] = true
+			projects = append(projects, lease.OwnerProjectID)
+		}
 	}
-	if err := db.PersistProject(ctx, request.OwnerProjectID); err != nil {
-		return lease, err
+	return projects
+}
+
+func (db *DB) persistProjects(ctx context.Context, projects []int64) error {
+	var persistErr error
+	for _, projectID := range projects {
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			persistErr = errors.Join(persistErr, err)
+		}
 	}
-	return lease, nil
+	return persistErr
+}
+
+func sameSandboxResourceLease(lease ResourceLease, request ResourceLeaseRequest) bool {
+	return lease.ResourceType == request.ResourceType && lease.ScopeRoot == request.ScopeRoot && lease.ScopePath == request.ScopePath && lease.OwnerProjectID == request.OwnerProjectID && lease.SandboxID == request.SandboxID
 }
 
 func validateResourceLeaseRequest(request ResourceLeaseRequest) error {
@@ -203,6 +291,58 @@ func newResourceLeaseToken() (string, error) {
 		return "", fmt.Errorf("generate resource lease custody token: %w", err)
 	}
 	return hex.EncodeToString(bytes[:]), nil
+}
+
+// ReleaseResourceLeases deletes every lease in one transaction and rewrites each
+// affected Project snapshot once. A lease whose custody token no longer matches
+// fails the whole release with ErrStateRace and leaves all leases in place.
+func (db *DB) ReleaseResourceLeases(ctx context.Context, leases []ResourceLease) error {
+	if len(leases) == 0 {
+		return nil
+	}
+	for _, lease := range leases {
+		if lease.ID < 1 || lease.CustodyToken == "" {
+			return fmt.Errorf("resource lease id and custody token are required")
+		}
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	queries := dbgen.New(tx)
+	projects := make([]int64, 0, len(leases))
+	for index := len(leases) - 1; index >= 0; index-- {
+		lease := leases[index]
+		result, err := queries.DeleteResourceLease(ctx, dbgen.DeleteResourceLeaseParams{ID: lease.ID, CustodyToken: lease.CustodyToken})
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count != 1 {
+			return ErrStateRace
+		}
+		projects = append(projects, lease.OwnerProjectID)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.persistProjects(ctx, dedupeInt64(projects))
+}
+
+func dedupeInt64(values []int64) []int64 {
+	var out []int64
+	seen := map[int64]bool{}
+	for _, v := range values {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (db *DB) ReleaseResourceLease(ctx context.Context, id int64, token string) error {

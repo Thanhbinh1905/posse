@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -176,8 +177,8 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
 	}
-	if _, err := gitOutput(out.Context, task.WorktreePath, "push", "origin", ref+":"+ref); err != nil {
-		return axi.Failure("pr_push_failed", "could not push the Task branch", true, err.Error())
+	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref); err != nil {
+		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
@@ -267,14 +268,16 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 }
 
 // A workspace Signal must account for every changed PR-mode member, not just
-// one URL in the Task row. Local and unchanged members need no PR.
-func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config) error {
+// one URL in the Task row. Local and unchanged members need no PR. A
+// full-pipeline Member answering a Review fix from its private candidate has
+// not been published yet.
+func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config, candidateFix bool) error {
 	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return err
 	}
 	for _, member := range members {
-		if member.repo.MergeMode != "pr" {
+		if member.repo.MergeMode != "pr" || candidateFix && isFullPipelineTask(task, member.repo.Repo) {
 			continue
 		}
 		ahead, err := commitsAhead(ctx, member.repo.WorktreePath, member.repo.BaseRef, "refs/heads/"+task.Branch)
@@ -298,6 +301,7 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 		if err := validateWorkerPullRequest(ctx, member.project, member.task, forge, member.repo.PRURL, sha); err != nil {
 			return prefixFailure(member.repo.Repo, err)
 		}
+		s.refreshFailedObservedPRChecks(ctx, db, project, cfg, task.ID, member.repo.Repo, member.repo.PRURL, sha)
 		if err := rejectFailedObservedPRChecks(ctx, db, task.ID, member.repo.Repo, member.repo.PRURL, sha); err != nil {
 			return prefixFailure(member.repo.Repo, err)
 		}
@@ -368,4 +372,43 @@ func validateWorkerRemoteBranch(ctx context.Context, task store.Task, sha string
 		return nil
 	}
 	return axi.Failure("pr_head_mismatch", "origin Task branch differs from the local Task commit", false)
+}
+
+// pushCredentialRetries covers a credential helper that transiently returns no
+// credentials, which git reports as a missing HTTPS username.
+var pushCredentialRetries = 2
+
+var pushCredentialRetryDelay = 500 * time.Millisecond
+
+func isCredentialPromptFailure(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "could not read Username") || strings.Contains(message, "could not read Password")
+}
+
+func pushWithCredentialRetry(ctx context.Context, worktree, ref string) error {
+	var err error
+	for attempt := 0; attempt <= pushCredentialRetries; attempt++ {
+		if _, err = gitOutput(ctx, worktree, "push", "origin", ref+":"+ref); err == nil || !isCredentialPromptFailure(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pushCredentialRetryDelay):
+		}
+	}
+	return err
+}
+
+// pushFailureHelp names the credential helper when git could not get HTTPS credentials.
+func pushFailureHelp(ctx context.Context, worktree string, pushErr error) []string {
+	help := []string{pushErr.Error()}
+	if !isCredentialPromptFailure(pushErr) {
+		return help
+	}
+	helper, err := gitOutput(ctx, worktree, "config", "--get-urlmatch", "credential.helper", "https://github.com")
+	if err != nil || helper == "" {
+		return append(help, "git has no credential helper for https://github.com; configure one such as `gh auth setup-git`")
+	}
+	return append(help, fmt.Sprintf("git credential helper %q returned no credentials; run `gh auth status` and `printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill` in this pane, then retry `posse publish`", helper))
 }

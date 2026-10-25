@@ -199,6 +199,10 @@ func methodTimeout(method string) time.Duration {
 	switch method {
 	case "agent.start", "worktree.open", "workspace.create", "workspace.close":
 		return 45 * time.Second
+	case "agent.prompt":
+		// A timeout after the request is written leaves delivery uncertain, and
+		// Posse never retries it, so a loaded Herdr server must have time to answer.
+		return 30 * time.Second
 	default:
 		return 3 * time.Second
 	}

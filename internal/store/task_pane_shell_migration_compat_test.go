@@ -14,6 +14,21 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`ALTER TABLE validation_fix_rounds DROP COLUMN member_heads_json`,
+		`DROP TRIGGER project_history_revision_decision_delete`,
+		`DROP TRIGGER project_history_revision_decision_update`,
+		`DROP TRIGGER project_history_revision_decision_insert`,
+		`DROP TRIGGER project_history_revision_notice_delete`,
+		`DROP TRIGGER project_history_revision_notice_update`,
+		`DROP TRIGGER project_history_revision_notice_insert`,
+		`DROP TRIGGER project_history_revision_project_insert`,
+		`DROP TABLE project_history_revisions`,
+		`DROP INDEX notices_task_kind_idx`,
+		`DROP INDEX notices_sandbox_episode_idx`,
+		`DROP INDEX notices_project_id_idx`,
+		`ALTER TABLE pr_body_markers DROP COLUMN validation_digest`,
+		`DROP TABLE merge_queue_entries`,
+		`ALTER TABLE completed_rider_busy DROP COLUMN baseline`,
 		`DROP TABLE research_attempts`,
 		`DROP TABLE member_watch_errors`,
 		`DROP TABLE validation_stage_results`,

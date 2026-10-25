@@ -643,3 +643,186 @@ func TestUnchangedProjectSnapshotIsNotRewritten(t *testing.T) {
 		t.Fatal("changed Project state kept the previous snapshot capture time")
 	}
 }
+
+// The unchanged check compares a digest recorded in the snapshot header
+// instead of decoding the whole snapshot. It must still notice an in-place
+// edit that keeps every row count, and a legacy snapshot without a digest.
+func TestProjectSnapshotDigestDetectsInPlaceEditsAndLegacySnapshots(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noticeID, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "worker_idle", Summary: "before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := db.ProjectSnapshotPath(project.Name)
+	read := func() projectSnapshot {
+		t.Helper()
+		var snapshot projectSnapshot
+		if _, err := toml.DecodeFile(path, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	first := read()
+	if first.StateDigest == "" || recordedProjectSnapshotDigest(path) != first.StateDigest {
+		t.Fatalf("snapshot header digest = %q, decoded digest = %q", recordedProjectSnapshotDigest(path), first.StateDigest)
+	}
+
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET summary='after' WHERE id=?`, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET project_uuid=? WHERE id=?`, "00000000-0000-4000-8000-000000000428", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	edited := read()
+	if edited.StateDigest == first.StateDigest || edited.State.CapturedAt <= first.State.CapturedAt || edited.Project.UUID != "00000000-0000-4000-8000-000000000428" {
+		t.Fatalf("in-place edit was not persisted: first=%#v edited=%#v", first, edited)
+	}
+	var summary string
+	for _, notice := range edited.State.Notices {
+		if notice.ID == noticeID {
+			summary = notice.Summary
+		}
+	}
+	if summary != "after" {
+		t.Fatalf("edited Notice summary in snapshot = %q, want after", summary)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(data), "state_digest = \""+edited.StateDigest+"\"\n", "", 1)
+	if legacy == string(data) {
+		t.Fatal("snapshot did not record its digest in the header")
+	}
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if recordedProjectSnapshotDigest(path) != edited.StateDigest {
+		t.Fatalf("legacy snapshot without a digest was not rewritten: header digest %q", recordedProjectSnapshotDigest(path))
+	}
+}
+
+// The unchanged check compares a per-Project history revision instead of
+// reading and hashing every open Notice (#486). Every write to a recorded
+// Notice or Decision column must change that revision; claim bookkeeping,
+// which the snapshot does not record, must not.
+func TestProjectHistoryRevisionGuardsTheUnchangedSnapshotCheck(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := func() int64 {
+		t.Helper()
+		var value int64
+		if err := db.QueryRowContext(ctx, `SELECT revision FROM project_history_revisions WHERE project_id=?`, project.ID).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	created := revision()
+	noticeID, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "worker_idle", Summary: "before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := revision()
+	if last == created {
+		t.Fatal("a new Notice did not change the history revision")
+	}
+	for _, statement := range []string{
+		`UPDATE notices SET summary='edited' WHERE id=?`,
+		`UPDATE notices SET data_json='{"edited":true}' WHERE id=?`,
+		`UPDATE notices SET delivered_at=1 WHERE id=?`,
+		`UPDATE notices SET acked_at=2 WHERE id=?`,
+	} {
+		if _, err := db.ExecContext(ctx, statement, noticeID); err != nil {
+			t.Fatal(err)
+		}
+		if next := revision(); next == last {
+			t.Fatalf("%s did not change the history revision", statement)
+		} else {
+			last = next
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET claim_token='claim',claimed_at=3 WHERE id=?`, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if revision() != last {
+		t.Fatal("unrecorded claim bookkeeping changed the history revision")
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "test:1", Kind: "worker_question", Question: "A?", Options: []string{"yes", "no"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next := revision(); next == last {
+		t.Fatal("a new Decision did not change the history revision")
+	} else {
+		last = next
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE decisions SET answer='yes',answered_at=4 WHERE id=?`, decision.ID); err != nil {
+		t.Fatal(err)
+	}
+	if revision() == last {
+		t.Fatal("an answered Decision did not change the history revision")
+	}
+
+	// With the revision unchanged, persistence must not read the history: an
+	// edit made behind the trigger's back stays out of the snapshot.
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER project_history_revision_notice_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE notices SET summary='untracked' WHERE id=?`, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot projectSnapshot
+	if _, err := toml.DecodeFile(db.ProjectSnapshotPath(project.Name), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.State.Notices) != 1 || snapshot.State.Notices[0].Summary != "edited" || len(snapshot.State.Decisions) != 1 || snapshot.State.Decisions[0].Answer != "yes" {
+		t.Fatalf("unchanged check read the history or the snapshot missed recorded history: %#v", snapshot.State)
+	}
+	// A recorded change rewrites the snapshot with the current history.
+	if _, err := db.CreateNotice(ctx, Notice{ProjectID: project.ID, Kind: "worker_idle", Summary: "next"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = projectSnapshot{}
+	if _, err := toml.DecodeFile(db.ProjectSnapshotPath(project.Name), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.State.Notices) != 2 || snapshot.State.Notices[0].Summary != "untracked" {
+		t.Fatalf("changed history was not rewritten: %#v", snapshot.State.Notices)
+	}
+}
