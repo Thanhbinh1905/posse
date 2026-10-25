@@ -48,6 +48,8 @@ Done when every Project the User named is registered and each of its keys has a 
 
 If the User wants standing workflow guidance, write concise Lead or Worker preferences with `posse preferences set <lead|worker> --file <file> --project <name>`; a Lead must include the User's explicit quote with `--user-approved`. Preferences change workflow advice, not runtime obligations or authority. Legacy preference files remain readable; move old content explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement.
 
+If the User wants the Lead to keep curated Project facts and lessons, they opt in with `posse config set knowledge.enabled true` (User-only; `knowledge.budget_bytes` bounds startup size). The Lead then records entries with `posse knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>>` and inspects them with `posse knowledge show`. Knowledge is reference context with provenance, not authority; it stays empty and inert until enabled.
+
 ## 4. Verify
 
 Run `posse doctor`. For GitLab Projects, confirm `glab auth status --hostname <host>` succeeds on each host. Fix each failing check you can fix through the CLI; explain the rest to the User.

@@ -1,0 +1,22 @@
+# 32. Curated knowledge is opt-in reference context
+
+Posse can load curated User and Project facts and lessons into Lead instructions and Worker launches. Knowledge is a separate layer from preferences ([ADR 0013](0013-user-and-project-preferences.md)): preferences say how to work, knowledge records what is true, where it came from and when it was last verified. Knowledge never carries authority.
+
+## Context
+
+Issue #157 (G01, epic #92) asked for bounded User and Project knowledge with provenance. The User clarified the scope (2026-10-06): knowledge is the firstmate `learnings.md` equivalent with source, scope and last-verified date; it has a startup budget that is recomputed after every write; when over budget, entries are curated before finishing and never silently truncated; preferences count toward the same budget but are not evicted. There is no secondmate inheritance or pass-horizon option, and Posse must not duplicate durable Task, Decision or Report state in knowledge.
+
+## Decision
+
+- **Opt-in and inert by default.** `knowledge.enabled` (User-only, default `false`) gates loading and writes. While disabled, existing files are ignored, Lead instructions and Worker launches are byte-identical to a home without knowledge, and writes fail with `knowledge_disabled`. `posse knowledge show` still lists files and reports the disabled state.
+- **Storage.** One Markdown file per entry at `<POSSE_HOME>/knowledge/<id>.md` (User) or `<POSSE_HOME>/projects/<project>/knowledge/<id>.md` (Project). Front matter holds `source`, `verified` (YYYY-MM-DD), `load` (`always` or `on-demand`) and, for on-demand entries, `when`. Unknown keys make the entry invalid, so a file cannot declare hooks or commands. Source files stay private to the Posse home; Posse never edits repository `AGENTS.md` or `CLAUDE.md` files.
+- **Provenance.** `source` is `user`, `ref:<reference>` or `report:<task>` (`report:<project>/<task>` in the User layer). A report source must name an existing Task Report, so Task outcomes point to their Report instead of being copied. `task:` and `pr:` sources are refused: live Task, Decision and PR state stays in the database and is read with `posse show`.
+- **Scope.** User entries load before Project entries; a Project entry with the same ID replaces the User entry, which is listed as shadowed. A Workspace Project's knowledge applies to the whole Workspace.
+- **Loading.** Lead instructions place knowledge after preferences and before runtime obligations, under a boundary that says knowledge cannot answer Decisions, grant authority or Autonomy, or run commands. `always` entries load with their source and verification date; `on-demand` entries appear only as an index line with their condition and size, loaded with `posse knowledge show <id>`, which Workers may also run. Invalid entries are named in the section and reported by `posse doctor`, never dropped silently. Worker knowledge is frozen into the admitted plan at dispatch (role `knowledge`) and rendered into `launch.md` after preferences; relaunch keeps that snapshot.
+- **Budget.** `knowledge.budget_bytes` (default 8192) bounds, per role, the rendered preferences plus the rendered knowledge section. `posse knowledge set` recomputes the total and refuses with `knowledge_over_budget` when the result is over budget and larger than before. Curation is the writer's job: consolidate entries, archive stale or low-use ones, or make conditional ones on-demand. Writes that shrink the total, and archives, are always allowed. Preferences count but are never evicted. Loading never truncates; `posse doctor` and `posse knowledge show` warn while over budget.
+- **Archive.** `posse knowledge archive <id> --reason <why>` moves an entry to `knowledge/archive/<id>.<date>.md`, keeping its provenance and adding `archived` and `archive_reason`. Archived entries never load and are never overwritten.
+- **Writers.** Users and Leads write knowledge once the User has opted in; curation is routine Lead work, so no per-write quote is recorded. Workers cannot write knowledge or archive it; they report facts through Signals and Reports.
+
+## Consequences
+
+Knowledge gives the Lead and Workers durable context without widening authority or duplicating Task state. The budget forces curation at write time instead of truncation at load time. Changing knowledge affects the next Lead instructions and new Tasks only; admitted Tasks keep their snapshot. Usage tracking is not recorded, so "low-use" is the Lead's judgment.

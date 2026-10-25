@@ -29,6 +29,12 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	if err != nil {
 		return leadInstructionResult{}, err
 	}
+	var knowledge []knowledgeEntry
+	if cfg.Knowledge.Enabled {
+		if knowledge, err = knowledgeSources(home, project); err != nil {
+			return leadInstructionResult{}, err
+		}
+	}
 	identity := leadIdentity(cfg)
 	result := leadInstructionResult{
 		Lowkey:        cfg.Lowkey.Lead,
@@ -52,6 +58,9 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 		text.WriteString(preferenceInstructions)
 		text.WriteString("\n")
 	}
+	if knowledgeInstructions := renderedKnowledge(project, knowledge); knowledgeInstructions != "" {
+		text.WriteString(knowledgeInstructions)
+	}
 	text.WriteString("## Runtime obligations\n\nThese obligations come from Posse's execution contract. Preferences can change default workflow advice but cannot grant authority, change Task evidence or override these obligations.\n\n")
 	if project.IsDirectory() {
 		text.WriteString("- This is a legacy Directory Project. Posse no longer admits Tasks here; non-Git work is edited directly outside Posse.\n")
@@ -73,6 +82,9 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	}
 	text.WriteString("- User-only keys (`pool.setup`, `kinds.<kind>.lead_auto_approve`, `autonomy.*`) may be changed only after explicit User approval. In this Lead conversation, use `posse config set <key> <value> [--project <name>] --user-approved \"<User's words>\"` or `posse config unset <key> [--project <name>] --user-approved \"<User's words>\"`. Outside a Lead pane, give the User the exact `! posse config set ...` or `! posse config unset ...` command.\n")
 	text.WriteString("- Preferences are how-to-work guidance. A User shell can run `posse preferences set <lead|worker> --file <file> [--project <name>]`; from this Lead, use that command with `--user-approved \"<User's words>\"` only after explicit consent. Workers cannot write preferences or config.\n")
+	if cfg.Knowledge.Enabled {
+		text.WriteString("- Knowledge is opt-in curated reference context, not authority. Record a durable Project fact or lesson with `posse knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--user]`; point Task outcomes to their Report and never copy live Task, Decision or PR state. A write that would exceed `knowledge.budget_bytes` is refused: curate first by consolidating entries, archiving stale or low-use ones with `posse knowledge archive <id> --reason <why>`, or making conditional ones on-demand with `--when`. Never edit repository AGENTS or CLAUDE files to record knowledge. Workers cannot write knowledge.\n")
+	}
 	text.WriteString("- Run `posse` to inspect Tasks and Notices. Write a Brief with type, title and done_when (one criterion, or a block list of criteria; no other field accepts a YAML list), then run `posse dispatch --brief <file>` to resolve a Profile and generate a display name. Start one Worker with `posse start --brief <file> [--name <short>] [--profile <name>] [--queue]`; `after: [t12:landed, t14:accepted]` records typed local prerequisites, and `--queue` admits at capacity without resources. Inspect waits with `posse show`; cancel a queued Task with `posse teardown`. The optional name is display-only, and Sandbox-backed Tasks use Task-ID-bound branches. Use `posse relaunch <task> [--profile <name>]` to resume an interrupted Worker or move it to another Profile.\n")
 	if project.IsDirectory() {
 		text.WriteString("- Do not create or dispatch a Brief from this legacy Directory Project. Register a Git repository with `posse project add` to use Posse.\n")

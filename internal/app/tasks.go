@@ -687,6 +687,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	}
 	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, plan.ProseLanguage, fmt.Sprintf("launch:%d", launch)) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
+	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err

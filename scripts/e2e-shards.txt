@@ -325,3 +325,4 @@
 1 TestStagingFullPipelineReviewCarryAndCapDecision
 2 TestTaskViewsShowObservedAgentStatusBesideTaskState
 4 TestClaudePastePlaceholderInstructionIsSubmitted
+4 TestKnowledgeOptInLoadsForLeadAndWorker
