@@ -318,8 +318,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	if taskErr != nil {
 		t.Fatal(taskErr)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
-	fixture.waitState(t, "t3", store.StateLost)
+	fixture.reconcileUntilState(t, "t3", store.StateLost)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "relaunch", "t3")
 	fixture.waitState(t, "t3", store.StateWorking)
 	relaunched := fixture.moveWorkerToLegacyTab(t, fixture.task(t, "t3"))
@@ -812,6 +811,31 @@ func (f *workerTabsFixture) waitState(t *testing.T, taskID string, want store.St
 		return err == nil && task.State == want
 	}) {
 		t.Fatalf("%s did not reach %s: %#v", taskID, want, f.task(t, taskID))
+	}
+}
+
+// reconcileUntilState re-runs `posse list` until the Task reaches want. A single
+// `list` is a best-effort reconcile: under load it can defer within its pass
+// budget, or snapshot a pane Herdr has not yet dropped, and exit 0 with the
+// Task unchanged. Nothing else reconciles in this fixture, so one pass is not
+// enough to wait on a reconcile-driven transition.
+func (f *workerTabsFixture) reconcileUntilState(t *testing.T, taskID string, want store.State) {
+	t.Helper()
+	var lastList string
+	if !waitForCondition(60*time.Second, func() bool {
+		command := exec.Command(f.binary, "list")
+		command.Dir, command.Env = f.repo, f.leadEnv
+		output, err := command.CombinedOutput()
+		lastList = fmt.Sprintf("%s (err=%v)", output, err)
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		task, err := db.Task(context.Background(), f.projectID, taskID)
+		return err == nil && task.State == want
+	}) {
+		t.Fatalf("%s did not reach %s after repeated reconcile: %#v\nlast list: %s", taskID, want, f.task(t, taskID), lastList)
 	}
 }
 
