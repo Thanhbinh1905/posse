@@ -14,7 +14,7 @@ set -eu
 # timeout, leaving room for compilation and runner variance so a shard stays
 # under about 60% of the timeout. When the self-check reports a shard over
 # budget, add a shard here and to the matrix.
-shard_count=7
+shard_count=8
 budget_seconds=360
 module=$(go list -m)
 durations=$(cat "$(dirname "$0")/race-durations.txt")
