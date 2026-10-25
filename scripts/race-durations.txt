@@ -1133,3 +1133,9 @@
 1 internal/store/sqlc
 2 internal/taskplan
 2 internal/usage
+1 internal/app TestADRNumbersAreUnique
+1 internal/app TestClassifyQuotaExhaustionIgnoresQuotaTextTheWorkerMovedPast
+1 internal/app TestClassifyQuotaExhaustionRecognizesEachHarness
+1 internal/store TestQuotaExhaustionIsClaimedOncePerLaunch
+1 internal/store TestQuotaExhaustionOfALaunchWaitsForTheEarlierLaunchHandler
+1 internal/store TestQuotaDecisionBecomesObsoleteWhenTheWorkerIsRelaunched
