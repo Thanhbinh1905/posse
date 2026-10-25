@@ -1,4 +1,4 @@
-# 32. Quota fallback relaunches in the same Sandbox
+# 34. Quota fallback relaunches in the same Sandbox
 
 On 2026-10-25 several Claude Code Workers sat for about two hours at `You've hit your session limit · resets 7pm`. Herdr still reported them working, the screen never changed, and the Lead ran on the same exhausted account, so nothing acted until the limit reset.
 
