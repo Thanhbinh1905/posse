@@ -24,7 +24,9 @@ const e2eDurationsPath = "../../scripts/e2e-durations.txt"
 // recorded CI timing yet; refresh it with scripts/refresh-e2e-durations.sh.
 const newTestDurationEstimate = 60
 
-var shardIDs = []string{"1", "2", "3", "4"}
+// newRaceUnitDurationEstimate is the duration suggested for a unit test or
+// package with no recorded CI timing yet; most take about a second.
+const newRaceUnitDurationEstimate = 1
 
 // TestE2EDurationsCoverEveryE2ETest runs without the e2e tag so a plain
 // `go test ./...` catches E2E tests missing from scripts/e2e-durations.txt,
@@ -84,49 +86,6 @@ func readDurations(t *testing.T, path string) map[string]int {
 		t.Fatalf("read E2E durations: %v", err)
 	}
 	return recorded
-}
-
-type assignment struct {
-	shard string
-	line  int
-}
-
-func readManifest(t *testing.T, path string) (map[string]assignment, map[string]int) {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open shard manifest: %v", err)
-	}
-	defer f.Close()
-
-	assigned := map[string]assignment{}
-	counts := map[string]int{}
-	for _, id := range shardIDs {
-		counts[id] = 0
-	}
-	sc := bufio.NewScanner(f)
-	for n := 1; sc.Scan(); n++ {
-		fields := strings.Fields(sc.Text())
-		if len(fields) == 0 {
-			continue
-		}
-		if len(fields) != 2 {
-			t.Fatalf("%s line %d: expected \"<shard> <name>\"", path, n)
-		}
-		shard, name := fields[0], fields[1]
-		if _, ok := counts[shard]; !ok {
-			t.Fatalf("%s line %d: invalid shard %s, expected one of %v", path, n, shard, shardIDs)
-		}
-		if prev, dup := assigned[name]; dup {
-			t.Fatalf("%s line %d: %s is already assigned on line %d", path, n, name, prev.line)
-		}
-		assigned[name] = assignment{shard: shard, line: n}
-		counts[shard]++
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("read shard manifest: %v", err)
-	}
-	return assigned, counts
 }
 
 // discoverE2ETests lists top-level Test functions across every platform's
@@ -191,16 +150,6 @@ func isTestName(name string) bool {
 	return strings.HasPrefix(name, "Test") && name != "TestMain" && name != "TestE2EDurationsCoverEveryE2ETest"
 }
 
-func lightestShard(counts map[string]int) string {
-	best := shardIDs[0]
-	for _, id := range shardIDs[1:] {
-		if counts[id] < counts[best] {
-			best = id
-		}
-	}
-	return best
-}
-
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -210,45 +159,159 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-const (
-	raceShardManifestPath = "../../scripts/race-shards.txt"
-	raceAppPackage        = "github.com/thanhbinh1905/posse/internal/app"
-)
+const raceDurationsPath = "../../scripts/race-durations.txt"
 
-// TestRaceShardManifestCoversEveryPackage guards scripts/race-shards.txt, read
-// by scripts/run-race-shard.sh. The app package is sharded by test name and
-// must not appear in the manifest.
-func TestRaceShardManifestCoversEveryPackage(t *testing.T) {
-	out, err := exec.Command("go", "list", "../../...").Output()
-	if err != nil {
-		t.Fatalf("go list ./...: %v", err)
-	}
+// raceUnit is one line of scripts/race-durations.txt: a whole package when
+// test is empty, otherwise one top-level test of a split package.
+type raceUnit struct {
+	pkg, test string
+	line      int
+}
+
+// TestRaceDurationsCoverEveryTest guards scripts/race-durations.txt, which
+// scripts/run-race-shard.sh balances the race-enabled unit test shards by. A
+// package is recorded whole, or test by test when it is split across shards.
+func TestRaceDurationsCoverEveryTest(t *testing.T) {
+	module := goList(t, "-m")[0]
 	discovered := map[string]bool{}
-	for _, pkg := range strings.Fields(string(out)) {
-		if pkg != raceAppPackage {
-			discovered[pkg] = true
-		}
+	for _, pkg := range goList(t, "../../...") {
+		discovered[strings.TrimPrefix(pkg, module+"/")] = true
 	}
 
-	assigned, counts := readManifest(t, raceShardManifestPath)
-	var problems []string
-	for _, pkg := range sortedKeys(discovered) {
-		if _, ok := assigned[pkg]; ok {
+	whole := map[string]int{}
+	split := map[string]map[string]int{}
+	for _, unit := range readRaceDurations(t, raceDurationsPath) {
+		if unit.test == "" {
+			whole[unit.pkg] = unit.line
 			continue
 		}
-		shard := lightestShard(counts)
-		problems = append(problems, fmt.Sprintf(
-			"package %s is not assigned to a race shard; add this line to scripts/race-shards.txt (shard %s currently has the fewest packages):\n\t%s %s",
-			pkg, shard, shard, pkg))
-		counts[shard]++
+		if split[unit.pkg] == nil {
+			split[unit.pkg] = map[string]int{}
+		}
+		split[unit.pkg][unit.test] = unit.line
 	}
-	for _, pkg := range sortedKeys(assigned) {
+
+	var problems []string
+	for _, pkg := range sortedKeys(discovered) {
+		_, isWhole := whole[pkg]
+		_, isSplit := split[pkg]
+		if !isWhole && !isSplit {
+			problems = append(problems, fmt.Sprintf(
+				"package %s has no recorded duration; add this line to scripts/race-durations.txt and refresh it after CI runs with scripts/refresh-race-durations.sh <run-id>:\n\t%d %s",
+				pkg, newRaceUnitDurationEstimate, pkg))
+		}
+	}
+	for _, pkg := range sortedKeys(whole) {
 		if !discovered[pkg] {
 			problems = append(problems, fmt.Sprintf(
-				"scripts/race-shards.txt line %d assigns %s, which is not a non-app package; remove it", assigned[pkg].line, pkg))
+				"scripts/race-durations.txt line %d records %s, which is not a package; remove it", whole[pkg], pkg))
+		}
+		if _, ok := split[pkg]; ok {
+			problems = append(problems, fmt.Sprintf(
+				"scripts/race-durations.txt records %s both whole (line %d) and per test; keep one form", pkg, whole[pkg]))
+		}
+	}
+	for _, pkg := range sortedKeys(split) {
+		if !discovered[pkg] {
+			problems = append(problems, fmt.Sprintf(
+				"scripts/race-durations.txt records tests of %s, which is not a package; remove them", pkg))
+			continue
+		}
+		tests := discoverPackageTests(t, module+"/"+pkg)
+		for _, name := range sortedKeys(tests) {
+			if _, ok := split[pkg][name]; !ok {
+				problems = append(problems, fmt.Sprintf(
+					"test %s (%s) of %s has no recorded duration; add this line to scripts/race-durations.txt and refresh it after CI runs with scripts/refresh-race-durations.sh <run-id>:\n\t%d %s %s",
+					name, tests[name], pkg, newRaceUnitDurationEstimate, pkg, name))
+			}
+		}
+		for _, name := range sortedKeys(split[pkg]) {
+			if _, ok := tests[name]; !ok {
+				problems = append(problems, fmt.Sprintf(
+					"scripts/race-durations.txt line %d records %s of %s, which is not a top-level test; remove it", split[pkg][name], name, pkg))
+			}
 		}
 	}
 	if len(problems) > 0 {
-		t.Fatalf("race shard manifest is out of date:\n%s", strings.Join(problems, "\n"))
+		t.Fatalf("race durations are out of date:\n%s", strings.Join(problems, "\n"))
 	}
+}
+
+func goList(t *testing.T, args ...string) []string {
+	t.Helper()
+	out, err := exec.Command("go", append([]string{"list"}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("go list %v: %v", args, err)
+	}
+	return strings.Fields(string(out))
+}
+
+// discoverPackageTests lists the top-level Test functions that `go test`
+// builds for pkg on this platform, mapped to their file.
+func discoverPackageTests(t *testing.T, pkg string) map[string]string {
+	t.Helper()
+	out, err := exec.Command("go", "list", "-f",
+		"{{.Dir}}{{range .TestGoFiles}}\n{{.}}{{end}}{{range .XTestGoFiles}}\n{{.}}{{end}}", pkg).Output()
+	if err != nil {
+		t.Fatalf("go list %s: %v", pkg, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	dir := lines[0]
+	fset := token.NewFileSet()
+	tests := map[string]string{}
+	for _, file := range lines[1:] {
+		parsed, err := parser.ParseFile(fset, filepath.Join(dir, file), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") || fn.Name.Name == "TestMain" {
+				continue
+			}
+			if _, seen := tests[fn.Name.Name]; !seen {
+				tests[fn.Name.Name] = file
+			}
+		}
+	}
+	return tests
+}
+
+func readRaceDurations(t *testing.T, path string) []raceUnit {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open race durations: %v", err)
+	}
+	defer f.Close()
+
+	var units []raceUnit
+	seen := map[string]int{}
+	sc := bufio.NewScanner(f)
+	for n := 1; sc.Scan(); n++ {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 && len(fields) != 3 {
+			t.Fatalf("%s line %d: expected \"<seconds> <package> [<test>]\"", path, n)
+		}
+		if seconds, err := strconv.Atoi(fields[0]); err != nil || seconds < 1 {
+			t.Fatalf("%s line %d: invalid duration %s, expected whole seconds of at least 1", path, n, fields[0])
+		}
+		unit := raceUnit{pkg: fields[1], line: n}
+		if len(fields) == 3 {
+			unit.test = fields[2]
+		}
+		key := unit.pkg + " " + unit.test
+		if prev, dup := seen[key]; dup {
+			t.Fatalf("%s line %d: %s is already recorded on line %d", path, n, strings.TrimSpace(key), prev)
+		}
+		seen[key] = n
+		units = append(units, unit)
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("read race durations: %v", err)
+	}
+	return units
 }
