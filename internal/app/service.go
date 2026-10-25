@@ -131,6 +131,11 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
 		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
+		{Name: "knowledge", Summary: "Inspect and curate opt-in User and Project knowledge.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ knowledge show [<id>] [--project <name>|--user]", Summary: "Show knowledge entries with provenance and the startup budget, or one entry.", Handler: s.knowledgeShow},
+			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
+			{Name: "archive", Usage: "$ knowledge archive <id> --reason <why> [--project <name>|--user]", Summary: "Move an entry to the never-loaded archive with provenance.", Handler: s.knowledgeArchive},
+		}},
 		{Name: "preferences", Summary: "Inspect and update layered User and Project preferences.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Worker preferences with their sources.", Handler: s.preferencesShow},
 			{Name: "path", Usage: "$ preferences path <lead|worker> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},

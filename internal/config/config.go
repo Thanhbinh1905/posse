@@ -177,9 +177,18 @@ type Lowkey struct {
 	Lead bool `toml:"lead" json:"lead"`
 }
 
+// Knowledge opts into curated User and Project knowledge (ADR 0032).
+type Knowledge struct {
+	Enabled     bool `toml:"enabled" json:"enabled"`
+	BudgetBytes int  `toml:"budget_bytes" json:"budget_bytes"`
+}
+
+const DefaultKnowledgeBudgetBytes = 8192
+
 type Config struct {
 	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
 	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`
+	Knowledge           Knowledge                  `toml:"knowledge" json:"knowledge"`
 	Identity            Identity                   `toml:"identity" json:"identity"`
 	Lead                Lead                       `toml:"lead" json:"lead"`
 	Defaults            Defaults                   `toml:"defaults" json:"defaults"`
@@ -646,6 +655,7 @@ func defaultMap() map[string]any {
 		"full_pipeline":   map[string]any{"run_workflows": false},
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":          map[string]any{"lead": false},
+		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
@@ -743,6 +753,9 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	}
 	if !oneOf(c.Research.Native, ResearchTracked, ResearchOff) {
 		add("research.native", "must be tracked or off")
+	}
+	if c.Knowledge.BudgetBytes < 1 {
+		add("knowledge.budget_bytes", "must be positive")
 	}
 	if c.Research.MaxActive < 1 {
 		add("research.max_active", "must be positive")
