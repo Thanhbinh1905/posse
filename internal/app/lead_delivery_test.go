@@ -851,4 +851,8 @@ func TestWorkerWaitRulesByKind(t *testing.T) {
 	if strings.Contains(foreground, backgroundRule) || !strings.Contains(foreground, ciRule) {
 		t.Fatalf("foreground Worker rules = %q", foreground)
 	}
+	const detachedRule = "Never end a turn while a detached command (shell `&`, `nohup`, `setsid`, a polling loop) runs: nothing wakes you when it finishes. Wait in the foreground"
+	if !strings.Contains(background, detachedRule+" or use a background command the harness tracks.") || !strings.Contains(foreground, detachedRule+".") {
+		t.Fatalf("detached command rule missing: background=%q foreground=%q", background, foreground)
+	}
 }

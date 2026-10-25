@@ -2706,14 +2706,17 @@ func (db *DB) UndeliveredNotices(ctx context.Context, projectID int64) ([]Notice
 	return notices, nil
 }
 
-func (db *DB) HasNotice(ctx context.Context, projectID, taskID int64, kind string, launch ...int) (bool, error) {
+func (db *DB) HasNotice(ctx context.Context, projectID, taskID int64, kind string) (bool, error) {
 	var found int
-	var err error
-	if kind == "worker_idle" && len(launch) > 0 {
-		err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=? AND json_extract(data_json,'$.launch')=?)`, projectID, taskID, kind, launch[0]).Scan(&found)
-	} else {
-		err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=?)`, projectID, taskID, kind).Scan(&found)
-	}
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=?)`, projectID, taskID, kind).Scan(&found)
+	return found != 0, err
+}
+
+// HasWorkerIdleNotice reports whether the idle episode that began at idleSince
+// in this launch already raised its worker_idle Notice.
+func (db *DB) HasWorkerIdleNotice(ctx context.Context, projectID, taskID int64, launch int, idleSince int64) (bool, error) {
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='worker_idle' AND json_extract(data_json,'$.launch')=? AND json_extract(data_json,'$.idle_since')=?)`, projectID, taskID, launch, idleSince).Scan(&found)
 	return found != 0, err
 }
 

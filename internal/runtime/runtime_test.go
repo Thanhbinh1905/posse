@@ -760,7 +760,7 @@ func TestRelaunchedWorkerGetsIdleNoticeForItsNewLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(created) != 1 || created[0].Kind != "worker_idle" || created[0].DataJSON != `{"launch":2}` {
+	if len(created) != 1 || created[0].Kind != "worker_idle" || created[0].DataJSON != fmt.Sprintf(`{"launch":2,"idle_since":%d}`, start.UnixMilli()) {
 		t.Fatalf("new launch did not receive its own idle Notice: %#v", created)
 	}
 }
