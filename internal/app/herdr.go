@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -46,16 +47,8 @@ func (s *Service) safePromptWhen(ctx context.Context, paneID, text string, allow
 	return s.prompt(ctx, paneID, map[string]any{"target": paneID, "text": text}, allowed)
 }
 
-func (s *Service) safePromptWhenBefore(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, beforePrompt func() error) error {
-	return s.promptBefore(ctx, paneID, map[string]any{"target": paneID, "text": text}, allowed, beforePrompt)
-}
-
 func (s *Service) safePromptWhenWithSubmissionGate(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, gate func(func() error) error) error {
 	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, "agent.prompt", map[string]any{"target": paneID, "text": text}, allowed, nil, gate, false)
-}
-
-func (s *Service) safePromptWhenBeforeFocused(ctx context.Context, paneID, text string, allowed func(herdr.Snapshot) error, beforePrompt func() error) error {
-	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, "agent.prompt", map[string]any{"target": paneID, "text": text}, allowed, beforePrompt, nil, true)
 }
 
 func (s *Service) prompt(ctx context.Context, paneID string, params map[string]any, allowed func(herdr.Snapshot) error) error {
@@ -221,13 +214,29 @@ func (s *Service) confirmPrompt(ctx context.Context, paneID, text string, send f
 	return axi.Failure("prompt_not_delivered", fmt.Sprintf("the agent did not start working after %d prompt attempts: %v", launchPromptAttempts, lastErr), true, "Inspect the agent pane in Herdr, then retry")
 }
 
+// pastePlaceholder is how Claude Code shows a long or multi-line paste in its
+// input box instead of the pasted text.
+var pastePlaceholder = regexp.MustCompile(`\[Pasted text #[0-9]+`)
+
 // promptOnScreen reports whether the pane shows text, ignoring whitespace so a
-// prompt wrapped by the agent's input box still matches. A stalled prompt was
-// never submitted, so a copy on screen is the one left in the input.
+// prompt wrapped by the agent's input box still matches, or shows a paste
+// placeholder. A stalled prompt was never submitted, so a copy on screen is
+// the one left in the input.
 func (s *Service) promptOnScreen(ctx context.Context, paneID, text string) bool {
+	screen := s.visibleScreen(ctx, paneID)
+	compact := func(value string) string { return strings.Join(strings.Fields(value), "") }
+	want := compact(text)
+	return want != "" && (strings.Contains(compact(screen), want) || pastePlaceholder.MatchString(screen))
+}
+
+func (s *Service) pastePlaceholderOnScreen(ctx context.Context, paneID string) bool {
+	return pastePlaceholder.MatchString(s.visibleScreen(ctx, paneID))
+}
+
+func (s *Service) visibleScreen(ctx context.Context, paneID string) string {
 	raw, err := s.herdrCall(ctx, "pane.read", map[string]any{"pane_id": paneID, "source": "visible"})
 	if err != nil {
-		return false
+		return ""
 	}
 	var screen struct {
 		Read struct {
@@ -235,11 +244,9 @@ func (s *Service) promptOnScreen(ctx context.Context, paneID, text string) bool 
 		} `json:"read"`
 	}
 	if json.Unmarshal(raw, &screen) != nil {
-		return false
+		return ""
 	}
-	compact := func(value string) string { return strings.Join(strings.Fields(value), "") }
-	want := compact(text)
-	return want != "" && strings.Contains(compact(screen.Read.Text), want)
+	return screen.Read.Text
 }
 
 func isPromptStall(err error) bool {
