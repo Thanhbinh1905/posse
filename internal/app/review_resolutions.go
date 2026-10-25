@@ -2,11 +2,13 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -69,4 +71,44 @@ func convertReviewResolutions(input reviewResolutionsFile, expected, actual stri
 		result.Patterns = append(result.Patterns, store.ReviewFixResolution{Pattern: answer.Pattern, Status: answer.Status, Note: answer.Note})
 	}
 	return result
+}
+
+// reviewFixMemberAnswers reads the head of every Member a workspace Review fix
+// named. A full-pipeline Member answers from its clean private candidate, which
+// must still be the candidate the fix was issued for.
+func (s *Service) reviewFixMemberAnswers(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, round store.ValidationFixRound) ([]store.ReviewFixMemberHead, error) {
+	answers := make([]store.ReviewFixMemberHead, 0, len(round.MemberHeads))
+	for _, member := range round.MemberHeads {
+		lane, err := resolveCandidateLane(ctx, db, project, task, member.Repository)
+		if err != nil {
+			return nil, err
+		}
+		root := lane.task.WorktreePath
+		if member.CandidateID > 0 {
+			candidate, err := db.LatestValidationCandidate(ctx, task.ID, member.Repository)
+			if err != nil || candidate.ID != member.CandidateID || candidate.State != store.ValidationCandidateActive {
+				return nil, axi.Failure("candidate_missing", lane.memberLabel("the private candidate this Review fix was issued for is no longer active"), false, "The Lead must decide whether to queue a new Review fix for the current candidate")
+			}
+			if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
+				return nil, err
+			}
+			status, err := gitStatusOutput(ctx, candidate.WorktreePath, "--porcelain", "--untracked-files=all")
+			if err != nil {
+				return nil, err
+			}
+			if status != "" {
+				return nil, axi.Failure("candidate_dirty", lane.memberLabel("commit candidate changes before signalling done"), false, candidate.WorktreePath)
+			}
+			root = candidate.WorktreePath
+		}
+		head, err := gitOutput(ctx, root, "rev-parse", "HEAD")
+		if err != nil {
+			return nil, err
+		}
+		if !gitAncestor(ctx, root, member.ExpectedBaseHead, head) {
+			return nil, recordHeadDiscontinuity(ctx, db, project, task, member.ExpectedBaseHead, head)
+		}
+		answers = append(answers, store.ReviewFixMemberHead{Repository: member.Repository, ActualHead: head, CandidateID: member.CandidateID})
+	}
+	return answers, nil
 }

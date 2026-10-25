@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -104,7 +105,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	workerCacheStatus, workerCacheDetail, workerCacheAction := workerGoBuildCacheDiagnostic(home, workerCachePolicy)
 	addCheck("Posse Worker Go build cache", workerCacheStatus, workerCacheDetail, workerCacheAction)
 	if configErr != nil {
-		addCheck("config", "fail", configErr.Error(), "Fix the reported configuration key")
+		addCheck("config", "fail", configErr.Error(), configCheckAction(configErr))
 	} else {
 		detail := fmt.Sprintf("%d profiles; implicit dispatch=%s", len(cfg.Profiles), cfg.Defaults.DispatchInheritance)
 		var disabledKinds []string
@@ -159,21 +160,19 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 					}
 					addCheck("Task temp and process leaks "+project.Name, status, detail, action)
 				}
-				if projectConfigErr == nil {
-					usages, usageErr := noMistakesConfigUsage(ctx.Context, db, project, projectCfg)
-					if usageErr != nil {
-						addCheck("deprecated no-mistakes "+project.Name, "warn", "could not inspect Project policies: "+usageErr.Error(), "Inspect the Project configuration and migrate away from no-mistakes")
-					} else if len(usages) > 0 {
-						detail := strings.Join(usages, "; ")
-						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Merge Mode to pr or local and review policy to quick or none")
-					}
+				var migration *config.MigrationError
+				migrationRequired := configErr == nil && errors.As(projectConfigErr, &migration)
+				if migrationRequired {
+					addCheck("config "+project.Name, "fail", projectConfigErr.Error(), configCheckAction(projectConfigErr))
 				}
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {
 					addCheck("project "+project.Name, "warn", reason, "Run `posse project remove "+project.Name+"`")
 					continue
 				}
 				if projectConfigErr != nil {
-					addCheck("forge "+project.Name, "warn", projectConfigErr.Error(), "Fix the Project config")
+					if !migrationRequired {
+						addCheck("forge "+project.Name, "warn", projectConfigErr.Error(), "Fix the Project config")
+					}
 					continue
 				}
 				if detail, countErr := executionResourceSummary(ctx.Context, db, project.ID, projectCfg.Defaults.MaxWorkers); countErr != nil {
@@ -243,7 +242,9 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		}
 	}
 	checks = append(checks, preferenceSizeWarnings(home, registeredProjects)...)
-	if kindConfigErr != nil {
+	// A removed config value is already reported by the config checks above.
+	var kindMigration *config.MigrationError
+	if kindConfigErr != nil && !errors.As(kindConfigErr, &kindMigration) {
 		addCheck("agent configuration", "warn", kindConfigErr.Error(), "Fix the agent settings in config.toml")
 	}
 
@@ -402,7 +403,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("agent hooks", "warn", strings.Join(staleHooks, ", "), "Run `posse setup` to refresh the SessionStart and Worker guard hooks")
 		}
 	}
-	for _, tool := range []string{"gh", "no-mistakes"} {
+	for _, tool := range []string{"gh"} {
 		if path, lookErr := exec.LookPath(tool); lookErr == nil {
 			addCheck(tool, "ok", path, "")
 		} else {
@@ -412,33 +413,14 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	return doctorResult{Checks: checks, Manifests: manifests}, nil
 }
 
-func noMistakesConfigUsage(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]string, error) {
-	if project.IsDirectory() {
-		return nil, nil
+// configCheckAction names the replacement a removed config value requires.
+func configCheckAction(err error) string {
+	var invalid *config.InvalidError
+	var migration *config.MigrationError
+	if !errors.As(err, &invalid) || !errors.As(err, &migration) {
+		return "Fix the reported configuration key"
 	}
-	var usages []string
-	if cfg.Defaults.MergeMode == "no-mistakes" {
-		usages = append(usages, "Project "+project.Name+" defaults.merge_mode")
-	}
-	if cfg.Defaults.Review == "no-mistakes" {
-		usages = append(usages, "Project "+project.Name+" defaults.review")
-	}
-	if !project.IsWorkspace() {
-		return usages, nil
-	}
-	repos, err := db.ProjectRepos(ctx, project.ID)
-	if err != nil {
-		return nil, err
-	}
-	for _, repo := range repos {
-		if savedMemberMergeMode(cfg, repo.Name, repo.OriginHost) == "no-mistakes" {
-			usages = append(usages, "Member "+repo.Name+" effective merge_mode")
-		}
-		if cfg.MemberReview(repo.Name) == "no-mistakes" {
-			usages = append(usages, "Member "+repo.Name+" effective review policy")
-		}
-	}
-	return usages, nil
+	return strings.Join(configRepairHelp(invalid), "; ")
 }
 
 func executionResourceSummary(ctx context.Context, db *store.DB, projectID int64, maxWorkers int) (string, error) {

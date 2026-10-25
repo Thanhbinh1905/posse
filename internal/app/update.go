@@ -486,7 +486,7 @@ func (s *Service) installRelease(ctx context.Context, release githubRelease, for
 			Message string   `json:"message"`
 			Help    []string `json:"help"`
 		}
-		if json.Unmarshal(output, &failure) == nil && failure.Code == "config_invalid" {
+		if json.Unmarshal(output, &failure) == nil && (failure.Code == "config_invalid" || failure.Code == "config_migration_required") {
 			if _, repairable := configRepairForError(config.ValidateAll(home)); repairable {
 				help := append([]string(nil), failure.Help...)
 				if err := os.Remove(binaryBackup); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -666,6 +666,16 @@ func (s *Service) updatePreflight(ctx *axi.Context, args []string) error {
 	}
 	if err := schemaFailure(db.RefuseLiveMigration(ctx.Context, pending, os.Getenv(store.ForceMigrationEnv) == "1")); err != nil {
 		return err
+	}
+	// This release cannot finish a frozen no-mistakes plan, so --force does not
+	// override this refusal.
+	noMistakesTasks, err := db.LiveNoMistakesTasks(ctx.Context)
+	if err != nil {
+		return err
+	}
+	if len(noMistakesTasks) > 0 {
+		return axi.Failure("no_mistakes_tasks_live", fmt.Sprintf("this release removed no-mistakes; %d live Task(s) still have a frozen no-mistakes plan: %s", len(noMistakesTasks), strings.Join(noMistakesTasks, ", ")), false,
+			"Finish or merge them on the current release, or cancel each with `posse teardown <task> --discard --user-approved \"<User's words>\"`, then retry `posse update`")
 	}
 	return printUpdateConfigRepair(ctx, repair)
 }

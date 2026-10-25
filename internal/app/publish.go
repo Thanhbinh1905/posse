@@ -268,14 +268,16 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 }
 
 // A workspace Signal must account for every changed PR-mode member, not just
-// one URL in the Task row. Local and unchanged members need no PR.
-func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config) error {
+// one URL in the Task row. Local and unchanged members need no PR. A
+// full-pipeline Member answering a Review fix from its private candidate has
+// not been published yet.
+func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config, candidateFix bool) error {
 	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {
 		return err
 	}
 	for _, member := range members {
-		if member.repo.MergeMode != "pr" {
+		if member.repo.MergeMode != "pr" || candidateFix && isFullPipelineTask(task, member.repo.Repo) {
 			continue
 		}
 		ahead, err := commitsAhead(ctx, member.repo.WorktreePath, member.repo.BaseRef, "refs/heads/"+task.Branch)

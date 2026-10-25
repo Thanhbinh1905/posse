@@ -171,12 +171,8 @@ func TestFirstOutcomeConfiguredCursorUsesMappedCLI(t *testing.T) {
 	}
 }
 
-func TestFirstOutcomeUpReportsNoMistakesReadinessOnRefusal(t *testing.T) {
+func TestFirstOutcomeUpRefusesNoMistakesConfigWithItsReplacement(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
-	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
-	if err := os.WriteFile(filepath.Join(bin, "no-mistakes"), []byte("#!/bin/sh\necho 'error: repo not initialized (run no-mistakes init first)'\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
 	projectConfig := filepath.Join(f.home, "projects", f.project.Name, "config.toml")
 	if err := os.MkdirAll(filepath.Dir(projectConfig), 0700); err != nil {
 		t.Fatal(err)
@@ -188,7 +184,7 @@ func TestFirstOutcomeUpReportsNoMistakesReadinessOnRefusal(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	t.Setenv("HERDR_WORKSPACE_ID", "w1")
 	output := outcomeCLI(t, f.service, 1, "up", "--pi", "--json")
-	for _, want := range []string{"no_mistakes_uninitialized", "Readiness gap: no_mistakes_uninitialized", "no-mistakes init"} {
+	for _, want := range []string{"config_migration_required", projectConfig + ": defaults.merge_mode: no-mistakes was removed; use pr", "posse config set defaults.merge_mode pr --project " + f.project.Name} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("up omitted %q: %s", want, output)
 		}
@@ -523,7 +519,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
 	f := newFirstOutcomeFixture(t)
 	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
-	for _, cli := range []string{"gh", "glab", "no-mistakes"} {
+	for _, cli := range []string{"gh", "glab"} {
 		script := "#!/bin/sh\n[ -e '" + filepath.Join(f.root, cli+"-ready") + "' ] && exit 0\nprintf 'repo not initialized\\n'\nexit 1\n"
 		if err := os.WriteFile(filepath.Join(bin, cli), []byte(script), 0700); err != nil {
 			t.Fatal(err)
@@ -563,7 +559,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 			}
 		}
 	}
-	check([]string{"forge_auth", "autonomy_ask", "machine_setup"}, []string{"no_mistakes_uninitialized"})
+	check([]string{"forge_auth", "autonomy_ask", "machine_setup"}, nil)
 	if err := os.WriteFile(filepath.Join(f.root, "gh-ready"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -602,22 +598,10 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 		t.Fatal(err)
 	}
 	check([]string{"machine_setup"}, []string{"forge_auth"})
-	if err := os.WriteFile(filepath.Join(f.root, "no-mistakes-ready"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "no-mistakes", "--project", "shop")
-	if err := os.Remove(filepath.Join(f.root, "no-mistakes-ready")); err != nil {
-		t.Fatal(err)
-	}
-	check([]string{"machine_setup", "no_mistakes_uninitialized"}, []string{"forge_auth"})
-	if err := os.WriteFile(filepath.Join(f.root, "no-mistakes-ready"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
 	// Applying machine setup is a User-shell action; fake its read-only Herdr responses.
 	f.fake.RunOut["plugin link "+filepath.Join(f.home, "plugin", "herdr-plugin.toml")] = []byte(`{}`)
 	outcomeCLI(t, f.service, 0, "setup", "--binary", "/usr/bin/true")
 	f.fake.RunOut["plugin list --json"] = []byte(`{"plugins":[{"id":"posse.herdr","path":"` + filepath.Join(f.home, "plugin", "herdr-plugin.toml") + `"}]}`)
-	check(nil, []string{"forge_auth", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"})
 	output = outcomeCLI(t, f.service, 0, "--json")
 	if strings.Contains(output, `"readiness"`) {
 		t.Fatalf("fully ready status retained readiness: %s", output)
@@ -626,7 +610,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	if err := os.Remove(filepath.Join(f.root, "pi", "extensions", "posse-worker-guard.ts")); err != nil {
 		t.Fatal(err)
 	}
-	check([]string{"machine_setup"}, []string{"no_mistakes_uninitialized"})
+	check([]string{"machine_setup"}, []string{"forge_auth"})
 }
 
 func TestFirstOutcomeInstructionsAndOptionalSetupAgree(t *testing.T) {

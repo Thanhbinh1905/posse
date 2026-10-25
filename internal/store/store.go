@@ -846,6 +846,8 @@ type Task struct {
 	AgentSessionKind     string         `toml:"agent_session_kind"`
 	AgentAbsentSince     int64          `toml:"agent_absent_since"`
 	IdleSince            int64          `toml:"idle_since"`
+	AgentStatus          string         `toml:"agent_status,omitempty"`
+	AgentStatusSince     int64          `toml:"agent_status_since,omitempty"`
 	AgentServerStartedAt string         `toml:"agent_server_started_at"`
 	PRURL                string         `toml:"pr_url"`
 	MergedRef            string         `toml:"landed_ref"`
@@ -2706,14 +2708,17 @@ func (db *DB) UndeliveredNotices(ctx context.Context, projectID int64) ([]Notice
 	return notices, nil
 }
 
-func (db *DB) HasNotice(ctx context.Context, projectID, taskID int64, kind string, launch ...int) (bool, error) {
+func (db *DB) HasNotice(ctx context.Context, projectID, taskID int64, kind string) (bool, error) {
 	var found int
-	var err error
-	if kind == "worker_idle" && len(launch) > 0 {
-		err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=? AND json_extract(data_json,'$.launch')=?)`, projectID, taskID, kind, launch[0]).Scan(&found)
-	} else {
-		err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=?)`, projectID, taskID, kind).Scan(&found)
-	}
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=?)`, projectID, taskID, kind).Scan(&found)
+	return found != 0, err
+}
+
+// HasWorkerIdleNotice reports whether the idle episode that began at idleSince
+// in this launch already raised its worker_idle Notice.
+func (db *DB) HasWorkerIdleNotice(ctx context.Context, projectID, taskID int64, launch int, idleSince int64) (bool, error) {
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='worker_idle' AND json_extract(data_json,'$.launch')=? AND json_extract(data_json,'$.idle_since')=?)`, projectID, taskID, launch, idleSince).Scan(&found)
 	return found != 0, err
 }
 
@@ -3090,7 +3095,7 @@ func taskFromDB(row dbgen.Task) Task {
 		MergeMode: row.MergeMode, AutonomyReview: row.AutonomyReview, AutonomyMerge: row.AutonomyMerge,
 		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, SandboxID: sandboxID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
-		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentServerStartedAt: row.AgentServerStartedAt,
+		AgentName: row.AgentName, AgentSession: row.AgentSession, AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentStatus: row.AgentStatus, AgentStatusSince: row.AgentStatusSince, AgentServerStartedAt: row.AgentServerStartedAt,
 		PRURL: row.PrUrl, MergedRef: row.MergedRef, LastOutputHash: row.LastOutputHash,
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
@@ -3121,10 +3126,45 @@ func (db *DB) UpdateTaskContainment(ctx context.Context, taskID int64, mode, pat
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) error {
+// TaskObservation is what reconcile last recorded about a Task's pane and
+// agent. AgentStatus is the Herdr agent status, or AgentStatusNoPane and
+// AgentStatusNoAgent; AgentStatusSince is when Posse first observed it.
+type TaskObservation struct {
+	PaneID               string
+	WorkspaceID          string
+	AgentSession         string
+	AgentSessionKind     string
+	AgentAbsentSince     int64
+	IdleSince            int64
+	AgentServerStartedAt string
+	AgentStatus          string
+	AgentStatusSince     int64
+}
+
+const (
+	AgentStatusNoPane  = "no_pane"
+	AgentStatusNoAgent = "no_agent"
+)
+
+// Observation returns the Task's recorded observation.
+func (task Task) Observation() TaskObservation {
+	return TaskObservation{
+		PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind,
+		AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, AgentServerStartedAt: task.AgentServerStartedAt,
+		AgentStatus: task.AgentStatus, AgentStatusSince: task.AgentStatusSince,
+	}
+}
+
+// ObservedState reports whether reconcile records an agent observation for a
+// Task in this state.
+func ObservedState(state State) bool {
+	return oneOfState(state, StateSpawning, StateWorking, StateNeedsDecision, StateBlocked, StateStalled, StateDone, StateMerging)
+}
+
+func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, observation TaskObservation) error {
 	ctx, cancel := context.WithTimeout(ctx, ObservationWriteBudget)
 	defer cancel()
-	unchanged, err := db.taskObservationMatches(ctx, taskID, paneID, workspaceID, agentSession, agentSessionKind, agentAbsentSince, idleSince, agentServerStartedAt)
+	unchanged, err := db.taskObservationMatches(ctx, taskID, observation)
 	if err != nil {
 		return fmt.Errorf("check Task observation: %w", err)
 	}
@@ -3132,7 +3172,7 @@ func (db *DB) UpdateTaskObservation(ctx context.Context, taskID int64, paneID, w
 		// A prior database update may have committed before its snapshot write failed.
 		return db.persistTaskRow(ctx, taskID)
 	}
-	if err := db.writeTaskObservation(ctx, taskID, paneID, workspaceID, agentSession, agentSessionKind, agentAbsentSince, idleSince, agentServerStartedAt, time.Now().UnixMilli()); err != nil {
+	if err := db.writeTaskObservation(ctx, taskID, observation, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("write Task observation: %w", err)
 	}
 	return db.persistTaskRow(ctx, taskID)
@@ -3146,31 +3186,32 @@ func (db *DB) persistTaskRow(ctx context.Context, taskID int64) error {
 	return db.persistTask(ctx, taskID, false)
 }
 
-func (db *DB) writeTaskObservation(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string, updatedAt int64) error {
+func (db *DB) writeTaskObservation(ctx context.Context, taskID int64, o TaskObservation, updatedAt int64) error {
 	params := dbgen.UpdateTaskObservationParams{
-		PaneID: paneID, HerdrWorkspaceID: workspaceID, AgentSession: agentSession, AgentSessionKind: agentSessionKind,
-		AgentAbsentSince: agentAbsentSince, AgentServerStartedAt: agentServerStartedAt, IdleSince: idleSince,
+		PaneID: o.PaneID, HerdrWorkspaceID: o.WorkspaceID, AgentSession: o.AgentSession, AgentSessionKind: o.AgentSessionKind,
+		AgentAbsentSince: o.AgentAbsentSince, AgentServerStartedAt: o.AgentServerStartedAt, IdleSince: o.IdleSince,
+		AgentStatus: o.AgentStatus, AgentStatusSince: o.AgentStatusSince,
 		UpdatedAt: updatedAt, ID: taskID,
-		PaneID_2: paneID, HerdrWorkspaceID_2: workspaceID, AgentSession_2: agentSession, AgentSessionKind_2: agentSessionKind,
-		AgentAbsentSince_2: agentAbsentSince, AgentServerStartedAt_2: agentServerStartedAt, IdleSince_2: idleSince,
+		PaneID_2: o.PaneID, HerdrWorkspaceID_2: o.WorkspaceID, AgentSession_2: o.AgentSession, AgentSessionKind_2: o.AgentSessionKind,
+		AgentAbsentSince_2: o.AgentAbsentSince, AgentServerStartedAt_2: o.AgentServerStartedAt, IdleSince_2: o.IdleSince,
+		AgentStatus_2: o.AgentStatus, AgentStatusSince_2: o.AgentStatusSince,
 	}
 	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
 		return dbgen.New(conn).UpdateTaskObservation(ctx, params)
 	})
 }
 
-func (db *DB) taskObservationMatches(ctx context.Context, taskID int64, paneID, workspaceID, agentSession, agentSessionKind string, agentAbsentSince, idleSince int64, agentServerStartedAt string) (bool, error) {
-	var currentPaneID, currentWorkspaceID, currentAgentSession, currentAgentSessionKind, currentAgentServerStartedAt string
-	var currentAgentAbsentSince, currentIdleSince int64
-	err := db.QueryRowContext(ctx, `SELECT pane_id, herdr_workspace_id, agent_session, agent_session_kind, agent_absent_since, idle_since, agent_server_started_at FROM tasks WHERE id=?`, taskID).Scan(
-		&currentPaneID, &currentWorkspaceID, &currentAgentSession, &currentAgentSessionKind, &currentAgentAbsentSince, &currentIdleSince, &currentAgentServerStartedAt)
+func (db *DB) taskObservationMatches(ctx context.Context, taskID int64, observation TaskObservation) (bool, error) {
+	var current TaskObservation
+	err := db.QueryRowContext(ctx, `SELECT pane_id, herdr_workspace_id, agent_session, agent_session_kind, agent_absent_since, idle_since, agent_server_started_at, agent_status, agent_status_since FROM tasks WHERE id=?`, taskID).Scan(
+		&current.PaneID, &current.WorkspaceID, &current.AgentSession, &current.AgentSessionKind, &current.AgentAbsentSince, &current.IdleSince, &current.AgentServerStartedAt, &current.AgentStatus, &current.AgentStatusSince)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, retryableContention(err)
 	}
-	return currentPaneID == paneID && currentWorkspaceID == workspaceID && currentAgentSession == agentSession && currentAgentSessionKind == agentSessionKind && currentAgentAbsentSince == agentAbsentSince && currentIdleSince == idleSince && currentAgentServerStartedAt == agentServerStartedAt, nil
+	return current == observation, nil
 }
 
 func (db *DB) UpdateProjectObservation(ctx context.Context, project Project, paneID, workspaceID string, absentSince int64) error {

@@ -71,7 +71,7 @@ func doctorGroup(name string) string {
 	switch {
 	case strings.Contains(lower, "project "), strings.HasPrefix(lower, "execution resources"):
 		return "Projects"
-	case strings.Contains(lower, "setup"), strings.Contains(lower, "skills"), strings.Contains(lower, "hooks"), strings.Contains(lower, "agent configuration"), lower == "gh", lower == "no-mistakes":
+	case strings.Contains(lower, "setup"), strings.Contains(lower, "skills"), strings.Contains(lower, "hooks"), strings.Contains(lower, "agent configuration"), lower == "gh":
 		return "Setup"
 	case strings.Contains(lower, "herdr"), strings.Contains(lower, "plugin"), strings.Contains(lower, "agent"), strings.Contains(lower, "forge"), strings.HasPrefix(lower, "glab"), strings.Contains(lower, "claude"):
 		return "Integrations"

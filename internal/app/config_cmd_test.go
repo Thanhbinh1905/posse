@@ -358,7 +358,7 @@ func TestConfigUserOnlyApprovalIsRecordedForLeadOnly(t *testing.T) {
 	}
 }
 
-func TestConfigSetWarnsWhenSelectingNoMistakesPolicies(t *testing.T) {
+func TestConfigSetRefusesNoMistakesWithItsReplacement(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	initRepo(t, repo)
@@ -378,12 +378,18 @@ func TestConfigSetWarnsWhenSelectingNoMistakesPolicies(t *testing.T) {
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, errorsOut
 	t.Chdir(repo)
-	installReadyNoMistakes(t)
-	for _, key := range []string{"defaults.merge_mode", "repositories.api.merge_mode", "defaults.review", "repositories.api.review"} {
+	projectPath := config.ConfigPath(home, "shop")
+	for key, replacement := range map[string]string{"defaults.merge_mode": "pr", "repositories.api.merge_mode": "pr", "defaults.review": "full-pipeline", "repositories.api.review": "full-pipeline"} {
 		output.Reset()
 		errorsOut.Reset()
-		if code := cli.Run([]string{"config", "set", key, "no-mistakes", "--project", "shop"}); code != 0 || !strings.Contains(output.String()+errorsOut.String(), "deprecated") {
-			t.Fatalf("config set %s no-mistakes: code=%d stdout=%s stderr=%s", key, code, output, errorsOut)
+		code := cli.Run([]string{"config", "set", key, "no-mistakes", "--project", "shop"})
+		text := output.String() + errorsOut.String()
+		if code != 1 || !strings.Contains(text, "config_migration_required") || !strings.Contains(text, key+": no-mistakes was removed; use "+replacement) ||
+			!strings.Contains(text, "posse config set "+key+" "+replacement+" --project shop") {
+			t.Fatalf("config set %s no-mistakes: code=%d output=%s", key, code, text)
+		}
+		if _, err := os.Stat(projectPath); !os.IsNotExist(err) {
+			t.Fatalf("refused config set %s wrote %s: %v", key, projectPath, err)
 		}
 	}
 }

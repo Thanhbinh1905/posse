@@ -76,7 +76,7 @@ func (s *Service) autoTeardownMergedTasks(ctx context.Context, db *store.DB, pro
 		return err
 	}
 	for _, task := range tasks {
-		mergedPR := task.MergeMode == "pr" || task.MergeMode == "no-mistakes"
+		mergedPR := deliveredByPullRequest(task.MergeMode)
 		if project.IsWorkspace() {
 			repos, err := db.TaskRepos(ctx, task.ID)
 			if err != nil {

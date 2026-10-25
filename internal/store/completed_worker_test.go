@@ -141,7 +141,7 @@ func TestCompletedWorkerUnchangedNewTurnKeepsDone(t *testing.T) {
 	observe := func(status string) *Notice {
 		t.Helper()
 		now = now.Add(time.Second)
-		notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", status, read, now)
+		notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", status, RepositoryFingerprints{TurnEnd: read, Current: read}, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,13 +199,127 @@ func TestCompletedWorkerUnreadableTurnEndBaselineReopensOnNewTurn(t *testing.T) 
 		read   func() (string, error)
 	}{{"working", readable}, {"idle", unreadable}} {
 		now = now.Add(time.Second)
-		if _, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", step.status, step.read, now); err != nil {
+		if _, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", step.status, RepositoryFingerprints{TurnEnd: step.read, Current: step.read}, now); err != nil {
 			t.Fatal(err)
 		}
 	}
 	now = now.Add(time.Second)
-	notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", "working", readable, now)
+	notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", "working", RepositoryFingerprints{Current: readable}, now)
 	if err != nil || notice == nil {
 		t.Fatalf("new turn after an unreadable turn end did not reopen: %#v %v", notice, err)
+	}
+}
+
+// Reproduce #509: a new turn's only working observation can precede its
+// commit, so the turn's end must compare the repository again.
+func TestCompletedWorkerTurnChangeAfterWorkingObservationReopensAtTurnEnd(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// staleTurnEnd reports the pre-snapshot read taken before the commit.
+		staleTurnEnd bool
+	}{{"turn end read after commit", false}, {"turn end read before commit", true}} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "t1", MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "start"); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+				t.Fatal(err)
+			}
+			task, err := db.Task(ctx, project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			head := "head-1"
+			read := func() (string, error) { return head, nil }
+			stale := func() (string, error) { return "head-1", nil }
+			now := time.Now()
+			observe := func(status string, fingerprints RepositoryFingerprints) *Notice {
+				t.Helper()
+				now = now.Add(time.Second)
+				notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", status, fingerprints, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return notice
+			}
+			same := RepositoryFingerprints{TurnEnd: read, Current: read}
+			observe("working", same)
+			observe("idle", same)
+			if observe("working", same) != nil {
+				t.Fatal("new turn reopened the Task before it changed the repository")
+			}
+			head = "head-2"
+			turnEnd := same
+			if test.staleTurnEnd {
+				turnEnd.TurnEnd = stale
+			}
+			notice := observe("idle", turnEnd)
+			if notice == nil || notice.Kind != "worker_resumed" {
+				t.Fatalf("turn that committed after its working observation did not reopen: %#v", notice)
+			}
+			if current, _ := db.Task(ctx, project.ID, "t1"); current.State != StateWorking {
+				t.Fatalf("state = %s; want working", current.State)
+			}
+			if queued, err := db.OldestQueuedMessage(ctx, id); err != nil || queued.Body == "" {
+				t.Fatalf("no signal-again instruction queued: %#v %v", queued, err)
+			}
+		})
+	}
+}
+
+func TestCompletedWorkerUnchangedResumedTurnEndKeepsDone(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "t1", MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "start"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() (string, error) { return "head-1", nil }
+	same := RepositoryFingerprints{TurnEnd: read, Current: read}
+	now := time.Now()
+	for _, status := range []string{"working", "idle", "working", "idle", "idle"} {
+		now = now.Add(time.Second)
+		if notice, err := db.ObserveCompletedWorkerState(ctx, task, "w1:p1", "generation", status, same, now); err != nil || notice != nil {
+			t.Fatalf("%s observation = %#v, %v; want no reopen", status, notice, err)
+		}
+	}
+	var turnEnded, resumed int
+	if err := db.QueryRowContext(ctx, `SELECT turn_ended,resumed FROM completed_rider_busy WHERE task_id=?`, id).Scan(&turnEnded, &resumed); err != nil || turnEnded != 1 || resumed != 0 {
+		t.Fatalf("turn boundary = ended %d resumed %d, %v; want ended 1 resumed 0", turnEnded, resumed, err)
+	}
+	if current, _ := db.Task(ctx, project.ID, "t1"); current.State != StateDone {
+		t.Fatalf("state = %s; want done", current.State)
 	}
 }

@@ -341,18 +341,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		}
 		var targetSelected bool
 		targetBranch, targetSelected = targetBranchForTask(cfg, brief, "", project.DefaultBranch)
-		if mode == "no-mistakes" && targetBranch != project.DefaultBranch {
-			return axi.Failure("no_mistakes_target_unsupported", fmt.Sprintf("no-mistakes delivery only supports the repository default branch %q, but this Task targets %q", project.DefaultBranch, targetBranch), false, "Use `merge_mode: pr` for a non-default target, or remove `target:` to use the default branch")
-		}
 		if targetSelected {
 			if _, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target"); err != nil {
 				return err
 			}
-		}
-	}
-	if mode == "no-mistakes" && !project.IsWorkspace() {
-		if err := ensureNoMistakesInitialized(ctx.Context, project.Root); err != nil {
-			return err
 		}
 	}
 	if project.IsWorkspace() {
@@ -764,9 +756,6 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
 	if reviewIdentityDetails != nil {
 		result = append(result, axi.Field{Key: "review_identity", Value: reviewIdentityDetails})
-	}
-	if mode == "no-mistakes" {
-		result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning("merge_mode")}})
 	}
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
@@ -1186,8 +1175,6 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change the default branch, or merge."
 	} else if project.IsWorkspace() && task.Type == "change" {
 		work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
-	} else if merge == "no-mistakes" {
-		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Deliver only through `no-mistakes axi run --intent <from Brief>`. If Posse asks you to catch up with the target after publication, merge `origin/<target>` into this branch, resolve conflicts, then rerun the pipeline with `--skip=rebase` so the pushed branch is updated by merge, not rebase. Never push directly, rebase a pushed branch, or open a PR."
 	}
 	if task.Type == "change" {
 		if plan, err := task.AdmittedPlan(); err == nil && plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan)) {
@@ -1209,7 +1196,7 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	signal := fmt.Sprintf("posse signal done \"<summary>\" --turn %s", turnToken)
 	if task.Type == "change" {
 		signal += " after committing and ensuring a clean worktree"
-		if merge == "no-mistakes" || (merge == "pr" && !project.IsWorkspace()) {
+		if merge == "pr" && !project.IsWorkspace() {
 			signal += " --pr <url>"
 		}
 	} else {
@@ -1389,8 +1376,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if len(attachments) > 0 && (verb != "done" || task.Type == "change") {
 		return axi.Failure("signal_invalid", "--attach is only valid on a Research or Review done Signal", false)
 	}
-	if parsed.Flags["pr"] != "" && (verb != "done" || task.Type != "change" || project.IsWorkspace() || (task.MergeMode != "no-mistakes" && task.MergeMode != "pr")) {
-		return axi.Failure("signal_invalid", "--pr is only valid on a PR or no-mistakes Change Task done Signal", false)
+	if verb == "done" && task.Type == "change" && usesRemovedNoMistakes(task) {
+		return noMistakesRemoved(task)
+	}
+	if parsed.Flags["pr"] != "" && (verb != "done" || task.Type != "change" || project.IsWorkspace() || task.MergeMode != "pr") {
+		return axi.Failure("signal_invalid", "--pr is only valid on a PR Change Task done Signal", false)
 	}
 	if noChange && (verb != "done" || task.Type != "change" || project.IsWorkspace() || parsed.Flags["pr"] != "" || parsed.Flags["resolutions"] != "") {
 		return axi.Failure("signal_invalid", "--no-change is only valid on a done Signal of a single-repository Change Task without --pr or --resolutions", false)
@@ -1448,15 +1438,21 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				return configError(err)
 			}
 			// Every changed full-pipeline Member must be delivered from its
-			// promoted, fully validated private candidate.
+			// promoted, fully validated private candidate. Answers to a Review
+			// fix come from the private candidates instead, before promotion.
+			round, fixPending, err := db.ReviewFixRoundForTask(ctx.Context, task.ID)
+			if err != nil {
+				return err
+			}
+			candidateFix := fixPending && len(round.MemberHeads) > 0
 			if lanes, err := changedCandidateLanes(ctx.Context, db, project, task); err != nil {
 				return err
-			} else if len(lanes) > 0 {
+			} else if len(lanes) > 0 && !candidateFix {
 				if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, ""); err != nil {
 					return err
 				}
 			}
-			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg); err != nil {
+			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg, candidateFix); err != nil {
 				return err
 			}
 		} else if task.Type == "change" && noChange {
@@ -1502,7 +1498,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 			if !privateCandidate {
 				if err := validateChangeSignal(ctx.Context, task); err != nil {
-					return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
+					help := "Commit the change and leave the worktree clean before signalling done"
+					if work, workErr := s.unmergedWork(ctx.Context, db, project, task); workErr == nil && work == "" {
+						help = "If the Task needs no change, run `posse signal done <note> --no-change`; otherwise commit the change and leave the worktree clean"
+					}
+					return axi.Failure("signal_invalid", err.Error(), false, help)
 				}
 			}
 			if !project.IsWorkspace() {
@@ -1510,14 +1510,10 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					return err
 				}
 			}
-			if (task.MergeMode == "no-mistakes" || task.MergeMode == "pr") && parsed.Flags["pr"] == "" && !privateCandidate {
+			if task.MergeMode == "pr" && parsed.Flags["pr"] == "" && !privateCandidate {
 				return axi.Failure("signal_invalid", "a PR-mode Change Task requires --pr <url>", false)
 			}
-			if task.MergeMode == "no-mistakes" {
-				if err := validatePullRequestOrigin(ctx.Context, project.Root, parsed.Flags["pr"]); err != nil {
-					return err
-				}
-			} else if task.MergeMode == "pr" && !privateCandidate {
+			if task.MergeMode == "pr" && !privateCandidate {
 				cfg, err := config.Load(home, project.Name)
 				if err != nil {
 					return configError(err)
@@ -1599,49 +1595,58 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return axi.Failure("review_resolutions_invalid", err.Error(), false)
 			}
-			actualHead := ""
-			candidateID := int64(0)
-			if fullPipelineSelected(task, "") {
-				candidate, err := db.LatestValidationCandidate(ctx.Context, task.ID, "")
-				if err != nil || candidate.State != store.ValidationCandidateActive {
-					return axi.Failure("candidate_missing", "full-pipeline Review fixes require the active private candidate", false)
-				}
-				if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
-					return err
-				}
-				candidate, err = db.LatestValidationCandidate(ctx.Context, task.ID, "")
+			if len(round.MemberHeads) > 0 {
+				members, err := s.reviewFixMemberAnswers(ctx.Context, db, home, project, task, round)
 				if err != nil {
 					return err
 				}
-				cwd, cwdErr := currentDir()
-				if cwdErr != nil || !pathWithin(candidate.WorktreePath, cwd) {
-					return axi.Failure("review_fix_candidate_required", "full-pipeline Review fixes must be completed in the private candidate checkout", false, candidate.WorktreePath)
-				}
-				actualHead, err = gitOutput(ctx.Context, candidate.WorktreePath, "rev-parse", "HEAD")
-				if err != nil {
-					return err
-				}
-				candidateID = candidate.ID
+				reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, "", 0)
+				reviewResolutions.Members = members
 			} else {
-				actualHead, err = gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
-				if err != nil {
-					return err
-				}
-			}
-			if _, err := gitOutput(ctx.Context, task.WorktreePath, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
-				root := task.WorktreePath
-				if candidateID > 0 {
-					candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
-					if candidateErr != nil {
-						return candidateErr
+				actualHead := ""
+				candidateID := int64(0)
+				if fullPipelineSelected(task, "") {
+					candidate, err := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+					if err != nil || candidate.State != store.ValidationCandidateActive {
+						return axi.Failure("candidate_missing", "full-pipeline Review fixes require the active private candidate", false)
 					}
-					root = candidate.WorktreePath
+					if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
+						return err
+					}
+					candidate, err = db.LatestValidationCandidate(ctx.Context, task.ID, "")
+					if err != nil {
+						return err
+					}
+					cwd, cwdErr := currentDir()
+					if cwdErr != nil || !pathWithin(candidate.WorktreePath, cwd) {
+						return axi.Failure("review_fix_candidate_required", "full-pipeline Review fixes must be completed in the private candidate checkout", false, candidate.WorktreePath)
+					}
+					actualHead, err = gitOutput(ctx.Context, candidate.WorktreePath, "rev-parse", "HEAD")
+					if err != nil {
+						return err
+					}
+					candidateID = candidate.ID
+				} else {
+					actualHead, err = gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
+					if err != nil {
+						return err
+					}
 				}
-				if _, err := gitOutput(ctx.Context, root, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
-					return recordHeadDiscontinuity(ctx.Context, db, project, task, round.ExpectedBaseHead, actualHead)
+				if _, err := gitOutput(ctx.Context, task.WorktreePath, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
+					root := task.WorktreePath
+					if candidateID > 0 {
+						candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+						if candidateErr != nil {
+							return candidateErr
+						}
+						root = candidate.WorktreePath
+					}
+					if _, err := gitOutput(ctx.Context, root, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
+						return recordHeadDiscontinuity(ctx.Context, db, project, task, round.ExpectedBaseHead, actualHead)
+					}
 				}
+				reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, actualHead, candidateID)
 			}
-			reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, actualHead, candidateID)
 		}
 	} else if parsed.Flags["resolutions"] != "" {
 		return axi.Failure("signal_invalid", "--resolutions is only valid on a Change done Signal with a Review fix instruction", false)
@@ -1908,7 +1913,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	// Plain sends refresh PR state best-effort to retain the merged-PR guard,
 	// but refresh failures must not prevent delivery using the last observation.
 	if !interrupting && !parsed.Bool("queue") {
-		refreshPR := task.PRURL != "" && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes")
+		refreshPR := task.PRURL != "" && deliveredByPullRequest(task.MergeMode)
 		if project.IsWorkspace() {
 			if repos, reposErr := db.TaskRepos(ctx.Context, task.ID); reposErr == nil {
 				for _, repo := range repos {
@@ -2485,6 +2490,9 @@ func (s *Service) relaunch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if usesRemovedNoMistakes(task) {
+		return noMistakesRemoved(task)
+	}
 	var cfg config.Config
 	if task.PlanJSON == "" || parsed.Flags["profile"] != "" {
 		cfg, err = config.Load(home, project.Name)
@@ -2855,7 +2863,10 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			}
 			// Record the successful launch's generation before another event
 			// can mistake this Worker for an unrecovered process.
-			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, current.AgentSessionKind, 0, 0, generation)
+			observation := current.Observation()
+			observation.AgentAbsentSince, observation.IdleSince, observation.AgentServerStartedAt = 0, 0, generation
+			observation.AgentStatus, observation.AgentStatusSince = "", 0
+			return db.UpdateTaskObservation(ctx, taskID, observation)
 		}
 		if current.State == store.StateWorking {
 			return track("task.progress", progress)

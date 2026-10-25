@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -61,4 +62,17 @@ func turnEndFingerprint(ctx context.Context, task store.Task, fallback func() (s
 		}
 		return state.fingerprint, state.err
 	}
+}
+
+// ObserveCompletedWorkerTurnStart records a working status that a Herdr status
+// event reports for a completed Worker's pane. A short turn can end before the
+// event's reconcile pass takes its snapshot, so the event alone marks the new
+// turn and the turn's end decides whether it changed the repository.
+func ObserveCompletedWorkerTurnStart(ctx context.Context, db *store.DB, task store.Task, paneID, server string, now time.Time) (*store.Notice, error) {
+	current := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
+	notice, err := db.ObserveCompletedWorkerState(ctx, task, paneID, server, "working", store.RepositoryFingerprints{Current: current}, now)
+	if isStateRace(err) {
+		return nil, nil
+	}
+	return notice, err
 }

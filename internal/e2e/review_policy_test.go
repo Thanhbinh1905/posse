@@ -353,179 +353,18 @@ jobs:
 
 func TestFullPipelineCIRepairRevalidatesPrivateCandidateBeforeRepublish(t *testing.T) {
 	f := reviewIdentityFixture(t)
-	workerScript := `#!/bin/sh
-set -eu
-herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-IFS= read -r prompt || exit 0
-launch=${prompt#Read }
-launch=${launch% and follow it.}
-case "$launch" in */tasks/t1/launch.md)
-  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-  : > "$POSSE_TEST_ROOT/ci-worker-ready"
-  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-  turn_token=
-  while IFS= read -r line; do
-    printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/ci-worker-input.log"
-    case "$line" in *'| turn '*) turn_token=$(printf '%s\n' "$line" | sed -n 's/.*| turn \([^]]*\)].*/\1/p') ;; esac
-    case "$line" in *'Required CI checks failed'*)
-      printf 'repaired candidate content\n' > change.txt
-      git add change.txt
-      git commit -m 'repair failing CI check'
-      : > "$POSSE_TEST_ROOT/ci-worker-fixed"
-      herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-      while [ ! -e "$POSSE_TEST_ROOT/ci-worker-allow-done" ]; do sleep 0.02; done
-      if "$POSSE_E2E_POSSE_BIN" signal done 'Repaired CI candidate validated' --pr 'https://github.com/acme/shop/pull/17' --turn "$turn_token" >> "$POSSE_TEST_ROOT/ci-worker-signal.log" 2>&1; then
-        printf 'signal-ok\n' >> "$POSSE_TEST_ROOT/ci-worker-signal.log"
-      else
-        printf 'signal-failed\n' >> "$POSSE_TEST_ROOT/ci-worker-signal.log"
-      fi
-      herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
-      ;;
-    esac
-  done
-  ;;
-*)
-  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
-  printf '%s\t%s\n' "$HERDR_PANE_ID" "$PWD" >> "$POSSE_TEST_ROOT/review-identity-ready.log"
-  : > "$POSSE_TEST_ROOT/review-working-$HERDR_PANE_ID"
-  while IFS= read -r line; do herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1; done
-  ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(f.root, "bin", "claude"), []byte(workerScript), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "full-pipeline")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "ci_loop.max_fix_rounds", "2")
-	if code, output := startReviewIdentityTask(t, f, "CI repair", "author", ""); code != 0 {
-		t.Fatalf("start Change Task: %d %s", code, output)
-	}
-	change := f.mustTask(t, "t1")
-	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
-	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
-	writeAndCommit := func(content string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		gitTest(t, f.env, change.WorktreePath, "add", "change.txt")
-		gitTest(t, f.env, change.WorktreePath, "commit", "-m", "update candidate content")
-	}
-	writeAndCommit("initial candidate content\n")
-	publishCandidate := func(summary string) (store.ValidationCandidate, string) {
-		t.Helper()
-		code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", summary, "--verify", "go test ./... -> passed", "--proof", "Intent/E2E behavior verified", "--risk", "Risk: low\nRollback: revert PR")
-		if code != 0 || !strings.Contains(output, "validation required before publication") {
-			t.Fatalf("submit private candidate: %d %s", code, output)
-		}
-		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return candidate, output
-	}
-	candidate, _ := publishCandidate("CI repair candidate")
-	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
-	expectedOriginHead := ""
-	assertOriginHead := func(expected string) {
-		t.Helper()
-		if expected == "" {
-			assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
-			return
-		}
-		got := strings.TrimSpace(gitTest(t, f.env, f.remote, "show-ref", "--hash", "refs/heads/"+change.Branch))
-		if got != expected {
-			t.Fatalf("bare origin head advanced to %s before revalidation; want %s", got, expected)
-		}
-	}
-	validateCandidate := func(candidate store.ValidationCandidate, round string) {
-		t.Helper()
-		if code, output := runReviewIdentityCLI(t, f, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
-			t.Fatalf("start candidate Review: %d %s", code, output)
-		}
-		review := f.mustTask(t, round)
-		waitForReviewIdentityAgent(t, f, review.PaneID)
-		report := filepath.Join(f.home, "scratch", "shop", round, "report.md")
-		findings := filepath.Join(f.home, "scratch", "shop", round, "findings.json")
-		if err := os.WriteFile(report, []byte("The private candidate passed review.\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(findings, []byte(`{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
-		for _, args := range [][]string{
-			{"validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent/E2E behavior verified"},
-			{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"},
-			{"validate", "lint", "--proof", "Configured Gates passed", "--coverage", "No local workflow jobs are present"},
-		} {
-			if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, args...); code != 0 {
-				t.Fatalf("candidate stage %v failed: %d %s", args, code, output)
-			}
-			assertOriginHead(expectedOriginHead)
-		}
-	}
-	validateCandidate(candidate, "t2")
-	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "CI repair candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
-		t.Fatalf("promote initial candidate: %d %s", code, output)
-	}
-	expectedOriginHead = candidate.CandidateSHA
-	turn, err := f.db.TaskTurnToken(context.Background(), change.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Initial candidate validated", "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
-		t.Fatalf("complete initial Task: %d %s", code, output)
-	}
-	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
-		t.Fatalf("open initial PR: %s", output)
-	}
-	change = f.mustTask(t, "t1")
-	firstHead := change.GatedSHA
-	if firstHead == "" {
-		t.Fatal("initial publication did not bind a gated PR head")
-	}
-	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", firstHead)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
-	if !waitForCondition(20*time.Second, func() bool {
-		observation, err := f.db.LatestPRObservation(context.Background(), change.ID)
-		if err != nil || observation.HeadSHA != firstHead || !strings.Contains(observation.Checks, "FAILURE") {
-			return false
-		}
-		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
-		if err != nil {
-			return false
-		}
-		for _, notice := range notices {
-			if notice.TaskID == change.ID && notice.Kind == "ci_fix_queued" {
-				return true
-			}
-		}
-		return false
-	}) {
-		observation, observationErr := f.db.LatestPRObservation(context.Background(), change.ID)
-		notices, noticesErr := f.db.Notices(context.Background(), f.project.ID, false)
-		t.Fatalf("failed CI observation did not queue a repair: observation=%#v err=%v notices=%#v err=%v", observation, observationErr, notices, noticesErr)
-	}
-	f.requireNotice(t, "t1", "ci_fix_queued")
+	h := startCIRepairChange(t, f, [2]string{"ci_loop.max_fix_rounds", "2"})
+	firstHead := h.publishThenFailCI(t)
 	var fixRoundCount int
-	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, change.ID).Scan(&fixRoundCount); err != nil || fixRoundCount != 1 {
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, h.change.ID).Scan(&fixRoundCount); err != nil || fixRoundCount != 1 {
 		t.Fatalf("CI fix rounds=%d err=%v", fixRoundCount, err)
-	}
-	if !waitForCondition(15*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(f.root, "ci-worker-fixed"))
-		return err == nil
-	}) {
-		input, _ := os.ReadFile(filepath.Join(f.root, "ci-worker-input.log"))
-		t.Fatalf("fake Worker did not consume the queued CI instruction: %s", input)
 	}
 	// Posse records delivery once Herdr confirms the new turn, which can land
 	// after the fake Worker already finished the repair.
 	var messageStatus string
 	var messageErr error
 	if !waitForCondition(15*time.Second, func() bool {
-		messageErr = f.db.QueryRowContext(context.Background(), `SELECT m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='ci'`, change.ID).Scan(&messageStatus)
+		messageErr = f.db.QueryRowContext(context.Background(), `SELECT m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='ci'`, h.change.ID).Scan(&messageStatus)
 		return messageErr == nil && messageStatus == "delivered"
 	}) {
 		t.Fatalf("CI repair instruction status=%q err=%v, want delivered", messageStatus, messageErr)
@@ -534,13 +373,13 @@ esac
 	if err != nil || !strings.Contains(string(workerInput), "Required CI checks failed") || !strings.Contains(string(workerInput), firstHead) {
 		t.Fatalf("fake Worker did not consume the expected head-bound CI repair: %s err=%v", workerInput, err)
 	}
-	assertOriginHead(firstHead)
-	candidate, _ = publishCandidate("Repaired CI candidate")
+	h.assertOriginHead(t, firstHead)
+	candidate := h.submitCandidate(t, "Repaired CI candidate")
 	if candidate.CandidateSHA == firstHead {
 		t.Fatal("CI repair did not produce a fresh private candidate")
 	}
-	validateCandidate(candidate, "t3")
-	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "Repaired CI candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+	h.validateCandidate(t, candidate, "t3")
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Repaired CI candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
 		t.Fatalf("republish repaired candidate: %d %s", code, output)
 	}
 	if err := os.WriteFile(filepath.Join(f.root, "ci-worker-allow-done"), []byte("complete\n"), 0o600); err != nil {
@@ -554,17 +393,14 @@ esac
 		t.Fatalf("fake Worker did not complete the repaired task: %s", signalLog)
 	}
 	f.waitTaskState(t, "t1", store.StateDone)
-	published, err := exec.Command("git", "--git-dir", f.remote, "rev-parse", "refs/heads/"+change.Branch).Output()
-	if err != nil || strings.TrimSpace(string(published)) != candidate.CandidateSHA {
-		t.Fatalf("origin head=%s, want fully revalidated candidate %s: %v", strings.TrimSpace(string(published)), candidate.CandidateSHA, err)
-	}
+	h.assertOriginHead(t, candidate.CandidateSHA)
 	f.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.CandidateSHA)
 	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
-	observation, err := f.db.LatestPRObservation(context.Background(), change.ID)
+	observation, err := f.db.LatestPRObservation(context.Background(), h.change.ID)
 	if err != nil || observation.HeadSHA != candidate.CandidateSHA || !strings.Contains(observation.Checks, "SUCCESS") {
 		t.Fatalf("fresh published head lacks a green CI observation: %#v err=%v", observation, err)
 	}
-	stages, err := f.db.ValidationStages(context.Background(), change.ID)
+	stages, err := f.db.ValidationStages(context.Background(), h.change.ID)
 	if err != nil || len(stages) != 6 {
 		t.Fatalf("validation stages for both candidates=%+v err=%v", stages, err)
 	}
@@ -653,39 +489,6 @@ func runReviewIdentityCLIWithResourceConflictRetry(t *testing.T, f *prLifecycleF
 	}
 }
 
-func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
-	f := reviewIdentityFixture(t)
-	// Both Merge phases must inspect the same completed candidate, without
-	// independent Watch reconciliation between the receipt refusals.
-	stopBackgroundWatch(t, f)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "no-mistakes")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
-	// The fake matches the installed upstream: it has no receipt query.
-	installFakeNoMistakes(t, f)
-	if code, out := startReviewIdentityTask(t, f, "Pipeline receipt", "author", ""); code != 0 {
-		t.Fatalf("start: %d %s", code, out)
-	}
-	change := f.mustTask(t, "t1")
-	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
-	signalReviewPolicyTask(t, f, change)
-	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
-	for _, args := range [][]string{{"merge", "t1"}, {"merge", "t1", "--execute"}} {
-		if candidate := f.mustTask(t, "t1"); candidate.State != store.StateDone {
-			t.Fatalf("receipt phase %v has no completed candidate: %s", args, candidate.State)
-		}
-		code, out := runReviewIdentityCLI(t, f, args...)
-		if code != 1 || !strings.Contains(out, "review_receipt_unsupported") {
-			t.Fatalf("missing receipt admitted: %d %s", code, out)
-		}
-		if candidate := f.mustTask(t, "t1"); candidate.State != store.StateDone {
-			t.Fatalf("receipt refusal %v changed candidate state: %s", args, candidate.State)
-		}
-	}
-	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
-		t.Fatal("receipt refusal changed target")
-	}
-}
-
 func TestSelectedReviewPolicyConfigNeedsUserConsent(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, key := range []string{"defaults.review", "repositories.api.review"} {
@@ -726,7 +529,7 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	leadEnv := setEnv(f.env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
-	for _, setting := range [][2]string{{"defaults.merge_mode", "local"}, {"defaults.review", "no-mistakes"}, {"repositories.api.review", "none"}} {
+	for _, setting := range [][2]string{{"defaults.merge_mode", "local"}, {"defaults.review", "full-pipeline"}, {"repositories.api.review", "none"}} {
 		runPosse(t, f.binary, root, f.env, "config", "set", setting[0], setting[1], "--project", "policy-stack")
 	}
 	brief := filepath.Join(f.root, "member-policy.md")
@@ -779,7 +582,7 @@ func TestReviewPolicyLegacyConfigMigration(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, value := range []string{"always", "on_risk", "never"} {
 		code, out := runReviewIdentityCLI(t, f, "config", "set", "defaults.review", value, "--user-approved", "Select review")
-		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick, full-pipeline or no-mistakes") {
+		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick or full-pipeline") {
 			t.Errorf("migration %s: %d %s", value, code, out)
 		}
 	}

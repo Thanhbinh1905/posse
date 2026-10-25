@@ -45,6 +45,10 @@ func leadWorkspace(snapshot herdr.Snapshot, project store.Project) (string, bool
 	return "", false
 }
 
+func sandboxOccupied(holder string) error {
+	return axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox: "+holder, false, "Inspect the Sandbox's open panes before retrying")
+}
+
 // openWorkerTab places every Worker Sandbox in an unfocused tab of the Lead's
 // workspace. The pane is labeled before returning so recovery and Teardown can find it.
 func (s *Service) openWorkerTab(ctx context.Context, home string, project store.Project, task store.Task, path, displayAgent string) (openedTab, error) {
@@ -58,12 +62,12 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 	}
 	for _, workspace := range snapshot.Workspaces {
 		if workspace.Root == path {
-			return openedTab{}, axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox", false, "Inspect the Sandbox's open panes before retrying")
+			return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + " root")
 		}
 		if workspace.Worktree.CheckoutPath == path {
 			for _, pane := range snapshot.Panes {
 				if pane.WorkspaceID == workspace.WorkspaceID {
-					return openedTab{}, axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox", false, "Inspect the Sandbox's open panes before retrying")
+					return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + " checkout, pane " + pane.PaneID)
 				}
 			}
 		}
@@ -74,7 +78,7 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 		}
 		otherTaskPane := strings.HasPrefix(pane.Label, "posse:"+project.Name+":t") && pane.Label != task.PaneLabel
 		if pane.WorkspaceID != workspaceID || otherTaskPane {
-			return openedTab{}, axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox", false, "Inspect the Sandbox's open panes before retrying")
+			return openedTab{}, sandboxOccupied("pane " + pane.PaneID + " label " + pane.Label + " in workspace " + pane.WorkspaceID)
 		}
 	}
 	raw, err := s.herdrCall(ctx, "tab.create", map[string]any{

@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -108,6 +110,28 @@ type ValidationFixRound struct {
 	DedupeKey        string `toml:"dedupe_key"`
 	MessageID        int64  `toml:"message_id"`
 	CreatedAt        int64  `toml:"created_at"`
+	// MemberHeads binds a workspace Review fix to every changed Member;
+	// ExpectedBaseHead is then ValidationMemberHeadsDigest(MemberHeads).
+	MemberHeads []ValidationFixMemberHead `toml:"member_heads,omitempty"`
+}
+
+// ValidationFixMemberHead is one workspace Member's expected head in a Review
+// fix instruction, with its private candidate under full-pipeline.
+type ValidationFixMemberHead struct {
+	Repository       string `json:"repository" toml:"repository"`
+	ExpectedBaseHead string `json:"expected_base_head" toml:"expected_base_head"`
+	CandidateID      int64  `json:"candidate_id,omitempty" toml:"candidate_id,omitempty"`
+}
+
+// ValidationMemberHeadsDigest identifies a set of workspace Member heads.
+func ValidationMemberHeadsDigest(members []ValidationFixMemberHead) string {
+	sorted := append([]ValidationFixMemberHead(nil), members...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Repository < sorted[j].Repository })
+	hash := sha256.New()
+	for _, member := range sorted {
+		fmt.Fprintf(hash, "%s\x00%s\x00%d\n", member.Repository, member.ExpectedBaseHead, member.CandidateID)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 type ReviewFindingDetail struct {
@@ -139,7 +163,16 @@ type ReviewFixResolutionsInput struct {
 	ExpectedBaseHead string
 	ActualHead       string
 	CandidateID      int64
-	Patterns         []ReviewFixResolution
+	// Members answers a workspace fix instruction with every Member's head.
+	Members  []ReviewFixMemberHead
+	Patterns []ReviewFixResolution
+}
+
+// ReviewFixMemberHead is a workspace Member's head when its fix is answered.
+type ReviewFixMemberHead struct {
+	Repository  string
+	ActualHead  string
+	CandidateID int64
 }
 
 type ReviewEvidence struct {
@@ -179,7 +212,7 @@ var ErrValidationHeadsChanged = errors.New("validation fix instructions changed 
 // QueueValidationFixInstruction records a fix round and queues or extends the
 // unsent validation message for the same head in one transaction.
 func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string) (QueueValidationFixResult, error) {
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, nil, nil)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, nil, nil)
 }
 
 // QueueValidationFixInstructionWithinBudget records a fix round only while its
@@ -188,7 +221,7 @@ func (db *DB) QueueValidationFixInstructionWithinBudget(ctx context.Context, tas
 	if maxRounds < 0 {
 		return QueueValidationFixResult{}, fmt.Errorf("validation fix round budget cannot be negative")
 	}
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, &maxRounds, nil)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, &maxRounds, nil)
 }
 
 // QueueValidationFixInstructionWithSharedBudget enforces the frozen per-kind
@@ -197,10 +230,32 @@ func (db *DB) QueueValidationFixInstructionWithSharedBudget(ctx context.Context,
 	if maxRounds < 0 || sharedMax < 1 {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")
 	}
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, dedupeKey, body, &maxRounds, &sharedMax)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, &maxRounds, &sharedMax)
 }
 
-func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
+// QueueReviewFixInstruction records one whole-pattern Review fix round. A
+// workspace instruction names every changed Member head, and expectedBaseHead
+// must be their digest. A nil budget is not enforced.
+func (db *DB) QueueReviewFixInstruction(ctx context.Context, taskID int64, expectedBaseHead string, members []ValidationFixMemberHead, dedupeKey, body string, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
+	if (maxRounds != nil && *maxRounds < 0) || (sharedMax != nil && *sharedMax < 1) {
+		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")
+	}
+	if len(members) > 0 {
+		seen := map[string]bool{}
+		for _, member := range members {
+			if member.Repository == "" || seen[member.Repository] || !validValidationSHA(member.ExpectedBaseHead) || member.CandidateID < 0 {
+				return QueueValidationFixResult{}, fmt.Errorf("invalid workspace Member head for a Review fix")
+			}
+			seen[member.Repository] = true
+		}
+		if expectedBaseHead != ValidationMemberHeadsDigest(members) {
+			return QueueValidationFixResult{}, fmt.Errorf("workspace Review fix head must be the digest of its Member heads")
+		}
+	}
+	return db.queueValidationFixInstruction(ctx, taskID, "review", expectedBaseHead, members, dedupeKey, body, maxRounds, sharedMax)
+}
+
+func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead string, members []ValidationFixMemberHead, dedupeKey, body string, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
 	if taskID < 1 || (kind != "gate" && kind != "ci" && kind != "review" && kind != "freshness") {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix task or kind")
 	}
@@ -303,7 +358,11 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 			return QueueValidationFixResult{}, err
 		}
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?)`, taskID, kind, seq, expectedBaseHead, dedupeKey, messageID, createdAt)
+	memberHeads, err := marshalValidationMemberHeads(members)
+	if err != nil {
+		return QueueValidationFixResult{}, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json) VALUES(?,?,?,?,?,?,?,?)`, taskID, kind, seq, expectedBaseHead, dedupeKey, messageID, createdAt, memberHeads)
 	if err != nil {
 		return QueueValidationFixResult{}, err
 	}
@@ -520,13 +579,18 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 		return state, err
 	}
 
-	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at FROM validation_fix_rounds WHERE ship_task_id=? ORDER BY kind,seq`, taskID)
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json FROM validation_fix_rounds WHERE ship_task_id=? ORDER BY kind,seq`, taskID)
 	if err != nil {
 		return state, err
 	}
 	for rows.Next() {
 		var value ValidationFixRound
-		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.Kind, &value.Seq, &value.ExpectedBaseHead, &value.DedupeKey, &value.MessageID, &value.CreatedAt); err != nil {
+		var memberHeads string
+		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.Kind, &value.Seq, &value.ExpectedBaseHead, &value.DedupeKey, &value.MessageID, &value.CreatedAt, &memberHeads); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		if value.MemberHeads, err = unmarshalValidationMemberHeads(memberHeads); err != nil {
 			_ = rows.Close()
 			return state, err
 		}
@@ -547,4 +611,23 @@ func closeSnapshotRows(rows *sql.Rows) error {
 		return fmt.Errorf("close validation snapshot rows: %w", err)
 	}
 	return nil
+}
+
+func marshalValidationMemberHeads(members []ValidationFixMemberHead) (string, error) {
+	if len(members) == 0 {
+		return "[]", nil
+	}
+	encoded, err := json.Marshal(members)
+	return string(encoded), err
+}
+
+func unmarshalValidationMemberHeads(encoded string) ([]ValidationFixMemberHead, error) {
+	var members []ValidationFixMemberHead
+	if err := json.Unmarshal([]byte(encoded), &members); err != nil {
+		return nil, fmt.Errorf("invalid validation fix Member heads: %w", err)
+	}
+	if len(members) == 0 {
+		return nil, nil
+	}
+	return members, nil
 }

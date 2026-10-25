@@ -93,6 +93,41 @@ func TestUpdatePreflightAllowsKnownConfigRepair(t *testing.T) {
 	}
 }
 
+func TestUpdatePreflightRefusesLiveNoMistakesPlans(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T, *reviewVerdictFixture)
+		refused bool
+	}{
+		{"live no-mistakes delivery", func(t *testing.T, f *reviewVerdictFixture) {
+			if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET landing_mode='no-mistakes' WHERE id=?`, f.task.ID); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"live no-mistakes review", func(t *testing.T, f *reviewVerdictFixture) { freezeReviewPolicy(t, f, "no-mistakes", 5) }, true},
+		{"merged no-mistakes history", func(t *testing.T, f *reviewVerdictFixture) {
+			if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET landing_mode='no-mistakes', state='merged' WHERE id=?`, f.task.ID); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"no no-mistakes plan", func(*testing.T, *reviewVerdictFixture) {}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReviewVerdictFixture(t)
+			tc.prepare(t, f)
+			// Force overrides idle migrations, never this refusal.
+			t.Setenv(store.ForceMigrationEnv, "1")
+			code, output := runCLI(t, testService(f.home, nil), "_update-preflight")
+			if refused := code != 0; refused != tc.refused {
+				t.Fatalf("preflight refused=%v, want %v: %s", refused, tc.refused, output)
+			}
+			if tc.refused && (!strings.Contains(output, "no_mistakes_tasks_live") || !strings.Contains(output, "shop t1") || !strings.Contains(output, "posse teardown <task> --discard")) {
+				t.Fatalf("refusal does not name the live Task and its remedy: %s", output)
+			}
+		})
+	}
+}
+
 func TestUpdateRollsBackBinaryWhenSetupFails(t *testing.T) {
 	_, archiveName, archive, digest := buildReleaseArchive(t, "v0.15.1")
 	var url string

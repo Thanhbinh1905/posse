@@ -15,6 +15,15 @@ func TestReviewPolicyBriefSelectionAndMigration(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "use quick") {
 				t.Fatalf("local alias admitted: %v", err)
 			}
+		case policy == "no-mistakes":
+			if err == nil || !strings.Contains(err.Error(), "no-mistakes was removed; use full-pipeline") {
+				t.Fatalf("removed no-mistakes admitted: %v", err)
+			}
+			for _, parse := range []func(string) (Brief, error){ParseStoredBriefText, ParseHistoricalBriefText} {
+				if stored, err := parse(text); err != nil || stored.Review != policy {
+					t.Fatalf("stored no-mistakes Brief changed: %#v %v", stored, err)
+				}
+			}
 		case legacy:
 			if err == nil || !strings.Contains(err.Error(), "legacy review policy") {
 				t.Fatalf("legacy admitted: %s %v", policy, err)
@@ -77,9 +86,9 @@ func TestReviewPolicyTighteningAndScopedChoice(t *testing.T) {
 		consent, allowed   bool
 	}{
 		{"none", "", false, true}, {"none", "quick", false, true}, {"quick", "full-pipeline", false, true},
-		{"quick", "none", false, false}, {"full-pipeline", "quick", false, false}, {"no-mistakes", "quick", false, false},
-		{"quick", "none", true, true}, {"no-mistakes", "quick", true, true}, {"full-pipeline", "quick", true, true},
-		{"full-pipeline", "no-mistakes", false, false}, {"full-pipeline", "no-mistakes", true, true},
+		{"quick", "none", false, false}, {"full-pipeline", "quick", false, false},
+		{"quick", "none", true, true}, {"full-pipeline", "quick", true, true},
+		{"no-mistakes", "quick", true, false}, {"full-pipeline", "no-mistakes", true, false},
 		{"always", "none", true, false}, {"local", "quick", true, false},
 		{"none", "local", false, false}, {"none", "local", true, false}, {"none", "invented", true, false},
 	} {

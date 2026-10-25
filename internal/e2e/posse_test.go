@@ -1251,7 +1251,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			defer recoveryDB.Close()
 			var recoveryErr error
 			recoveryState, recoveryErr = recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
-			return recoveryErr == nil && recoveryState.Status == "pending" && recoveryState.Attempts > 0 && recoveryState.LastError == "another Herdr workspace already holds this Sandbox"
+			return recoveryErr == nil && recoveryState.Status == "pending" && recoveryState.Attempts > 0 && strings.HasPrefix(recoveryState.LastError, "another Herdr workspace already holds this Sandbox")
 		}) {
 			t.Fatalf("startup recovery did not fail closed on the restored torn-down Task workspace: %#v", recoveryState)
 		}
@@ -1519,7 +1519,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("missing Worker did not enter the absence grace period: %#v, %v", dead, err)
 	}
 	// Advance the isolated Task's observation past the two-minute grace rather than waiting in real time.
-	if err := db.UpdateTaskObservation(context.Background(), dead.ID, dead.PaneID, dead.HerdrWorkspaceID, dead.AgentSession, dead.AgentSessionKind, time.Now().Add(-3*time.Minute).UnixMilli(), dead.IdleSince, dead.AgentServerStartedAt); err != nil {
+	if err := db.UpdateTaskObservation(context.Background(), dead.ID, store.TaskObservation{PaneID: dead.PaneID, WorkspaceID: dead.HerdrWorkspaceID, AgentSession: dead.AgentSession, AgentSessionKind: dead.AgentSessionKind, AgentAbsentSince: time.Now().Add(-3 * time.Minute).UnixMilli(), IdleSince: dead.IdleSince, AgentServerStartedAt: dead.AgentServerStartedAt}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -2199,6 +2199,7 @@ func isolatedE2EEnv(t *testing.T, root string) []string {
 	if e2eGoCache.err != nil || e2eGoCache.mod == "" || e2eGoCache.build == "" {
 		t.Fatalf("resolve shared Go caches: %v", e2eGoCache.err)
 	}
+	guardSpawnedProcesses(t, root)
 	env := herdr.IsolatedTestEnvironment(root)
 	env = setEnv(env, "GOMODCACHE", e2eGoCache.mod)
 	return setEnv(env, "GOCACHE", e2eGoCache.build)

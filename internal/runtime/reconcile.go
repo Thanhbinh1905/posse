@@ -203,11 +203,9 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if found && pane.Agent != "" {
 		status = pane.AgentStatus
 	}
-	fingerprint := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
-	if status == "idle" || status == "done" {
-		fingerprint = turnEndFingerprint(ctx, task, fingerprint)
-	}
-	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, fingerprint, now)
+	current := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
+	fingerprints := store.RepositoryFingerprints{TurnEnd: turnEndFingerprint(ctx, task, current), Current: current}
+	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, fingerprints, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
@@ -230,7 +228,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			err := markLost(ctx, db, task, "Worker pane and label are absent from the Herdr snapshot", now, &notices)
 			return notices, err
 		}
-		return nil, observationFailure(db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, sessionref.Sanitize("", task.AgentSession), task.AgentSessionKind, absentSince, 0, task.AgentServerStartedAt))
+		observation := task.Observation()
+		observation.AgentSession = sessionref.Sanitize("", task.AgentSession)
+		observation.AgentAbsentSince, observation.IdleSince = absentSince, 0
+		observation.AgentStatus, observation.AgentStatusSince = store.AgentStatusNoPane, agentStatusSince(task, store.AgentStatusNoPane, now)
+		return nil, observationFailure(db.UpdateTaskObservation(ctx, task.ID, observation))
 	}
 	absentSince := task.AgentAbsentSince
 	agentPresent := pane.Agent != ""
@@ -273,7 +275,19 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	} else {
 		idleSince = 0
 	}
-	if err := db.UpdateTaskObservation(ctx, task.ID, pane.PaneID, pane.WorkspaceID, session, sessionKind, absentSince, idleSince, serverStartedAt); err != nil {
+	observedStatus := store.AgentStatusNoAgent
+	if agentPresent {
+		observedStatus = pane.AgentStatus
+		if observedStatus == "" {
+			observedStatus = "unknown"
+		}
+	}
+	observation := store.TaskObservation{
+		PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, AgentSession: session, AgentSessionKind: sessionKind,
+		AgentAbsentSince: absentSince, IdleSince: idleSince, AgentServerStartedAt: serverStartedAt,
+	}
+	observation.AgentStatus, observation.AgentStatusSince = observedStatus, agentStatusSince(task, observedStatus, now)
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
 		return nil, observationFailure(err)
 	}
 	episode, err := db.TaskModelErrorEpisode(ctx, task.ID)
@@ -301,13 +315,13 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		}
 	}
 	if task.State == store.StateWorking && idleAfter > 0 && idleSince > 0 && now.Sub(time.UnixMilli(idleSince)) >= idleAfter {
-		exists, err := db.HasNotice(ctx, task.ProjectID, task.ID, "worker_idle", task.Launches)
+		exists, err := db.HasWorkerIdleNotice(ctx, task.ProjectID, task.ID, task.Launches, idleSince)
 		if err != nil {
 			return nil, err
 		}
 		modelErrorHandled := episode.Launch == task.Launches && episode.Status != "" && episode.Status != "resolved" && !store.ModelErrorAwaitingTurn(episode) && (episode.Status != "active" || episode.NextAttemptAt > 0)
 		if !exists && !modelErrorHandled {
-			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d}`, task.Launches), now)
+			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d,"idle_since":%d}`, task.Launches, idleSince), now)
 			if err != nil {
 				return nil, err
 			}
@@ -329,6 +343,17 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		}
 	}
 	return notices, nil
+}
+
+// agentStatusSince keeps the time Posse first observed status while it holds.
+// Herdr idle and done both mean the agent ended its turn, so a flip between
+// them continues the same observation.
+func agentStatusSince(task store.Task, status string, now time.Time) int64 {
+	turnEnded := func(value string) bool { return value == "idle" || value == "done" }
+	if task.AgentStatusSince > 0 && (task.AgentStatus == status || turnEnded(task.AgentStatus) && turnEnded(status)) {
+		return task.AgentStatusSince
+	}
+	return now.UnixMilli()
 }
 
 func reconcileLeadObservation(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, now time.Time) error {

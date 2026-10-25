@@ -47,7 +47,8 @@ type TaskSnapshot struct {
 	// ReviewTargets and ReviewVerdict are set for a Review Task only.
 	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
-	// ReviewReceipts are the no-mistakes receipts that qualified a Change Task.
+	// ReviewReceipts are the no-mistakes receipts that qualified a Change Task
+	// before no-mistakes was removed; they are kept as history.
 	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
 	// Validation state is owned by a Change Task and includes its review rounds,
 	// finding ledger, carry proofs, dispositions, and fix-round budget.
@@ -1118,8 +1119,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if task.ReviewsTaskID != 0 {
 			reviewed = task.ReviewsTaskID
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,agent_status,agent_status_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.AgentStatus, task.AgentStatusSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity); err != nil {
 			return err
 		}
 		var previous *taskplan.Plan
@@ -1258,8 +1259,12 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if fixRound.ChangeTaskID != 0 && fixRound.ChangeTaskID != task.ID {
 				return fmt.Errorf("validation fix round in snapshot for t%d belongs to Task %d", task.Seq, fixRound.ChangeTaskID)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt); err != nil {
+			memberHeads, err := marshalValidationMemberHeads(fixRound.MemberHeads)
+			if err != nil {
+				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json) VALUES(?,?,?,?,?,?,?,?,?)`,
+				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt, memberHeads); err != nil {
 				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
 			}
 		}

@@ -25,6 +25,7 @@ type CompletedWorkerBusy struct {
 	BusySince       int64
 	TurnEnded       int64
 	Baseline        string
+	Resumed         int64
 }
 
 type ConfigApproval struct {
@@ -560,6 +561,8 @@ type Task struct {
 	ContainmentPath      string
 	ContainmentMarker    string
 	PaneShellIdentity    string
+	AgentStatus          string
+	AgentStatusSince     int64
 }
 
 type TaskLaunchIdentity struct {
@@ -665,6 +668,7 @@ type ValidationFixRound struct {
 	DedupeKey        string
 	MessageID        int64
 	CreatedAt        int64
+	MemberHeadsJson  string
 }
 
 type ValidationStageResult struct {

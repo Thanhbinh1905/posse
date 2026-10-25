@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. [ADR 0024](0024-built-in-validation-replaces-no-mistakes.md) and spec section 25.17 record the removal of no-mistakes (V15, #305); the `no-mistakes` exception below no longer exists.
 
 ## Decision
 
