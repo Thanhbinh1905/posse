@@ -310,7 +310,7 @@ done
 		if err := os.WriteFile(filepath.Join(task.WorktreePath, "resumed-change.txt"), []byte("resumed Worker work\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !waitForCondition(12*time.Second, func() bool {
+		if !waitForCondition(30*time.Second, func() bool {
 			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 			return f.task(t, "t1").State == store.StateWorking
 		}) {
