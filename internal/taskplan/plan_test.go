@@ -2,6 +2,7 @@ package taskplan_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -264,8 +265,8 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 	}{
 		{"executor mode", func(r *taskplan.Request) { r.Execution.Mode = "in-place" }},
 		{"scope", func(r *taskplan.Request) { r.Execution.Scope = "remote" }},
-		{"workspace no-mistakes", func(r *taskplan.Request) { r.Execution.Scope = "workspace"; r.Delivery = "no-mistakes" }},
-		{"full-pipeline no-mistakes delivery", func(r *taskplan.Request) { r.Review = "full-pipeline"; r.Delivery = "no-mistakes" }},
+		{"removed no-mistakes delivery", func(r *taskplan.Request) { r.Delivery = "no-mistakes" }},
+		{"removed no-mistakes review", func(r *taskplan.Request) { r.Review = "no-mistakes" }},
 		{"workspace missing members", func(r *taskplan.Request) { r.Execution.Scope = "workspace" }},
 		{"repo members", func(r *taskplan.Request) {
 			r.Execution.Members = []taskplan.Member{{Name: "api", Path: "api", Delivery: "local"}}
@@ -280,6 +281,36 @@ func TestUnsupportedExecutionCombinationsAreRejected(t *testing.T) {
 				t.Fatal("unsupported combination admitted")
 			}
 		})
+	}
+}
+
+func TestStoredNoMistakesPlanStaysReadable(t *testing.T) {
+	r := request("change")
+	r.Delivery = "pr"
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Version, plan.Delivery, plan.Review = 5, "no-mistakes", "no-mistakes"
+	plan.Preferences[0].Value, plan.Preferences[1].Value = "no-mistakes", "no-mistakes"
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := taskplan.Decode(string(data))
+	if err != nil || stored.Delivery != "no-mistakes" || stored.Review != "no-mistakes" {
+		t.Fatalf("stored no-mistakes plan unreadable: %#v %v", stored, err)
+	}
+	if encoded, err := stored.Encode(); err != nil || encoded != string(data) {
+		t.Fatalf("stored no-mistakes plan bytes changed: %v", err)
+	}
+	plan.Version = taskplan.Version
+	current, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := taskplan.Decode(string(current)); err == nil || !strings.Contains(err.Error(), "no-mistakes was removed") {
+		t.Fatalf("current plan admitted no-mistakes: %v", err)
 	}
 }
 
@@ -369,7 +400,7 @@ func TestLegacyReviewPlansKeepFrozenValues(t *testing.T) {
 
 func TestMemberReviewSelectionAndScopedConsent(t *testing.T) {
 	r := request("change")
-	r.Review = "no-mistakes"
+	r.Review = "full-pipeline"
 	r.Brief = taskplan.Select("brief", "members.md", []byte("---\ntype: change\ntitle: Member\ndone_when: checked\nrepos: [api]\nreview: quick\n---\n"))
 	r.Execution.Scope = "workspace"
 	r.Execution.Members = []taskplan.Member{{Name: "api", Path: "api", Delivery: "local", Review: "none", ReviewSource: "repositories.api.review"}}
@@ -377,7 +408,7 @@ func TestMemberReviewSelectionAndScopedConsent(t *testing.T) {
 	if err != nil || plan.Execution.Members[0].Review != "quick" || plan.Execution.Members[0].ReviewSource != "brief: members.md" {
 		t.Fatalf("member tightening: %#v %v", plan, err)
 	}
-	r.Execution.Members[0].Review = "no-mistakes"
+	r.Execution.Members[0].Review = "full-pipeline"
 	if _, err := taskplan.Resolve(r); err == nil {
 		t.Fatal("member policy loosened without consent")
 	}

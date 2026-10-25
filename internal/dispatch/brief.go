@@ -81,16 +81,22 @@ func ParseBrief(path string) (Brief, error) {
 }
 
 func ParseBriefText(contents string) (Brief, error) {
-	return parseBriefText(contents, false)
+	return parseBriefText(contents, false, false)
+}
+
+// ParseStoredBriefText reads a Brief frozen under the current contract before
+// no-mistakes was removed, so its stored merge_mode or review stays readable.
+func ParseStoredBriefText(contents string) (Brief, error) {
+	return parseBriefText(contents, false, true)
 }
 
 // ParseHistoricalBriefText reads stored Briefs without applying the new Change ticket
 // cardinality rule, so existing Tasks retain their original issue references.
 func ParseHistoricalBriefText(contents string) (Brief, error) {
-	return parseBriefText(contents, true)
+	return parseBriefText(contents, true, true)
 }
 
-func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, error) {
+func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes bool) (Brief, error) {
 	lines := strings.Split(strings.ReplaceAll(contents, "\r\n", "\n"), "\n")
 	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
 		return Brief{}, &BriefError{Field: "frontmatter", Reason: "must start with --- and include a closing ---"}
@@ -341,8 +347,10 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 	if brief.Execution == "in-place" && len(brief.Paths) == 0 {
 		return Brief{}, &BriefError{Field: "paths", Reason: "must list at least one directory-relative path for in-place execution"}
 	}
-	if brief.MergeMode != "" && !oneOf(brief.MergeMode, "local", "pr", "no-mistakes") {
-		return Brief{}, &BriefError{Field: "merge_mode", Reason: "must be local, pr or no-mistakes"}
+	if brief.MergeMode != "" && !(allowNoMistakes && brief.MergeMode == config.NoMistakes) {
+		if err := config.ValidateMergeMode(brief.MergeMode); err != nil {
+			return Brief{}, &BriefError{Field: "merge_mode", Reason: err.Error()}
+		}
 	}
 	if brief.ReportKind != "" {
 		if brief.Type != "research" {
@@ -352,7 +360,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue bool) (Brief, err
 			return Brief{}, &BriefError{Field: "report_kind", Reason: "must be spec or tickets"}
 		}
 	}
-	if brief.Review != "" && !(allowHistoricalMultiIssue && config.LegacyReview(brief.Review)) {
+	if brief.Review != "" && !(allowHistoricalMultiIssue && config.LegacyReview(brief.Review)) && !(allowNoMistakes && brief.Review == config.NoMistakes) {
 		if err := config.ValidateReview(brief.Review); err != nil {
 			return Brief{}, &BriefError{Field: "review", Reason: err.Error()}
 		}
@@ -720,7 +728,7 @@ func ResolveReview(requested, current string, userChoice bool) (string, error) {
 	if err := config.ValidateReview(requested); err != nil {
 		return "", &BriefError{Field: "review", Reason: err.Error()}
 	}
-	rank := map[string]int{"none": 0, "quick": 1, "no-mistakes": 2, "full-pipeline": 3}
+	rank := map[string]int{"none": 0, "quick": 1, "full-pipeline": 2}
 	if !userChoice && rank[requested] < rank[current] {
 		return "", &BriefError{Field: "review", Reason: "cannot loosen the Project review policy without a scoped User choice"}
 	}
@@ -733,8 +741,6 @@ func mergeRank(value string) int {
 		return 0
 	case "pr":
 		return 1
-	case "no-mistakes":
-		return 2
 	default:
 		return -1
 	}

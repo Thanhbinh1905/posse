@@ -1,6 +1,6 @@
 # Review verdicts bind completed revisions
 
-**Current status:** ADR 0028 removes configurable command Gates. PR review evidence is still bound to `gated_sha` and forge CI; local delivery has no automated verification.
+**Current status:** ADR 0028 removes configurable command Gates. PR review evidence is still bound to `gated_sha` and forge CI; local delivery has no automated verification. [ADR 0024](0024-built-in-validation-replaces-no-mistakes.md) and spec section 25.17 record the removal of no-mistakes (V15, #305): the `no-mistakes` review policy fails config with `config_migration_required`, Posse no longer queries receipts, and stored `review_receipts` stay readable as history.
 
 ## Context
 

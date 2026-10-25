@@ -253,6 +253,10 @@ func (s *Service) researchConfig(home string, project store.Project) (config.Con
 }
 
 func configFailure(err error) error {
+	var migration *config.MigrationError
+	if errors.As(err, &migration) {
+		return configError(err)
+	}
 	var invalid *config.InvalidError
 	if errors.As(err, &invalid) {
 		return axi.Failure("config_invalid", err.Error(), false, "Run `posse config show --effective` to inspect configuration")

@@ -208,7 +208,7 @@ func TestUnchangedTaskObservationDoesNotWaitForWriter(t *testing.T) {
 		absentSince, idleSince                              int64
 		serverStartedAt                                     string
 	}{"w1:p1", "w1", "session-1", "claude", 10, 20, "server-1"}
-	if err := db.UpdateTaskObservation(ctx, taskID, observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt); err != nil {
+	if err := db.UpdateTaskObservation(ctx, taskID, TaskObservation{PaneID: observation.paneID, WorkspaceID: observation.workspaceID, AgentSession: observation.agentSession, AgentSessionKind: observation.agentSessionKind, AgentAbsentSince: observation.absentSince, IdleSince: observation.idleSince, AgentServerStartedAt: observation.serverStartedAt}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET updated_at=1 WHERE id=?`, taskID); err != nil {
@@ -225,7 +225,7 @@ func TestUnchangedTaskObservationDoesNotWaitForWriter(t *testing.T) {
 
 	writeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if err := db.UpdateTaskObservation(writeCtx, taskID, observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt); err != nil {
+	if err := db.UpdateTaskObservation(writeCtx, taskID, TaskObservation{PaneID: observation.paneID, WorkspaceID: observation.workspaceID, AgentSession: observation.agentSession, AgentSessionKind: observation.agentSessionKind, AgentAbsentSince: observation.absentSince, IdleSince: observation.idleSince, AgentServerStartedAt: observation.serverStartedAt}); err != nil {
 		t.Fatalf("unchanged Task observation waited for a write lock: %v", err)
 	}
 	var updatedAt int64
@@ -260,7 +260,7 @@ func TestChangedTaskObservationIsPersisted(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET updated_at=1 WHERE id=?`, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateTaskObservation(ctx, taskID, "w2:p3", "w2", "session-2", "claude", 30, 40, "server-2"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, taskID, TaskObservation{PaneID: "w2:p3", WorkspaceID: "w2", AgentSession: "session-2", AgentSessionKind: "claude", AgentAbsentSince: 30, IdleSince: 40, AgentServerStartedAt: "server-2"}); err != nil {
 		t.Fatal(err)
 	}
 	var paneID, workspaceID, agentSession, agentSessionKind, serverStartedAt string
@@ -330,7 +330,7 @@ func TestTaskObservationConditionalUpdatePreservesConcurrentObservation(t *testi
 		absentSince, idleSince                              int64
 		serverStartedAt                                     string
 	}{"w2:p3", "w2", "session-2", "claude", 30, 40, "server-2"}
-	unchanged, err := db.taskObservationMatches(ctx, taskID, observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt)
+	unchanged, err := db.taskObservationMatches(ctx, taskID, TaskObservation{PaneID: observation.paneID, WorkspaceID: observation.workspaceID, AgentSession: observation.agentSession, AgentSessionKind: observation.agentSessionKind, AgentAbsentSince: observation.absentSince, IdleSince: observation.idleSince, AgentServerStartedAt: observation.serverStartedAt})
 	if err != nil || unchanged {
 		t.Fatalf("initial Task observation check = unchanged:%t error:%v, want changed", unchanged, err)
 	}
@@ -338,7 +338,7 @@ func TestTaskObservationConditionalUpdatePreservesConcurrentObservation(t *testi
 		observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.writeTaskObservation(ctx, taskID, observation.paneID, observation.workspaceID, observation.agentSession, observation.agentSessionKind, observation.absentSince, observation.idleSince, observation.serverStartedAt, 200); err != nil {
+	if err := db.writeTaskObservation(ctx, taskID, TaskObservation{PaneID: observation.paneID, WorkspaceID: observation.workspaceID, AgentSession: observation.agentSession, AgentSessionKind: observation.agentSessionKind, AgentAbsentSince: observation.absentSince, IdleSince: observation.idleSince, AgentServerStartedAt: observation.serverStartedAt}, 200); err != nil {
 		t.Fatal(err)
 	}
 	var updatedAt int64

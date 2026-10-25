@@ -61,26 +61,30 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 }
 
 type activeTaskSummary struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	State      string `json:"state"`
-	MergeQueue string `json:"merge_queue,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	State         string `json:"state"`
+	Agent         string `json:"agent,omitempty"`
+	AgentMismatch string `json:"agent_mismatch,omitempty"`
+	MergeQueue    string `json:"merge_queue,omitempty"`
 }
 
 type taskSummary struct {
-	ID      string       `json:"id"`
-	Type    string       `json:"type"`
-	State   string       `json:"state"`
-	Title   string       `json:"title"`
-	Name    string       `json:"name"`
-	PRState string       `json:"pr_state,omitempty"`
-	Queue   string       `json:"merge_queue,omitempty"`
-	Profile string       `json:"profile,omitempty"`
-	Branch  string       `json:"branch,omitempty"`
-	Reason  string       `json:"reason,omitempty"`
-	Issues  []string     `json:"issues,omitempty"`
-	Refs    []string     `json:"refs,omitempty"`
-	Usage   usage.Counts `json:"usage"`
+	ID            string       `json:"id"`
+	Type          string       `json:"type"`
+	State         string       `json:"state"`
+	Agent         string       `json:"agent,omitempty"`
+	AgentMismatch string       `json:"agent_mismatch,omitempty"`
+	Title         string       `json:"title"`
+	Name          string       `json:"name"`
+	PRState       string       `json:"pr_state,omitempty"`
+	Queue         string       `json:"merge_queue,omitempty"`
+	Profile       string       `json:"profile,omitempty"`
+	Branch        string       `json:"branch,omitempty"`
+	Reason        string       `json:"reason,omitempty"`
+	Issues        []string     `json:"issues,omitempty"`
+	Refs          []string     `json:"refs,omitempty"`
+	Usage         usage.Counts `json:"usage"`
 }
 
 type noticeSummary struct {
@@ -181,10 +185,12 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
 		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID])}
+		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
@@ -235,9 +241,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 				if reasonErr != nil {
 					return reasonErr
 				}
-				attention = append(attention, taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason})
+				row := taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason}
+				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
+				attention = append(attention, row)
 			} else {
-				active = append(active, activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), MergeQueue: mergeQueueLabel(queuePlaces[task.ID])})
+				row := activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), MergeQueue: mergeQueueLabel(queuePlaces[task.ID])}
+				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
+				active = append(active, row)
 			}
 		}
 		pending, err := db.UndeliveredNotices(ctx.Context, project.ID)
@@ -359,9 +369,12 @@ func summarizeProject(project store.Project, cfg config.Config, tasks []store.Ta
 	if lead == "" {
 		lead = "missing"
 	}
+	now := time.Now()
 	rows := make([]activeTaskSummary, 0, len(tasks))
 	for _, task := range tasks {
-		rows = append(rows, activeTaskSummary{ID: project.Name + "/" + taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)})
+		row := activeTaskSummary{ID: project.Name + "/" + taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State)}
+		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
+		rows = append(rows, row)
 	}
 	return projectSummary{Name: project.Name, Mode: projectMergeMode(project, cfg), Autonomy: "review=" + autonomy.Review + " merge=" + autonomy.Merge, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
 }
@@ -431,9 +444,11 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
 		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(task, cfg)}
+		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 		if taskNeedsUser(task) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
@@ -543,6 +558,12 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
+	if agent, mismatch := agentObservation(task, cfg, time.Now()); agent != "" {
+		view["agent"] = agent
+		if mismatch != "" {
+			view["agent_mismatch"] = mismatch
+		}
+	}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return admittedPlanFailure(err)

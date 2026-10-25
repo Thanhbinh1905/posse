@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -45,15 +46,15 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.auto_recover", Type: TypeBoolean, Default: true, Meaning: "Whether plugin events and the Herdr startup hook restart the Lead and Workers after a Herdr restart or a closed Lead workspace; when false, `posse up` recovers them."},
 	{Key: "defaults.recovery_attempts", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic relaunch attempts per Worker recovery episode; exhaustion requires explicit relaunch."},
 	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed automatic Worker relaunches; doubles up to one minute."},
-	{Key: "defaults.merge_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Default: "pr", Meaning: "How Change Task changes are Merged; no-mistakes is deprecated."},
+	{Key: "defaults.merge_mode", Type: TypeString, Allowed: []string{"local", "pr"}, Default: "pr", Meaning: "How Change Task changes are Merged."},
 	{Key: "defaults.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for Change Tasks; empty uses each repository's default branch."},
 	{Key: "defaults.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Forge for this Project; auto detects from each repository remote."},
 	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
 	{Key: "defaults.merge_method", Type: TypeString, Allowed: []string{"squash", "merge", "rebase"}, Default: "squash", Meaning: "Merge method used for pull requests."},
 	{Key: "defaults.require_current_target", Type: TypeBoolean, Default: false, Meaning: "Require a PR/MR head to contain the current target tip before final CI evidence and Merge, asking behind Workers to merge the target through a per-target merge queue (ADR 0019, ADR 0031); when false, a green, mergeable PR merges while behind and only conflicts ask the Worker to merge the target.", UserOnly: true},
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
-	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline is selectable and frozen but unavailable until VP-C validation ships; no-mistakes is deprecated.", UserOnly: true},
-	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline", "no-mistakes"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
+	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline is selectable and frozen but unavailable until VP-C validation ships.", UserOnly: true},
+	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
 	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Change Tasks.", UserOnly: true},
 	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Change Task; may be lowered to 1 or 2.", UserOnly: true},
 	{Key: "review_loop.block_at", Type: TypeString, Allowed: []string{"P0", "P1", "P2"}, Default: "P1", Meaning: "Finding severity at or above which introduced findings block Merge.", UserOnly: true},
@@ -63,7 +64,7 @@ var keySpecs = []KeySpec{
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
 	{Key: "full_pipeline.run_workflows", Type: TypeBoolean, Default: false, Meaning: "Explicitly allow locally executing repository CI workflow shell steps in the private full-pipeline candidate; unsupported jobs remain visible and cannot be inferred from repository files.", UserOnly: true},
-	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr", "no-mistakes"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode. no-mistakes is deprecated and unavailable for workspace Tasks."},
+	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
 	{Key: "pool.clean", Type: TypeString, Allowed: []string{"warm", "pristine"}, Default: "warm", Meaning: "Whether released Sandboxes keep ignored files."},
 	{Key: "pool.setup", Type: TypeStringArray, Default: []string{}, Meaning: "Commands run in a Sandbox after it is acquired.", UserOnly: true},
@@ -208,6 +209,11 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 				return err
 			}
 		}
+		if key == "defaults.merge_mode" || strings.HasPrefix(key, "repositories.") && strings.HasSuffix(key, ".merge_mode") {
+			if err := ValidateMergeMode(text); err != nil {
+				return err
+			}
+		}
 		if len(spec.Allowed) > 0 && !oneOf(text, spec.Allowed...) {
 			return fmt.Errorf("%s must be one of %s", key, strings.Join(spec.Allowed, ", "))
 		}
@@ -331,7 +337,7 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 			if _, found := Lookup(key); !found {
 				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"})
 			} else if err := ValidateSetting(key, current, projectFile); err != nil {
-				issues = append(issues, &InvalidError{File: file, Key: key, Reason: strings.TrimPrefix(err.Error(), key+" ")})
+				issues = append(issues, settingIssue(file, key, err))
 			}
 		default:
 			if prefix == "" {
@@ -343,7 +349,7 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 				return
 			}
 			if err := ValidateSetting(key, value, projectFile); err != nil {
-				issues = append(issues, &InvalidError{File: file, Key: key, Reason: strings.TrimPrefix(err.Error(), key+" ")})
+				issues = append(issues, settingIssue(file, key, err))
 			}
 		}
 	}
@@ -358,6 +364,16 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 		walk(key, values[key])
 	}
 	return uniqueValidationErrors(issues)
+}
+
+// settingIssue keeps a MigrationError as the cause so callers can report the
+// replacement the User must choose.
+func settingIssue(file, key string, err error) *InvalidError {
+	var migration *MigrationError
+	if errors.As(err, &migration) {
+		return &InvalidError{File: file, Key: key, Cause: err}
+	}
+	return &InvalidError{File: file, Key: key, Reason: strings.TrimPrefix(err.Error(), key+" ")}
 }
 
 func sortedMapKeys[V any](values map[string]V) []string {

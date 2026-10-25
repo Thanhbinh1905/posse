@@ -172,7 +172,7 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	t.Fatalf("doctor omitted execution resource counts: %#v", result.Checks)
 }
 
-func TestDoctorListsProjectsAndMembersUsingNoMistakes(t *testing.T) {
+func TestDoctorNamesNoMistakesConfigReplacements(t *testing.T) {
 	root := t.TempDir()
 	shopRoot := filepath.Join(root, "shop")
 	initRepo(t, shopRoot)
@@ -196,18 +196,10 @@ func TestDoctorListsProjectsAndMembersUsingNoMistakes(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	configBefore := map[string][]byte{}
 	for project, text := range map[string]string{
-		"shop": `[defaults]
-merge_mode = "no-mistakes"
-review = "no-mistakes"
-`,
-		"stack": `[defaults]
-merge_mode = "pr"
-review = "none"
-[repositories.api]
-merge_mode = "no-mistakes"
-review = "no-mistakes"
-`,
+		"shop":  "[defaults]\nmerge_mode = \"no-mistakes\"\n",
+		"stack": "[defaults]\nmerge_mode = \"pr\"\n[repositories.api]\nreview = \"no-mistakes\"\n",
 	} {
 		path := filepath.Join(home, "projects", project, "config.toml")
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -216,20 +208,51 @@ review = "no-mistakes"
 		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		configBefore[path] = []byte(text)
 	}
 	service := testService(home, nil)
 	output := &bytes.Buffer{}
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	if code := cli.Run([]string{"doctor", "--json"}); code != 0 {
-		t.Fatalf("doctor exit=%d output=%s", code, output.String())
+	cli.Run([]string{"doctor", "--json"})
+	var result struct {
+		Checks []struct{ Check, Status, Detail string }
+		Help   []struct{ Check, Action string }
 	}
-	for _, want := range []string{
-		"deprecated no-mistakes shop", "Project shop defaults.merge_mode", "Project shop defaults.review",
-		"deprecated no-mistakes stack", "Member api effective merge_mode", "Member api effective review policy",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Errorf("doctor omitted %q: %s", want, output.String())
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("decode doctor: %v %s", err, output.String())
+	}
+	checks := map[string]struct{ Status, Detail, Action string }{}
+	for _, check := range result.Checks {
+		checks[check.Check] = struct{ Status, Detail, Action string }{check.Status, check.Detail, ""}
+	}
+	for _, help := range result.Help {
+		check := checks[help.Check]
+		check.Action = help.Action
+		checks[help.Check] = check
+	}
+	if _, duplicated := checks["agent configuration"]; duplicated {
+		t.Fatalf("doctor reported the removed value twice: %s", output.String())
+	}
+	shopPath := filepath.Join(home, "projects", "shop", "config.toml")
+	shop := checks["config shop"]
+	if shop.Status != "fail" || !strings.Contains(shop.Detail, shopPath+": defaults.merge_mode: no-mistakes was removed; use pr") ||
+		!strings.Contains(shop.Action, "`posse config set defaults.merge_mode pr --project shop`") || !strings.Contains(shop.Action, "commands.test and commands.lint") {
+		t.Fatalf("shop config check = %#v\n%s", shop, output.String())
+	}
+	stackPath := filepath.Join(home, "projects", "stack", "config.toml")
+	stack := checks["config stack"]
+	if stack.Status != "fail" || !strings.Contains(stack.Detail, stackPath+": repositories.api.review: no-mistakes was removed; use full-pipeline (quick or none are lighter choices)") ||
+		!strings.Contains(stack.Action, "`posse config set repositories.api.review full-pipeline --project stack`") ||
+		!strings.Contains(stack.Action, "`posse config set repositories.api.review quick --project stack`") || !strings.Contains(stack.Action, "`posse config set repositories.api.review none --project stack`") {
+		t.Fatalf("stack config check = %#v\n%s", stack, output.String())
+	}
+	if strings.Contains(output.String(), "no_mistakes_migration") {
+		t.Fatalf("doctor still prints the removed migration list: %s", output.String())
+	}
+	for path, before := range configBefore {
+		if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+			t.Fatalf("doctor changed %s: %v\n%s", path, err, after)
 		}
 	}
 }

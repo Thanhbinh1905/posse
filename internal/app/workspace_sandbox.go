@@ -26,7 +26,7 @@ const (
 	sharedEntriesLimit = 10000
 )
 
-var mergeRank = map[string]int{"local": 0, "pr": 1, "no-mistakes": 2}
+var mergeRank = map[string]int{"local": 0, "pr": 1}
 
 // taskMember is one member repository a workspace Task checks out.
 type taskMember struct {
@@ -109,9 +109,6 @@ func (s *Service) planTaskMembersWithChoice(ctx context.Context, db *store.DB, p
 				return nil, "", axi.Failure("brief_invalid", fmt.Sprintf("merge_mode %s would loosen member %s from %s", brief.MergeMode, name, member.MergeMode), false, "Remove merge_mode or tighten it")
 			}
 			member.MergeMode = brief.MergeMode
-		}
-		if member.MergeMode == "no-mistakes" {
-			return nil, "", axi.Failure("brief_invalid", "no-mistakes merging is not available for workspace members", false, "Use merge_mode local or pr")
 		}
 		if member.MergeMode == "pr" && remote == "" {
 			return nil, "", axi.Failure("brief_invalid", "member "+name+" has no origin and can only Merge locally", false, "Remove merge_mode: pr from the Brief")

@@ -103,24 +103,6 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if key == "defaults.merge_mode" && parsed.Positionals[1] == "no-mistakes" {
-		root := ""
-		if projectName != "" {
-			project, err := s.projectByName(ctx.Context, db, projectName)
-			if err != nil {
-				return err
-			}
-			root = project.Root
-		} else {
-			root, err = gitTop(ctx.Context, "")
-			if err != nil {
-				return err
-			}
-		}
-		if err := ensureNoMistakesInitialized(ctx.Context, root); err != nil {
-			return err
-		}
-	}
 	path := config.ConfigPath(home, projectName)
 	original, originalMode, originalExists, err := configSnapshot(path)
 	if err != nil {
@@ -149,9 +131,6 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 		return err
 	}
 	result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "setting", Value: key}, {Key: "value", Value: value}}
-	if parsed.Positionals[1] == "no-mistakes" && isNoMistakesPolicySetting(key) {
-		result = append(result, axi.Field{Key: "warnings", Value: []any{noMistakesDeprecatedWarning(key)}})
-	}
 	result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to inspect merged settings"}})
 	return ctx.Print(result)
 }

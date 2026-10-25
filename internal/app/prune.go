@@ -357,7 +357,7 @@ func mergedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 					eligible, reason = true, "Task branch is merged"
 				}
 			}
-			if !eligible && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
+			if !eligible && deliveredByPullRequest(task.MergeMode) {
 				observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 				if observationErr != nil && !store.IsNotFound(observationErr) {
 					return nil, observationErr
@@ -517,7 +517,7 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 			}
 			eligible, reason = true, "approved discard tip is captured"
 		} else if repo.State == store.TaskRepoMerged && repo.MergedRef != "" && repo.GatedSHA == sha {
-			if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", sha, repo.MergedRef); err == nil || repo.MergeMode == "pr" || repo.MergeMode == "no-mistakes" {
+			if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", sha, repo.MergedRef); err == nil || deliveredByPullRequest(repo.MergeMode) {
 				eligible, reason = true, "Task branch is merged"
 			}
 		}

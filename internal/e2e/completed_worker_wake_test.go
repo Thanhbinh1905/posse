@@ -14,14 +14,19 @@ import (
 
 // Reproduce #443: a wake turn after done that only acknowledges a result keeps
 // the Task done, while a wake turn that changes HEAD reopens it and queues an
-// instruction to signal again.
+// instruction to signal again. The changed turn commits after its working
+// event and ends at once, so no watch pass needs to observe it working (#509).
 func TestDoneWorkerWakeTurnReopensOnlyWhenRepositoryChanges(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 
 	agent := `#!/bin/sh
 set -eu
-report() { herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state "$1" >/dev/null 2>&1; }
+# Deliver each status change through the Posse Herdr plugin hook, as in production.
+report() {
+  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state "$1" >/dev/null 2>&1
+  HERDR_PLUGIN_EVENT_JSON="{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"$HERDR_PANE_ID\",\"agent_status\":\"$1\"}}" "$POSSE_E2E_POSSE_BIN" _ingest >> "$POSSE_TEST_ROOT/ingest.log" 2>&1 || true
+}
 report idle
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)
@@ -48,7 +53,6 @@ case "$PWD/" in
     printf 'wake change\n' > "wake-$task_id.txt"
     git add "wake-$task_id.txt"
     git commit -m "wake change $task_id" >/dev/null
-    sleep 2
     report idle
     : > "$POSSE_TEST_ROOT/wake-change-done-$task_id"
     while IFS= read -r instruction; do printf '%s\n' "$instruction" >> "$POSSE_TEST_ROOT/worker-delivery.log"; done

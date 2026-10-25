@@ -28,7 +28,7 @@ type readinessGap struct {
 // the same effective config and diagnostics produce the same conversation.
 func projectReadiness(cfg config.Config, checks []doctorCheck) []readinessGap {
 	gaps := []readinessGap{}
-	for _, code := range []string{"forge_auth", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"} {
+	for _, code := range []string{"forge_auth", "autonomy_ask", "machine_setup"} {
 		if code == "autonomy_ask" {
 			if cfg.Defaults.MergeMode == "" {
 				continue // Machine-only diagnostics have no Project authority.
@@ -62,20 +62,6 @@ func withReadiness(result axi.Object, gaps []readinessGap) axi.Object {
 		result = append(result, axi.Field{Key: "readiness", Value: gaps})
 	}
 	return result
-}
-
-func withReadinessHelp(err error, gaps []readinessGap) error {
-	failure, ok := err.(*axi.Error)
-	if !ok {
-		return err
-	}
-	for _, gap := range gaps {
-		if gap.Code == "no_mistakes_uninitialized" {
-			failure.Help = append(failure.Help, "Readiness gap: "+gap.Code+" - "+gap.Consequence, "Readiness fix: "+gap.Fix)
-			break
-		}
-	}
-	return failure
 }
 
 func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]readinessGap, error) {
@@ -284,15 +270,6 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 				}
 			}
 			checks = append(checks, auth)
-		}
-		if mode == "no-mistakes" {
-			check := doctorCheck{Name: "no-mistakes" + suffix, Status: "ok", Detail: "initialized", GapCode: "no_mistakes_uninitialized", Key: "defaults.merge_mode", Member: target.Name}
-			if err := ensureNoMistakesInitialized(ctx, target.Root); err != nil {
-				check.Status = "warn"
-				check.Detail = "The no-mistakes pipeline cannot run" + suffix + ": " + err.Error()
-				check.Action = "Install no-mistakes if needed, then run `no-mistakes init` in the repository."
-			}
-			checks = append(checks, check)
 		}
 	}
 	return checks

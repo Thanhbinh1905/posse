@@ -35,7 +35,7 @@ func TestVocabularyMalformedConfigRetainsInvalidError(t *testing.T) {
 }
 
 func TestVocabularyProjectShorthandUpgrade(t *testing.T) {
-	for _, mode := range []string{"local", "no-mistakes"} {
+	for _, mode := range []string{"local", "pr"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, "projects", "p", "config.toml")
@@ -64,6 +64,32 @@ func TestVocabularyProjectShorthandUpgrade(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestVocabularyUpgradeOfNoMistakesShorthandRequiresMigration(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "projects", "p", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("landing_mode = 'no-mistakes'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(home, "p")
+	var migration *MigrationError
+	if !errors.As(err, &migration) || migration.Replacement != "pr" || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "defaults.merge_mode") {
+		t.Fatalf("no-mistakes shorthand did not require migration: %v", err)
+	}
+	if backup, err := os.ReadFile(path + ".v014"); err != nil || string(backup) != "landing_mode = 'no-mistakes'\n" {
+		t.Fatalf("original Project config lost: %q %v", backup, err)
+	}
+	// The printed replacement repairs the renamed key.
+	if _, err := SetFile(path, "defaults.merge_mode", "pr", true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := Load(home, "p"); err != nil || cfg.Defaults.MergeMode != "pr" {
+		t.Fatalf("replacement did not repair config: %#v %v", cfg.Defaults, err)
 	}
 }
 

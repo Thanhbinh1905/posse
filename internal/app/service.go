@@ -847,7 +847,12 @@ func defaultBranch(ctx context.Context, root string) (string, error) {
 func configError(err error) error {
 	var invalid *config.InvalidError
 	if errors.As(err, &invalid) {
-		return axi.Failure("config_invalid", invalid.Error(), false, configRepairHelp(invalid)...)
+		code := "config_invalid"
+		var migration *config.MigrationError
+		if errors.As(invalid, &migration) {
+			code = "config_migration_required"
+		}
+		return axi.Failure(code, invalid.Error(), false, configRepairHelp(invalid)...)
 	}
 	return err
 }
@@ -862,6 +867,17 @@ func configRepairHelp(invalid *config.InvalidError) []string {
 		scope = " --project " + filepath.Base(projectDir)
 	}
 	key := invalid.Key
+	var migration *config.MigrationError
+	if errors.As(invalid, &migration) {
+		help := []string{"Run `posse config set " + key + " " + migration.Replacement + scope + "` in " + invalid.File}
+		for _, lighter := range migration.Lighter {
+			help = append(help, "Or choose the lighter `posse config set "+key+" "+lighter+scope+"`")
+		}
+		if migration.Value == config.NoMistakes {
+			help = append(help, "Keep no-mistakes commands.test and commands.lint in the repository CI workflow; a full-pipeline Worker records test evidence with `posse validate test`")
+		}
+		return append(help, "Posse never changes config for this migration", "Run `posse setup` after the config is valid")
+	}
 	value := "<valid-value>"
 	if strings.Contains(invalid.Error(), "legacy review policy") {
 		value = "none"

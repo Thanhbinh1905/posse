@@ -382,7 +382,7 @@ func TestBriefParsingAndTightening(t *testing.T) {
 type: change
 title: Fix login
 done_when: login test passes
-merge_mode: no-mistakes
+merge_mode: pr
 autonomy: { merge: ask }
 ---
 Do the work.
@@ -390,8 +390,8 @@ Do the work.
 	if err != nil {
 		t.Fatal(err)
 	}
-	mode, autonomy, err := ValidateTightening(brief, "pr", config.Autonomy{Review: "lead", Merge: "auto"})
-	if err != nil || mode != "no-mistakes" || autonomy.Merge != "ask" || autonomy.Review != "lead" {
+	mode, autonomy, err := ValidateTightening(brief, "local", config.Autonomy{Review: "lead", Merge: "auto"})
+	if err != nil || mode != "pr" || autonomy.Merge != "ask" || autonomy.Review != "lead" {
 		t.Fatalf("tightened values = %q %#v, %v", mode, autonomy, err)
 	}
 }
@@ -401,6 +401,7 @@ func TestBriefRejectsInvalidOrLooserContract(t *testing.T) {
 		"---\ntitle: missing type\ndone_when: x\n---\n",
 		"---\ntype: change\ntitle: x\ndone_when: x\nunknown: x\n---\n",
 		"---\ntype: review\ntitle: x\ndone_when: x\n---\n",
+		"---\ntype: change\ntitle: x\ndone_when: x\nmerge_mode: no-mistakes\n---\n",
 	} {
 		if _, err := ParseBriefText(source); err == nil {
 			t.Fatalf("accepted invalid Brief:\n%s", source)
