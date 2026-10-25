@@ -640,7 +640,7 @@ func renderSetupPlan(plan []map[string]any) []axi.Object {
 }
 
 func setupPrerequisites(state setupInspection) []axi.Object {
-	tools := []string{"git", "herdr", "gh", "no-mistakes"}
+	tools := []string{"git", "herdr", "gh"}
 	for _, kind := range state.ReferencedKinds {
 		tools = append(tools, agentCLIName(kind))
 	}
@@ -656,7 +656,7 @@ func setupPrerequisites(state setupInspection) []axi.Object {
 		status := "available"
 		if err != nil {
 			status = "missing"
-			if tool == "gh" || tool == "no-mistakes" {
+			if tool == "gh" {
 				status = "optional_missing"
 			}
 			path = ""

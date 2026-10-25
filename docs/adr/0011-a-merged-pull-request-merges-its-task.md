@@ -1,5 +1,7 @@
 # A merged pull request Merges its Task
 
+**Current status:** [ADR 0024](0024-built-in-validation-replaces-no-mistakes.md) and spec section 25.17 record the removal of no-mistakes (V15, #305). New Tasks use `pr`; a Task admitted under `no-mistakes` still Merges when the forge reports its pull request merged.
+
 Posse treated Merge as a step of the Task state machine: only a `merging` Task, or a `done` one with a safe worktree, could become `merged`. A Task sent back to `working` for a follow-up, or marked `lost`, never Merged when the User merged its pull request. It got no teardown, kept its Sandbox, and sometimes raised no Notice at all. Tasks t59, t61 and t62 (pull requests #5, #6 and #7) all ended `lost` with a merged pull request recorded as open. Commit 2bcd6e3 added a `pr_follow_up_pending` Notice for this case, but the Task still waited for the Worker to report `done`. The User chose to treat a merged pull request as the fact that decides Merge.
 
 ## Decision

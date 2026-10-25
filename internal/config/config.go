@@ -732,6 +732,9 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	add := func(key, reason string) {
 		issues = append(issues, &InvalidError{File: file, Key: key, Reason: reason})
 	}
+	addErr := func(key string, err error) {
+		issues = append(issues, settingIssue(file, key, err))
+	}
 	if c.Defaults.MaxWorkers < 1 {
 		add("defaults.max_workers", "must be positive")
 	}
@@ -771,8 +774,8 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	if !oneOf(c.Defaults.AutoTeardown, "finished", "merged", "never") {
 		add("defaults.auto_teardown", "must be one of finished, merged, never")
 	}
-	if !oneOf(c.Defaults.MergeMode, "local", "pr", "no-mistakes") {
-		add("defaults.merge_mode", "must be local, pr or no-mistakes")
+	if err := ValidateMergeMode(c.Defaults.MergeMode); err != nil {
+		addErr("defaults.merge_mode", err)
 	}
 	if !oneOf(c.Defaults.Forge, "", "auto", "github", "gitlab") {
 		add("defaults.forge", "must be auto, github or gitlab")
@@ -781,7 +784,7 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		repo := c.Repositories[name]
 		if repo.Review != "" {
 			if err := ValidateReview(repo.Review); err != nil {
-				add("repositories."+name+".review", err.Error())
+				addErr("repositories."+name+".review", err)
 			}
 		}
 		if !oneOf(repo.Forge, "", "auto", "github", "gitlab") {
@@ -792,7 +795,7 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		add("defaults.merge_method", "must be squash, merge or rebase")
 	}
 	if err := ValidateReview(c.Defaults.Review); err != nil {
-		add("defaults.review", err.Error())
+		addErr("defaults.review", err)
 	}
 	if !oneOf(c.Pool.Clean, "warm", "pristine") {
 		add("pool.clean", "must be warm or pristine")

@@ -15,7 +15,16 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 5
+const Version = 6
+
+// planVersionRuntimeWorkflow marks the first plan version that binds a frozen
+// workflow to its run and stage identity.
+const planVersionRuntimeWorkflow = 5
+
+// planVersionWithoutNoMistakes marks the first plan version written after the
+// no-mistakes Merge Mode and review policy were removed. Older plans may still
+// name them so stored Tasks and their review receipts stay readable.
+const planVersionWithoutNoMistakes = 6
 
 var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
 
@@ -343,16 +352,17 @@ func (p Plan) Validate() error {
 		if err := config.ValidateHistoricalReview(p.Review); err != nil {
 			return invalid(err.Error())
 		}
-	} else if err := config.ValidateReview(p.Review); err != nil {
+	} else if err := p.validateReview(p.Review); err != nil {
 		return invalid(err.Error())
 	}
-	if p.Delivery != "local" && p.Delivery != "pr" && p.Delivery != "no-mistakes" {
+	storedNoMistakes := p.Version < planVersionWithoutNoMistakes && p.Delivery == config.NoMistakes
+	if p.Delivery != "local" && p.Delivery != "pr" && !storedNoMistakes {
 		return invalid("unsupported delivery")
 	}
-	if p.Execution.Scope == "workspace" && p.Delivery == "no-mistakes" {
+	if p.Execution.Scope == "workspace" && storedNoMistakes {
 		return invalid("no-mistakes delivery is unsupported for Workspaces")
 	}
-	if p.Version >= 4 && p.Review == "full-pipeline" && p.Delivery == "no-mistakes" {
+	if p.Version >= 4 && p.Review == "full-pipeline" && storedNoMistakes {
 		return invalid("full-pipeline cannot use no-mistakes delivery")
 	}
 	if p.Execution.Mode == "in-place" {
@@ -422,7 +432,7 @@ func (p Plan) Validate() error {
 			return invalid("invalid pinned Member base commit")
 		}
 		if p.Version >= 2 {
-			validateReview := config.ValidateReview
+			validateReview := p.validateReview
 			if p.Version < 4 {
 				validateReview = config.ValidateHistoricalReview
 			}
@@ -453,6 +463,8 @@ func (p Plan) Validate() error {
 	parseBrief := dispatch.ParseBriefText
 	if p.Version < planVersionCurrentBriefContract {
 		parseBrief = dispatch.ParseHistoricalBriefText
+	} else if p.Version < planVersionWithoutNoMistakes {
+		parseBrief = dispatch.ParseStoredBriefText
 	}
 	brief, err := parseBrief(string(p.Inputs[0].Bytes))
 	if err != nil {
@@ -484,7 +496,7 @@ func (p Plan) Validate() error {
 		}
 		runtimeBound := p.Workflow.RunID != "" || p.Workflow.StageName != "" || p.Workflow.StageIndex != 0
 		if !runtimeBound {
-			if p.Version >= Version || brief.Workflow == "" || brief.WorkflowRun != "" || brief.Stage != "" {
+			if p.Version >= planVersionRuntimeWorkflow || brief.Workflow == "" || brief.WorkflowRun != "" || brief.Stage != "" {
 				return invalid("frozen workflow does not match the selected Brief or lacks run and stage identity")
 			}
 		} else {
@@ -596,6 +608,14 @@ func (p Plan) Validate() error {
 		}
 	}
 	return nil
+}
+
+// validateReview checks a review policy frozen by a version 4 or later plan.
+func (p Plan) validateReview(value string) error {
+	if p.Version < planVersionWithoutNoMistakes && value == config.NoMistakes {
+		return nil
+	}
+	return config.ValidateReview(value)
 }
 
 func Decode(data string) (Plan, error) {

@@ -737,7 +737,9 @@ func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 	if !strings.Contains(workspace, `posse publish --repo <member> "<summary>" [--verify "<command> -> <result>"] [--proof "<markdown>"] [--risk "<markdown>"]`) || !strings.Contains(workspace, "screenshots/images") || !strings.Contains(workspace, "test/log evidence") || !strings.Contains(workspace, "risk plus rollback") {
 		t.Fatalf("workspace Worker protocol has incorrect publishing rules: %s", workspace)
 	}
-	if strings.Contains(noMistakes, "git push") || !strings.Contains(noMistakes, "no-mistakes axi run --intent") {
-		t.Fatalf("no-mistakes Worker protocol has incorrect delivery rules: %s", noMistakes)
+	// A Task admitted before the no-mistakes removal gets the no-push protocol;
+	// its done Signal and Merge are refused.
+	if !strings.Contains(noMistakes, "Never git push or open a PR") || strings.Contains(noMistakes, "no-mistakes") || strings.Contains(noMistakes, "--pr <url>") {
+		t.Fatalf("legacy no-mistakes Worker protocol has incorrect delivery rules: %s", noMistakes)
 	}
 }

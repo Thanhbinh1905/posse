@@ -59,7 +59,7 @@ The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Ta
 _Avoid_: Approval, review result
 
 **Review Loop**:
-The optional built-in protocol that turns successive Review Tasks of one Change Task into at most three Review Rounds over a Finding Ledger; part of the built-in validation that replaces no-mistakes.
+The optional built-in protocol that turns successive Review Tasks of one Change Task into at most three Review Rounds over a Finding Ledger; part of the built-in validation that replaced no-mistakes.
 _Avoid_: Review pipeline, review cycle
 
 **Review Round**:
@@ -132,7 +132,7 @@ Work a Worker made on a merged Task beyond what merged, such as later commits or
 _Avoid_: Follow-up (that is a message to a Worker), residue, diff
 
 **Merge Mode**:
-How a Project's Change Tasks Merge: `local` (merge on this machine), `pr` (a pull request) or the deprecated `no-mistakes` (through the no-mistakes pipeline, replaced by built-in validation).
+How a Project's Change Tasks Merge: `local` (merge on this machine) or `pr` (a pull request). The removed `no-mistakes` mode fails config with `config_migration_required` naming `pr`; Tasks admitted under it stay readable as history.
 Formerly: Landing Mode.
 _Avoid_: Delivery mode
 

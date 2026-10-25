@@ -518,87 +518,35 @@ func TestStartRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
 	}
 }
 
-func TestStartRejectsNoMistakesOnNonDefaultTargetBeforeAllocatingResources(t *testing.T) {
-	fixture := newStartFixture(t)
-	origin := filepath.Join(filepath.Dir(fixture.repo), "origin.git")
-	gitTest(t, filepath.Dir(fixture.repo), "init", "--bare", origin)
-	gitTest(t, fixture.repo, "remote", "add", "origin", origin)
-	gitTest(t, fixture.repo, "push", "origin", "main")
-	gitTest(t, fixture.repo, "switch", "-c", "staging")
-	gitTest(t, fixture.repo, "push", "origin", "staging")
-	gitTest(t, fixture.repo, "switch", "main")
-	installReadyNoMistakes(t)
-	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nmerge_mode: no-mistakes\ntarget: staging\n---\nCreate a committed file.\n"
-	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
-		t.Fatal(err)
+func TestStartRejectsNoMistakesBriefBeforeAllocatingResources(t *testing.T) {
+	for field, replacement := range map[string]string{"merge_mode": "pr", "review": "full-pipeline"} {
+		t.Run(field, func(t *testing.T) {
+			fixture := newStartFixture(t)
+			brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\n" + field + ": no-mistakes\n---\nCreate a committed file.\n"
+			if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			code, output := fixture.start(t)
+			if code != 1 || !strings.Contains(output, field) || !strings.Contains(output, "no-mistakes was removed; use "+replacement) {
+				t.Fatalf("start did not refuse the removed no-mistakes %s: code=%d output=%s", field, code, output)
+			}
+			if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
+				t.Fatalf("refused no-mistakes Brief allocated Herdr resources: calls=%#v", fixture.fake.Calls)
+			}
+			db, err := store.OpenReadOnly(fixture.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
+			if err != nil || len(tasks) != 0 {
+				t.Fatalf("refused no-mistakes Brief allocated Tasks: %#v, %v", tasks, err)
+			}
+			if _, err := gitOutput(context.Background(), fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1"); err == nil {
+				t.Fatal("refused no-mistakes Brief allocated a Task branch")
+			}
+		})
 	}
-	code, output := fixture.start(t)
-	if code != 1 || !strings.Contains(output, "no_mistakes_target_unsupported") {
-		t.Fatalf("start did not refuse unsupported no-mistakes target: code=%d output=%s", code, output)
-	}
-	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
-		t.Fatalf("unsupported no-mistakes target allocated Herdr resources: calls=%#v", fixture.fake.Calls)
-	}
-	db, err := store.OpenReadOnly(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
-	if err != nil || len(tasks) != 0 {
-		t.Fatalf("unsupported no-mistakes target allocated Tasks: %#v, %v", tasks, err)
-	}
-	sandboxes, err := db.Sandboxes(context.Background(), fixture.project.ID)
-	if err != nil || len(sandboxes) != 0 {
-		t.Fatalf("unsupported no-mistakes target acquired Sandboxes: %#v, %v", sandboxes, err)
-	}
-	if _, err := os.Stat(filepath.Join(fixture.home, "scratch", "shop", "t1")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported no-mistakes target allocated Task scratch: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported no-mistakes target allocated Task files: %v", err)
-	}
-	if _, err := gitOutput(context.Background(), fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1"); err == nil {
-		t.Fatal("unsupported no-mistakes target allocated a Task branch")
-	}
-}
-
-func TestStartAdmitsDefaultTargetNoMistakesWithDeprecationWarning(t *testing.T) {
-	fixture := newStartFixture(t)
-	origin := filepath.Join(filepath.Dir(fixture.repo), "origin.git")
-	gitTest(t, filepath.Dir(fixture.repo), "init", "--bare", origin)
-	gitTest(t, fixture.repo, "remote", "add", "origin", origin)
-	gitTest(t, fixture.repo, "push", "origin", "main")
-	installReadyNoMistakes(t)
-	brief := "---\ntype: change\ntitle: Launch probe\ndone_when: the Worker acts\nmerge_mode: no-mistakes\n---\nCreate a committed file.\n"
-	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	code, output := fixture.start(t)
-	if code != 0 || !strings.Contains(output, "deprecated") {
-		t.Fatalf("default-target no-mistakes Task was not admitted with warning: code=%d output=%s", code, output)
-	}
-	db, err := store.OpenReadOnly(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
-	if err != nil || len(tasks) != 1 || tasks[0].MergeMode != "no-mistakes" || tasks[0].TargetBranch != "main" || tasks[0].State != store.StateWorking {
-		t.Fatalf("default-target Task behavior changed: %#v, %v", tasks, err)
-	}
-}
-
-func installReadyNoMistakes(t *testing.T) {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(bin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "no-mistakes"), []byte("#!/bin/sh\necho initialized\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestStartReportsSandboxSetupFailureAndReleasesSandbox(t *testing.T) {

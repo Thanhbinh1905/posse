@@ -74,7 +74,7 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 		{"repo branch map", "target: {api: main}\n", nil},
 		{"missing branch", "base: main\ntarget: missing\n", nil},
 		{"unsupported execution", "execution: in-place\n", nil},
-		{"uninitialized no-mistakes", "merge_mode: no-mistakes\n", nil},
+		{"removed no-mistakes", "merge_mode: no-mistakes\n", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			brief := filepath.Join(f.root, "refused.md")

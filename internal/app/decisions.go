@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,16 +108,6 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			request.Kind = "review"
 			request.Question = "How should the Review Task findings for " + task.Title + " be handled? " + notice.Summary
 			request.Options = []string{"accept", "request-changes", "ignore"}
-		case notice.Kind == "needs_decision" && task.MergeMode == "no-mistakes" && task.AutonomyReview != "lead":
-			home, err := s.homePath()
-			if err != nil {
-				return err
-			}
-			if _, err := os.Stat(filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err == nil {
-				request.Kind = "review"
-				request.Question = "How should the findings for " + task.Title + " be handled? " + notice.Summary
-				request.Options = []string{"accept", "request-changes", "ignore"}
-			}
 		}
 		if request.Question != "" {
 			if _, err := db.RaiseDecision(ctx, request); err != nil {

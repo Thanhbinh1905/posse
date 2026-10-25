@@ -235,10 +235,6 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		name = detected.Name
 	}
-	root := project.Root
-	if !registered {
-		root = detected.Root
-	}
 	cfg, err := config.Load(home, name)
 	if err != nil {
 		return configError(err)
@@ -260,23 +256,6 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	if _, kindFound := cfg.Kinds[kind]; !kindFound {
 		return axi.Failure("agent_kind_unknown", "unknown Lead agent kind "+kind, false, "Choose a configured kind from `posse config show --effective`")
-	}
-	workspace := (registered && project.IsWorkspace()) || (!registered && detected.Kind == store.ProjectKindWorkspace)
-	if cfg.Defaults.MergeMode == "no-mistakes" && detected.Kind != store.ProjectKindDirectory && !project.IsDirectory() {
-		if workspace {
-			return axi.Failure("config_invalid", "no-mistakes merging is not available for workspace Projects", false, "Set `merge_mode` to local or pr for Project "+name)
-		}
-		if err := ensureNoMistakesInitialized(ctx.Context, root); err != nil {
-			readinessProject := project
-			if !registered {
-				readinessProject = store.Project{Name: name, Root: root, Kind: detected.Kind, DefaultBranch: detected.DefaultBranch}
-			}
-			gaps, readinessErr := s.readiness(ctx.Context, db, readinessProject, cfg)
-			if readinessErr == nil {
-				return withReadinessHelp(err, gaps)
-			}
-			return err
-		}
 	}
 	if s.Herdr == nil {
 		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
@@ -504,15 +483,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		{Key: "pane", Value: leadPane.PaneID},
 		{Key: "help", Value: []any{"The Lead is starting in this pane."}},
 	}
-	result = withReadiness(result, gaps)
-	migrations, err := noMistakesMigrations(ctx.Context, db, project, cfg)
-	if err != nil {
-		return err
-	}
-	if len(migrations) > 0 {
-		result = append(result, axi.Field{Key: "no_mistakes_migration", Value: noMistakesMigrationOutput(migrations)})
-	}
-	return ctx.Print(result)
+	return ctx.Print(withReadiness(result, gaps))
 }
 
 func agentName(project string, sequence, launch int) string {

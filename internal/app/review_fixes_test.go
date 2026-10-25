@@ -71,7 +71,7 @@ func TestReviewCrossRepoPRsWedgeReconcile(t *testing.T) {
 		t.Fatalf("merge %s %s", out, e)
 	}
 	ctx := context.Background()
-	id, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "other", State: store.StateSpawning, MergeMode: "no-mistakes", Branch: "posse/t2", BaseRef: "main", AutonomyMerge: "ask"})
+	id, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "other", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main", AutonomyMerge: "ask"})
 	if err != nil {
 		t.Fatal(err)
 	}
