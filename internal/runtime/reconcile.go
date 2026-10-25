@@ -203,11 +203,9 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if found && pane.Agent != "" {
 		status = pane.AgentStatus
 	}
-	fingerprint := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
-	if status == "idle" || status == "done" {
-		fingerprint = turnEndFingerprint(ctx, task, fingerprint)
-	}
-	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, fingerprint, now)
+	current := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
+	fingerprints := store.RepositoryFingerprints{TurnEnd: turnEndFingerprint(ctx, task, current), Current: current}
+	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, fingerprints, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
