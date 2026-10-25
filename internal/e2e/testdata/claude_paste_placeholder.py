@@ -62,6 +62,10 @@ def handle(text):
             change.write("worker change %s\n" % task_id)
         subprocess.run(["git", "add", "e2e-worker-%s.txt" % task_id], check=True)
         subprocess.run(["git", "commit", "-q", "-m", "worker change " + task_id], check=True)
+        # The test releases this gate once start returns, so the Task is
+        # working before the done Signal.
+        while not os.path.exists(os.path.join(os.environ["POSSE_E2E_SIGNAL_GATE"], task_id)):
+            time.sleep(0.02)
         run(posse, "publish", "Worker committed " + task_id)
         run(posse, "signal", "done", "Worker committed " + task_id, "--pr", pr_url)
         report("idle")
