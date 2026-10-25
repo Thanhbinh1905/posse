@@ -67,7 +67,7 @@ func TestTornDownReviewCapNoticesAreExcludedFromReconciliation(t *testing.T) {
 	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, Kind: "review_cap_reached", Summary: "stale cap"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='torn_down' WHERE id=?`, fixture.task.ID); err != nil {
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='torn-down' WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	notices, err := fixture.db.ReviewCapNotices(ctx, fixture.project.ID)

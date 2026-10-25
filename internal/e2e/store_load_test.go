@@ -96,6 +96,7 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	type sample struct {
 		command  string
 		elapsed  time.Duration
+		cpu      time.Duration
 		failed   bool
 		busy     bool
 		deferred bool
@@ -109,6 +110,7 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 		samples <- sample{
 			command:  strings.TrimSpace("posse " + strings.Join(args[:min(len(args), 1)], " ")),
 			elapsed:  time.Since(started),
+			cpu:      result.cpu,
 			failed:   result.err != nil,
 			busy:     strings.Contains(lower, "store_busy") || strings.Contains(lower, "sqlite_busy") || strings.Contains(lower, "database is locked"),
 			deferred: strings.Contains(result.output, "reconciliation was deferred") || strings.Contains(result.output, "maintenance deferred"),
@@ -220,7 +222,9 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 		list := byCommand[command]
 		sort.Slice(list, func(i, j int) bool { return list[i].elapsed < list[j].elapsed })
 		var failed, busy, deferred int
+		var cpu time.Duration
 		for _, sample := range list {
+			cpu += sample.cpu
 			if sample.failed {
 				failed++
 			}
@@ -232,7 +236,7 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 			}
 		}
 		percentile := func(p int) time.Duration { return list[(len(list)-1)*p/100].elapsed.Round(time.Millisecond) }
-		fmt.Fprintf(&report, "%-14s n=%-3d failed=%-3d busy=%-3d deferred=%-3d p50=%-7s p95=%-7s max=%s\n", command, len(list), failed, busy, deferred, percentile(50), percentile(95), percentile(100))
+		fmt.Fprintf(&report, "%-14s n=%-3d failed=%-3d busy=%-3d deferred=%-3d p50=%-7s p95=%-7s max=%-7s cpu/call=%s\n", command, len(list), failed, busy, deferred, percentile(50), percentile(95), percentile(100), (cpu / time.Duration(len(list))).Round(time.Millisecond))
 	}
 	watchLog, _ := os.ReadFile(filepath.Join(f.home, "projects", f.project.Name, "watch.log"))
 	lowerWatchLog := strings.ToLower(string(watchLog))

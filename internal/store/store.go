@@ -2657,6 +2657,10 @@ func (db *DB) MarkClaimedMessageDelivered(ctx context.Context, messageID int64, 
 	return db.PersistProject(ctx, projectID)
 }
 
+func (db *DB) OpenNoticeCount(ctx context.Context, projectID int64) (int64, error) {
+	return db.queries.OpenNoticeCount(ctx, projectID)
+}
+
 func (db *DB) Notices(ctx context.Context, projectID int64, openOnly bool) ([]Notice, error) {
 	notices := make([]Notice, 0)
 	if openOnly {
@@ -3002,6 +3006,42 @@ func (db *DB) Tasks(ctx context.Context, projectID int64, includeFinished bool) 
 	} else {
 		rows, err = db.queries.Tasks(ctx, projectID)
 	}
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		tasks = append(tasks, taskFromDB(row))
+	}
+	return tasks, nil
+}
+
+// TasksInState reads one state's Tasks from the Project state index, so
+// per-command maintenance does not load the Project's torn-down history.
+func (db *DB) TasksInState(ctx context.Context, projectID int64, state State) ([]Task, error) {
+	rows, err := db.queries.TasksInState(ctx, dbgen.TasksInStateParams{ProjectID: projectID, State: string(state)})
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		tasks = append(tasks, taskFromDB(row))
+	}
+	return tasks, nil
+}
+
+// TasksWithPaneLabels returns the Project's Tasks, in any state, whose pane
+// label is one of labels. Callers matching live panes read only the Tasks
+// those panes can belong to rather than the Project's whole history.
+func (db *DB) TasksWithPaneLabels(ctx context.Context, projectID int64, labels []string) ([]Task, error) {
+	if len(labels) == 0 {
+		return []Task{}, nil
+	}
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.queries.TasksWithPaneLabels(ctx, dbgen.TasksWithPaneLabelsParams{ProjectID: projectID, LabelsJson: string(encoded)})
 	if err != nil {
 		return nil, err
 	}

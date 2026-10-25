@@ -1038,6 +1038,17 @@ func (q *Queries) OldestQueuedMessage(ctx context.Context, taskID int64) (Oldest
 	return i, err
 }
 
+const openNoticeCount = `-- name: OpenNoticeCount :one
+SELECT COUNT(*) FROM notices WHERE project_id = ? AND acked_at IS NULL
+`
+
+func (q *Queries) OpenNoticeCount(ctx context.Context, projectID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, openNoticeCount, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const openNotices = `-- name: OpenNotices :many
 SELECT id, project_id, COALESCE(task_id, 0) AS task_id, kind, summary, data_json,
     created_at, COALESCE(delivered_at, 0) AS delivered_at, COALESCE(acked_at, 0) AS acked_at
@@ -2322,12 +2333,169 @@ func (q *Queries) TaskTransitions(ctx context.Context, arg TaskTransitionsParams
 }
 
 const tasks = `-- name: Tasks :many
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity FROM tasks INDEXED BY tasks_project_state_idx
 WHERE project_id = ? AND state NOT IN ('merged', 'reported', 'torn-down') ORDER BY seq
 `
 
 func (q *Queries) Tasks(ctx context.Context, projectID int64) ([]Task, error) {
 	rows, err := q.db.QueryContext(ctx, tasks, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Task{}
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Seq,
+			&i.Type,
+			&i.ReviewsTaskID,
+			&i.Title,
+			&i.State,
+			&i.Profile,
+			&i.DispatchRule,
+			&i.MergeMode,
+			&i.AutonomyReview,
+			&i.AutonomyMerge,
+			&i.Branch,
+			&i.BaseRef,
+			&i.WorktreePath,
+			&i.HerdrWorkspaceID,
+			&i.PaneID,
+			&i.PaneLabel,
+			&i.AgentName,
+			&i.AgentSession,
+			&i.PrUrl,
+			&i.MergedRef,
+			&i.LastOutputHash,
+			&i.LastWorktreeHash,
+			&i.LastProgressAt,
+			&i.AgentAbsentSince,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SandboxID,
+			&i.Launches,
+			&i.GatedSha,
+			&i.AgentServerStartedAt,
+			&i.IdleSince,
+			&i.ShortName,
+			&i.AgentSessionKind,
+			&i.TargetBranch,
+			&i.PrTitle,
+			&i.PlanJson,
+			&i.ReportKind,
+			&i.ReportDigest,
+			&i.ReportManifestJson,
+			&i.ContainmentMode,
+			&i.ContainmentPath,
+			&i.ContainmentMarker,
+			&i.PaneShellIdentity,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const tasksInState = `-- name: TasksInState :many
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id = ? AND state = ? ORDER BY seq
+`
+
+type TasksInStateParams struct {
+	ProjectID int64
+	State     string
+}
+
+func (q *Queries) TasksInState(ctx context.Context, arg TasksInStateParams) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, tasksInState, arg.ProjectID, arg.State)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Task{}
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Seq,
+			&i.Type,
+			&i.ReviewsTaskID,
+			&i.Title,
+			&i.State,
+			&i.Profile,
+			&i.DispatchRule,
+			&i.MergeMode,
+			&i.AutonomyReview,
+			&i.AutonomyMerge,
+			&i.Branch,
+			&i.BaseRef,
+			&i.WorktreePath,
+			&i.HerdrWorkspaceID,
+			&i.PaneID,
+			&i.PaneLabel,
+			&i.AgentName,
+			&i.AgentSession,
+			&i.PrUrl,
+			&i.MergedRef,
+			&i.LastOutputHash,
+			&i.LastWorktreeHash,
+			&i.LastProgressAt,
+			&i.AgentAbsentSince,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SandboxID,
+			&i.Launches,
+			&i.GatedSha,
+			&i.AgentServerStartedAt,
+			&i.IdleSince,
+			&i.ShortName,
+			&i.AgentSessionKind,
+			&i.TargetBranch,
+			&i.PrTitle,
+			&i.PlanJson,
+			&i.ReportKind,
+			&i.ReportDigest,
+			&i.ReportManifestJson,
+			&i.ContainmentMode,
+			&i.ContainmentPath,
+			&i.ContainmentMarker,
+			&i.PaneShellIdentity,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const tasksWithPaneLabels = `-- name: TasksWithPaneLabels :many
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity FROM tasks
+WHERE project_id = ? AND pane_label IN (SELECT value FROM json_each(?2)) ORDER BY seq
+`
+
+type TasksWithPaneLabelsParams struct {
+	ProjectID  int64
+	LabelsJson interface{}
+}
+
+func (q *Queries) TasksWithPaneLabels(ctx context.Context, arg TasksWithPaneLabelsParams) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, tasksWithPaneLabels, arg.ProjectID, arg.LabelsJson)
 	if err != nil {
 		return nil, err
 	}

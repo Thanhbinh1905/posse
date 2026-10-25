@@ -55,6 +55,7 @@ type Querier interface {
 	NextTaskSeq(ctx context.Context, projectID int64) (int64, error)
 	Notices(ctx context.Context, projectID int64) ([]NoticesRow, error)
 	OldestQueuedMessage(ctx context.Context, taskID int64) (OldestQueuedMessageRow, error)
+	OpenNoticeCount(ctx context.Context, projectID int64) (int64, error)
 	OpenNotices(ctx context.Context, projectID int64) ([]OpenNoticesRow, error)
 	PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerByTaskRepoParams) (PRBodyMarkerByTaskRepoRow, error)
 	PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PRBodyMarkersByTaskRow, error)
@@ -93,6 +94,8 @@ type Querier interface {
 	TaskSignals(ctx context.Context, arg TaskSignalsParams) ([]Signal, error)
 	TaskTransitions(ctx context.Context, arg TaskTransitionsParams) ([]Transition, error)
 	Tasks(ctx context.Context, projectID int64) ([]Task, error)
+	TasksInState(ctx context.Context, arg TasksInStateParams) ([]Task, error)
+	TasksWithPaneLabels(ctx context.Context, arg TasksWithPaneLabelsParams) ([]Task, error)
 	TouchProjectForTask(ctx context.Context, arg TouchProjectForTaskParams) error
 	UndeliveredNotices(ctx context.Context, projectID int64) ([]UndeliveredNoticesRow, error)
 	UpdateProgress(ctx context.Context, arg UpdateProgressParams) error

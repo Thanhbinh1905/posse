@@ -909,7 +909,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 			fmt.Fprintf(&out, "- Error: %s\n\n", err)
 			continue
 		}
-		notices, err := db.Notices(ctx, project.ID, true)
+		openNotices, err := db.OpenNoticeCount(ctx, project.ID)
 		if err != nil {
 			fmt.Fprintf(&out, "- Error: %s\n\n", err)
 			continue
@@ -926,10 +926,10 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 				fmt.Fprintf(&out, "  - %s/%s (%s) [%s] %s\n", project.Name, taskIDString(task.Seq), taskDisplayName(task), task.State, task.Title)
 			}
 		}
-		if len(notices) == 0 {
+		if openNotices == 0 {
 			out.WriteString("- Open Notices: none\n")
 		} else {
-			fmt.Fprintf(&out, "- Open Notices: %d\n", len(notices))
+			fmt.Fprintf(&out, "- Open Notices: %d\n", openNotices)
 		}
 		fmt.Fprintf(&out, "- Last activity: %s\n\n", time.UnixMilli(project.LastActivityAt).Local().Format(time.RFC3339))
 	}

@@ -1013,13 +1013,13 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, ""); err != nil {
 		return err
 	}
-	tasks, err := db.Tasks(ctx, project.ID, true)
+	tasks, err := db.Tasks(ctx, project.ID, false)
 	if err != nil {
 		return err
 	}
 	watched := make([]store.Task, 0)
 	for _, task := range tasks {
-		if task.PRURL == "" || task.State == store.StateMerged || task.State == store.StateTornDown || task.State == store.StateReported {
+		if task.PRURL == "" {
 			continue
 		}
 		previous, previousErr := db.LatestPRObservation(ctx, task.ID)

@@ -182,11 +182,16 @@ func runStressCommand(binary, cwd string, env []string, args []string) stressCom
 	command := exec.CommandContext(ctx, binary, args...)
 	command.Dir, command.Env = cwd, env
 	output, err := command.CombinedOutput()
-	return stressCommandResult{args: args, output: string(output), err: err}
+	result := stressCommandResult{args: args, output: string(output), err: err}
+	if command.ProcessState != nil {
+		result.cpu = command.ProcessState.UserTime() + command.ProcessState.SystemTime()
+	}
+	return result
 }
 
 type stressCommandResult struct {
 	args   []string
 	output string
 	err    error
+	cpu    time.Duration
 }
