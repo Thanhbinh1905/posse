@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
 )
 
@@ -27,32 +25,6 @@ func externalCommandTimeoutValue() time.Duration {
 		}
 	}
 	return externalCommandTimeout
-}
-
-func ensureNoMistakesInitialized(ctx context.Context, root string) error {
-	if _, err := exec.LookPath("no-mistakes"); err != nil {
-		return axi.Failure("no_mistakes_unavailable", "no-mistakes is not installed or not on PATH", false, "Install no-mistakes, then run `no-mistakes init` in this repository")
-	}
-	output, err := commandOutputArgs(ctx, root, "no-mistakes", "axi", "status")
-	if strings.Contains(strings.ToLower(output), "repo not initialized") {
-		return axi.Failure("no_mistakes_uninitialized", "no-mistakes reports that this repository is not initialized", false, "Run `no-mistakes init`")
-	}
-	if err != nil {
-		return axi.Failure("no_mistakes_status_failed", "could not verify no-mistakes repository status", true, strings.TrimSpace(output))
-	}
-	return nil
-}
-
-func isNoMistakesPolicySetting(key string) bool {
-	return key == "defaults.merge_mode" || key == "defaults.review" ||
-		strings.HasPrefix(key, "repositories.") && (strings.HasSuffix(key, ".merge_mode") || strings.HasSuffix(key, ".review"))
-}
-
-func noMistakesDeprecatedWarning(setting string) axi.Object {
-	return axi.Object{
-		{Key: "code", Value: "deprecated"},
-		{Key: "message", Value: setting + " uses deprecated no-mistakes; migrate to the built-in validation settings in docs/spec.md section 25"},
-	}
 }
 
 func commandOutputArgs(ctx context.Context, cwd, name string, args ...string) (string, error) {
@@ -117,7 +89,7 @@ func commandStdoutArgsWithEnv(ctx context.Context, cwd string, extraEnv []string
 }
 
 func timeoutForExternalCommand(name string, args []string) time.Duration {
-	if name == "gh" || name == "glab" || name == "no-mistakes" {
+	if name == "gh" || name == "glab" {
 		return externalCommandTimeoutValue()
 	}
 	if name == "git" {
@@ -132,10 +104,10 @@ func timeoutForExternalCommand(name string, args []string) time.Duration {
 
 func externalCommandEnvironment(name string) []string {
 	env := os.Environ()
-	if name == "git" || name == "gh" || name == "glab" || name == "no-mistakes" {
+	if name == "git" || name == "gh" || name == "glab" {
 		env = replaceEnvironment(env, "GIT_TERMINAL_PROMPT", "0")
 	}
-	if name == "gh" || name == "glab" || name == "no-mistakes" {
+	if name == "gh" || name == "glab" {
 		env = replaceEnvironment(env, "GH_PROMPT_DISABLED", "1")
 	}
 	return env

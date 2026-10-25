@@ -811,13 +811,13 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			for _, pending := range behind {
 				queueTargetSync(pending, func() error {
-					_, err := queuePRTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA)
+					_, err := queuePRTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.freshness, pending.headSHA)
 					return err
 				})
 			}
 			for _, pending := range conflicts {
 				queueTargetSync(pending, func() error {
-					return queueConflictTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.target.member.repo.MergeMode, pending.freshness, pending.headSHA)
+					return queueConflictTargetSyncInstruction(pollCtx, db, pending.target.task, pending.target.member.repo.Repo, pending.freshness, pending.headSHA)
 				})
 			}
 			for _, result := range groupResults {

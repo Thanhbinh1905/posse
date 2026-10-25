@@ -75,6 +75,18 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
+	if usesRemovedNoMistakes(task) {
+		return noMistakesRemoved(task)
+	}
+	if task.State == store.StateDone && !project.IsWorkspace() {
+		work, err := s.unmergedWork(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		if work == "" {
+			return axi.Failure("merge_refused", "Task has no change to deliver", false, "Run `posse teardown "+taskIDString(task.Seq)+"` to finish it")
+		}
+	}
 	if parsed.Bool("execute") {
 		if task.State != store.StateDone && task.State != store.StateMerging {
 			cfg, err := config.Load(home, project.Name)
@@ -88,14 +100,14 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		if task.AutonomyMerge != "auto" && strings.TrimSpace(parsed.Flags["user-approved"]) == "" {
 			mergeKind := "local merge"
-			if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
+			if task.MergeMode == "pr" {
 				mergeKind = "pull request merge"
 			}
 			return axi.Failure("merge_approval_required", mergeKind+" needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 		}
 	}
 	var prMergeIntent *store.Intent
-	if parsed.Bool("execute") && !project.IsWorkspace() && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
+	if parsed.Bool("execute") && !project.IsWorkspace() && task.MergeMode == "pr" {
 		var prIntent store.Intent
 		intentErr := retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
 			var err error
@@ -128,7 +140,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
-	if !project.IsWorkspace() && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
+	if !project.IsWorkspace() && task.MergeMode == "pr" {
 		// Pull request evidence binds to the gated forge head, not the Sandbox tip.
 		return s.preparePullRequestMerge(ctx, db, project, cfg, task, parsed.Bool("execute"), strings.TrimSpace(parsed.Flags["user-approved"]), prMergeIntent)
 	}
@@ -365,7 +377,7 @@ func settleFailedMergeIntent(ctx context.Context, db *store.DB, project store.Pr
 		return err
 	}
 	if current.State == store.StateMerging {
-		if current.MergeMode == "pr" || current.MergeMode == "no-mistakes" {
+		if deliveredByPullRequest(current.MergeMode) {
 			if err := db.ReconcileResourceLeasesForIntent(ctx, intent.ID, "verified no local merge effect is pending"); err != nil {
 				return err
 			}
@@ -807,7 +819,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}); err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task process shutdown", err)
 	}
-	if sandboxHeld && task.State == store.StateMerged && !discardable && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes" || project.IsWorkspace()) {
+	if sandboxHeld && task.State == store.StateMerged && !discardable && (deliveredByPullRequest(task.MergeMode) || project.IsWorkspace()) {
 		if err := s.runIntentStep(ctx, db, intent, "orphan.snapshot", func() error {
 			if !project.IsWorkspace() {
 				return snapshotPROrphan(ctx, db, project, task)
@@ -1046,7 +1058,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				}
 				// A PR branch advanced after its external merge stays at its
 				// existing tip even when the Sandbox can be safely released.
-				if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
+				if deliveredByPullRequest(task.MergeMode) {
 					observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 					if observationErr != nil && !store.IsNotFound(observationErr) {
 						return observationErr
@@ -1061,7 +1073,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				ref := "refs/heads/" + task.Branch
 				if sha, revErr := gitOutput(ctx, project.Root, "rev-parse", ref); revErr == nil {
 					merged := false
-					if task.State == store.StateMerged && (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") {
+					if task.State == store.StateMerged && deliveredByPullRequest(task.MergeMode) {
 						observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 						if observationErr != nil && !store.IsNotFound(observationErr) {
 							return observationErr
@@ -1116,7 +1128,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				}
 				result.RemoteBranchRemoved = result.RemoteBranchRemoved || removed
 			}
-		} else if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
+		} else if deliveredByPullRequest(task.MergeMode) {
 			observation, observationErr := db.LatestPRObservation(ctx, task.ID)
 			if observationErr != nil && !store.IsNotFound(observationErr) {
 				return result, observationErr

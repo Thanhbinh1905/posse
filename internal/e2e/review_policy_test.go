@@ -359,9 +359,15 @@ func TestFullPipelineCIRepairRevalidatesPrivateCandidateBeforeRepublish(t *testi
 	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, h.change.ID).Scan(&fixRoundCount); err != nil || fixRoundCount != 1 {
 		t.Fatalf("CI fix rounds=%d err=%v", fixRoundCount, err)
 	}
+	// Posse records delivery once Herdr confirms the new turn, which can land
+	// after the fake Worker already finished the repair.
 	var messageStatus string
-	if err := f.db.QueryRowContext(context.Background(), `SELECT m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='ci'`, h.change.ID).Scan(&messageStatus); err != nil || messageStatus != "delivered" {
-		t.Fatalf("CI repair instruction status=%q err=%v, want delivered", messageStatus, err)
+	var messageErr error
+	if !waitForCondition(15*time.Second, func() bool {
+		messageErr = f.db.QueryRowContext(context.Background(), `SELECT m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='ci'`, h.change.ID).Scan(&messageStatus)
+		return messageErr == nil && messageStatus == "delivered"
+	}) {
+		t.Fatalf("CI repair instruction status=%q err=%v, want delivered", messageStatus, messageErr)
 	}
 	workerInput, err := os.ReadFile(filepath.Join(f.root, "ci-worker-input.log"))
 	if err != nil || !strings.Contains(string(workerInput), "Required CI checks failed") || !strings.Contains(string(workerInput), firstHead) {
@@ -483,39 +489,6 @@ func runReviewIdentityCLIWithResourceConflictRetry(t *testing.T, f *prLifecycleF
 	}
 }
 
-func TestSelectedReviewPolicyNoMistakesFailsClosed(t *testing.T) {
-	f := reviewIdentityFixture(t)
-	// Both Merge phases must inspect the same completed candidate, without
-	// independent Watch reconciliation between the receipt refusals.
-	stopBackgroundWatch(t, f)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "no-mistakes")
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
-	// The fake matches the installed upstream: it has no receipt query.
-	installFakeNoMistakes(t, f)
-	if code, out := startReviewIdentityTask(t, f, "Pipeline receipt", "author", ""); code != 0 {
-		t.Fatalf("start: %d %s", code, out)
-	}
-	change := f.mustTask(t, "t1")
-	gitTest(t, f.env, change.WorktreePath, "commit", "--allow-empty", "-m", "candidate")
-	signalReviewPolicyTask(t, f, change)
-	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
-	for _, args := range [][]string{{"merge", "t1"}, {"merge", "t1", "--execute"}} {
-		if candidate := f.mustTask(t, "t1"); candidate.State != store.StateDone {
-			t.Fatalf("receipt phase %v has no completed candidate: %s", args, candidate.State)
-		}
-		code, out := runReviewIdentityCLI(t, f, args...)
-		if code != 1 || !strings.Contains(out, "review_receipt_unsupported") {
-			t.Fatalf("missing receipt admitted: %d %s", code, out)
-		}
-		if candidate := f.mustTask(t, "t1"); candidate.State != store.StateDone {
-			t.Fatalf("receipt refusal %v changed candidate state: %s", args, candidate.State)
-		}
-	}
-	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
-		t.Fatal("receipt refusal changed target")
-	}
-}
-
 func TestSelectedReviewPolicyConfigNeedsUserConsent(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, key := range []string{"defaults.review", "repositories.api.review"} {
@@ -556,7 +529,7 @@ func TestSelectedReviewPolicyWorkspaceAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	leadEnv := setEnv(f.env, "HERDR_PANE_ID", workspace.RootPane.PaneID)
-	for _, setting := range [][2]string{{"defaults.merge_mode", "local"}, {"defaults.review", "no-mistakes"}, {"repositories.api.review", "none"}} {
+	for _, setting := range [][2]string{{"defaults.merge_mode", "local"}, {"defaults.review", "full-pipeline"}, {"repositories.api.review", "none"}} {
 		runPosse(t, f.binary, root, f.env, "config", "set", setting[0], setting[1], "--project", "policy-stack")
 	}
 	brief := filepath.Join(f.root, "member-policy.md")
@@ -609,7 +582,7 @@ func TestReviewPolicyLegacyConfigMigration(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	for _, value := range []string{"always", "on_risk", "never"} {
 		code, out := runReviewIdentityCLI(t, f, "config", "set", "defaults.review", value, "--user-approved", "Select review")
-		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick, full-pipeline or no-mistakes") {
+		if code != 1 || !strings.Contains(out, "legacy review policy") || !strings.Contains(out, "none, quick or full-pipeline") {
 			t.Errorf("migration %s: %d %s", value, code, out)
 		}
 	}

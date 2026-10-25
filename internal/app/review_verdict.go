@@ -238,7 +238,7 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	if err != nil {
 		return err
 	}
-	local, receipt, fullPipeline := false, false, false
+	local, fullPipeline := false, false
 	for _, selected := range policies {
 		switch selected {
 		case "none":
@@ -246,18 +246,10 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 			local = true
 		case "full-pipeline":
 			fullPipeline = true
-		case "no-mistakes":
-			receipt = true
+		case config.NoMistakes:
+			return noMistakesRemoved(task)
 		default:
 			return axi.Failure("review_policy_invalid", "unsupported selected review policy "+selected, false)
-		}
-	}
-	if receipt {
-		if project.IsWorkspace() {
-			return axi.Failure("review_receipt_unsupported", "Task "+taskIDString(task.Seq)+" selects no-mistakes review for a workspace Member; no-mistakes cannot produce Member receipts", false, "Select quick or none review for workspace Members")
-		}
-		if err := requireNoMistakesReceipt(ctx, db, project, task, commit); err != nil {
-			return err
 		}
 	}
 	// A mixed workspace needs both: full-pipeline Members their barrier and

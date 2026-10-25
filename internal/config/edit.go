@@ -44,6 +44,10 @@ func SetFile(path, key, text string, projectFile bool) (any, error) {
 	}
 	value, literal, err := parseSetting(schemaKey, spec, text, projectFile)
 	if err != nil {
+		var migration *MigrationError
+		if errors.As(err, &migration) {
+			return nil, &InvalidError{File: path, Key: key, Cause: err}
+		}
 		return nil, &InvalidError{File: path, Key: key, Reason: err.Error()}
 	}
 	original, err := readFileForEdit(path)

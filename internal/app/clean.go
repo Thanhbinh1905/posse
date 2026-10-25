@@ -214,7 +214,7 @@ func (s *Service) cleanTornDownTask(ctx context.Context, db *store.DB, home stri
 				return err
 			}
 		}
-	} else if (task.MergeMode == "pr" || task.MergeMode == "no-mistakes") && task.PRURL != "" {
+	} else if deliveredByPullRequest(task.MergeMode) && task.PRURL != "" {
 		cfg, err := config.Load(home, project.Name)
 		if err != nil {
 			return configError(err)

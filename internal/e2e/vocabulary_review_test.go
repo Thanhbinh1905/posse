@@ -110,6 +110,21 @@ func Test014ProjectShorthandConfigVocabularyUpgrade(t *testing.T) {
 			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			if mode == "no-mistakes" {
+				// The rename still runs; the removed value then needs the User's replacement.
+				code, out := runReleaseCLI(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--effective", "--json")
+				if code != 1 || !strings.Contains(out, "config_migration_required") || !strings.Contains(out, path+": defaults.merge_mode: no-mistakes was removed; use pr") {
+					t.Fatalf("upgraded no-mistakes shorthand did not require migration: %d %s", code, out)
+				}
+				if data, err := os.ReadFile(path + ".v014"); err != nil || string(data) != original {
+					t.Fatalf("original spec config not preserved: %q %v", data, err)
+				}
+				runPosse(t, f.binary, f.repo, f.leadEnv, "config", "set", "defaults.merge_mode", "pr", "--project", f.project.Name)
+				if code, out := runReleaseCLI(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--effective", "--json"); code != 0 || !strings.Contains(out, `"merge_mode":"pr"`) {
+					t.Fatalf("printed replacement did not repair the upgraded config: %d %s", code, out)
+				}
+				return
+			}
 			output := runPosse(t, f.binary, f.repo, f.leadEnv, "config", "show", "--project", f.project.Name, "--effective", "--json")
 			var result struct {
 				Effective config.Config `json:"effective"`

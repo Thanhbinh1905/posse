@@ -142,167 +142,153 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 		}
 	}
 	if task.State == store.StateDone {
-		if task.MergeMode == "no-mistakes" {
-			if task.PRURL == "" {
-				return axi.Failure("merge_refused", "no-mistakes delivery has no pull request URL", false, "Signal completion with `posse signal done <summary> --pr <url>`")
+		// Legacy completions without a Worker-reported PR may reopen a
+		// closed PR at Merge. Worker-reported URLs must never be silently
+		// replaced by a PR that the Worker did not validate.
+		if task.MergeMode == "pr" && task.PRURL != "" {
+			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
+			if previousErr != nil && !store.IsNotFound(previousErr) {
+				return previousErr
 			}
-			if err := s.enterNoMistakesMerge(ctx, db, project, cfg, task); err != nil {
-				return err
-			}
-			current, err := db.TaskByID(ctx, project.ID, task.ID)
-			if err != nil {
-				return err
-			}
-			task = current
-		} else {
-			// Legacy completions without a Worker-reported PR may reopen a
-			// closed PR at Merge. Worker-reported URLs must never be silently
-			// replaced by a PR that the Worker did not validate.
-			if task.MergeMode == "pr" && task.PRURL != "" {
-				previous, previousErr := db.LatestPRObservation(ctx, task.ID)
-				if previousErr != nil && !store.IsNotFound(previousErr) {
-					return previousErr
-				}
-				if previousErr == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
-					signals, err := db.TaskSignals(ctx, task.ID, 20)
-					if err != nil {
-						return err
-					}
-					for _, signal := range signals {
-						if signal.Verb != "done" {
-							continue
-						}
-						var data map[string]string
-						_ = json.Unmarshal([]byte(signal.DataJSON), &data)
-						if data["pr_url"] == "" {
-							if err := db.UpdateTaskMerge(ctx, task.ID, "", ""); err != nil {
-								return err
-							}
-							task.PRURL = ""
-						}
-						break
-					}
-				}
-			}
-			if task.WorktreePath == "" || task.Branch == "" {
-				return axi.Failure("merge_refused", "Task has no branch or Sandbox", false)
-			}
-			status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
-			if err != nil {
-				return err
-			}
-			if status != "" {
-				return axi.Failure("merge_refused", "Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")
-			}
-			gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
-			if err != nil {
-				return err
-			}
-			workerPR := task.PRURL != ""
-			if isFullPipelineTask(task, "") && !workerPR {
-				return axi.Failure("candidate_promotion_required", "full-pipeline Tasks must publish through the validated private candidate promotion path", false, "Complete local validation and run `posse publish` from the private candidate checkout")
-			}
-			if workerPR {
-				forge, err := forgeForRepository(ctx, project.Root, cfg, "")
+			if previousErr == nil && previous.PRURL == task.PRURL && previous.State == "CLOSED" {
+				signals, err := db.TaskSignals(ctx, task.ID, 20)
 				if err != nil {
 					return err
 				}
-				if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, gatedSHA); err != nil {
-					return err
+				for _, signal := range signals {
+					if signal.Verb != "done" {
+						continue
+					}
+					var data map[string]string
+					_ = json.Unmarshal([]byte(signal.DataJSON), &data)
+					if data["pr_url"] == "" {
+						if err := db.UpdateTaskMerge(ctx, task.ID, "", ""); err != nil {
+							return err
+						}
+						task.PRURL = ""
+					}
+					break
 				}
 			}
-			if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
-				return err
-			}
-			if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
-				return err
-			}
-			task.GatedSHA = gatedSHA
-			currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
-			if err != nil {
-				return err
-			}
-			if currentSHA != gatedSHA {
-				if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
-					return err
-				}
-				return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
-			}
-			if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
-				if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
-					return errors.Join(err, clearErr)
-				}
-				return err
-			}
-			home, err := s.homePath()
-			if err != nil {
-				return err
-			}
-			if started, err := s.maybeAutoStartReviewRound(out, db, home, project, task); err != nil {
-				return err
-			} else if started {
-				return nil
-			}
-			if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
-				return err
-			}
+		}
+		if task.WorktreePath == "" || task.Branch == "" {
+			return axi.Failure("merge_refused", "Task has no branch or Sandbox", false)
+		}
+		status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
+		if err != nil {
+			return err
+		}
+		if status != "" {
+			return axi.Failure("merge_refused", "Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")
+		}
+		gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+		if err != nil {
+			return err
+		}
+		workerPR := task.PRURL != ""
+		if isFullPipelineTask(task, "") && !workerPR {
+			return axi.Failure("candidate_promotion_required", "full-pipeline Tasks must publish through the validated private candidate promotion path", false, "Complete local validation and run `posse publish` from the private candidate checkout")
+		}
+		if workerPR {
 			forge, err := forgeForRepository(ctx, project.Root, cfg, "")
 			if err != nil {
 				return err
 			}
-			if err := validateForgeMergeMethod(forge, cfg); err != nil {
+			if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, gatedSHA); err != nil {
 				return err
 			}
-			if workerPR {
-				if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, gatedSHA); err != nil {
-					return err
-				}
-			} else {
-				// Compatibility with Change Tasks completed before Worker publishing existed.
-				branchRef := "refs/heads/" + task.Branch
-				if err := refuseAgentAttribution(ctx, project.Root, branchRef, task); err != nil {
-					return err
-				}
-				if _, err := gitOutput(ctx, project.Root, "push", "origin", branchRef+":"+branchRef); err != nil {
-					return axi.Failure("pr_push_failed", "could not push the gated Task branch", true, err.Error())
-				}
-			}
-			openedURL := ""
-			if task.PRURL == "" {
-				openIntent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, "merge --open-pr")
-				if err != nil {
-					return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
-				}
-				openIntentActive = true
-				prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "", false, "")
-				if openErr != nil {
-					return openErr
-				}
-				task.PRURL = prURL
-				openedURL = prURL
-				if _, err := forgeReference(prURL, forge); err != nil {
-					return axi.Failure("pr_create_failed", "forge returned an invalid pull request URL", false, err.Error())
-				}
-			}
-			if err := db.UpdateTaskMerge(ctx, task.ID, task.PRURL, ""); err != nil {
-				return err
-			}
-			if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "Pull request is open for review"); err != nil {
-				return err
-			}
-			if openedURL != "" {
-				if err := createPROpenedNotice(ctx, db, project, task, openedURL, task.GatedSHA, task.Title+": pull request opened"); err != nil {
-					return err
-				}
-			}
-			if openIntentActive {
-				if err := db.FinishIntent(ctx, openIntent.ID, openIntent.ProcessID); err != nil {
-					return err
-				}
-				openIntentActive = false
-			}
-			task.State = store.StateMerging
 		}
+		if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
+			return err
+		}
+		if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
+			return err
+		}
+		task.GatedSHA = gatedSHA
+		currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+		if err != nil {
+			return err
+		}
+		if currentSHA != gatedSHA {
+			if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
+				return err
+			}
+			return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
+		}
+		if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
+			if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
+				return errors.Join(err, clearErr)
+			}
+			return err
+		}
+		home, err := s.homePath()
+		if err != nil {
+			return err
+		}
+		if started, err := s.maybeAutoStartReviewRound(out, db, home, project, task); err != nil {
+			return err
+		} else if started {
+			return nil
+		}
+		if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
+			return err
+		}
+		forge, err := forgeForRepository(ctx, project.Root, cfg, "")
+		if err != nil {
+			return err
+		}
+		if err := validateForgeMergeMethod(forge, cfg); err != nil {
+			return err
+		}
+		if workerPR {
+			if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, gatedSHA); err != nil {
+				return err
+			}
+		} else {
+			// Compatibility with Change Tasks completed before Worker publishing existed.
+			branchRef := "refs/heads/" + task.Branch
+			if err := refuseAgentAttribution(ctx, project.Root, branchRef, task); err != nil {
+				return err
+			}
+			if _, err := gitOutput(ctx, project.Root, "push", "origin", branchRef+":"+branchRef); err != nil {
+				return axi.Failure("pr_push_failed", "could not push the gated Task branch", true, err.Error())
+			}
+		}
+		openedURL := ""
+		if task.PRURL == "" {
+			openIntent, err = s.startTaskIntent(ctx, db, project.ID, task.ID, "merge --open-pr")
+			if err != nil {
+				return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+			}
+			openIntentActive = true
+			prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "", false, "")
+			if openErr != nil {
+				return openErr
+			}
+			task.PRURL = prURL
+			openedURL = prURL
+			if _, err := forgeReference(prURL, forge); err != nil {
+				return axi.Failure("pr_create_failed", "forge returned an invalid pull request URL", false, err.Error())
+			}
+		}
+		if err := db.UpdateTaskMerge(ctx, task.ID, task.PRURL, ""); err != nil {
+			return err
+		}
+		if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "Pull request is open for review"); err != nil {
+			return err
+		}
+		if openedURL != "" {
+			if err := createPROpenedNotice(ctx, db, project, task, openedURL, task.GatedSHA, task.Title+": pull request opened"); err != nil {
+				return err
+			}
+		}
+		if openIntentActive {
+			if err := db.FinishIntent(ctx, openIntent.ID, openIntent.ProcessID); err != nil {
+				return err
+			}
+			openIntentActive = false
+		}
+		task.State = store.StateMerging
 	}
 	if task.State != store.StateMerging {
 		return axi.Failure("merge_refused", "Task must be done or merging before Merge", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect its state")
@@ -593,35 +579,6 @@ func pullRequestHeadMismatch(actual, expected string) error {
 
 func pullRequestHeadLagTimeout(actual, expected string) error {
 	return axi.Failure("pr_head_lag_timeout", fmt.Sprintf("forge has not caught up to pushed Task head %s; the request still reports previous head %s", expected, actual), true, "Re-run `posse publish` after the forge updates its request head")
-}
-
-func (s *Service) enterNoMistakesMerge(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
-	if err := validatePullRequestOrigin(ctx, project.Root, task.PRURL); err != nil {
-		return err
-	}
-	if task.Branch == "" || task.WorktreePath == "" {
-		return axi.Failure("merge_refused", "Task has no branch or Sandbox", false)
-	}
-	gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
-	if err != nil {
-		return err
-	}
-	if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
-		return err
-	}
-	if err := requireSelectedReviewAt(ctx, db, project, cfg, task, gatedSHA); err != nil {
-		return err
-	}
-	if err := db.SetTaskGatedSHA(ctx, task.ID, gatedSHA); err != nil {
-		return err
-	}
-	if err := db.UpdateTaskMerge(ctx, task.ID, task.PRURL, ""); err != nil {
-		return err
-	}
-	if err := db.Transition(ctx, task.ID, store.StateDone, store.StateMerging, "cli", "no-mistakes delivered the pull request"); err != nil {
-		return err
-	}
-	return createPROpenedNotice(ctx, db, project, task, task.PRURL, gatedSHA, task.Title+": no-mistakes pull request is ready for review")
 }
 
 func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, userQuote string, intent store.Intent) error {
@@ -1332,12 +1289,12 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		behind = nil
 	}
 	for _, pending := range behind {
-		if _, err := queuePRTargetSyncInstruction(ctx, db, pending.task, "", pending.task.MergeMode, pending.freshness, pending.headSHA); err != nil {
+		if _, err := queuePRTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
 			return err
 		}
 	}
 	for _, pending := range conflicts {
-		if err := queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.task.MergeMode, pending.freshness, pending.headSHA); err != nil {
+		if err := queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
 			return err
 		}
 	}

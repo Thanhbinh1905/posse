@@ -144,12 +144,43 @@ func (db *DB) PendingIdleMigrations(ctx context.Context) ([]int64, error) {
 
 // RefuseLiveMigration is also called before installing a downloaded build so
 // refusal never leaves the installed binary pointing at a migration it cannot run.
+// liveTaskStates lists the Task states an update must not strand.
+const liveTaskStates = `('spawning','working','needs-decision','blocked','stalled','done','merging')`
+
+// LiveNoMistakesTasks lists live Tasks, as "<project> t<seq>", whose frozen
+// plan selects the removed no-mistakes Merge Mode or review policy.
+func (db *DB) LiveNoMistakesTasks(ctx context.Context) ([]string, error) {
+	var hasPlans bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='plan_json')`).Scan(&hasPlans); err != nil {
+		return nil, err
+	}
+	planUse := "0"
+	if hasPlans {
+		planUse = `(CASE WHEN json_valid(t.plan_json) THEN json_extract(t.plan_json,'$.review')='no-mistakes' OR EXISTS(SELECT 1 FROM json_each(t.plan_json,'$.execution.members') m WHERE json_extract(m.value,'$.review')='no-mistakes') ELSE 0 END)`
+	}
+	rows, err := db.QueryContext(ctx, `SELECT p.name, t.seq FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.state IN `+liveTaskStates+` AND (t.landing_mode='no-mistakes' OR `+planUse+`) ORDER BY p.name, t.seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []string
+	for rows.Next() {
+		var project string
+		var seq int
+		if err := rows.Scan(&project, &seq); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, fmt.Sprintf("%s t%d", project, seq))
+	}
+	return tasks, rows.Err()
+}
+
 func (db *DB) RefuseLiveMigration(ctx context.Context, pending []int64, force bool) error {
 	if force || len(pending) == 0 {
 		return nil
 	}
 	var count int
-	err := db.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE state IN ('spawning','working','needs-decision','blocked','stalled','done','merging')`).Scan(&count)
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE state IN `+liveTaskStates).Scan(&count)
 	if err != nil {
 		return err
 	}

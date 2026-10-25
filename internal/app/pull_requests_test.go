@@ -37,25 +37,18 @@ func TestPRMergeRefusesStaleHeadBeforeGate(t *testing.T) {
 	}
 }
 
-func TestNoMistakesMergeRefusesStaleHeadAndSkipsRebaseOnRecovery(t *testing.T) {
-	fixture := newPRMergeFixture(t, "no-mistakes", store.StateDone)
-	prURL := "https://github.com/acme/shop/pull/17"
-	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, prURL, ""); err != nil {
+func TestMergeRefusesLiveNoMistakesTask(t *testing.T) {
+	fixture := newLegacyNoMistakesFixture(t, store.StateDone)
+	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
-	fixture.requireCurrentTarget(t)
-	targetTip := fixture.advanceTarget(t, false, true)
 	code, output, stderr := fixture.run("merge", "t1")
-	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
-		t.Fatalf("no-mistakes Merge accepted a stale head: exit=%d output=%s error=%s", code, output, stderr)
+	if code == 0 || !strings.Contains(output, "no_mistakes_removed") || !strings.Contains(output, "posse teardown t1 --discard") {
+		t.Fatalf("Merge accepted a live no-mistakes Task: exit=%d output=%s error=%s", code, output, stderr)
 	}
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
 	if err != nil || task.State != store.StateDone || task.GatedSHA != "" {
-		t.Fatalf("stale no-mistakes head acquired merging evidence: task=%#v err=%v", task, err)
-	}
-	var instruction string
-	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "--skip=rebase") || !strings.Contains(instruction, targetTip) {
-		t.Fatalf("no-mistakes freshness instruction does not preserve merge-based sync: body=%q err=%v", instruction, err)
+		t.Fatalf("refused no-mistakes Task acquired merging evidence: task=%#v err=%v", task, err)
 	}
 }
 
@@ -460,53 +453,20 @@ func TestPRMergeReturnsTaskToDoneWhenRemoteHeadMoved(t *testing.T) {
 	}
 }
 
-func TestNoMistakesDoneSignalRecordsPRForMerge(t *testing.T) {
-	fixture := newPRMergeFixture(t, "no-mistakes", store.StateWorking)
-	fixture.installFakeNoMistakes(t, "status: initialized\n", 0)
-	prURL := "https://github.com/acme/shop/pull/17"
-	code, output, errOutput := fixture.run("signal", "done", "Worker completion summary", "--pr", prURL)
-	if code != 0 {
-		t.Fatalf("no-mistakes done Signal exit=%d output=%s error=%s", code, output, errOutput)
+func TestNoMistakesDoneSignalIsRefused(t *testing.T) {
+	fixture := newLegacyNoMistakesFixture(t, store.StateWorking)
+	code, output, errOutput := fixture.run("signal", "done", "Worker completion summary", "--pr", "https://github.com/acme/shop/pull/17")
+	if code == 0 || !strings.Contains(output, "no_mistakes_removed") {
+		t.Fatalf("no-mistakes done Signal was accepted: exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateDone || task.PRURL != prURL || task.GatedSHA != "" {
-		t.Fatalf("no-mistakes PR was not recorded for Merge: %#v, %v", task, err)
-	}
-	log, err := os.ReadFile(fixture.ghLog)
-	if err == nil && (strings.Contains(string(log), "pr create") || strings.Contains(string(log), "git push")) {
-		t.Fatalf("no-mistakes delivery unexpectedly opened or pushed a PR: %q, %v", log, err)
-	}
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	code, output, errOutput = fixture.run("merge", "t1")
-	if code != 0 {
-		t.Fatalf("no-mistakes Merge exit=%d output=%s error=%s", code, output, errOutput)
-	}
-	task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-	if err != nil || task.State != store.StateMerging || task.GatedSHA != fixture.headSHA {
-		t.Fatalf("posse merge did not start watching the no-mistakes PR: %#v, %v", task, err)
-	}
-	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", task.GatedSHA)
-	cfg, err := config.Load(fixture.home, fixture.project.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
-		t.Fatal(err)
-	}
-	code, output, errOutput = fixture.run("merge", "t1", "--execute", "--user-approved", "User approved the no-mistakes PR")
-	if code != 0 {
-		t.Fatalf("no-mistakes PR merge exit=%d output=%s error=%s", code, output, errOutput)
-	}
-	log, err = os.ReadFile(fixture.ghLog)
-	if err != nil || !strings.Contains(string(log), "pr merge") {
-		t.Fatalf("no-mistakes merge did not use the PR merge path: %q, %v", log, err)
+	if err != nil || task.State != store.StateWorking || task.PRURL != "" {
+		t.Fatalf("refused no-mistakes Signal changed the Task: %#v, %v", task, err)
 	}
 }
 
 func TestTeardownRemovesExactMergedNoMistakesBranch(t *testing.T) {
-	fixture := newPRMergeFixture(t, "no-mistakes", store.StateWorking)
+	fixture := newLegacyNoMistakesFixture(t, store.StateWorking)
 	ctx := context.Background()
 
 	sandboxBase := filepath.Join(fixture.home, "pool", fixture.project.Name)
@@ -550,7 +510,7 @@ func TestTeardownRemovesExactMergedNoMistakesBranch(t *testing.T) {
 }
 
 func TestTeardownPreservesAdvancedMergedNoMistakesBranch(t *testing.T) {
-	fixture := newPRMergeFixture(t, "no-mistakes", store.StateWorking)
+	fixture := newLegacyNoMistakesFixture(t, store.StateWorking)
 	ctx := context.Background()
 
 	sandboxBase := filepath.Join(fixture.home, "pool", fixture.project.Name)
@@ -592,17 +552,6 @@ func TestTeardownPreservesAdvancedMergedNoMistakesBranch(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/heads/"+task.Branch)); got != advancedSHA {
 		t.Fatalf("Teardown changed the advanced no-mistakes branch tip to %s, want %s", got, advancedSHA)
-	}
-}
-
-func TestNoMistakesDoneRejectsPullRequestFromAnotherRepository(t *testing.T) {
-	fixture := newPRMergeFixture(t, "no-mistakes", store.StateWorking)
-	fixture.installFakeNoMistakes(t, "status: initialized\n", 0)
-	prURL := "https://github.com/other/fork/pull/3"
-	code, output, _ := fixture.run("signal", "done", "Worker completion summary", "--pr", prURL)
-	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
-	if code != 1 || !strings.Contains(output, "pr_repository_mismatch") || !strings.Contains(output, "acme/shop") || err != nil || task.State != store.StateWorking || task.PRURL != "" {
-		t.Fatalf("foreign PR URL was accepted: exit=%d output=%s task=%#v err=%v", code, output, task, err)
 	}
 }
 
@@ -996,7 +945,12 @@ func TestClosedWorkerPRMustBeReplacedBeforeRemerge(t *testing.T) {
 func TestWorkerPublishRestrictedToPRModeAndOwnBranch(t *testing.T) {
 	for _, mode := range []string{"local", "no-mistakes"} {
 		t.Run(mode, func(t *testing.T) {
-			f := newPRMergeFixture(t, mode, store.StateWorking)
+			var f *prMergeFixture
+			if mode == "no-mistakes" {
+				f = newLegacyNoMistakesFixture(t, store.StateWorking)
+			} else {
+				f = newPRMergeFixture(t, mode, store.StateWorking)
+			}
 			if code, output, _ := f.run("publish", "Worker completion summary"); code != 1 || !strings.Contains(output, "publish_refused") {
 				t.Fatalf("unexpected publish: %d %s", code, output)
 			}
@@ -1030,34 +984,16 @@ func TestLeadDoesNotGateMovedWorkerPR(t *testing.T) {
 	}
 }
 
-func TestUpRefusesNoMistakesModeWhenCLIReportsUninitialized(t *testing.T) {
-	fixture := newPRMergeFixture(t, "no-mistakes", store.StateWorking)
-	fixture.installFakeNoMistakes(t, "error: repo not initialized (run 'no-mistakes init' first)\n", 1)
-	if err := os.WriteFile(filepath.Join(fixture.repo, ".no-mistakes.yaml"), []byte("looks initialized\n"), 0o600); err != nil {
+func TestUpRefusesNoMistakesConfigWithItsReplacement(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	configPath := filepath.Join(fixture.home, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\nmerge_mode = \"no-mistakes\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fixture.service.herdrContext = func() bool { return true }
-
 	code, output, _ := fixture.run("up", "--claude")
-	log, err := os.ReadFile(filepath.Join(fixture.root, "no-mistakes.log"))
-	if code != 1 || !strings.Contains(output, "no_mistakes_uninitialized") || err != nil || !strings.Contains(string(log), "axi status") {
-		t.Fatalf("up did not honor no-mistakes initialization status: exit=%d output=%s log=%q err=%v", code, output, log, err)
-	}
-}
-
-func TestConfigSetRefusesNoMistakesModeWhenCLIReportsUninitialized(t *testing.T) {
-	fixture := newPRMergeFixture(t, "local", store.StateWorking)
-	fixture.installFakeNoMistakes(t, "error: repo not initialized (run 'no-mistakes init' first)\n", 1)
-	configPath := filepath.Join(fixture.home, "config.toml")
-	before, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	code, output, _ := fixture.run("config", "set", "defaults.merge_mode", "no-mistakes")
-	after, readErr := os.ReadFile(configPath)
-	log, logErr := os.ReadFile(filepath.Join(fixture.root, "no-mistakes.log"))
-	if code != 1 || !strings.Contains(output, "no_mistakes_uninitialized") || readErr != nil || string(after) != string(before) || logErr != nil || !strings.Contains(string(log), "axi status") {
-		t.Fatalf("config set did not preserve the prior config on no-mistakes refusal: exit=%d output=%s before=%q after=%q log=%q errors=%v/%v", code, output, before, after, log, readErr, logErr)
+	if code != 1 || !strings.Contains(output, "config_migration_required") || !strings.Contains(output, configPath+": defaults.merge_mode: no-mistakes was removed; use pr") || !strings.Contains(output, "posse config set defaults.merge_mode pr") {
+		t.Fatalf("up did not name the no-mistakes replacement: exit=%d output=%s", code, output)
 	}
 }
 
@@ -1171,6 +1107,22 @@ func TestDeleteMergedRemoteBranchRequiresCurrentMergedPRHead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newLegacyNoMistakesFixture models a Task admitted with the no-mistakes Merge
+// Mode before its removal; current config can no longer select it.
+func newLegacyNoMistakesFixture(t *testing.T, state store.State) *prMergeFixture {
+	t.Helper()
+	fixture := newPRMergeFixture(t, "pr", state)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET landing_mode='no-mistakes' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.task = task
+	return fixture
 }
 
 func newPRMergeFixture(t *testing.T, mode string, state store.State) *prMergeFixture {
@@ -1398,16 +1350,6 @@ func (fixture *prMergeFixture) setGHHead(t *testing.T, head string) {
 	if err := os.WriteFile(fixture.ghHead, []byte(head), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func (fixture *prMergeFixture) installFakeNoMistakes(t *testing.T, response string, exitCode int) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(fixture.bin, "no-mistakes"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$POSSE_TEST_NO_MISTAKES_LOG\"\nprintf '%s' \"$POSSE_TEST_NO_MISTAKES_RESPONSE\"\nexit \"$POSSE_TEST_NO_MISTAKES_EXIT\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("POSSE_TEST_NO_MISTAKES_LOG", filepath.Join(fixture.root, "no-mistakes.log"))
-	t.Setenv("POSSE_TEST_NO_MISTAKES_RESPONSE", response)
-	t.Setenv("POSSE_TEST_NO_MISTAKES_EXIT", fmt.Sprint(exitCode))
 }
 
 func (fixture *prMergeFixture) setGraphQLState(t *testing.T, state, checks, review, mergeable, mergeCommit, head string) {

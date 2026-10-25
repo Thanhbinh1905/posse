@@ -34,7 +34,7 @@ use = "deep"
 use = "deep"
 `
 	project := `[defaults]
-merge_mode = "no-mistakes"
+merge_mode = "local"
 gate = ["go test ./...", "go vet ./..."]
 
 [autonomy]
@@ -50,7 +50,7 @@ use = "fast"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Defaults.MaxWorkers != 5 || cfg.Defaults.MergeMode != "no-mistakes" || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "defaults.gate was removed") {
+	if cfg.Defaults.MaxWorkers != 5 || cfg.Defaults.MergeMode != "local" || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "defaults.gate was removed") {
 		t.Fatalf("merged defaults = %#v", cfg.Defaults)
 	}
 	if cfg.Identity.Lead.Name != "Lead" || cfg.Identity.Lead.Language != "vi" {
