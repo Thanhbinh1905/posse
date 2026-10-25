@@ -51,7 +51,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		if notice.Kind == "review_cap_reached" && latestCapNotice[notice.TaskID] != notice.ID {
 			continue
 		}
-		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached") {
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached", "quota_exhausted") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
@@ -103,6 +103,16 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			} else {
 				request.Question = "Discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? Its Sandbox is gone and the Task has prior work, so it cannot be relaunched. " + reason
 				request.Options = []string{"discard"}
+			}
+		case notice.Kind == "quota_exhausted" && store.QuotaDecisionState(task.State):
+			question, ok, err := quotaDecisionQuestion(task, notice)
+			if err != nil {
+				return err
+			}
+			if ok {
+				request.Kind = "quota"
+				request.Question = question
+				request.Options = []string{"relaunch", "discard"}
 			}
 		case notice.Kind == "task_done" && task.Type == "review" && task.ReviewsTaskID != 0 && task.AutonomyReview != "lead":
 			request.Kind = "review"
@@ -314,4 +324,27 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 		return err
 	}
 	return ctx.Print(axi.Object{{Key: "decision", Value: decisionOutput(ctx.Context, db, project.ID, decision)}, {Key: "help", Value: []any{"The Lead will receive a Notice to carry out the chosen action"}}})
+}
+
+// quotaDecisionQuestion asks only about the launch that ran out of quota; a
+// later relaunch already answered it.
+func quotaDecisionQuestion(task store.Task, notice store.Notice) (string, bool, error) {
+	var data struct {
+		Launch int    `json:"launch"`
+		Resets string `json:"resets"`
+	}
+	if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+		return "", false, err
+	}
+	if data.Launch != task.Launches {
+		return "", false, nil
+	}
+	ref := taskIDString(task.Seq)
+	question := ref + " (" + taskDisplayName(task) + ") cannot continue: " + strings.TrimPrefix(notice.Summary, task.Title+": ") + ". "
+	if data.Resets != "" {
+		question += "Relaunch with the same Profile once the limit resets " + data.Resets + ", or discard the Task? "
+	} else {
+		question += "Relaunch with the same Profile once its quota is restored, or discard the Task? "
+	}
+	return question + "The Lead can instead run `posse relaunch " + ref + " --profile <name>` to continue now with another Profile.", true, nil
 }

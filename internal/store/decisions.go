@@ -43,7 +43,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least one option")
 	}
 	switch request.Kind {
-	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency":
+	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "quota":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
 	}
@@ -377,12 +377,14 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'worker_exited' THEN 'Task reopened or Worker launch changed'
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
 		WHEN 'orphan' THEN 'Unrecoverable Orphan resolved during Teardown'
+		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
 		ELSE 'Task no longer failed or lost' END
-		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan')
+		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
 		((kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode='pr' AND NOT EXISTS(SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url) AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS' AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'))))
 		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
 		OR (kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>decisions.task_launches))
+		OR (kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>decisions.task_launches))
 		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (kind='orphan' AND decisions.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
@@ -396,7 +398,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" {
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" {
 		return "", nil
 	}
 	var state State
@@ -421,6 +423,9 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "worker_exited" && (state != StateDone && state != StateMerging || launches != decision.TaskLaunches) {
 		return "Task reopened or Worker launch changed", nil
+	}
+	if decision.Kind == "quota" && (!QuotaDecisionState(state) || launches != decision.TaskLaunches) {
+		return "Worker relaunched or Task left its working states", nil
 	}
 	if decision.Kind == "pr_closed" {
 		var owned bool

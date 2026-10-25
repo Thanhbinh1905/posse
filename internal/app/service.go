@@ -407,6 +407,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 				}
 			}
 		}
+		if err := s.appendQuotaNotices(ctx, db, project, cfg, &result); err != nil {
+			return result, err
+		}
 		return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
 	}
 	current, err := s.snapshot(ctx)
@@ -443,8 +446,22 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		return result, err
 	}
 	if !result.GenerationMismatch {
+		if err := s.appendQuotaNotices(ctx, db, project, cfg, &result); err != nil {
+			return result, err
+		}
 	}
 	return result, s.retryPendingLaunches(ctx, db, project, cfg, result.Snapshot)
+}
+
+// appendQuotaNotices handles Workers whose quota ran out. A Project that is
+// down starts no Workers.
+func (s *Service) appendQuotaNotices(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, result *runtime.RunResult) error {
+	if project.IsDown() {
+		return nil
+	}
+	notices, err := s.handleQuotaExhaustion(ctx, db, project, cfg, result.Snapshot)
+	result.Notices = append(result.Notices, notices...)
+	return err
 }
 
 // projectRecoveryWait bounds how long a command waits for another process's
@@ -624,6 +641,12 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 					if runErr == nil && result.GenerationMismatch {
 						runErr = errRecoveryDeferred
+					}
+					// A Worker stuck at its quota message may emit no further
+					// events, and the Lead may share its exhausted account, so
+					// the Watch's pass relaunches it with its fallback.
+					if runErr == nil && options.watchObservation {
+						runErr = s.appendQuotaNotices(ctx, db, project, cfg, &result)
 					}
 				}
 			}

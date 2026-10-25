@@ -289,6 +289,21 @@ type PublishPrePushHead struct {
 	RecordedAt int64
 }
 
+type QuotaExhaustion struct {
+	TaskID     int64
+	Launch     int64
+	Agent      string
+	Profile    string
+	Line       string
+	Resets     string
+	Status     string
+	Fallback   string
+	Detail     string
+	OwnerPid   int64
+	ObservedAt int64
+	UpdatedAt  int64
+}
+
 type RepoFetchFailure struct {
 	ProjectID           int64
 	Repo                string

@@ -44,6 +44,30 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 	if len(patterns) == 0 {
 		return "", "", false
 	}
+	for _, rendered := range piRenderedErrors(output) {
+		for _, pattern := range patterns {
+			if rendered.streamErrorPrefix && pattern.kind != "model_stream_error" {
+				continue
+			}
+			if strings.Contains(rendered.message, pattern.marker) {
+				return pattern.kind, pattern.marker, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+type piRenderedError struct {
+	// message is the lowercased error text without Pi's "Error:" prefix.
+	message           string
+	text              string
+	streamErrorPrefix bool
+}
+
+// piRenderedErrors returns each error result Pi rendered with its fixed /bug
+// help line and only terminal footer content after it.
+func piRenderedErrors(output string) []piRenderedError {
+	var rendered []piRenderedError
 	lines := strings.Split(normalizeModelTerminalOutput(output), "\n")
 	for i := 0; i+1 < len(lines); i++ {
 		errorLine := strings.TrimSpace(lines[i])
@@ -62,20 +86,14 @@ func classifyModelError(agent, output string) (kind, marker string, ok bool) {
 		default:
 			continue
 		}
-		message = strings.ToLower(strings.TrimSpace(message))
+		text := strings.TrimSpace(message)
+		message = strings.ToLower(text)
 		if len(message) > 2048 || !piFooterOnly(lines[i+2:]) {
 			continue
 		}
-		for _, pattern := range patterns {
-			if streamErrorPrefix && pattern.kind != "model_stream_error" {
-				continue
-			}
-			if strings.Contains(message, pattern.marker) {
-				return pattern.kind, pattern.marker, true
-			}
-		}
+		rendered = append(rendered, piRenderedError{message: message, text: text, streamErrorPrefix: streamErrorPrefix})
 	}
-	return "", "", false
+	return rendered
 }
 
 // Pi brackets tool-result panels with horizontal rules. A pane tail may start
