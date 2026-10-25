@@ -278,6 +278,13 @@ func (db *DB) CreateValidationNoticeOnce(ctx context.Context, notice Notice, prU
 		gateCheck = `EXISTS (SELECT 1 FROM tasks t JOIN task_repos r ON r.task_id=t.id WHERE t.id=? AND t.project_id=? AND t.type='change' AND t.state IN ('done','merging') AND r.repo=? AND r.landing_mode='pr' AND r.pr_url=? AND r.gated_sha=?)`
 		gateArgs = []any{notice.TaskID, notice.ProjectID, memberName, prURL, headSHA}
 	}
+	if notice.Kind == "ci_fix_queued" {
+		// The fix round is already recorded, and delivering its message may have
+		// reopened the Task and cleared the gated head before this Notice lands.
+		// The recorded round, not the Task's current state, proves the fix was queued.
+		gateCheck = `EXISTS (SELECT 1 FROM validation_fix_rounds r WHERE r.ship_task_id=? AND r.kind='ci' AND r.expected_base_head=?)`
+		gateArgs = []any{notice.TaskID, headSHA}
+	}
 	query := `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) SELECT ?,?,?,?,?,? WHERE ` + gateCheck + ` AND NOT EXISTS (SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=? AND json_valid(data_json) AND json_extract(data_json,'$.head_sha')=? AND json_extract(data_json,'$.check_set')=?)`
 	args := []any{notice.ProjectID, notice.TaskID, notice.Kind, notice.Summary, notice.DataJSON, createdAt}
 	args = append(args, gateArgs...)

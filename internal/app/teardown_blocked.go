@@ -6,25 +6,30 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
-	processes := taskContainmentProcessDetails(task)
-	if task.WorktreePath != "" {
-		sandboxProcesses, err := sandboxTaskProcessDetails(task.WorktreePath)
-		if err == nil {
-			processes = mergeTaskProcessDetails(processes, sandboxProcesses)
-		}
-	}
-	if home, err := s.homePath(); err == nil {
-		if roots, rootErr := taskOwnedProcessRoots(ctx, db, home, project, task); rootErr == nil {
-			if pids, pidErr := processIDsInRoots(roots); pidErr == nil {
-				processes = mergeTaskProcessDetails(processes, taskOwnedProcessDetails(pids))
+	collect := func() []taskProcessDetail {
+		processes := taskContainmentProcessDetails(task)
+		if task.WorktreePath != "" {
+			sandboxProcesses, err := sandboxTaskProcessDetails(task.WorktreePath)
+			if err == nil {
+				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
 			}
 		}
+		if home, err := s.homePath(); err == nil {
+			if roots, rootErr := taskOwnedProcessRoots(ctx, db, home, project, task); rootErr == nil {
+				if pids, pidErr := processIDsInRoots(roots); pidErr == nil {
+					processes = mergeTaskProcessDetails(processes, taskOwnedProcessDetails(pids))
+				}
+			}
+		}
+		return processes
 	}
+	processes := stableTaskProcesses(collect(), collect)
 	if len(processes) == 0 {
 		return nil
 	}
@@ -47,6 +52,32 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 		return err
 	}
 	return nil
+}
+
+// transientProcessWindow separates the two scans behind stableTaskProcesses.
+// It exceeds the lifetime of the `sleep 0.1` a polling loop spawns.
+const transientProcessWindow = 200 * time.Millisecond
+
+// stableTaskProcesses keeps the processes that survive a second scan. Short-lived
+// children, such as the `sleep` a polling shell loop spawns each iteration,
+// get a new PID on every scan and would otherwise make the blocking set differ
+// between retries.
+func stableTaskProcesses(first []taskProcessDetail, rescan func() []taskProcessDetail) []taskProcessDetail {
+	if len(first) == 0 {
+		return nil
+	}
+	time.Sleep(transientProcessWindow)
+	still := make(map[int]bool)
+	for _, process := range rescan() {
+		still[process.PID] = true
+	}
+	stable := make([]taskProcessDetail, 0, len(first))
+	for _, process := range first {
+		if still[process.PID] {
+			stable = append(stable, process)
+		}
+	}
+	return stable
 }
 
 func describeTaskProcesses(processes []taskProcessDetail) string {
