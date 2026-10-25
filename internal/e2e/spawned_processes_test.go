@@ -108,6 +108,14 @@ func guardSpawnedProcesses(t *testing.T, root string) {
 	}
 	t.Cleanup(func() {
 		guardedFixtureRoots.Delete(root)
+		all, err := fixtureSpawnedProcesses(root)
+		if err != nil {
+			t.Errorf("inspect processes spawned from %s: %v", root, err)
+			return
+		}
+		if len(all) == 0 {
+			return // The common case costs a single /proc scan.
+		}
 		find := func(hidden bool) func() ([]isolatedHerdrServerProcess, error) {
 			return func() ([]isolatedHerdrServerProcess, error) {
 				all, err := fixtureSpawnedProcesses(root)
