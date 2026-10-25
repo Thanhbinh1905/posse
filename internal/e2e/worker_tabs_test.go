@@ -312,7 +312,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	}
 	missing, taskErr := taskDB.Task(context.Background(), fixture.projectID, "t3")
 	if taskErr == nil {
-		taskErr = taskDB.UpdateTaskObservation(context.Background(), missing.ID, missing.PaneID, missing.HerdrWorkspaceID, missing.AgentSession, missing.AgentSessionKind, time.Now().Add(-3*time.Minute).UnixMilli(), missing.IdleSince, missing.AgentServerStartedAt)
+		taskErr = taskDB.UpdateTaskObservation(context.Background(), missing.ID, store.TaskObservation{PaneID: missing.PaneID, WorkspaceID: missing.HerdrWorkspaceID, AgentSession: missing.AgentSession, AgentSessionKind: missing.AgentSessionKind, AgentAbsentSince: time.Now().Add(-3 * time.Minute).UnixMilli(), IdleSince: missing.IdleSince, AgentServerStartedAt: missing.AgentServerStartedAt})
 	}
 	_ = taskDB.Close()
 	if taskErr != nil {

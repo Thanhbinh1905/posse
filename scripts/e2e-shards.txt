@@ -313,3 +313,4 @@
 4 TestPRCarriedPassLandsPinnedToTheCarriedHead
 4 TestPRHandResolvedTargetMergeAfterPassHasNoCarry
 4 TestWorkerIdleNoticeIsRaisedOncePerIdleEpisode
+4 TestTaskViewsShowObservedAgentStatusBesideTaskState
