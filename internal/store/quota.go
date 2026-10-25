@@ -82,6 +82,15 @@ func (db *DB) ClaimQuotaExhaustion(ctx context.Context, record QuotaExhaustion, 
 	if launches != record.Launch || !QuotaDecisionState(state) || state == StateNeedsDecision {
 		return false, tx.Commit()
 	}
+	// An earlier launch's handler that is still relaunching owns the pane; its
+	// quota message is still on screen and is not this launch's.
+	var earlierOwner int
+	err = tx.QueryRowContext(ctx, `SELECT owner_pid FROM quota_exhaustions WHERE task_id=? AND launch<? AND status='claimed' ORDER BY launch DESC LIMIT 1`, record.TaskID, record.Launch).Scan(&earlierOwner)
+	if err == nil && ownerAlive(earlierOwner) {
+		return false, tx.Commit()
+	} else if err != nil && !IsNotFound(err) {
+		return false, err
+	}
 	existing, err := scanQuotaExhaustion(tx.QueryRowContext(ctx, quotaExhaustionColumns+` WHERE task_id=? AND launch=?`, record.TaskID, record.Launch))
 	switch {
 	case IsNotFound(err):
@@ -106,7 +115,10 @@ func (db *DB) ClaimQuotaExhaustion(ctx context.Context, record QuotaExhaustion, 
 }
 
 // FinishQuotaExhaustion records the claimed launch's outcome once, with its
-// Notice in the same transaction.
+// Notice in the same transaction. A fallback relaunch that failed after
+// advancing the Task's launch leaves that launch without an agent; the outcome
+// is also recorded for the current launch so its stale screen is not observed
+// again and the Notice binds to it.
 func (db *DB) FinishQuotaExhaustion(ctx context.Context, taskID int64, launch, ownerPID int, status, fallback, detail string, notice Notice) (*Notice, error) {
 	verb := map[string]string{"fallback": "quota_fallback", "decision": "quota_decision"}[status]
 	if verb == "" {
@@ -134,6 +146,25 @@ func (db *DB) FinishQuotaExhaustion(ctx context.Context, taskID int64, launch, o
 	}
 	if err := insertQuotaSignal(ctx, tx, record, verb, detail, now); err != nil {
 		return nil, err
+	}
+	var current int
+	if err := tx.QueryRowContext(ctx, `SELECT launches FROM tasks WHERE id=?`, taskID).Scan(&current); err != nil {
+		return nil, err
+	}
+	if status == "decision" && current > launch {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO quota_exhaustions(task_id,launch,agent,profile,line,resets,status,fallback,detail,owner_pid,observed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(task_id,launch) DO NOTHING`, taskID, current, record.Agent, record.Profile, record.Line, record.Resets, status, fallback, detail, ownerPID, record.ObservedAt, now); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err == nil && data != nil {
+			data["launch"] = current
+			encoded, err := json.Marshal(data)
+			if err != nil {
+				return nil, err
+			}
+			notice.DataJSON = string(encoded)
+		}
 	}
 	if notice.DataJSON == "" {
 		notice.DataJSON = "{}"

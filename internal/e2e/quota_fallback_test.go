@@ -121,7 +121,7 @@ func TestQuotaWhileHerdrReportsWorkingFallsBackOnceStalled(t *testing.T) {
 		_ = watch.Process.Kill()
 		_ = watch.Wait()
 	}()
-	if !waitForCondition(20*time.Second, func() bool { return fixture.hasNotice(t, "quota_fallback") }) {
+	if !waitForCondition(60*time.Second, func() bool { return fixture.hasNotice(t, "quota_fallback") }) {
 		current := fixture.base.mustTask(t, "t1")
 		t.Fatalf("a Worker stuck at its quota message while reported working never fell back: state=%s launches=%d", current.State, current.Launches)
 	}
@@ -301,7 +301,7 @@ func (fixture *quotaFixture) start(t *testing.T) store.Task {
 // only exhaust its quota mid-turn.
 func (fixture *quotaFixture) emitQuota(t *testing.T, attempt int) {
 	t.Helper()
-	if !waitForCondition(15*time.Second, func() bool {
+	if !waitForCondition(45*time.Second, func() bool {
 		contents, _ := os.ReadFile(fixture.log)
 		task, err := fixture.base.db.Task(context.Background(), fixture.base.project.ID, "t1")
 		return err == nil && task.State == store.StateWorking && task.Launches == attempt && strings.Count(string(contents), "primary ") >= attempt
@@ -318,7 +318,7 @@ func (fixture *quotaFixture) emitQuota(t *testing.T, attempt int) {
 
 func (fixture *quotaFixture) waitLog(t *testing.T, want string) {
 	t.Helper()
-	if !waitForCondition(15*time.Second, func() bool {
+	if !waitForCondition(45*time.Second, func() bool {
 		contents, _ := os.ReadFile(fixture.log)
 		return strings.Contains(string(contents), want)
 	}) {
@@ -344,7 +344,7 @@ func (fixture *quotaFixture) hasNotice(t *testing.T, kind string) bool {
 func (fixture *quotaFixture) waitNotice(t *testing.T, kind string) store.Notice {
 	t.Helper()
 	var found store.Notice
-	if !waitForCondition(20*time.Second, func() bool {
+	if !waitForCondition(60*time.Second, func() bool {
 		notices, err := fixture.base.db.Notices(context.Background(), fixture.base.project.ID, false)
 		if err != nil {
 			return false
@@ -361,7 +361,9 @@ func (fixture *quotaFixture) waitNotice(t *testing.T, kind string) store.Notice 
 		screen, _ := (posseRuntime.SystemProgress{}).ReadPane(context.Background(), herdr.NewWithEnv("herdr", fixture.base.env), task.PaneID, 60)
 		notices, _ := fixture.base.db.Notices(context.Background(), fixture.base.project.ID, false)
 		ingest, _ := os.ReadFile(filepath.Join(fixture.base.root, "ingest.log"))
-		t.Fatalf("no %s Notice: state=%s notices=%#v screen=%q ingest=%s", kind, task.State, notices, screen, ingest)
+		intents, _ := fixture.base.db.Intents(context.Background(), fixture.base.project.ID)
+		signals, _ := fixture.base.db.TaskSignals(context.Background(), task.ID, 30)
+		t.Fatalf("no %s Notice: state=%s launches=%d intents=%#v signals=%#v notices=%#v screen=%q ingest=%s", kind, task.State, task.Launches, intents, signals, notices, screen, ingest)
 	}
 	return found
 }

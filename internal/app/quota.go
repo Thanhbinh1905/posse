@@ -227,15 +227,19 @@ func (s *Service) handleTaskQuotaExhaustion(ctx context.Context, db *store.DB, p
 	}
 	data := map[string]any{"launch": task.Launches, "agent": kind, "profile": task.Profile, "limit": quota.limit(), "line": quota.Line, "resets": quota.Resets, "fallback": fallback}
 	reached := quotaReachedText(task.Profile, quota)
-	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
+	// The outcome is recorded even when the relaunch consumed or canceled ctx.
+	finish := func(status, detail string, notice store.Notice) (*store.Notice, error) {
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return db.FinishQuotaExhaustion(finishCtx, task.ID, task.Launches, os.Getpid(), status, fallback, detail, notice)
+	}
 	if fallback != "" {
 		relaunched, relaunchErr := s.relaunchTaskAttempt(ctx, db, home, project, cfg, task, fallback, true)
 		if relaunchErr == nil {
 			data["worker"] = relaunched.Worker
 			detail := fmt.Sprintf("%s; relaunched with fallback Profile %s in the same Sandbox", reached, fallback)
 			notice := store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "quota_fallback", Summary: task.Title + ": " + detail, DataJSON: marshalJSON(data)}
-			return db.FinishQuotaExhaustion(finishCtx, task.ID, task.Launches, os.Getpid(), "fallback", fallback, detail, notice)
+			return finish("fallback", detail, notice)
 		}
 		data["relaunch_error"] = relaunchErr.Error()
 		reached += fmt.Sprintf("; relaunch with fallback Profile %s failed: %v", fallback, relaunchErr)
@@ -243,7 +247,7 @@ func (s *Service) handleTaskQuotaExhaustion(ctx context.Context, db *store.DB, p
 		reached += "; it has no fallback Profile"
 	}
 	notice := store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "quota_exhausted", Summary: task.Title + ": " + reached, DataJSON: marshalJSON(data)}
-	return db.FinishQuotaExhaustion(finishCtx, task.ID, task.Launches, os.Getpid(), "decision", fallback, reached, notice)
+	return finish("decision", reached, notice)
 }
 
 func quotaKindSupported(kind string) bool {

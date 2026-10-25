@@ -115,3 +115,55 @@ func TestQuotaDecisionBecomesObsoleteWhenTheWorkerIsRelaunched(t *testing.T) {
 		t.Fatalf("pending after relaunch = %#v, %v; want decision %d obsolete", pending, err, decision.ID)
 	}
 }
+
+func TestQuotaExhaustionOfALaunchWaitsForTheEarlierLaunchHandler(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Quota", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET launches=1 WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	alive := map[int]bool{100: true}
+	isAlive := func(pid int) bool { return alive[pid] }
+	first := QuotaExhaustion{TaskID: taskID, Launch: 1, Agent: "codex", Profile: "primary", Line: "You've hit your usage limit.", Resets: ""}
+	if claimed, err := db.ClaimQuotaExhaustion(ctx, first, 100, isAlive); err != nil || !claimed {
+		t.Fatalf("claim launch 1 = %t, %v", claimed, err)
+	}
+	// The fallback relaunch advanced the launch, then stalled before its agent
+	// started; the screen still shows launch 1's message.
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET launches=2, profile='backup' WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	second := QuotaExhaustion{TaskID: taskID, Launch: 2, Agent: "claude", Profile: "backup", Line: first.Line}
+	if claimed, err := db.ClaimQuotaExhaustion(ctx, second, 200, isAlive); err != nil || claimed {
+		t.Fatalf("claim launch 2 while launch 1's handler runs = %t, %v; want refused", claimed, err)
+	}
+	// The relaunch failed: the Decision binds to launch 2 and launch 2 is not
+	// observed again.
+	notice := Notice{ProjectID: project.ID, TaskID: taskID, Kind: "quota_exhausted", Summary: "Quota: relaunch failed", DataJSON: `{"launch":1,"profile":"primary"}`}
+	created, err := db.FinishQuotaExhaustion(ctx, taskID, 1, 100, "decision", "backup", "relaunch failed", notice)
+	if err != nil || created == nil || created.DataJSON != `{"launch":2,"profile":"primary"}` {
+		t.Fatalf("finish after a failed relaunch = %#v, %v; want the Notice bound to launch 2", created, err)
+	}
+	if carried, err := db.TaskQuotaExhaustion(ctx, taskID, 2); err != nil || carried.Status != "decision" {
+		t.Fatalf("launch 2 record = %#v, %v; want the decision carried", carried, err)
+	}
+	alive[100] = false
+	if claimed, err := db.ClaimQuotaExhaustion(ctx, second, 200, isAlive); err != nil || claimed {
+		t.Fatalf("claim of a launch with a carried outcome = %t, %v; want refused", claimed, err)
+	}
+}
