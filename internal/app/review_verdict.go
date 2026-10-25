@@ -24,7 +24,7 @@ func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Pro
 	}
 	if !project.IsWorkspace() && plan != nil && (plan.Review == "full-pipeline" || isFullPipelineTask(change, project.Name)) {
 		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
-		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+		if err != nil || !offersCandidateHead(candidate) {
 			return nil, axi.Failure("candidate_missing", "full-pipeline review requires an active private candidate", false, "Submit the Task with `posse publish` before starting its Review")
 		}
 		return []store.ReviewTarget{{Repository: project.Name, Commit: candidate.CandidateSHA}}, nil
@@ -65,7 +65,7 @@ func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Pro
 		}
 		if memberReviews[repo.Repo] == "full-pipeline" {
 			candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo.Repo)
-			if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+			if err != nil || !offersCandidateHead(candidate) {
 				return nil, axi.Failure("candidate_missing", "full-pipeline review requires an active private candidate for Member "+repo.Repo, false, "Submit the Member with `posse publish --repo "+repo.Repo+"` before starting its Review")
 			}
 			targets = append(targets, store.ReviewTarget{Repository: repo.Repo, Commit: candidate.CandidateSHA})
@@ -85,6 +85,17 @@ func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Pro
 		return nil, fmt.Errorf("task %s has no changed repository", taskIDString(change.Seq))
 	}
 	return targets, nil
+}
+
+// offersCandidateHead reports whether a Change Task still offers candidate's
+// head. A promotion interrupted after its push leaves the candidate promoting;
+// its head stays the reviewed one so the rerun can finish publication.
+func offersCandidateHead(candidate store.ValidationCandidate) bool {
+	switch candidate.State {
+	case store.ValidationCandidateActive, store.ValidationCandidatePromoting, store.ValidationCandidatePromoted:
+		return true
+	}
+	return false
 }
 
 // reviewableChange refuses a Change Task that has not completed. Only a completed
