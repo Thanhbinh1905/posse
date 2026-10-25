@@ -351,3 +351,19 @@ func TestFindPanePrefersLabelOverRecordedID(t *testing.T) {
 		t.Fatalf("FindPane did not fall back to an unlabeled pane's id: %#v, %v", pane, found)
 	}
 }
+
+func TestIsolatedTestEnvironmentDropsWorkerAndHarnessIdentity(t *testing.T) {
+	root := t.TempDir()
+	dropped := []string{"POSSE_WORKER_HOME", "POSSE_TASK_ID", "POSSE_TASK_TEMP", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDECODE"}
+	for _, key := range dropped {
+		t.Setenv(key, "inherited")
+	}
+	for _, entry := range IsolatedTestEnvironment(root) {
+		key, _, _ := strings.Cut(entry, "=")
+		for _, name := range dropped {
+			if key == name {
+				t.Fatalf("isolated environment kept %s", entry)
+			}
+		}
+	}
+}
