@@ -874,7 +874,7 @@ func configRepairHelp(invalid *config.InvalidError) []string {
 			help = append(help, "Or choose the lighter `posse config set "+key+" "+lighter+scope+"`")
 		}
 		if migration.Value == config.NoMistakes {
-			help = append(help, "Keep no-mistakes commands.test and commands.lint in the repository CI workflow; a full-pipeline Worker records test evidence with `posse validate test`")
+			help = append(help, "Keep no-mistakes commands.test and commands.lint in the repository CI workflow; a full-pipeline Worker records test evidence with `posse validate test`, and `full_pipeline.run_workflows = true` runs those workflow jobs locally at lint")
 		}
 		return append(help, "Posse never changes config for this migration", "Run `posse setup` after the config is valid")
 	}
