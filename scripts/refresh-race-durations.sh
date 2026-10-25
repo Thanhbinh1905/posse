@@ -1,21 +1,24 @@
 #!/bin/sh
 set -eu
 
-# Rewrites race-durations.txt from the test shard jobs of a CI run, or from a
-# local `go test -race -v ./...` log when given a file path. A package recorded
-# whole takes its `ok` line time; a package recorded per test takes each
-# top-level test's duration. An entry absent from the run keeps its recorded
-# duration.
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 <ci-run-id|go-test-log-file>" >&2
+# Rewrites race-durations.txt from the test shard jobs of a CI run, by default
+# the latest successful CI run on main, or from a local `go test -race -v ./...`
+# log when given a file path. A package recorded whole takes its `ok` line
+# time; a package recorded per test takes each top-level test's duration. An
+# entry absent from the run keeps its recorded duration; a recorded entry that
+# no longer exists is dropped.
+if [ "$#" -gt 1 ]; then
+  echo "usage: $0 [<ci-run-id>|<go-test-log-file>]" >&2
   exit 2
 fi
-file="$(dirname "$0")/race-durations.txt"
+dir=$(dirname "$0")
+file="$dir/race-durations.txt"
 module=$(go list -m)
-if [ -f "$1" ]; then
-  log=$(cat "$1")
+source=${1:-$(gh run list --workflow ci.yml --branch main --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId')}
+if [ -f "$source" ]; then
+  log=$(cat "$source")
 else
-  log=$(gh run view "$1" --log |
+  log=$(gh run view "$source" --log |
     awk -F '\t' '$1 ~ /^test shard [0-9]+$/ { sub(/^[^\t]*\t[^\t]*\t[^ ]+ /, ""); print }')
 fi
 measured=$(printf '%s\n' "$log" | awk -v module="$module" -v file="$file" '
@@ -49,12 +52,15 @@ measured=$(printf '%s\n' "$log" | awk -v module="$module" -v file="$file" '
   }
   END { for (key in max) print max[key], key }' | sed 's/ $//')
 if [ -z "$measured" ]; then
-  echo "$1 has no race shard durations" >&2
+  echo "$source has no race shard durations" >&2
   exit 1
 fi
+planned=$("$dir/run-race-shard.sh" --plan)
+current=$(printf '%s\n' "$planned" | awk '{ print $3, $4 }')
 {
+  printf '%s\n' "$current" | sed 's/^/current /'
   printf '%s\n' "$measured"
   awk 'NF == 2 || NF == 3' "$file"
-} | awk '!seen[$2 " " $3]++' | LC_ALL=C sort -k2,2 -k3,3 > "$file.tmp"
+} | awk '$1 == "current" { keep[$2 " " $3] = 1; next } ($2 " " $3 in keep) && !seen[$2 " " $3]++' | LC_ALL=C sort -k2,2 -k3,3 > "$file.tmp"
 mv "$file.tmp" "$file"
-printf 'Updated %s from %s\n' "$file" "$1"
+printf 'Updated %s from %s\n' "$file" "$source"

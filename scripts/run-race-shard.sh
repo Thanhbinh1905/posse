@@ -2,20 +2,26 @@
 set -eu
 
 # Race-enabled unit tests are balanced across shards by the durations recorded
-# in race-durations.txt, shared with the plain Go test in internal/e2e
-# (TestRaceDurationsCoverEveryTest). A line is "<seconds> <package>" for a
-# package that runs whole, or "<seconds> <package> <test>" for each top-level
-# test of a package split across shards. Packages are module-relative, such as
-# internal/store. Refresh the file from a CI run with
+# in race-durations.txt. A line is "<seconds> <package>" for a package that
+# runs whole, or "<seconds> <package> <test>" for each top-level test of a
+# package split across shards. Packages are module-relative, such as
+# internal/store. A discovered package or split test without a recorded
+# duration is planned at default_seconds and a recorded one that no longer
+# exists is ignored, so parallel PRs that add or remove tests never fail the
+# check. Refresh the file from CI timing data with
 # scripts/refresh-race-durations.sh.
 #
 # shard_count must match the test-shard matrix in .github/workflows/ci.yml.
 # budget_seconds caps each shard's planned test time at 40% of the 15m go test
 # timeout, leaving room for compilation and runner variance so a shard stays
-# under about 60% of the timeout. When the self-check reports a shard over
-# budget, add a shard here and to the matrix.
+# under about 60% of the timeout. The self-check warns once a shard plans over
+# warn_percent of the budget and fails over the budget. On a warning, add a
+# shard here and to the matrix.
 shard_count=8
 budget_seconds=360
+warn_percent=85
+# default_seconds is above the 95th percentile of recorded split tests.
+default_seconds=5
 module=$(go list -m)
 durations=$(cat "$(dirname "$0")/race-durations.txt")
 
@@ -30,10 +36,7 @@ split_packages() {
 }
 
 validate_durations() {
-  packages=$1
-  manifest=$2
-
-  if ! printf '%s\n' "$manifest" | awk '
+  printf '%s\n' "$1" | awk '
     NF == 0 { next }
     NF != 2 && NF != 3 {
       printf "invalid race duration on line %d: expected <seconds> <package> [<test>]\n", NR > "/dev/stderr"
@@ -62,33 +65,70 @@ validate_durations() {
       }
       if (invalid) exit 1
     }
-  '; then
-    return 1
-  fi
+  '
+}
 
-  recorded_packages=$(printf '%s\n' "$manifest" | awk 'NF >= 2 { print $2 }' | LC_ALL=C sort -u)
-  if [ "$packages" != "$recorded_packages" ]; then
-    echo "race-durations.txt must record every package of the module." >&2
-    printf 'Discovered packages:\n%s\nRecorded packages:\n%s\n' "$packages" "$recorded_packages" >&2
-    return 1
+# units prints every unit to plan: "<package>" for a package that runs whole,
+# and "<package> <test>" for each top-level test of a package the manifest
+# splits. Listing with -race reuses the build for the shard's own go test run.
+units() {
+  packages=$(relative_packages)
+  split=$({
+    printf '%s\n' "$packages" | sed 's/^/package /'
+    split_packages "$1" | sed 's/^/split /'
+  } | awk '$1 == "package" { known[$2] = 1; next } $2 in known { print $2 }')
+  {
+    printf '%s\n' "$split" | sed 's/^/split /'
+    printf '%s\n' "$packages" | sed 's/^/package /'
+  } | awk '$1 == "split" { split_pkg[$2] = 1; next } NF == 2 && !($2 in split_pkg) { print $2 }'
+  if [ -n "$split" ]; then
+    # shellcheck disable=SC2046 # package paths have no spaces
+    listed=$(go test -race -list '^Test' $(printf '%s\n' "$split" | sed 's|^|./|'))
+    printf '%s\n' "$listed" | awk -v module="$module" '
+      NF == 1 && $1 ~ /^Test/ { pending[++n] = $1; next }
+      /^ok[ \t]/ {
+        pkg = substr($2, length(module) + 2)
+        for (i = 1; i <= n; i++) print pkg, pending[i]
+        n = 0
+      }'
   fi
 }
 
-# validate_split_tests checks that each split package records exactly the
-# top-level tests that go test discovers in it.
-validate_split_tests() {
-  for pkg in $(split_packages "$2"); do
-    discovered=$(go test -list '^Test' "./$pkg" | awk 'NF == 1 && $1 ~ /^Test/ { print $1 }' | LC_ALL=C sort)
-    recorded=$(printf '%s\n' "$2" | awk -v pkg="$pkg" 'NF == 3 && $2 == pkg { print $3 }' | LC_ALL=C sort)
-    if [ "$discovered" != "$recorded" ]; then
-      printf 'race-durations.txt must record every top-level test of %s exactly once.\n' "$pkg" >&2
-      printf 'Discovered tests:\n%s\nRecorded tests:\n%s\n' "$discovered" "$recorded" >&2
-      return 1
-    fi
-  done
+# tagged prints the manifest and the units as "recorded <seconds> <package>
+# [<test>]" and "unit <package> [<test>]" lines for the awk programs below.
+tagged() {
+  printf '%s\n' "$2" | awk 'NF == 2 || NF == 3 { print "recorded", $0 }'
+  printf '%s\n' "$1" | awk 'NF == 1 || NF == 2 { print "unit", $0 }'
 }
 
-# plan prints "<shard> <seconds> <package> [<test>]" for every recorded unit.
+# estimate prints "<seconds> <package> [<test>]" for every unit: its recorded
+# duration, or default_seconds when it has none.
+estimate() {
+  tagged "$1" "$2" | awk -v fallback="$default_seconds" '
+    $1 == "recorded" { seconds[$3 " " $4] = $2; next }
+    {
+      key = $2 " " $3
+      line = (key in seconds ? seconds[key] : fallback) " " key
+      sub(/ $/, "", line)
+      print line
+    }'
+}
+
+# warn_unrecorded prints a CI warning for every unit without a recorded
+# duration and every recorded unit that no longer exists.
+warn_unrecorded() {
+  tagged "$1" "$2" | awk -v fallback="$default_seconds" '
+    $1 == "recorded" { key = $3 " " $4; sub(/ $/, "", key); recorded[key] = 1; next }
+    { key = $2 " " $3; sub(/ $/, "", key); unit[key] = 1 }
+    END {
+      for (key in unit) if (!(key in recorded))
+        printf "::warning::%s has no recorded race duration and is planned at %ds; refresh scripts/race-durations.txt with scripts/refresh-race-durations.sh once it runs on main\n", key, fallback
+      for (key in recorded) if (!(key in unit))
+        printf "::warning::scripts/race-durations.txt records %s, which no longer exists; scripts/refresh-race-durations.sh drops it\n", key
+    }' | LC_ALL=C sort
+}
+
+# plan prints "<shard> <seconds> <package> [<test>]" for every estimated unit.
 # Longest units go first, each to the shard with the least planned time so far.
 plan() {
   printf '%s\n' "$1" |
@@ -102,28 +142,31 @@ plan() {
     }'
 }
 
-# check_plan verifies that the plan runs every recorded unit in exactly one
-# shard and that no shard exceeds the budget.
+# check_plan verifies that the plan runs every estimated unit in exactly one
+# shard. It warns when a shard plans over warn_percent of the budget and fails
+# when a shard exceeds the budget.
 check_plan() {
-  manifest=$1
-  planned=$(plan "$manifest" "$2")
-  recorded_units=$(printf '%s\n' "$manifest" | awk 'NF == 2 || NF == 3 { print $2, $3 }' | LC_ALL=C sort)
+  estimated=$1
+  planned=$(plan "$estimated" "$2")
+  estimated_units=$(printf '%s\n' "$estimated" | awk 'NF == 2 || NF == 3 { print $2, $3 }' | LC_ALL=C sort)
   planned_units=$(printf '%s\n' "$planned" | awk -v count="$2" '$1 >= 1 && $1 <= count { print $3, $4 }' | LC_ALL=C sort)
-  if [ "$recorded_units" != "$planned_units" ]; then
-    echo "Race shard plan does not run every recorded unit exactly once." >&2
+  if [ "$estimated_units" != "$planned_units" ]; then
+    echo "Race shard plan does not run every unit exactly once." >&2
     return 1
   fi
-  printf '%s\n' "$planned" | awk -v count="$2" -v budget="$3" '
+  printf '%s\n' "$planned" | awk -v count="$2" -v budget="$3" -v warn="$warn_percent" '
     { total[$1] += $2 }
     END {
       for (s = 1; s <= count; s++) {
         printf "Race shard %d/%d plans %ds of %ds budget\n", s, count, total[s], budget
         if (total[s] > budget) over = 1
+        else if (total[s] * 100 > budget * warn) near = 1
       }
       if (over) {
         print "A race shard exceeds its budget; raise shard_count in scripts/run-race-shard.sh and the test-shard matrix in .github/workflows/ci.yml." > "/dev/stderr"
         exit 1
       }
+      if (near) printf "::warning::A race shard plans over %d%% of its budget; raise shard_count in scripts/run-race-shard.sh and the test-shard matrix in .github/workflows/ci.yml before a shard exceeds it.\n", warn
     }'
 }
 
@@ -141,35 +184,50 @@ shard_commands() {
 }
 
 run_self_check() {
-  packages=$(relative_packages)
-  validate_durations "$packages" "$durations"
-  validate_split_tests "$packages" "$durations"
-  check_plan "$durations" "$shard_count" "$budget_seconds"
+  validate_durations "$durations"
+  discovered=$(units "$durations")
+  warn_unrecorded "$discovered" "$durations"
+  check_plan "$(estimate "$discovered" "$durations")" "$shard_count" "$budget_seconds"
 
-  if validate_durations 'pkg/a
-pkg/b' '1 pkg/a' >/dev/null 2>&1; then
-    echo "self-check failed: an unrecorded package was accepted" >&2
-    return 1
-  fi
-  if validate_durations 'pkg/a' '1 pkg/a
+  if validate_durations '1 pkg/a
 2 pkg/a TestA' >/dev/null 2>&1; then
     echo "self-check failed: a package recorded whole and per test was accepted" >&2
     return 1
   fi
-  if validate_durations 'pkg/a' '0 pkg/a' >/dev/null 2>&1; then
+  if validate_durations '0 pkg/a' >/dev/null 2>&1; then
     echo "self-check failed: a zero duration was accepted" >&2
     return 1
   fi
-  if validate_durations 'pkg/a' '1 pkg/a TestA
+  if validate_durations '1 pkg/a TestA
 2 pkg/a TestA' >/dev/null 2>&1; then
     echo "self-check failed: a duplicate test duration was accepted" >&2
     return 1
   fi
-  if ! validate_durations 'pkg/a
-pkg/b' '1 pkg/a TestΩ
+  if ! validate_durations '1 pkg/a TestΩ
 2 pkg/a TestB
 3 pkg/b'; then
     echo "self-check failed: a valid manifest was rejected" >&2
+    return 1
+  fi
+  if [ "$(estimate 'pkg/a TestA
+pkg/a TestNew
+pkg/b
+pkg/new' '2 pkg/a TestA
+3 pkg/a TestRemoved
+4 pkg/b
+6 pkg/removed' | tr '\n' ' ')" != "2 pkg/a TestA $default_seconds pkg/a TestNew 4 pkg/b $default_seconds pkg/new " ]; then
+    echo "self-check failed: a missing unit is not planned at the default estimate" >&2
+    return 1
+  fi
+  if [ "$(warn_unrecorded 'pkg/a TestA
+pkg/a TestNew
+pkg/new' '2 pkg/a TestA
+3 pkg/a TestRemoved
+6 pkg/removed' | awk '{ print $1, $2, $3 }')" != '::warning::pkg/a TestNew has
+::warning::pkg/new has no
+::warning::scripts/race-durations.txt records pkg/a
+::warning::scripts/race-durations.txt records pkg/removed,' ]; then
+    echo "self-check failed: missing and removed units are not reported as warnings" >&2
     return 1
   fi
   if [ "$(plan '5 pkg/a TestA
@@ -192,6 +250,14 @@ pkg/b' '1 pkg/a TestΩ
     echo "self-check failed: a shard over budget was accepted" >&2
     return 1
   fi
+  if ! near=$(check_plan '9 pkg/a' 1 10) || [ "${near#*::warning::}" = "$near" ]; then
+    echo "self-check failed: a shard near its budget did not warn" >&2
+    return 1
+  fi
+  if [ "$(check_plan '8 pkg/a' 1 10)" != 'Race shard 1/1 plans 8s of 10s budget' ]; then
+    echo "self-check failed: a shard within the warning threshold warned" >&2
+    return 1
+  fi
   printf 'Race shard assignment self-check passed.\n'
 }
 
@@ -200,7 +266,9 @@ if [ "$#" -eq 1 ] && [ "$1" = --self-test ]; then
   exit 0
 fi
 if [ "$#" -eq 1 ] && [ "$1" = --plan ]; then
-  plan "$durations" "$shard_count"
+  validate_durations "$durations"
+  discovered=$(units "$durations")
+  plan "$(estimate "$discovered" "$durations")" "$shard_count"
   exit 0
 fi
 if [ "$#" -ne 2 ]; then
@@ -220,8 +288,9 @@ if [ "$shard" -gt "$shard_count" ]; then
   exit 2
 fi
 
-validate_durations "$(relative_packages)" "$durations"
-shard_plan=$(plan "$durations" "$shard_count" | awk -v shard="$shard" '$1 == shard')
+validate_durations "$durations"
+discovered=$(units "$durations")
+shard_plan=$(plan "$(estimate "$discovered" "$durations")" "$shard_count" | awk -v shard="$shard" '$1 == shard')
 printf 'Running race shard %s/%s\n' "$shard" "$shard_count"
 started=$(date +%s)
 
@@ -234,5 +303,5 @@ elapsed=$(($(date +%s) - started))
 limit=$((budget_seconds * 3 / 2))
 printf 'Race shard %s/%s took %ss\n' "$shard" "$shard_count" "$elapsed"
 if [ "$elapsed" -gt "$limit" ]; then
-  echo "::warning::Race shard $shard took ${elapsed}s, over ${limit}s (60% of the 15m timeout); refresh scripts/race-durations.txt with scripts/refresh-race-durations.sh <run-id>"
+  echo "::warning::Race shard $shard took ${elapsed}s, over ${limit}s (60% of the 15m timeout); refresh scripts/race-durations.txt with scripts/refresh-race-durations.sh"
 fi

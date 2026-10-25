@@ -883,7 +883,6 @@
 2 internal/axi
 2 internal/config
 2 internal/dispatch
-3 internal/e2e
 1 internal/execgroup
 23 internal/execution
 5 internal/herdr
