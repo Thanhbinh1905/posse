@@ -229,6 +229,11 @@ type Project struct {
 	ProjectUuid      string
 }
 
+type ProjectHistoryRevision struct {
+	ProjectID int64
+	Revision  int64
+}
+
 type ProjectRepo struct {
 	ID            int64
 	ProjectID     int64
