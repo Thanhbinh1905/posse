@@ -47,7 +47,8 @@ type TaskSnapshot struct {
 	// ReviewTargets and ReviewVerdict are set for a Review Task only.
 	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
-	// ReviewReceipts are the no-mistakes receipts that qualified a Change Task.
+	// ReviewReceipts are the no-mistakes receipts that qualified a Change Task
+	// before no-mistakes was removed; they are kept as history.
 	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
 	// Validation state is owned by a Change Task and includes its review rounds,
 	// finding ledger, carry proofs, dispositions, and fix-round budget.

@@ -204,8 +204,13 @@ func migrateVocabularyFile(path string) error {
 	// shorthand here; Load enforces the actual file's global/Project scope.
 	validationValues := clone(values).(map[string]any)
 	removeLegacyGateSettings(path, validationValues)
-	if err := ValidateSchemaMap(path, validationValues, true); err != nil {
-		return err
+	// A removed value survives the rename unchanged; Load then reports it under
+	// its canonical key, where `posse config set` can replace it.
+	for _, issue := range SchemaValidationErrors(path, validationValues, true) {
+		var migration *MigrationError
+		if !errors.As(issue, &migration) {
+			return issue
+		}
 	}
 	inlineVersion := vocabularyMarkerVersion(data)
 	if !changed {

@@ -42,7 +42,7 @@ func TestExternalCommandsDisableInteractivePrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\nprintf '%s|%s' \"${GIT_TERMINAL_PROMPT:-missing}\" \"${GH_PROMPT_DISABLED:-missing}\"\n"
-	for _, name := range []string{"gh", "no-mistakes", "git"} {
+	for _, name := range []string{"gh", "glab", "git"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -50,7 +50,7 @@ func TestExternalCommandsDisableInteractivePrompts(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("GIT_TERMINAL_PROMPT", "1")
 	t.Setenv("GH_PROMPT_DISABLED", "0")
-	for _, name := range []string{"gh", "no-mistakes", "git"} {
+	for _, name := range []string{"gh", "glab", "git"} {
 		output, err := commandOutputArgs(context.Background(), root, name, "status")
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -208,12 +208,12 @@ func processIsRunning(pid int) (bool, error) {
 	return fields[0] != "Z" && fields[0] != "X", nil
 }
 
-func TestExternalTimeoutPolicyCoversNoMistakesAndOnlyGitFetch(t *testing.T) {
+func TestExternalTimeoutPolicyCoversForgeCLIsAndOnlyGitFetch(t *testing.T) {
 	for _, command := range []struct {
 		name string
 		args []string
 		want bool
-	}{{"gh", []string{"pr", "view"}, true}, {"no-mistakes", []string{"axi", "status"}, true}, {"git", []string{"-C", "/tmp/repo", "fetch", "origin"}, true}, {"git", []string{"-C", "/tmp/repo", "status"}, false}} {
+	}{{"gh", []string{"pr", "view"}, true}, {"glab", []string{"mr", "view"}, true}, {"git", []string{"-C", "/tmp/repo", "fetch", "origin"}, true}, {"git", []string{"-C", "/tmp/repo", "status"}, false}} {
 		got := timeoutForExternalCommand(command.name, command.args) > 0
 		if got != command.want {
 			t.Errorf("timeoutForExternalCommand(%q, %v) = %v, want %v", command.name, command.args, got, command.want)

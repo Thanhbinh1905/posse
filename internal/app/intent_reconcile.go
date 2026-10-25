@@ -278,7 +278,7 @@ func (s *Service) recoverMergeIntent(ctx context.Context, db *store.DB, project 
 	if task.State != store.StateMerging {
 		return finish("verified Task is not in local merging state")
 	}
-	if task.MergeMode == "pr" || task.MergeMode == "no-mistakes" {
+	if deliveredByPullRequest(task.MergeMode) {
 		return finish("verified remote merging has no local Git ref effect")
 	}
 	merged := false

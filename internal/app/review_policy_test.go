@@ -48,20 +48,19 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 		blockedAfterPass bool
 	}{
 		{"none", taskplan.Version, false, false}, {"quick", taskplan.Version, true, false}, {"local", 3, true, false},
-		{"full-pipeline", taskplan.Version, true, true}, {"no-mistakes", taskplan.Version, true, true},
+		{"full-pipeline", taskplan.Version, true, true}, {"no-mistakes", 5, true, true},
 		{"always", 1, true, false}, {"on_risk", 1, false, false}, {"never", 1, false, false},
 	} {
 		t.Run(tc.policy, func(t *testing.T) {
 			f := newReviewVerdictFixture(t)
 			freezeReviewPolicy(t, f, tc.policy, tc.version)
-			stubNoMistakesReceipt(t, func(string) (string, error) { return "", errors.New("exit status 1: unknown flag: --head") })
 			cfg := config.Config{Defaults: config.Defaults{Review: "none"}}
 			err := requireSelectedReview(context.Background(), f.db, f.project, cfg, f.task)
 			if (err != nil) != tc.blocked {
 				t.Fatalf("policy %s: %v", tc.policy, err)
 			}
 			var refusal *axi.Error
-			if tc.policy == "no-mistakes" && (!errors.As(err, &refusal) || refusal.Code != "review_receipt_unsupported") {
+			if tc.policy == "no-mistakes" && (!errors.As(err, &refusal) || refusal.Code != "no_mistakes_removed") {
 				t.Fatal(err)
 			}
 			if (reviewEvidenceStatus(f.task) == "legacy-evidence") != (tc.version == 1) {
@@ -85,7 +84,7 @@ func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 }
 
 func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
-	f := newWorkspaceMergeFixture(t, localWorkspaceConfig+"review='quick'\n[repositories.backend]\nreview='none'\n[repositories.worker]\nreview='no-mistakes'\n", []string{"backend", "worker"}, []string{"backend"})
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig+"review='quick'\n[repositories.backend]\nreview='none'\n[repositories.worker]\nreview='full-pipeline'\n", []string{"backend", "worker"}, []string{"backend"})
 	ctx := context.Background()
 	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
 	if err != nil {
@@ -116,8 +115,8 @@ func TestWorkspaceSelectedReviewOverridesStayFrozen(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Live config cannot replace the selected Member policy. Unchanged worker's
-	// no-mistakes selection must not block backend's none policy.
-	if _, err := config.SetFile(config.ConfigPath(f.home, ""), "repositories.backend.review", "no-mistakes", false); err != nil {
+	// full-pipeline selection must not block backend's none policy.
+	if _, err := config.SetFile(config.ConfigPath(f.home, ""), "repositories.backend.review", "full-pipeline", false); err != nil {
 		t.Fatal(err)
 	}
 	if code := f.run("merge", "t1", "--execute", "--user-approved", "Merge the selected local member"); code != 0 {

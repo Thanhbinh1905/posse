@@ -2,6 +2,8 @@
 
 Amended 2026-10-24: the rule is optional and off by default; see [Amendment](#amendment-optional-and-off-by-default).
 
+**Current status:** [ADR 0024](0024-built-in-validation-replaces-no-mistakes.md) and spec section 25.17 record the removal of no-mistakes (V15, #305); its recovery-run rule below no longer applies.
+
 ## Context
 
 A green PR/MR observation identifies the checked head, but does not prove that the branch includes the target branch's latest commit. Two Tasks can therefore pass checks against the same target and merge sequentially, leaving the second branch stale after the first Merge. Duplicate migration versions are one semantic conflict this permits.

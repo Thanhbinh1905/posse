@@ -90,7 +90,7 @@ func queuedTargetSyncHelp(taskSeq int) string {
 // pendingTargetSyncFailure explains a Merge that found no gated head because
 // Posse already queued the Worker an instruction to merge the PR target.
 func pendingTargetSyncFailure(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
-	if task.Type != "change" || task.MergeMode != "pr" && task.MergeMode != "no-mistakes" {
+	if task.Type != "change" || task.MergeMode != "pr" {
 		return nil
 	}
 	headSHA, err := db.OutstandingValidationFixHead(ctx, task.ID, "freshness")
@@ -106,7 +106,7 @@ func pendingTargetSyncFailure(ctx context.Context, db *store.DB, project store.P
 }
 
 func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task) error {
-	if task.State != store.StateWorking || task.Type != "change" || task.PRURL == "" || task.MergeMode != "pr" && task.MergeMode != "no-mistakes" {
+	if task.State != store.StateWorking || task.Type != "change" || task.PRURL == "" || task.MergeMode != "pr" {
 		return nil
 	}
 	if err := pendingTargetSyncFailure(ctx, db, project, task); err != nil {
@@ -138,7 +138,7 @@ func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Pro
 // queuePRTargetSyncInstruction enters a behind done or merging Task in its
 // target's merge queue and queues the merge-target instruction only for the
 // queue head, deduplicated against an earlier one (ADR 0031).
-func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) (targetSync, error) {
+func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) (targetSync, error) {
 	if task.State != store.StateDone && task.State != store.StateMerging {
 		return targetSync{}, nil
 	}
@@ -149,7 +149,7 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	if !place.Head() {
 		return targetSync{Place: place}, nil
 	}
-	if err := queueTargetMergeInstruction(ctx, db, task, member, mergeMode, freshness, headSHA); err != nil {
+	if err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA); err != nil {
 		return targetSync{}, err
 	}
 	return targetSync{Queued: true, Place: place}, nil
@@ -159,14 +159,14 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 // whose PR conflicts with its target to merge the target, without the merge
 // queue. It applies when defaults.require_current_target is off, so only
 // real conflicts need a Worker update (ADR 0019).
-func queueConflictTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) error {
+func queueConflictTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
 	if task.State != store.StateDone && task.State != store.StateMerging {
 		return nil
 	}
-	return queueTargetMergeInstruction(ctx, db, task, member, mergeMode, freshness, headSHA)
+	return queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA)
 }
 
-func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member, mergeMode string, freshness prTargetFreshness, headSHA string) error {
+func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
 	memberLabel := ""
 	if member != "" {
 		memberLabel = "Workspace member " + member + ": "
@@ -175,12 +175,7 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
 		memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
 	)
-	if mergeMode == "no-mistakes" {
-		instruction = fmt.Sprintf(
-			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, then rerun no-mistakes with `--skip=rebase` and the Brief intent. Signal done again afterward.",
-			memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
-		)
-	} else if member != "" {
+	if member != "" {
 		instruction += " For publication, use `posse publish --repo " + member + " \"<summary>\"` and report done without `--pr`."
 	} else {
 		instruction += " For publication, use `posse publish \"<summary>\"` and report done with the PR URL."
@@ -203,7 +198,7 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 // merge; the forge's mergeability, required by requireGreenObservation,
 // still refuses a conflicting head.
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member, mergeMode, headSHA string) error {
-	if mergeMode != "pr" && mergeMode != "no-mistakes" || !cfg.Defaults.RequireCurrentTarget {
+	if mergeMode != "pr" || !cfg.Defaults.RequireCurrentTarget {
 		return nil
 	}
 	targetBranch := taskTargetBranch(project, task)
@@ -214,7 +209,7 @@ func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, projec
 	if freshness.Fresh {
 		return nil
 	}
-	sync, err := queuePRTargetSyncInstruction(ctx, db, task, member, mergeMode, freshness, headSHA)
+	sync, err := queuePRTargetSyncInstruction(ctx, db, task, member, freshness, headSHA)
 	if err != nil {
 		return err
 	}

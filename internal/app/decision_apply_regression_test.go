@@ -117,13 +117,10 @@ func TestApplyAnsweredReviewChoices(t *testing.T) {
 	}
 }
 
-func TestApplyNoMistakesReviewAnswerQueuesWorker(t *testing.T) {
+func TestApplyFindingsReviewAnswerQueuesWorker(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	defer f.db.Close()
 	ctx := context.Background()
-	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET landing_mode='no-mistakes' WHERE id=?`, f.task.ID); err != nil {
-		t.Fatal(err)
-	}
 	if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "findings"); err != nil {
 		t.Fatal(err)
 	}

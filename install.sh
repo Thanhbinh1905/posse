@@ -147,11 +147,6 @@ check_tools() {
   else
     status_line skip "Optional: gh is not installed."
   fi
-  if command -v no-mistakes >/dev/null 2>&1; then
-    status_line ok "Optional: no-mistakes is installed."
-  else
-    status_line skip "Optional: no-mistakes is not installed."
-  fi
 
   if ! command -v herdr >/dev/null 2>&1; then
     status_line fail "Herdr 0.9.0 or newer is required."
