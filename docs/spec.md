@@ -376,7 +376,8 @@ messages(id, task_id, body, created_at, delivered_at, status)   -- Lead → Work
 events(id, received_at, kind, pane_id, data_json)               -- raw ingest journal
 approvals(id, task_id, action, user_quote, at)                  -- merges and discards
 config_approvals(id, project_id, key, action, value, user_quote, at)  -- Lead's quoted User approvals for config set/unset; value null on unset
-pr_observations(id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, observed_at)
+pr_observations(id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, observed_at, confirmed_at)
+  -- a changed state inserts a row; an unchanged poll only updates confirmed_at
 project_repos(id, project_id, name, path, default_branch, status, origin_host)  -- saved workspace members; status active | missing
 task_repos(id, task_id, repo, worktree_path, base_ref, target_branch, merge_mode, state, gated_sha, pr_url, merged_ref)
   -- one row per member a workspace Task touches; state open | unchanged | gated | merging | merged
@@ -384,6 +385,11 @@ task_target_changes(id, project_id, task_id, repo, source_task_id, from_branch, 
   -- durable stacked-PR retarget record; status pending | complete | blocked | skipped
 pr_body_markers(task_id, repo, pr_url, marker_token, updated_at)
   -- one current cryptographically random description token per Task/member PR
+deliveries(id, task_id, repo, pr_url, steward, origin, created_at)
+  -- one forge PR/MR of a Task or member (section 14); steward is lead; origin publish | legacy
+delivery_operations(id, delivery_id, operation, actor, actor_pane, head_sha, subject, baseline, outcome, detail, created_at, updated_at)
+  -- one steward forge operation; operation inspect | reply | refresh | rerun; actor lead | user;
+  -- outcome pending | succeeded | failed | uncertain
 repo_watch_state(project_id, repo, root_behind_head, checkout_checked_at, checkout_status, checkout_reason)  -- per-member checkout status and root_behind dedupe
 repo_fetch_failures(project_id, repo, consecutive_failures, last_error, updated_at)  -- consecutive origin-fetch failures; repo is empty for a repo Project
 review_rounds, review_patterns, review_findings, review_finding_events, review_carries, review_dispositions, validation_fix_rounds  -- built-in validation (section 25.10)
@@ -725,6 +731,17 @@ The `full-pipeline` contract requires a publication barrier before every push, i
 | merged (by posse, by the User on the forge, or by anyone) | `pr_merged`, plus `review_policy_violation` when the merged head lacks the selected evidence | any non-merged state → `merged`; `merged_ref` is the merge commit; the Worker is interrupted during Teardown |
 | closed without merging | `pr_closed` | keeps its state and branch; raises a `pr_closed` Decision to reopen and relaunch or discard; polling stops for this PR |
 
+**PR stewardship.** Every recorded PR/MR has one `deliveries` record per Task and member. The Lead is its operational steward; its authors are the Task's recorded launches (`task_launch_identities`), so stewardship and authorship stay separate. `posse publish` records a delivery with origin `publish`; a PR URL recorded before deliveries existed, or by another path, becomes a `legacy` delivery on migration or on its first steward command. The existing PR watch, its Notices and `posse merge` remain canonical; a delivery adds no second watch. The Lead (or the User) may perform only these forge operations without the Worker, each recorded in `delivery_operations` with actor, Lead pane, PR head, subject and outcome:
+
+| Command | Effect | Guard |
+|---|---|---|
+| `posse pr inspect <task> [--repo <member>]` | none; prints the delivery, authors, current observation, failed checks with run/job ids and the latest operations | forces a PR poll; when the watch cannot confirm the state from the forge during the call, it refuses with retryable `forge_unavailable` naming the last observation instead of presenting cached state as current |
+| `posse pr reply <task> --body <text>` | posts one PR/MR comment ending in a hidden `posse:steward-operation:<id>` marker | requires a current open observation; the same text is posted at most once per delivery (`pr_reply_duplicate`). A reply is not a review pass or a User answer |
+| `posse pr refresh <task>` | sets the saved or Brief title and rewrites Posse's Validation block inside its tokenized span | requires a current open observation; other PR/MR text is unchanged; already-current metadata is recorded without an edit |
+| `posse pr rerun <task> --run <id>` (GitHub) or `--job <id>` (GitLab) | reruns the failed jobs of an existing CI run (`gh run rerun --failed`, `glab ci retry`) | the id must be a failed check on the current observed head, the run must have completed on that head, and each run is rerun at most twice per head (`pr_rerun_limit`); it never starts a workflow, dispatches a new one or changes code |
+
+A forge error after an effect was requested records the operation `uncertain` and returns retryable `forge_outcome_unknown`. A `pending` operation older than two minutes belongs to an interrupted command and is treated the same way. The next attempt of the same operation first observes the forge: a reply is found by its marker, a GitHub rerun by a later run attempt or a running status, a GitLab rerun by a newer job of the same name in the pipeline. An effect that took place is recorded `succeeded` and is not repeated; an absent one is recorded `failed` and may be attempted again within its limit. When the forge cannot be read, the command refuses without acting. Stewardship grants no merge, approval, branch, push, workflow or secret authority: merging still requires `posse merge` with its approval and evidence, and code changes still go through a Worker. The decision is recorded in [ADR 0032](adr/0032-the-lead-stewards-pr-deliveries.md).
+
 A plain `posse send` attempts a PR refresh within the existing reconciliation budget. If refresh completes and reports a merged PR, `send` refuses with `pr_merged` and the Task Merges. If refresh times out or errors, send proceeds using the last persisted observation. `send --queue` and `send --interrupt` skip PR refresh; interruption is independent of forge latency and store maintenance. A merging Change Task accepts a follow-up `posse send <task> <message>` even before `pr_checks_failed`, `pr_changes_requested` or `pr_conflict`. When durable submission begins, the Task returns to `working`, clears `gated_sha`, and keeps its branch and PR; after the next done Signal, the Lead runs `posse merge` again. If a `merge --execute` intent is still running, `posse send` refuses with `intent_active` and help rather than interrupting the merge.
 
 The forge is selected from the repository's `origin` host (`github.com`, `gitlab.com`, or a configured enterprise host); `defaults.forge` overrides it per Project, and `repositories.<repository>.forge` overrides it per member repository. The auth probe allows two seconds, so normal self-hosted forge latency does not count as a timeout. GitLab merge uses `glab mr merge --sha <gated_sha> --auto-merge=false` with squash or merge-commit. GitLab rejects `merge_method = "rebase"` before pushing or merging, since server-side rebase changes the pushed source branch; use squash or merge. A new commit pushed after a fix resets the check status to pending, so a later failure or pass on the new head produces a fresh Notice. `posse show <task>` includes a `pr{url,state,checks,review,mergeable,updated}` row, and home shows the PR state in the Task row. Project-level, per-Task and workspace Member PR-watch failures raise `pr_watch_failing` only after three consecutive failures at that scope; a successful poll resets the streak. Task streaks are keyed by Task and Member, so another Task's success does not reset them. An acknowledged persistent Task failure is reminded after 24 hours, then after 48 hours and at most every seven days; project- and Member-scoped Notices remain deduplicated until recovery. A retryable `pr_forge_probe_timeout` is not cached by Watch; it contributes to the applicable streak and is retried at the next PR poll.
@@ -902,6 +919,7 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse workflow advance <run> --to <stage> --user-approved <quote> [--abandon <task>]...` | Lead | record the User's approval to advance to the next profile stage |
 | `posse start --brief <f> [--name <short>] [--user-approved <quote>] [--profile p] [--from-orphan <decision>]` | Lead | start a Task with an optional display name and workflow profile, optionally from the approved Orphan diff rebased onto the current default branch |
 | `posse retitle <task> "<conventional title>"` | Lead | save the PR/MR title for the Worker's next publish |
+| `posse pr inspect\|reply\|refresh\|rerun <task> [--repo <member>] [...]` | Lead, User | steward a PR/MR without the Worker: inspect, reply once, refresh Posse-owned metadata or rerun an existing failed CI run; every operation is recorded (section 14) |
 | `posse send <task> <msg> [--queue]` | Lead | send to a focused or unfocused Worker, steer a working Worker when supported, or wait for idle with `--queue` |
 | `posse send <task> --interrupt <msg>` | Lead | verify the current turn stopped, then deliver this redirect before queued messages |
 | `posse unsend <message-id>` | Lead | withdraw a queued message; refuse messages already claimed for delivery |
@@ -1005,6 +1023,7 @@ Each has an automated test.
 23. Posse-managed writers cannot hold equal, ancestor or descendant path scopes at once; conflicting Git common-dir/ref scopes serialize, independent refs do not, and a crash never expires a lease without custody reconciliation.
 24. A loop-enabled Change Task never has more verdict-recorded Review Rounds than its frozen `max_rounds` (at most 3), no round creates a finding whose fingerprint is already in its Finding Ledger, and automatic CI fix instructions never exceed their frozen budget.
 25. Posse accepts a native research result only from the bound child of a registered read-only attempt; a write-capable, untracked, cancelled or unverified child contributes nothing, and cancellation signals only the recorded process instances.
+26. A steward forge operation whose outcome is unknown is observed on the forge before the same operation runs again, so an ambiguous reply or CI rerun is never duplicated; PR stewardship never satisfies merge approval or evidence.
 
 ## 22. Testing
 

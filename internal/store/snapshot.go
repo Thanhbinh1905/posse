@@ -39,6 +39,10 @@ type TaskSnapshot struct {
 	ReportAcceptance *ReportAcceptance    `toml:"report_acceptance,omitempty"`
 	PRBodyMarkers    []PRBodyMarker       `toml:"pr_body_markers,omitempty"`
 	PRWatchFailures  []PRTaskWatchFailure `toml:"pr_watch_failures,omitempty"`
+	// Deliveries and their steward operations keep forge-effect history, so
+	// rerun limits and unknown outcomes survive a rebuild.
+	Deliveries         []Delivery          `toml:"deliveries,omitempty"`
+	DeliveryOperations []DeliveryOperation `toml:"delivery_operations,omitempty"`
 	// Members and TaskRepos are set for a workspace Project only.
 	Members       []ProjectRepo      `toml:"members,omitempty"`
 	TaskRepos     []TaskRepo         `toml:"task_repos,omitempty"`
@@ -327,6 +331,14 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	deliveries, err := db.TaskDeliveries(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	deliveryOperations, err := db.taskDeliveryOperations(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	snapshotPath := db.TaskSnapshotPath(project.Name, task.Seq)
 	if data, readErr := os.ReadFile(snapshotPath); readErr == nil {
 		var previous TaskSnapshot
@@ -363,7 +375,7 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, TargetChanges: targetChanges, PlanRevisions: plans}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1078,7 +1090,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1154,6 +1166,24 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("empty PR body marker token in snapshot for t%d", task.Seq)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO pr_body_markers(task_id,repo,pr_url,marker_token,updated_at) VALUES(?,?,?,?,?)`, task.ID, marker.Repo, marker.PRURL, marker.Token, marker.UpdatedAt); err != nil {
+				return err
+			}
+		}
+		restoredDeliveries := make(map[int64]bool, len(snapshot.Deliveries))
+		for _, delivery := range snapshot.Deliveries {
+			if delivery.ID < 1 || delivery.TaskID != 0 && delivery.TaskID != task.ID || delivery.PRURL == "" {
+				return fmt.Errorf("invalid delivery in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(id,task_id,repo,pr_url,steward,origin,created_at) VALUES(?,?,?,?,?,?,?)`, delivery.ID, task.ID, delivery.Repo, delivery.PRURL, delivery.Steward, delivery.Origin, delivery.CreatedAt); err != nil {
+				return err
+			}
+			restoredDeliveries[delivery.ID] = true
+		}
+		for _, operation := range snapshot.DeliveryOperations {
+			if !restoredDeliveries[operation.DeliveryID] {
+				return fmt.Errorf("steward operation in snapshot for t%d has no delivery", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_operations(id,delivery_id,operation,actor,actor_pane,head_sha,subject,baseline,outcome,detail,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, operation.ID, operation.DeliveryID, operation.Operation, operation.Actor, operation.ActorPane, operation.HeadSHA, operation.Subject, operation.Baseline, operation.Outcome, operation.Detail, operation.CreatedAt, operation.UpdatedAt); err != nil {
 				return err
 			}
 		}

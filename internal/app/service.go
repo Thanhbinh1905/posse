@@ -158,6 +158,12 @@ func (s *Service) commands() *axi.Command {
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "validate", Usage: "$ validate <status|test|docs|lint> [--repo <member>] [stage evidence flags]", Summary: "Record ordered, exact-head full-pipeline evidence from the private candidate checkout.", Handler: s.validateCandidate},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
+		{Name: "pr", Summary: "Steward a Task's PR/MR as the Lead: inspect it, reply, refresh Posse-owned metadata or rerun an existing failed CI run. Each operation is recorded; merge keeps its own approval.", Subcommands: []*axi.Command{
+			{Name: "inspect", Usage: "$ pr inspect <task> [--repo <member>]", Summary: "Read the current PR/MR state, failed checks, authors and recent steward operations.", Handler: s.prInspect},
+			{Name: "reply", Usage: "$ pr reply <task> --body <text> [--repo <member>]", Summary: "Post a reply on the PR/MR once; an unconfirmed reply is checked on the forge before any repeat.", Handler: s.prReply},
+			{Name: "refresh", Usage: "$ pr refresh <task> [--repo <member>]", Summary: "Rewrite the Posse-owned title and Validation block; other PR/MR text is unchanged.", Handler: s.prRefresh},
+			{Name: "rerun", Usage: "$ pr rerun <task> (--run <id>|--job <id>) [--repo <member>]", Summary: "Rerun an existing failed CI run (GitHub) or job (GitLab) on the current head, at most twice per run and head.", Handler: s.prRerun},
+		}},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
 		{Name: "status", Summary: "Read only this Worker's recorded status and admitted plan without maintenance.", Handler: s.status},
 		{Name: "send", Usage: "$ send <task> <message> [--queue] | send <task> --interrupt <message>", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Worker.", Handler: s.send},

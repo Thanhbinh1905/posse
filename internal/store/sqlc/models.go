@@ -60,6 +60,31 @@ type DecisionNoticeCursor struct {
 	LastNoticeID int64
 }
 
+type Delivery struct {
+	ID        int64
+	TaskID    int64
+	Repo      string
+	PrUrl     string
+	Steward   string
+	Origin    string
+	CreatedAt int64
+}
+
+type DeliveryOperation struct {
+	ID         int64
+	DeliveryID int64
+	Operation  string
+	Actor      string
+	ActorPane  string
+	HeadSha    string
+	Subject    string
+	Baseline   string
+	Outcome    string
+	Detail     string
+	CreatedAt  int64
+	UpdatedAt  int64
+}
+
 type Event struct {
 	ID         int64
 	ReceivedAt int64
@@ -200,6 +225,7 @@ type PrObservation struct {
 	MergeCommit string
 	ObservedAt  int64
 	Repo        string
+	ConfirmedAt int64
 }
 
 type PrTaskWatchFailure struct {
