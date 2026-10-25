@@ -143,21 +143,11 @@ func (s *Service) observeDelivery(ctx context.Context, db *store.DB, target stew
 		pollCtx, cancel := context.WithDeadline(ctx, deadline)
 		_ = s.pollProjectPullRequests(pollCtx, db, target.project, target.cfg, true)
 		cancel()
-		var observation store.PRObservation
-		var err error
-		if target.member == "" {
-			observation, err = db.LatestPRObservation(ctx, target.task.ID)
-		} else {
-			observation, err = db.LatestMemberPRObservation(ctx, target.task.ID, target.member)
-		}
-		if err != nil && !store.IsNotFound(err) {
+		observation, err := latestDeliveryObservation(ctx, db, target)
+		if err != nil {
 			return store.PRObservation{}, false, err
 		}
-		found := err == nil && observation.PRURL == target.prURL
-		if !found {
-			observation = store.PRObservation{}
-		}
-		if found {
+		if observation.ID != 0 {
 			confirmed, err := db.PRObservationConfirmedAt(ctx, observation.ID)
 			if err != nil {
 				return store.PRObservation{}, false, err
@@ -176,6 +166,22 @@ func (s *Service) observeDelivery(ctx context.Context, db *store.DB, target stew
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+// latestDeliveryObservation returns the delivery's latest observation, or a
+// zero observation when none was recorded for its PR URL.
+func latestDeliveryObservation(ctx context.Context, db *store.DB, target stewardTarget) (store.PRObservation, error) {
+	var observation store.PRObservation
+	var err error
+	if target.member == "" {
+		observation, err = db.LatestPRObservation(ctx, target.task.ID)
+	} else {
+		observation, err = db.LatestMemberPRObservation(ctx, target.task.ID, target.member)
+	}
+	if store.IsNotFound(err) || err == nil && observation.PRURL != target.prURL {
+		return store.PRObservation{}, nil
+	}
+	return observation, err
 }
 
 func (s *Service) watchFailureReason(ctx context.Context, db *store.DB, target stewardTarget) string {
@@ -223,6 +229,14 @@ func (s *Service) currentOpenDelivery(ctx context.Context, db *store.DB, target 
 
 func (s *Service) prInspect(ctx *axi.Context, args []string) error {
 	return s.stewardCommand(ctx, "inspect", args, nil, func(db *store.DB, target stewardTarget, _ parsedArgs) error {
+		if target.task.State == store.StateMerged || target.task.State == store.StateTornDown {
+			// The watch no longer polls a finished Task; show its final record.
+			observation, err := latestDeliveryObservation(ctx.Context, db, target)
+			if err != nil {
+				return err
+			}
+			return s.printDelivery(ctx, db, target, observation)
+		}
 		observation, current, err := s.observeDelivery(ctx.Context, db, target)
 		if err != nil {
 			return err
@@ -281,9 +295,11 @@ func (s *Service) printDelivery(ctx *axi.Context, db *store.DB, target stewardTa
 	for _, operation := range operations {
 		operationRows = append(operationRows, axi.Object{{Key: "id", Value: operation.ID}, {Key: "operation", Value: operation.Operation}, {Key: "actor", Value: operation.Actor}, {Key: "head", Value: shortSHA(operation.HeadSHA)}, {Key: "subject", Value: operation.Subject}, {Key: "outcome", Value: operation.Outcome}, {Key: "detail", Value: operation.Detail}, {Key: "at", Value: operation.UpdatedAt}})
 	}
-	confirmed, err := db.PRObservationConfirmedAt(ctx.Context, observation.ID)
-	if err != nil {
-		return err
+	var confirmed int64
+	if observation.ID != 0 {
+		if confirmed, err = db.PRObservationConfirmedAt(ctx.Context, observation.ID); err != nil {
+			return err
+		}
 	}
 	help := []any{}
 	if observation.State == "OPEN" && len(failures) > 0 {
