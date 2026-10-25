@@ -309,31 +309,59 @@ func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, 
 // show no containment identity before the ownership proof treats it as escaped.
 const taskContainmentSettleTimeout = time.Second
 
-// taskProcessLeftContainment reports whether pid, which just failed
-// taskContainsProcess, left its containment while alive. execve briefly exposes
-// an empty environment, so the same live instance must stay outside containment
-// for taskContainmentSettleTimeout before it counts as an escape.
-func taskProcessLeftContainment(pid int, task store.Task, roots []ownedProcessRoot) bool {
+type taskProcessSettlement int
+
+const (
+	taskProcessSettledInside taskProcessSettlement = iota
+	taskProcessSettledOutside
+	taskProcessSettledExited
+	taskProcessSettledReplaced
+)
+
+// settleTaskProcess waits for the live instance of pid, which just failed
+// contained, to show its containment again. execve briefly exposes an empty
+// environment, so the same live instance must stay outside containment for
+// taskContainmentSettleTimeout before it counts as outside.
+func settleTaskProcess(pid int, contained func() (bool, error)) (taskProcessSettlement, error) {
 	bootID, startTime, err := store.ProcessIdentityForPID(pid)
 	if processGone(err) {
-		return false
+		return taskProcessSettledExited, nil
 	}
 	deadline := time.Now().Add(taskContainmentSettleTimeout)
 	for {
-		if taskProcessExited(pid) || taskContainsProcess(pid, task, roots) {
-			return false
+		if taskProcessExited(pid) {
+			return taskProcessSettledExited, nil
+		}
+		inside, containedErr := contained()
+		if containedErr != nil {
+			return taskProcessSettledOutside, containedErr
+		}
+		if inside {
+			return taskProcessSettledInside, nil
 		}
 		if err == nil {
 			currentBootID, currentStartTime, currentErr := store.ProcessIdentityForPID(pid)
-			if processGone(currentErr) || currentErr == nil && currentBootID+"/"+currentStartTime != bootID+"/"+startTime {
-				return false
+			if processGone(currentErr) {
+				return taskProcessSettledExited, nil
+			}
+			if currentErr == nil && currentBootID+"/"+currentStartTime != bootID+"/"+startTime {
+				return taskProcessSettledReplaced, nil
 			}
 		}
 		if !time.Now().Before(deadline) {
-			return true
+			return taskProcessSettledOutside, nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// taskProcessLeftContainment reports whether pid, which just failed
+// taskContainsProcess, left its containment while alive.
+func taskProcessLeftContainment(pid int, task store.Task, roots []ownedProcessRoot) bool {
+	settlement, _ := settleTaskProcess(pid, func() (bool, error) {
+		return taskContainsProcess(pid, task, roots), nil
+	})
+	return settlement == taskProcessSettledOutside
 }
 
 // linuxProcessExiting is PF_EXITING in the flags field of /proc/PID/stat.
@@ -357,7 +385,31 @@ func taskProcessExited(pid int) bool {
 	return err == nil && flags&linuxProcessExiting != 0
 }
 
+// taskProcessHasOwnershipProof reports whether pid belongs to task. A process
+// whose environment reads empty may be mid-exec or exiting, so its proof
+// settles first: an exiting process counts as owned because signalling it is
+// harmless, and a live one counts once its marker reappears.
 func taskProcessHasOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
+	owned, err := taskProcessHasImmediateOwnershipProof(pid, task, roots, authorization)
+	if err != nil || owned {
+		return owned, err
+	}
+	if taskProcessExited(pid) {
+		return true, nil
+	}
+	if !processEnvironmentEmpty(pid) {
+		return false, nil
+	}
+	settlement, err := settleTaskProcess(pid, func() (bool, error) {
+		return taskProcessHasImmediateOwnershipProof(pid, task, roots, authorization)
+	})
+	if err != nil {
+		return false, err
+	}
+	return settlement == taskProcessSettledInside || settlement == taskProcessSettledExited, nil
+}
+
+func taskProcessHasImmediateOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
 	if taskContainsProcess(pid, task, roots) {
 		return true, nil
 	}
@@ -444,6 +496,13 @@ func taskScratchProcessDetails(home string, project store.Project, task store.Ta
 		return nil, err
 	}
 	return processDetails(pids), nil
+}
+
+// processEnvironmentEmpty reports whether pid's environment reads empty, as it
+// does mid-execve and after an exiting process releases its address space.
+func processEnvironmentEmpty(pid int) bool {
+	contents, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	return err == nil && len(contents) == 0
 }
 
 func processHasTaskMarker(pid int, marker string) bool {

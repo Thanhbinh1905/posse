@@ -785,6 +785,10 @@ os._exit(0)
 		if taskProcessLeftContainment(pid, task, roots) {
 			t.Fatal("exiting Task process was reported as escaped")
 		}
+		owned, err := taskProcessHasOwnershipProof(pid, task, roots, newSandboxProcessAuthorization())
+		if err != nil || !owned {
+			t.Fatalf("exiting Task process lost its ownership proof: owned=%v err=%v", owned, err)
+		}
 		if running() {
 			return
 		}
@@ -811,5 +815,110 @@ func TestTaskProcessLeftContainmentReportsLiveEscapedProcess(t *testing.T) {
 	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
 	if !taskProcessLeftContainment(escaped.Process.Pid, task, []ownedProcessRoot{{path: root}}) {
 		t.Fatal("live process outside the Task paths was not reported as escaped")
+	}
+}
+
+// execve briefly exposes an empty environment before the new image's
+// environment is installed. A process that starts with an empty environment
+// and then execs with the Task marker stretches that window so the signal
+// guard's ownership proof deterministically observes it.
+func TestTaskProcessHasOwnershipProofWaitsForMarkerAcrossExec(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := exec.LookPath("env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Setting Dir would add PWD to the environment, so the child changes
+	// directory itself.
+	execing := exec.Command("/bin/sh", "-c", `cd "$1" && echo ready && "$2" 0.2 && exec "$3" -i "POSSE_TASK_ID=$4" "$2" 300`, "sh", root, sleep, env, marker)
+	execing.Env = []string{}
+	stdout, err := execing.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := execing.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = execing.Process.Kill()
+		_ = execing.Wait()
+	})
+	if _, err := io.ReadFull(stdout, make([]byte, len("ready\n"))); err != nil {
+		t.Fatalf("process did not start: %v", err)
+	}
+	pid := execing.Process.Pid
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	roots := []ownedProcessRoot{{path: root}}
+	if environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ")); err != nil || len(environ) != 0 {
+		t.Fatalf("process exposed an environment before exec: %q, %v", environ, err)
+	}
+	owned, err := taskProcessHasOwnershipProof(pid, task, roots, newSandboxProcessAuthorization())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owned {
+		t.Fatal("Task process caught mid-exec was classed as unowned")
+	}
+}
+
+func TestTaskProcessHasOwnershipProofRejectsForeignProcessWithoutSettling(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	foreign := exec.Command("sleep", "300")
+	foreign.Dir = root
+	foreign.Env = []string{"POSSE_TASK_ID=another-task"}
+	if err := foreign.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = foreign.Process.Kill()
+		_ = foreign.Wait()
+	})
+	pid := foreign.Process.Pid
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(pid, "another-task") }) {
+		t.Fatal("foreign process did not start")
+	}
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	started := time.Now()
+	owned, err := taskProcessHasOwnershipProof(pid, task, []ownedProcessRoot{{path: root}}, newSandboxProcessAuthorization())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned {
+		t.Fatal("process with another Task marker was classed as owned")
+	}
+	if elapsed := time.Since(started); elapsed >= taskContainmentSettleTimeout/2 {
+		t.Fatalf("ownership proof waited %s for a process whose environment was readable", elapsed)
+	}
+}
+
+func TestTaskProcessHasOwnershipProofRejectsLiveProcessWithEmptyEnvironment(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unmarked := exec.Command("/bin/sh", "-c", `cd "$1" && exec "$2" 300`, "sh", root, sleep)
+	unmarked.Env = []string{}
+	if err := unmarked.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unmarked.Process.Kill()
+		_ = unmarked.Wait()
+	})
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	owned, err := taskProcessHasOwnershipProof(unmarked.Process.Pid, task, []ownedProcessRoot{{path: root}}, newSandboxProcessAuthorization())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned {
+		t.Fatal("live process that never gained the Task marker was classed as owned")
 	}
 }
