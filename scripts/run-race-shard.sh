@@ -127,6 +127,19 @@ check_plan() {
     }'
 }
 
+# shard_commands prints the arguments of each go test invocation of a shard's
+# plan: one for all whole packages, then one -run per split package.
+shard_commands() {
+  whole=$(printf '%s\n' "$1" | awk 'NF == 3 { printf " ./%s", $3 }')
+  if [ -n "$whole" ]; then
+    printf '%s\n' "${whole# }"
+  fi
+  for pkg in $(printf '%s\n' "$1" | awk 'NF == 4 { print $3 }' | LC_ALL=C sort -u); do
+    pattern=$(printf '%s\n' "$1" | awk -v pkg="$pkg" 'NF == 4 && $3 == pkg { if (n++) printf "|"; printf "%s", $4 }')
+    printf './%s -run '"'"'^(%s)$'"'"'\n' "$pkg" "$pattern"
+  done
+}
+
 run_self_check() {
   packages=$(relative_packages)
   validate_durations "$packages" "$durations"
@@ -164,6 +177,14 @@ pkg/b' '1 pkg/a TestΩ
 3 pkg/c
 3 pkg/a TestD' 2 | awk '{ print $1 ":" $3 $4 }' | tr '\n' ' ')" != '1:pkg/aTestA 2:pkg/b 2:pkg/aTestD 1:pkg/c ' ]; then
     echo "self-check failed: the plan does not balance by duration" >&2
+    return 1
+  fi
+  if [ "$(shard_commands '1 5 pkg/a TestA
+1 3 pkg/a TestD
+1 4 pkg/b
+1 3 pkg/c')" != './pkg/b ./pkg/c
+./pkg/a -run '"'"'^(TestA|TestD)$'"'"'' ]; then
+    echo "self-check failed: a shard does not run its whole and split units" >&2
     return 1
   fi
   if check_plan '3 pkg/a
@@ -205,16 +226,8 @@ printf 'Running race shard %s/%s\n' "$shard" "$shard_count"
 started=$(date +%s)
 
 # -v prints each top-level test's duration for scripts/refresh-race-durations.sh.
-set --
-for pkg in $(printf '%s\n' "$shard_plan" | awk 'NF == 4 { print $3 }'); do
-  set -- "$@" "./$pkg"
-done
-if [ "$#" -gt 0 ]; then
-  go test -race -v -count=1 -timeout=15m "$@"
-fi
-for pkg in $(printf '%s\n' "$shard_plan" | awk 'NF == 5 { print $3 }' | LC_ALL=C sort -u); do
-  pattern=$(printf '%s\n' "$shard_plan" | awk -v pkg="$pkg" 'NF == 5 && $3 == pkg { if (n++) printf "|"; printf "%s", $4 } END { print "" }')
-  go test -race -v -count=1 -timeout=15m "./$pkg" -run "^(${pattern})$"
+shard_commands "$shard_plan" | while IFS= read -r command; do
+  eval "go test -race -v -count=1 -timeout=15m $command" || exit 1
 done
 
 elapsed=$(($(date +%s) - started))
