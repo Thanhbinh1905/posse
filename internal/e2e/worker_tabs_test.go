@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -329,6 +330,9 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture.assertWorkerLabels(t, snapshot, relaunched)
 
 	// Recovery reopens the Worker as a Lead tab after the Herdr restart.
+	// Herdr restores the last periodic save, so a save older than the closed
+	// fixture panes would restore shells inside Sandboxes the Tasks reuse.
+	fixture.waitSessionPersisted(t)
 	killServer(t, fixture.server)
 	fixture.server = startServer(t, client)
 	output = runPosse(t, fixture.binary, fixture.repo, fixture.env, "recover", "--all")
@@ -899,6 +903,53 @@ func (f *workerTabsFixture) split(t *testing.T, paneID, cwd string) string {
 		t.Fatalf("split pane %s: %s %v", paneID, raw, err)
 	}
 	return result.Pane.PaneID
+}
+
+// waitSessionPersisted blocks until Herdr's session file lists exactly the
+// live panes' working directories. Killing the server earlier restores a stale
+// save under CPU load.
+func (f *workerTabsFixture) waitSessionPersisted(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(f.root, "xdg", "herdr", "session.json")
+	var live, saved []string
+	if !waitForCondition(30*time.Second, func() bool {
+		live = live[:0]
+		for _, pane := range f.snapshot(t).Panes {
+			live = append(live, filepath.Clean(pane.CWD))
+		}
+		sort.Strings(live)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var session any
+		if json.Unmarshal(raw, &session) != nil {
+			return false
+		}
+		saved = collectSessionCWDs(session, saved[:0])
+		sort.Strings(saved)
+		return slices.Equal(live, saved)
+	}) {
+		t.Fatalf("Herdr session file did not catch up with the live panes: live=%v saved=%v", live, saved)
+	}
+}
+
+func collectSessionCWDs(node any, out []string) []string {
+	switch node := node.(type) {
+	case map[string]any:
+		for key, value := range node {
+			if cwd, ok := value.(string); ok && key == "cwd" {
+				out = append(out, filepath.Clean(cwd))
+				continue
+			}
+			out = collectSessionCWDs(value, out)
+		}
+	case []any:
+		for _, value := range node {
+			out = collectSessionCWDs(value, out)
+		}
+	}
+	return out
 }
 
 func (f *workerTabsFixture) snapshot(t *testing.T) herdr.Snapshot {
