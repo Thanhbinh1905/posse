@@ -665,6 +665,7 @@ type ValidationFixRound struct {
 	DedupeKey        string
 	MessageID        int64
 	CreatedAt        int64
+	MemberHeadsJson  string
 }
 
 type ValidationStageResult struct {

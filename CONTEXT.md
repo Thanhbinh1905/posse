@@ -67,7 +67,7 @@ One Review Task in a Review Loop that records a verdict for one exact Change hea
 _Avoid_: Pass, iteration, rereview
 
 **Fix Round**:
-One instruction Posse or the Lead queues to a Change Worker to fix failed CI checks or selected Finding Patterns for one head, within a per-Project budget.
+One instruction Posse or the Lead queues to a Change Worker to fix failed CI checks or selected Finding Patterns for one head (one head per changed Member in a workspace), within a per-Project budget.
 _Avoid_: Retry, fix attempt
 
 **Finding Pattern**:

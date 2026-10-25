@@ -1258,8 +1258,12 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if fixRound.ChangeTaskID != 0 && fixRound.ChangeTaskID != task.ID {
 				return fmt.Errorf("validation fix round in snapshot for t%d belongs to Task %d", task.Seq, fixRound.ChangeTaskID)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
-				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt); err != nil {
+			memberHeads, err := marshalValidationMemberHeads(fixRound.MemberHeads)
+			if err != nil {
+				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json) VALUES(?,?,?,?,?,?,?,?,?)`,
+				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt, memberHeads); err != nil {
 				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
 			}
 		}
