@@ -24,6 +24,10 @@ const e2eDurationsPath = "../../scripts/e2e-durations.txt"
 // recorded CI timing yet; refresh it with scripts/refresh-e2e-durations.sh.
 const newTestDurationEstimate = 60
 
+// newRaceUnitDurationEstimate is the duration suggested for a unit test or
+// package with no recorded CI timing yet; most take about a second.
+const newRaceUnitDurationEstimate = 1
+
 // TestE2EDurationsCoverEveryE2ETest runs without the e2e tag so a plain
 // `go test ./...` catches E2E tests missing from scripts/e2e-durations.txt,
 // which scripts/run-e2e-shard.sh balances shards by.
@@ -194,7 +198,7 @@ func TestRaceDurationsCoverEveryTest(t *testing.T) {
 		if !isWhole && !isSplit {
 			problems = append(problems, fmt.Sprintf(
 				"package %s has no recorded duration; add this line to scripts/race-durations.txt and refresh it after CI runs with scripts/refresh-race-durations.sh <run-id>:\n\t%d %s",
-				pkg, newTestDurationEstimate, pkg))
+				pkg, newRaceUnitDurationEstimate, pkg))
 		}
 	}
 	for _, pkg := range sortedKeys(whole) {
@@ -218,7 +222,7 @@ func TestRaceDurationsCoverEveryTest(t *testing.T) {
 			if _, ok := split[pkg][name]; !ok {
 				problems = append(problems, fmt.Sprintf(
 					"test %s (%s) of %s has no recorded duration; add this line to scripts/race-durations.txt and refresh it after CI runs with scripts/refresh-race-durations.sh <run-id>:\n\t%d %s %s",
-					name, tests[name], pkg, newTestDurationEstimate, pkg, name))
+					name, tests[name], pkg, newRaceUnitDurationEstimate, pkg, name))
 			}
 		}
 		for _, name := range sortedKeys(split[pkg]) {
