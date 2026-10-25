@@ -5,6 +5,7 @@ package app
 import (
 	"fmt"
 	"syscall"
+	"time"
 )
 
 type sandboxProcessHandle struct {
@@ -53,3 +54,5 @@ func (handle *sandboxProcessHandle) Alive() (bool, error) {
 }
 
 func (handle *sandboxProcessHandle) Close() error { return nil }
+
+func sandboxProcessStartedBefore(int, time.Time) bool { return false }

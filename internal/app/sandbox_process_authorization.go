@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -23,10 +24,27 @@ type sandboxProcessAuthorization struct {
 	// escaped records Task-marked processes refused because they no longer
 	// reference Task-owned paths, keyed by PID with their start identity.
 	escaped map[int]string
+	// startedAt marks the start of Teardown. A process that started earlier
+	// did not appear during it.
+	startedAt time.Time
 }
 
 func newSandboxProcessAuthorization() *sandboxProcessAuthorization {
-	return &sandboxProcessAuthorization{handles: make(map[int]*sandboxProcessHandle), processGroups: make(map[int][]*sandboxProcessHandle), escaped: make(map[int]string)}
+	return &sandboxProcessAuthorization{handles: make(map[int]*sandboxProcessHandle), processGroups: make(map[int][]*sandboxProcessHandle), escaped: make(map[int]string), startedAt: time.Now()}
+}
+
+// predatesTeardown reports whether pid started before Teardown began.
+func (a *sandboxProcessAuthorization) predatesTeardown(pid int) bool {
+	return a != nil && !a.startedAt.IsZero() && sandboxProcessStartedBefore(pid, a.startedAt)
+}
+
+// unverifiedProcessState describes an unretained process: one that predates
+// Teardown is running, not appearing.
+func (a *sandboxProcessAuthorization) unverifiedProcessState(pid int) string {
+	if a.predatesTeardown(pid) {
+		return "is running in the Sandbox"
+	}
+	return "appeared in the Sandbox during teardown"
 }
 
 func (authorization *sandboxProcessAuthorization) bind(pid int) (*sandboxProcessHandle, error) {

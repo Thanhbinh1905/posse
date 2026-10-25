@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -211,4 +212,36 @@ func (handle *sandboxProcessHandle) Close() error {
 	err := unix.Close(handle.fd)
 	handle.fd = -1
 	return err
+}
+
+// sandboxProcessStartedBefore reports whether pid started before t. Any
+// failure to read the start time reports false, so the process is treated as
+// new.
+func sandboxProcessStartedBefore(pid int, t time.Time) bool {
+	fields, err := sandboxProcessStatFields(pid)
+	if err != nil || len(fields) <= 19 {
+		return false
+	}
+	ticks, err := strconv.ParseInt(fields[19], 10, 64)
+	if err != nil {
+		return false
+	}
+	stat, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(stat), "\n") {
+		value, found := strings.CutPrefix(line, "btime ")
+		if !found {
+			continue
+		}
+		boot, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return false
+		}
+		// Process start times are in clock ticks (USER_HZ is 100 on Linux).
+		started := time.Unix(boot, 0).Add(time.Duration(ticks) * 10 * time.Millisecond)
+		return started.Before(t)
+	}
+	return false
 }
