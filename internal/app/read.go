@@ -801,7 +801,19 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 	}
 	if task.Type == "change" && task.State == store.StateDone {
-		help = append(help, "Run `posse merge "+commandName+"` to record the merge head and check delivery readiness")
+		noChange := false
+		if !project.IsWorkspace() {
+			work, err := s.unmergedWork(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			noChange = work == ""
+		}
+		if noChange {
+			help = append(help, "Run `posse teardown "+commandName+"` to finish this Task; it has no change to deliver")
+		} else {
+			help = append(help, "Run `posse merge "+commandName+"` to record the merge head and check delivery readiness")
+		}
 	}
 	if task.State == store.StateNeedsDecision || task.State == store.StateBlocked {
 		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Worker")

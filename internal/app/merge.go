@@ -78,6 +78,15 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if usesRemovedNoMistakes(task) {
 		return noMistakesRemoved(task)
 	}
+	if task.State == store.StateDone && !project.IsWorkspace() {
+		work, err := s.unmergedWork(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		if work == "" {
+			return axi.Failure("merge_refused", "Task has no change to deliver", false, "Run `posse teardown "+taskIDString(task.Seq)+"` to finish it")
+		}
+	}
 	if parsed.Bool("execute") {
 		if task.State != store.StateDone && task.State != store.StateMerging {
 			cfg, err := config.Load(home, project.Name)

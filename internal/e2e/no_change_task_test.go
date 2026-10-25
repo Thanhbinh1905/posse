@@ -105,3 +105,33 @@ func TestTeardownStillRefusesUnapprovedUnmergedWork(t *testing.T) {
 		})
 	}
 }
+
+// TestNoChangeDoneTaskDirectsMergeToTeardown covers both delivery modes: Merge
+// has nothing to deliver for a no-change Task, so it points to teardown instead
+// of failing while building a pull request.
+func TestNoChangeDoneTaskDirectsMergeToTeardown(t *testing.T) {
+	for _, mode := range []string{"pr", "local"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newWorkerTabsFixture(t)
+			brief := filepath.Join(f.root, "no-change-"+mode+".md")
+			contents := "---\ntype: change\ntitle: Already satisfied\ndone_when: the test tears it down\nmerge_mode: " + mode + "\n---\nWait.\n"
+			if err := os.WriteFile(brief, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "no-change-"+mode, "--user-approved", "test selects the delivery mode")
+			f.waitState(t, "t1", store.StateWorking)
+			task := f.task(t, "t1")
+			runPosse(t, f.binary, task.WorktreePath, workerSignalEnv(f, task), "signal", "done", "--no-change", "Already fixed on main")
+			if done := f.task(t, "t1"); done.State != store.StateDone {
+				t.Fatalf("no-change done Signal left Task in %s", done.State)
+			}
+			if show := runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1"); strings.Contains(show, "posse merge t1") || !strings.Contains(show, "posse teardown t1") {
+				t.Fatalf("show must direct a no-change Task to teardown: %s", show)
+			}
+			runPosseExpectingFailure(t, f, f.repo, f.leadEnv, "posse teardown t1", "merge", "t1", "--execute", "--user-approved", "test")
+			if out := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(out, "torn-down") {
+				t.Fatalf("teardown did not finish the no-change Task: %s", out)
+			}
+		})
+	}
+}
