@@ -1508,7 +1508,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 			if !privateCandidate {
 				if err := validateChangeSignal(ctx.Context, task); err != nil {
-					return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
+					help := "Commit the change and leave the worktree clean before signalling done"
+					if work, workErr := s.unmergedWork(ctx.Context, db, project, task); workErr == nil && work == "" {
+						help = "If the Task needs no change, run `posse signal done <note> --no-change`; otherwise commit the change and leave the worktree clean"
+					}
+					return axi.Failure("signal_invalid", err.Error(), false, help)
 				}
 			}
 			if !project.IsWorkspace() {
