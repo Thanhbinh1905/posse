@@ -1963,6 +1963,10 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		return axi.Failure("message_refused", "Task is not accepting Worker instructions in state "+string(task.State), false, nextStep)
 	}
+	if task.State == store.StateQueued {
+		id := taskIDString(task.Seq)
+		return axi.Failure("message_refused", "Task is queued and has no Worker yet, so it cannot receive instructions", false, "Run `posse teardown "+id+"` and `posse start --brief <file> [--name <short>]` with the extra context in the Brief, or send after `posse show "+id+"` reports a started Worker")
+	}
 	if task.State == store.StateMerging {
 		if task.Type != "change" {
 			return axi.Failure("message_refused", "Task is not accepting Worker instructions in state merging because it is not a Change Task", false, "Run `posse show "+taskIDString(task.Seq)+"` to inspect this Task")

@@ -58,6 +58,14 @@ _Avoid_: Code review, audit
 The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Task, bound by Posse to the exact Change revision it examined. Only a current `pass` is a passing Review Verdict; selected review evidence may also include an explicit carry or User acceptance.
 _Avoid_: Approval, review result
 
+**Review Mode**:
+The User's choice of review evidence, frozen into each Change Task's plan: `none` (the default), `quick` (exact-head independent review before Merge) or `full-pipeline` (a Private Candidate passes review, test, docs and lint before every publication). All three are ready.
+_Avoid_: Review level, review gate
+
+**Private Candidate**:
+The unpublished checkout of one exact submitted Change head that `full-pipeline` validates before promotion pushes it or fast-forwards its Task branch; any later commit needs a fresh candidate.
+_Avoid_: Draft PR, staging branch
+
 **Review Loop**:
 The optional built-in protocol that turns successive Review Tasks of one Change Task into at most three Review Rounds over a Finding Ledger; part of the built-in validation that replaced no-mistakes.
 _Avoid_: Review pipeline, review cycle
