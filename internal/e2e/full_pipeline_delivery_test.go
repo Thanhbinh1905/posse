@@ -18,8 +18,14 @@ import (
 // passing verdict from its independent Reviewer.
 func passCandidateReview(t *testing.T, f *prLifecycleFixture, dir string, change store.Task, reviewSeq string) {
 	t.Helper()
+	passCandidateReviewAs(t, f, f.leadEnv, dir, change, reviewSeq)
+}
+
+// passCandidateReviewAs is passCandidateReview for the Lead of leadEnv.
+func passCandidateReviewAs(t *testing.T, f *prLifecycleFixture, leadEnv []string, dir string, change store.Task, reviewSeq string) {
+	t.Helper()
 	command := []string{"review", "start", taskIDOf(change), "--profile", "reviewer"}
-	if code, output := runFixtureCLI(t, f, dir, command...); code != 0 {
+	if code, output := runReleaseCLI(t, f.binary, dir, leadEnv, command...); code != 0 {
 		t.Fatalf("start candidate Review Round: code=%d %s", code, output)
 	}
 	review := mustProjectTask(t, f, change.ProjectID, reviewSeq)

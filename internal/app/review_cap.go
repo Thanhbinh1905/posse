@@ -43,6 +43,11 @@ func (s *Service) reviewCapFailure(ctx context.Context, db *store.DB, project st
 	if err != nil {
 		return err
 	}
+	return reviewCapExhausted(ctx, db, project, task, head, used, max)
+}
+
+// reviewCapExhausted raises the cap Notice for head and refuses the caller.
+func reviewCapExhausted(ctx context.Context, db *store.DB, project store.Project, task store.Task, head string, used, max int) error {
 	if err := createReviewCapNotice(ctx, db, project, task, head, used, max); err != nil {
 		return err
 	}

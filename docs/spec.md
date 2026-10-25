@@ -1150,7 +1150,7 @@ Admission (through `posse review start <change>` or a Brief with `review_of:`) r
 
 - `review_round_active` while another round of the same Change Task is live;
 - `review_round_unchanged` when the Change head equals the last reviewed head, or a carry already covers it;
-- `review_round_cap` when the verdict-recorded rounds equal the frozen `max_rounds`.
+- `review_round_cap` when the verdict-recorded rounds equal the frozen `max_rounds`. Under an admitted `full-pipeline` plan, Review fix and CI fix rounds count toward the same cap.
 
 CI fixes, review fixes and target merges are author changes, never rounds. They enter the next round's delta.
 
@@ -1164,6 +1164,8 @@ CI fixes, review fixes and target merges are author changes, never rounds. They 
 | `discard` | Tears down with the recorded discard approval. |
 
 Autonomy never answers a `review_cap` Decision.
+
+Under `full-pipeline`, a spent cap also blocks republication: a CI repair that exhausts it queues no further fix, and publishing or recording a later stage for an unreviewed candidate is refused with `review_cap_reached` until the User's Decision is applied.
 
 ### 25.3 Scope
 
