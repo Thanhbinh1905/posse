@@ -237,11 +237,26 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 		}
 	}
 	if !evidence.Complete {
-		help := "Run `posse review start " + taskIDString(task.Seq) + "` and wait for a pass on this exact candidate"
-		plan, planErr := task.AdmittedPlan()
-		if planErr == nil && (plan == nil || plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled) {
-			help = "Dispatch an independent Review Task with `review_of: " + taskIDString(task.Seq) + "` and wait for a pass on this exact candidate"
+		if requireFrozenReviewLoop(plan) != nil {
+			return axi.Failure("validation_review_required", "the current private candidate "+shortSHA(candidate.CandidateSHA)+" has no passing Review, proved Review carry, or exact-head User disposition", false,
+				"Dispatch an independent Review Task with `review_of: "+taskIDString(task.Seq)+"` and wait for a pass on this exact candidate")
 		}
+		// No Review Round can cover this candidate once Review and repair
+		// rounds have spent the frozen cap, so only the User's cap Decision
+		// can unblock publication.
+		usage, err := db.ReviewCapUsage(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		max := plan.ValidationLoops.MaxReviewRounds()
+		if used := reviewCapUsed(task, usage); used >= max {
+			head, err := reviewCapHead(ctx, db, project, task)
+			if err != nil {
+				return err
+			}
+			return reviewCapExhausted(ctx, db, project, task, head, used, max)
+		}
+		help := "Run `posse review start " + taskIDString(task.Seq) + "` and wait for a pass on this exact candidate"
 		return axi.Failure("validation_review_required", "the current private candidate "+shortSHA(candidate.CandidateSHA)+" has no passing Review, proved Review carry, or exact-head User disposition", false, help)
 	}
 	return nil
