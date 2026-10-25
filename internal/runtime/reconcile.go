@@ -33,6 +33,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 	budgetCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 	defer cancel()
 	defer func() { returnedErr = reconcileError(returnedErr) }()
+	baselines := captureTurnEndBaselines(budgetCtx, db, projectID)
 	snapshot, err := adapter.Snapshot(budgetCtx)
 	if err != nil {
 		return RunResult{}, err
@@ -60,7 +61,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
 		}
 	}
-	notices, err := ReconcileSnapshot(withBackgroundJobDetector(budgetCtx, adapter), db, projectID, snapshot, now, idleAfter)
+	notices, err := ReconcileSnapshot(withTurnEndBaselines(withBackgroundJobDetector(budgetCtx, adapter), baselines), db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
 		return result, errors.Join(returnedErr, err)
@@ -202,9 +203,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	if found && pane.Agent != "" {
 		status = pane.AgentStatus
 	}
-	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, func() (string, error) {
-		return repositoryFingerprint(ctx, task.WorktreePath)
-	}, now)
+	fingerprint := func() (string, error) { return repositoryFingerprint(ctx, task.WorktreePath) }
+	if status == "idle" || status == "done" {
+		fingerprint = turnEndFingerprint(ctx, task, fingerprint)
+	}
+	resumed, err := db.ObserveCompletedWorkerState(ctx, task, pane.PaneID, snapshot.ServerStartedAt, status, fingerprint, now)
 	if err != nil {
 		return nil, observationFailure(err)
 	}
