@@ -13,41 +13,77 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-const shardManifestPath = "../../scripts/e2e-shards.txt"
+const e2eDurationsPath = "../../scripts/e2e-durations.txt"
+
+// newTestDurationEstimate is the duration suggested for a test with no
+// recorded CI timing yet; refresh it with scripts/refresh-e2e-durations.sh.
+const newTestDurationEstimate = 60
 
 var shardIDs = []string{"1", "2", "3", "4"}
 
-// TestShardManifestCoversEveryE2ETest runs without the e2e tag so a plain
-// `go test ./...` catches E2E tests missing from scripts/e2e-shards.txt, the
-// manifest scripts/run-e2e-shard.sh reads.
-func TestShardManifestCoversEveryE2ETest(t *testing.T) {
-	assigned, counts := readManifest(t, shardManifestPath)
+// TestE2EDurationsCoverEveryE2ETest runs without the e2e tag so a plain
+// `go test ./...` catches E2E tests missing from scripts/e2e-durations.txt,
+// which scripts/run-e2e-shard.sh balances shards by.
+func TestE2EDurationsCoverEveryE2ETest(t *testing.T) {
+	recorded := readDurations(t, e2eDurationsPath)
 	discovered := discoverE2ETests(t)
 
 	var problems []string
 	for _, name := range sortedKeys(discovered) {
-		if _, ok := assigned[name]; ok {
+		if _, ok := recorded[name]; ok {
 			continue
 		}
-		shard := lightestShard(counts)
 		problems = append(problems, fmt.Sprintf(
-			"E2E test %s (%s) is not assigned to a shard; add this line to scripts/e2e-shards.txt (shard %s currently has the fewest tests):\n\t%s %s",
-			name, discovered[name], shard, shard, name))
-		counts[shard]++
+			"E2E test %s (%s) has no recorded duration; add this line to scripts/e2e-durations.txt and refresh it after CI runs with scripts/refresh-e2e-durations.sh <run-id>:\n\t%d %s",
+			name, discovered[name], newTestDurationEstimate, name))
 	}
-	for _, name := range sortedKeys(assigned) {
+	for _, name := range sortedKeys(recorded) {
 		if _, ok := discovered[name]; !ok {
 			problems = append(problems, fmt.Sprintf(
-				"scripts/e2e-shards.txt line %d assigns %s, which is not a top-level test in internal/e2e; remove it", assigned[name].line, name))
+				"scripts/e2e-durations.txt line %d records %s, which is not a top-level test in internal/e2e; remove it", recorded[name], name))
 		}
 	}
 	if len(problems) > 0 {
-		t.Fatalf("E2E shard manifest is out of date:\n%s", strings.Join(problems, "\n"))
+		t.Fatalf("E2E durations are out of date:\n%s", strings.Join(problems, "\n"))
 	}
+}
+
+// readDurations maps each recorded test to its line number.
+func readDurations(t *testing.T, path string) map[string]int {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open E2E durations: %v", err)
+	}
+	defer f.Close()
+
+	recorded := map[string]int{}
+	sc := bufio.NewScanner(f)
+	for n := 1; sc.Scan(); n++ {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			t.Fatalf("%s line %d: expected \"<seconds> <name>\"", path, n)
+		}
+		if seconds, err := strconv.Atoi(fields[0]); err != nil || seconds < 1 {
+			t.Fatalf("%s line %d: invalid duration %s, expected whole seconds of at least 1", path, n, fields[0])
+		}
+		if prev, dup := recorded[fields[1]]; dup {
+			t.Fatalf("%s line %d: %s is already recorded on line %d", path, n, fields[1], prev)
+		}
+		recorded[fields[1]] = n
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("read E2E durations: %v", err)
+	}
+	return recorded
 }
 
 type assignment struct {
@@ -152,7 +188,7 @@ func runsInE2E(t *testing.T, file *ast.File) bool {
 }
 
 func isTestName(name string) bool {
-	return strings.HasPrefix(name, "Test") && name != "TestMain" && name != "TestShardManifestCoversEveryE2ETest"
+	return strings.HasPrefix(name, "Test") && name != "TestMain" && name != "TestE2EDurationsCoverEveryE2ETest"
 }
 
 func lightestShard(counts map[string]int) string {
