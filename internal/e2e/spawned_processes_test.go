@@ -18,10 +18,11 @@ import (
 
 var guardedFixtureRoots sync.Map
 
-// findSpawnedPosseProcesses lists live processes started from a binary named
-// posse whose environment matches. Posse starts hidden Project Watches
-// detached from the command that spawned them, so only a scan finds them.
-func findSpawnedPosseProcesses(matches func([]byte) bool) ([]isolatedHerdrServerProcess, error) {
+// findSpawnedProcesses lists live processes whose environment or working
+// directory matches. Posse starts hidden Project Watches, and fixtures start
+// shells, detached from the command that spawned them, so only a scan finds
+// them. The E2E reaper and Herdr servers are covered by their own cleanup.
+func findSpawnedProcesses(matches func(environ []byte, cwd string) bool) ([]isolatedHerdrServerProcess, error) {
 	if runtime.GOOS != "linux" {
 		return nil, nil
 	}
@@ -41,44 +42,48 @@ func findSpawnedPosseProcesses(matches func([]byte) bool) ([]isolatedHerdrServer
 			continue
 		}
 		cmdline, err := os.ReadFile(filepath.Join(base, "cmdline"))
-		if err != nil {
-			continue
+		if err != nil || len(cmdline) == 0 {
+			continue // Exited, or a kernel thread.
 		}
-		args := strings.Split(string(cmdline), "\x00")
-		if filepath.Base(args[0]) != "posse" {
+		if filepath.Base(strings.Split(string(cmdline), "\x00")[0]) == "herdr" {
 			continue
 		}
 		environ, err := os.ReadFile(filepath.Join(base, "environ"))
-		if err != nil || !matches(environ) {
+		if err != nil || hasEnvironmentValue(environ, "POSSE_E2E_SERVER_REAPER", "1") {
 			continue
 		}
 		cwd, _ := os.Readlink(filepath.Join(base, "cwd"))
+		if !matches(environ, cwd) {
+			continue
+		}
 		processes = append(processes, isolatedHerdrServerProcess{PID: pid, StartTicks: startTicks, Args: strings.TrimSpace(strings.ReplaceAll(string(cmdline), "\x00", " ")), CWD: cwd})
 	}
 	return processes, nil
 }
 
-func runIDMatcher(runID string) func([]byte) bool {
-	return func(environ []byte) bool { return hasEnvironmentValue(environ, "POSSE_TEST_E2E_RUN_ID", runID) }
+func runIDMatcher(runID string) func([]byte, string) bool {
+	return func(environ []byte, _ string) bool {
+		return hasEnvironmentValue(environ, "POSSE_TEST_E2E_RUN_ID", runID)
+	}
 }
 
-func runSpawnedPosseProcesses(runID string) ([]isolatedHerdrServerProcess, error) {
-	return findSpawnedPosseProcesses(runIDMatcher(runID))
+func runSpawnedProcesses(runID string) ([]isolatedHerdrServerProcess, error) {
+	return findSpawnedProcesses(runIDMatcher(runID))
 }
 
-func stopRunSpawnedPosseProcesses(runID string, timeout time.Duration) error {
-	return stopProcesses("spawned posse process", func() ([]isolatedHerdrServerProcess, error) {
-		return runSpawnedPosseProcesses(runID)
+func stopRunSpawnedProcesses(runID string, timeout time.Duration) error {
+	return stopProcesses("spawned process", func() ([]isolatedHerdrServerProcess, error) {
+		return runSpawnedProcesses(runID)
 	}, timeout)
 }
 
-func fixtureSpawnedPosseProcesses(root string) ([]isolatedHerdrServerProcess, error) {
+func fixtureSpawnedProcesses(root string) ([]isolatedHerdrServerProcess, error) {
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		resolvedRoot = root
 	}
-	return findSpawnedPosseProcesses(func(environ []byte) bool {
-		return fixtureEnvironmentBelongsToRoot(environ, root, resolvedRoot)
+	return findSpawnedProcesses(func(environ []byte, cwd string) bool {
+		return fixtureEnvironmentBelongsToRoot(environ, root, resolvedRoot) || pathWithinRoot(root, cwd) || pathWithinRoot(resolvedRoot, cwd)
 	})
 }
 
@@ -87,12 +92,13 @@ func isHiddenWatch(process isolatedHerdrServerProcess) bool {
 	return len(args) == 3 && args[1] == "watch" && args[2] == "--poll-only"
 }
 
-// guardSpawnedPosseProcesses runs when the test ends. It stops the hidden
+// guardSpawnedProcesses runs when the test ends. It stops the hidden
 // Project Watches posse spawned from root, which have no owner but the
-// fixture, then fails the test if any other posse process is still running.
+// fixture, then fails the test if any other process of the fixture is still
+// running.
 // Cleanups run last-in first-out, so a guard registered after the fixture root
 // runs before the root is removed.
-func guardSpawnedPosseProcesses(t *testing.T, root string) {
+func guardSpawnedProcesses(t *testing.T, root string) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
 		return
@@ -104,7 +110,7 @@ func guardSpawnedPosseProcesses(t *testing.T, root string) {
 		guardedFixtureRoots.Delete(root)
 		find := func(hidden bool) func() ([]isolatedHerdrServerProcess, error) {
 			return func() ([]isolatedHerdrServerProcess, error) {
-				all, err := fixtureSpawnedPosseProcesses(root)
+				all, err := fixtureSpawnedProcesses(root)
 				var selected []isolatedHerdrServerProcess
 				for _, process := range all {
 					if isHiddenWatch(process) == hidden {
@@ -123,28 +129,35 @@ func guardSpawnedPosseProcesses(t *testing.T, root string) {
 			return len(leaked) == 0
 		})
 		if len(leaked) > 0 {
-			t.Errorf("test left posse processes running: %+v", leaked)
-			if err := stopProcesses("spawned posse process", find(false), 3*time.Second); err != nil {
-				t.Errorf("stop leaked posse processes spawned from %s: %v", root, err)
+			t.Errorf("test left processes running: %+v", leaked)
+			if err := stopProcesses("spawned process", find(false), 3*time.Second); err != nil {
+				t.Errorf("stop leaked processes spawned from %s: %v", root, err)
 			}
 		}
 	})
 }
 
-func TestSpawnedPosseWatchDoesNotOutliveKilledTest(t *testing.T) {
+func TestSpawnedProcessesDoNotOutliveKilledTest(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("spawned process inspection requires Linux procfs")
 	}
-	runHome, err := os.MkdirTemp(os.Getenv("TMPDIR"), "t404-watch-reaper-")
+	for _, mode := range []string{"watch", "shell"} {
+		t.Run(mode, func(t *testing.T) { assertSpawnedProcessReaped(t, mode) })
+	}
+}
+
+func assertSpawnedProcessReaped(t *testing.T, mode string) {
+	t.Helper()
+	runHome, err := os.MkdirTemp(os.Getenv("TMPDIR"), "t404-"+mode+"-reaper-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(runHome) })
-	readyFile := filepath.Join(runHome, "watch-ready")
-	runID := fmt.Sprintf("t404-%d", time.Now().UnixNano())
+	readyFile := filepath.Join(runHome, "ready")
+	runID := fmt.Sprintf("t404-%s-%d", mode, time.Now().UnixNano())
 	t.Cleanup(func() {
-		if err := stopRunSpawnedPosseProcesses(runID, 3*time.Second); err != nil {
-			t.Errorf("clean up spawned posse processes for %s: %v", runID, err)
+		if err := stopRunSpawnedProcesses(runID, 3*time.Second); err != nil {
+			t.Errorf("clean up spawned processes for %s: %v", runID, err)
 		}
 	})
 	env := cleanE2EEnvironment(os.Environ())
@@ -152,14 +165,14 @@ func TestSpawnedPosseWatchDoesNotOutliveKilledTest(t *testing.T) {
 		"HOME":                   filepath.Join(runHome, "home"),
 		"XDG_CONFIG_HOME":        filepath.Join(runHome, "xdg"),
 		"POSSE_HOME":             filepath.Join(runHome, "posse"),
-		"POSSE_E2E_WATCH_HELPER": "1",
+		"POSSE_E2E_WATCH_HELPER": mode,
 		"POSSE_E2E_READY_FILE":   readyFile,
 		"POSSE_E2E_TMP_PREFIX":   "posse-e2e-t404-",
 		"POSSE_TEST_E2E_RUN_ID":  runID,
 	} {
 		env = setEnv(env, key, value)
 	}
-	command := exec.Command(os.Args[0], "-test.run=^TestSpawnedPosseWatchTerminationHelper$", "-test.timeout=2m")
+	command := exec.Command(os.Args[0], "-test.run=^TestSpawnedProcessTerminationHelper$", "-test.timeout=2m")
 	command.Env = env
 	// A file, not a pipe: surviving fixture processes would otherwise hold a
 	// pipe open and block Wait.
@@ -180,29 +193,43 @@ func TestSpawnedPosseWatchDoesNotOutliveKilledTest(t *testing.T) {
 	_ = command.Wait()
 	rootData, err := os.ReadFile(readyFile)
 	if err != nil {
-		t.Fatalf("helper never reported a running Project Watch: %v\n%s", err, helperOutput())
+		t.Fatalf("helper never reported a running %s: %v\n%s", mode, err, helperOutput())
 	}
 	var leaked []isolatedHerdrServerProcess
 	if !waitForCondition(10*time.Second, func() bool {
-		leaked, _ = runSpawnedPosseProcesses(runID)
+		leaked, _ = runSpawnedProcesses(runID)
 		return len(leaked) == 0
 	}) {
-		t.Fatalf("hidden Project Watch survived its killed test: %+v\nhelper output: %s", leaked, helperOutput())
+		t.Fatalf("%s survived its killed test: %+v\nhelper output: %s", mode, leaked, helperOutput())
 	}
 	if err := removeFixtureRoot(string(rootData)); err != nil {
 		t.Errorf("remove killed helper fixture %s: %v", rootData, err)
 	}
 }
 
-// The helper starts a hidden Project Watch, then dies without running any
-// cleanup, as a timed-out or killed test binary does.
-func TestSpawnedPosseWatchTerminationHelper(t *testing.T) {
-	if os.Getenv("POSSE_E2E_WATCH_HELPER") == "" {
+// The helper starts a hidden Project Watch or a detached fixture shell, then
+// dies without running any cleanup, as a timed-out or killed test binary does.
+func TestSpawnedProcessTerminationHelper(t *testing.T) {
+	mode := os.Getenv("POSSE_E2E_WATCH_HELPER")
+	if mode == "" {
 		t.Skip("subprocess helper")
 	}
 	f := newPRLifecycleFixture(t)
-	if !waitForCondition(30*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatalf("hidden Watch process not running: %v", watchPIDs(f.root))
+	switch mode {
+	case "watch":
+		if !waitForCondition(30*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+			t.Fatalf("hidden Watch process not running: %v", watchPIDs(f.root))
+		}
+	case "shell":
+		// Mirrors the background process of the Teardown fixtures.
+		shell := exec.Command("sh", "-c", `while [ ! -f "$POSSE_TEST_ROOT/allow-exit" ]; do sleep 0.1; done`)
+		shell.Dir, shell.Env = f.repo, f.env
+		shell.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := shell.Start(); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
 	}
 	if err := os.WriteFile(os.Getenv("POSSE_E2E_READY_FILE"), []byte(f.root), 0o600); err != nil {
 		t.Fatal(err)

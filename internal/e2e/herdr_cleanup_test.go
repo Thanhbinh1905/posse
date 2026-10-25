@@ -67,13 +67,13 @@ func TestMain(m *testing.M) {
 		}
 		code = 1
 	}
-	if leaked, scanErr := runSpawnedPosseProcesses(runID); scanErr != nil {
-		fmt.Fprintln(os.Stderr, "inspect spawned posse processes:", scanErr)
+	if leaked, scanErr := runSpawnedProcesses(runID); scanErr != nil {
+		fmt.Fprintln(os.Stderr, "inspect spawned processes:", scanErr)
 		code = 1
 		keepReaper = true
 	} else if len(leaked) > 0 {
-		fmt.Fprintf(os.Stderr, "posse processes spawned by the E2E suite survived it: %+v\n", leaked)
-		if err := stopRunSpawnedPosseProcesses(runID, 3*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "processes spawned by the E2E suite survived it: %+v\n", leaked)
+		if err := stopRunSpawnedProcesses(runID, 3*time.Second); err != nil {
 			fmt.Fprintln(os.Stderr, "stop surviving posse processes:", err)
 			keepReaper = true
 		}
@@ -126,7 +126,7 @@ func runE2EServerReaper() {
 	runID := os.Getenv("POSSE_TEST_E2E_RUN_ID")
 	// Hidden Project Watches are detached (setsid), so they outlive a killed
 	// test binary just like the Herdr server does.
-	err = errors.Join(stopIsolatedHerdrServerProcesses(runID, 2*time.Second), stopRunSpawnedPosseProcesses(runID, 2*time.Second))
+	err = errors.Join(stopIsolatedHerdrServerProcesses(runID, 2*time.Second), stopRunSpawnedProcesses(runID, 2*time.Second))
 	if err != nil {
 		report := os.Getenv("POSSE_E2E_REAPER_REPORT")
 		if report != "" {
