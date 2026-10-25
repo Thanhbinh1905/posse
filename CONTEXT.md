@@ -127,6 +127,14 @@ _Avoid_: Deliver
 Posse's FIFO queue per target branch of done Change Tasks whose PR is behind that target; only its head is asked to merge the target. Used only when `defaults.require_current_target` is on.
 _Avoid_: Forge merge queue, merge train
 
+**Delivery**:
+The durable record of one forge pull request or merge request of a Change Task or Workspace Member. It outlives the Worker pane that opened it.
+_Avoid_: PR lifetime, Worker PR
+
+**Steward**:
+The Lead in its role as operator of a Delivery: it may inspect it, reply on it, refresh Posse-owned metadata and rerun an existing failed CI run, each recorded with actor and head. A Steward is not an author and has no merge, workflow or secret authority.
+_Avoid_: Owner, maintainer
+
 **Orphan**:
 Work a Worker made on a merged Task beyond what merged, such as later commits or uncommitted changes; the User decides whether it becomes a new Task or is discarded. Formerly: Leftover.
 _Avoid_: Follow-up (that is a message to a Worker), residue, diff
