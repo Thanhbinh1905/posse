@@ -65,9 +65,20 @@ type ciRepairChange struct {
 	// originHead is the published head the bare origin must hold; empty means
 	// the Task branch must still be absent.
 	originHead string
+	// auditOrigin, when set, also runs on every origin head check.
+	auditOrigin func(t *testing.T)
 }
 
 func startCIRepairChange(t *testing.T, f *prLifecycleFixture, settings ...[2]string) *ciRepairChange {
+	t.Helper()
+	return startCIRepairChangeWith(t, f, func() (int, string) {
+		return startReviewIdentityTask(t, f, "CI repair", "author", "")
+	}, settings...)
+}
+
+// startCIRepairChangeWith installs the CI repair Worker, applies settings and
+// starts Change Task t1 with start.
+func startCIRepairChangeWith(t *testing.T, f *prLifecycleFixture, start func() (int, string), settings ...[2]string) *ciRepairChange {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(f.root, "bin", "claude"), []byte(ciRepairWorkerScript), 0o700); err != nil {
 		t.Fatal(err)
@@ -77,7 +88,7 @@ func startCIRepairChange(t *testing.T, f *prLifecycleFixture, settings ...[2]str
 	for _, setting := range settings {
 		runPosse(t, f.binary, f.repo, f.env, "config", "set", setting[0], setting[1])
 	}
-	if code, output := startReviewIdentityTask(t, f, "CI repair", "author", ""); code != 0 {
+	if code, output := start(); code != 0 {
 		t.Fatalf("start Change Task: %d %s", code, output)
 	}
 	change := f.mustTask(t, "t1")
@@ -109,6 +120,9 @@ func (h *ciRepairChange) submitCandidate(t *testing.T, summary string) store.Val
 
 func (h *ciRepairChange) assertOriginHead(t *testing.T, expected string) {
 	t.Helper()
+	if h.auditOrigin != nil {
+		h.auditOrigin(t)
+	}
 	if expected == "" {
 		assertTaskBranchAbsentOnBareOrigin(t, h.f, h.change.Branch)
 		return
