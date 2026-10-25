@@ -546,6 +546,8 @@ The Task records the Profile and the rule used. Kind inheritance stores `implici
 
 `posse dispatch --brief <file> [--name <display-name>] [--profile <name>]` prints the same resolution without spawning; if Profile selection is ambiguous, `profile_required` includes the Task Name and candidate Profiles in help. [ADR 0022](adr/0022-compatible-dispatch-and-capacity.md) records the compatibility and visibility decisions.
 
+`posse stats` summarizes Tasks created in the last 30 days per Profile, using the Task record, its transitions and the recorded session usage; `--json` output carries `window_days` and a `profiles` list. Each row has `tasks`, `finished`, `landed`, `landed_rate`, `median_done_seconds`, `tokens_per_landed` and `relaunches`. A Task is finished once it is merged, reported, failed, lost or torn down, and landed once it merged or its Report was accepted. `landed_rate` is landed over finished Tasks; Tasks still in flight, and queued Tasks, are not finished. `median_done_seconds` runs from creation to the first `done` Signal; `tokens_per_landed` averages input, output and cache tokens over landed Tasks with known usage. Both are `null` without data. `relaunches` sums launches beyond the first. `posse dispatch` adds the same row as `profile_stats` for the resolved Profile, and when `profile_required` lists candidates its help gains one `stats <profile>: ...` line per candidate. Stats are informational: they never alter Dispatch Rules, Profile resolution or `posse start`, and these outputs only gain fields.
+
 ## 12. Pool
 
 Each Project has a Pool of reusable worktrees (Sandboxes) under `~/.posse/pool/<project>/sandbox-<n>`, created with `git worktree add --detach --lock --reason "posse: held by t<n>"` from the Project root. A Sandbox is held by exactly one Task from spawn to Teardown. The point of reuse is warmth: dependencies, build caches and other ignored files survive between Tasks.
@@ -893,7 +895,8 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse decisions [--all]` | Lead, User | list pending or all Decisions |
 | `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |
 | `posse apply <id>` | Lead | carry out an answered Orphan or closed-PR Decision |
-| `posse dispatch --brief <f> [--name <short>] [--profile p]` | Lead | preview Profile resolution and Task Name |
+| `posse dispatch --brief <f> [--name <short>] [--profile p]` | Lead | preview Profile resolution and Task Name, with each candidate Profile's stats |
+| `posse stats` | Lead | per-Profile landed rate, median time to `done`, tokens per landed Task and relaunch count over the last 30 days |
 | `posse workflow show <name> [--project p]` | User, Lead | preview a resolved workflow profile, source and digest |
 | `posse workflow status [<run>]` | User, Lead | show workflow run position, stage Tasks, result identities and advance history |
 | `posse workflow advance <run> --to <stage> --user-approved <quote> [--abandon <task>]...` | Lead | record the User's approval to advance to the next profile stage |

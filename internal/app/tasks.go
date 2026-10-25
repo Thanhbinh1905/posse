@@ -82,6 +82,18 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 				command += " --name " + name
 			}
 			failure.Help = append([]string{"Task Name: " + name, "Run `" + command + " --profile <name>` after choosing a Profile"}, failure.Help...)
+			var profileErr *dispatch.ProfileError
+			if errors.As(err, &profileErr) && len(profileErr.Candidates) > 0 {
+				if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
+					seen := map[string]bool{}
+					for _, candidate := range profileErr.Candidates {
+						if !seen[candidate.Profile] {
+							seen[candidate.Profile] = true
+							failure.Help = append(failure.Help, fmt.Sprintf("stats %s: %s", candidate.Profile, statsSummary(statsFor(history, candidate.Profile))))
+						}
+					}
+				}
+			}
 			return failure
 		}
 		return err
@@ -99,6 +111,9 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + startCommand + "` to start this Worker"}},
+	}
+	if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
+		result = append(result, axi.Field{Key: "profile_stats", Value: statsFor(history, resolution.Profile)})
 	}
 	if workflow != nil {
 		result = append(result, axi.Field{Key: "workflow", Value: workflow})
