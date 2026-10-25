@@ -719,7 +719,7 @@ func TestIngestDoesNotEraseSessionOwnerWhenAgentIdentityIsMissing(t *testing.T) 
 	ctx := context.Background()
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
-	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "claude-session", "claude", 0, 0, "generation-1"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, task.ID, store.TaskObservation{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, AgentSession: "claude-session", AgentSessionKind: "claude", AgentAbsentSince: 0, IdleSince: 0, AgentServerStartedAt: "generation-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -839,7 +839,7 @@ func TestTaskGenerationStillGetsRestartGraceAfterProjectGenerationWasRecorded(t 
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "", "", 0, 0, "old-generation"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, task.ID, store.TaskObservation{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, AgentSession: "", AgentSessionKind: "", AgentAbsentSince: 0, IdleSince: 0, AgentServerStartedAt: "old-generation"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "new-generation"); err != nil {
@@ -888,7 +888,7 @@ func TestRunWithMissingGenerationPreservesLastObservedProjectAndAgentGenerations
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
 	ctx := context.Background()
-	if err := db.UpdateTaskObservation(ctx, task.ID, task.PaneID, task.HerdrWorkspaceID, "", "", 0, 0, "generation-1"); err != nil {
+	if err := db.UpdateTaskObservation(ctx, task.ID, store.TaskObservation{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, AgentSession: "", AgentSessionKind: "", AgentAbsentSince: 0, IdleSince: 0, AgentServerStartedAt: "generation-1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RememberProjectServerStartedAt(ctx, project.ID, "generation-1"); err != nil {

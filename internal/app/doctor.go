@@ -30,6 +30,9 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 	}
 	checks, help := doctorRows(result.Checks)
 	output := axi.Object{{Key: "checks", Value: checks}, {Key: "help", Value: help}}
+	if len(result.Migrations) > 0 {
+		output = append(output, axi.Field{Key: "no_mistakes_migration", Value: noMistakesMigrationOutput(result.Migrations)})
+	}
 	if parsed.Bool("full") && len(result.Manifests) > 0 {
 		output = append(output, axi.Field{Key: "agent_manifests", Value: jsonRaw(result.Manifests)})
 	}
@@ -43,7 +46,10 @@ func (s *Service) doctor(ctx *axi.Context, args []string) error {
 		}
 	}
 	if ctx.Human {
-		return renderDoctorHuman(ctx, checks, help, parsed.Bool("verbose"))
+		if err := renderDoctorHuman(ctx, checks, help, parsed.Bool("verbose")); err != nil {
+			return err
+		}
+		return renderNoMistakesMigrationHuman(ctx, result.Migrations)
 	}
 	return ctx.Print(output)
 }
@@ -55,8 +61,9 @@ type doctorCheck struct {
 }
 
 type doctorResult struct {
-	Checks    []doctorCheck
-	Manifests json.RawMessage
+	Checks     []doctorCheck
+	Manifests  json.RawMessage
+	Migrations []noMistakesMigration
 }
 
 func doctorRows(checks []doctorCheck) ([]axi.Object, []axi.Object) {
@@ -78,6 +85,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		return doctorResult{}, err
 	}
 	checks := []doctorCheck{}
+	var migrations []noMistakesMigration
 	var registeredProjects []store.Project
 	addCheck := func(name, status, detail, action string) {
 		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail, Action: action})
@@ -165,7 +173,13 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 						addCheck("deprecated no-mistakes "+project.Name, "warn", "could not inspect Project policies: "+usageErr.Error(), "Inspect the Project configuration and migrate away from no-mistakes")
 					} else if len(usages) > 0 {
 						detail := strings.Join(usages, "; ")
-						addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Migrate this Project to built-in validation and set its Merge Mode to pr or local and review policy to quick or none")
+						projectMigrations, migrationErr := noMistakesMigrations(ctx.Context, db, project, projectCfg)
+						if migrationErr != nil {
+							addCheck("deprecated no-mistakes "+project.Name, "warn", detail+"; could not build replacement settings: "+migrationErr.Error(), "Inspect the Project configuration and migrate away from no-mistakes")
+						} else {
+							migrations = append(migrations, projectMigrations...)
+							addCheck("deprecated no-mistakes "+project.Name, "warn", detail, "Choose a replacement from the no-mistakes migration list (no_mistakes_migration) and run its `posse config set` commands; Posse does not change config")
+						}
 					}
 				}
 				if reason := staleProjectRootReason(project.Root, home); reason != "" {
@@ -409,7 +423,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck(tool, "warn", "not installed", "Install "+tool+" to use the corresponding Merge Mode")
 		}
 	}
-	return doctorResult{Checks: checks, Manifests: manifests}, nil
+	return doctorResult{Checks: checks, Manifests: manifests, Migrations: migrations}, nil
 }
 
 func noMistakesConfigUsage(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]string, error) {
