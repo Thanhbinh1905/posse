@@ -936,3 +936,49 @@ func TestSendReopensDoneChangeTaskBeforeImmediateSignal(t *testing.T) {
 		t.Fatalf("delivered Worker message = %q %q, %v", status, body, err)
 	}
 }
+
+func TestSendRefusesQueuedTaskNamingItsState(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, store.Task{Type: "change", Title: "Queued", ShortName: "queued", State: store.StateQueued}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	for _, args := range [][]string{{"send", "t1", "Context note"}, {"send", "--queue", "t1", "Context note"}, {"send", "t1", "--interrupt", "Context note"}} {
+		var output bytes.Buffer
+		cli := testService(home, herdr.NewFake()).CLI()
+		cli.Out = &output
+		code := cli.Run(args)
+		text := output.String()
+		if code == 0 || !strings.Contains(text, "message_refused") || !strings.Contains(text, "queued") || strings.Contains(text, "stopped accepting") || !strings.Contains(text, "posse teardown t1") {
+			t.Fatalf("%v: code=%d output=%s", args, code, text)
+		}
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=?`, taskID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("queued Task stored %d messages, err=%v", count, err)
+	}
+}
