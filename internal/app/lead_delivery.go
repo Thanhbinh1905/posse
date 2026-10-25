@@ -79,7 +79,15 @@ func workerWaitRules(kind config.Kind) string {
 	if kind.BackgroundCommands {
 		rules += "- Run long commands (full test suites, e2e, builds) as background commands and never poll them with sleep, ps or repeated reads; do other work or end your turn until they finish.\n"
 	}
+	rules += "- Never end a turn while a detached command (shell `&`, `nohup`, `setsid`, a polling loop) runs: nothing wakes you when it finishes. Wait in the foreground" + backgroundAlternative(kind) + ".\n"
 	return rules + "- Do not wait for PR CI after `posse signal done`; posse watches the PR and the Lead sends fix instructions."
+}
+
+func backgroundAlternative(kind config.Kind) string {
+	if kind.BackgroundCommands {
+		return " or use a background command the harness tracks"
+	}
+	return ""
 }
 
 func noticeDelivery(kind config.Kind) string {
