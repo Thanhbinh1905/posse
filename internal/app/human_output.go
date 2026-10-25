@@ -59,6 +59,48 @@ func renderDoctorHuman(ctx *axi.Context, checks []axi.Object, help []axi.Object,
 	return nil
 }
 
+// Commands stay unwrapped on their own lines so they can be copied as-is.
+func renderNoMistakesMigrationHuman(ctx *axi.Context, migrations []noMistakesMigration) error {
+	if len(migrations) == 0 {
+		return nil
+	}
+	fmt.Fprintln(ctx.Out, "\nNo-mistakes migration (Posse does not change config)")
+	for _, migration := range migrations {
+		scope := "Project " + migration.Project
+		if migration.Member != "" {
+			scope += " Member " + migration.Member
+		}
+		fmt.Fprintf(ctx.Out, "  %s (%s)\n    Recommended:\n", scope, strings.Join(migration.Uses, ", "))
+		for _, command := range migration.Set {
+			fmt.Fprintf(ctx.Out, "      %s\n", command)
+		}
+		if len(migration.LighterReview) > 0 {
+			fmt.Fprintln(ctx.Out, "    Lighter review instead of full-pipeline:")
+			for _, command := range migration.LighterReview {
+				fmt.Fprintf(ctx.Out, "      %s\n", command)
+			}
+		}
+		if migration.TrustedConfig != "" {
+			fmt.Fprintf(ctx.Out, "    Trusted no-mistakes config: %s\n", migration.TrustedConfig)
+		}
+		if len(migration.TrustedCommands) > 0 {
+			fmt.Fprintln(ctx.Out, "    Trusted commands:")
+		}
+		for _, command := range migration.TrustedCommands {
+			if err := writeWrapped(ctx.Out, command, ctx.Width); err != nil {
+				return err
+			}
+		}
+	}
+	fmt.Fprintln(ctx.Out, "  Notes")
+	for _, note := range noMistakesMigrationNotes {
+		if err := writeWrapped(ctx.Out, "- "+note, ctx.Width); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func pluralCount(count int, singular, plural string) string {
 	if count == 1 {
 		return fmt.Sprintf("1 %s", singular)
