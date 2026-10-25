@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,7 +43,7 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	runID := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
-	if os.Getenv("POSSE_E2E_TERMINATION_HELPER") != "" {
+	if os.Getenv("POSSE_E2E_TERMINATION_HELPER") != "" || os.Getenv("POSSE_E2E_WATCH_HELPER") != "" {
 		runID = os.Getenv("POSSE_TEST_E2E_RUN_ID")
 	}
 	_ = os.Setenv("POSSE_TEST_E2E_RUN_ID", runID)
@@ -62,6 +63,18 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "isolated Herdr servers survived the E2E suite: %+v\n", servers)
 		if err := stopIsolatedHerdrServerProcesses(runID, 3*time.Second); err != nil {
 			fmt.Fprintln(os.Stderr, "stop surviving isolated E2E servers:", err)
+			keepReaper = true
+		}
+		code = 1
+	}
+	if leaked, scanErr := runSpawnedProcesses(runID); scanErr != nil {
+		fmt.Fprintln(os.Stderr, "inspect spawned processes:", scanErr)
+		code = 1
+		keepReaper = true
+	} else if len(leaked) > 0 {
+		fmt.Fprintf(os.Stderr, "processes spawned by the E2E suite survived it: %+v\n", leaked)
+		if err := stopRunSpawnedProcesses(runID, 3*time.Second); err != nil {
+			fmt.Fprintln(os.Stderr, "stop surviving posse processes:", err)
 			keepReaper = true
 		}
 		code = 1
@@ -110,7 +123,11 @@ func runE2EServerReaper() {
 	for e2eProcessIsSame(pid, start) {
 		time.Sleep(25 * time.Millisecond)
 	}
-	if err := stopIsolatedHerdrServerProcesses(os.Getenv("POSSE_TEST_E2E_RUN_ID"), 2*time.Second); err != nil {
+	runID := os.Getenv("POSSE_TEST_E2E_RUN_ID")
+	// Hidden Project Watches are detached (setsid), so they outlive a killed
+	// test binary just like the Herdr server does.
+	err = errors.Join(stopIsolatedHerdrServerProcesses(runID, 2*time.Second), stopRunSpawnedProcesses(runID, 2*time.Second))
+	if err != nil {
 		report := os.Getenv("POSSE_E2E_REAPER_REPORT")
 		if report != "" {
 			_ = os.WriteFile(report, []byte(err.Error()+"\n"), 0o600)
@@ -376,37 +393,43 @@ func stopFixtureHerdrServerProcesses(root string, timeout time.Duration) error {
 }
 
 func stopMatchingIsolatedHerdrServers(matches func([]byte) bool, timeout time.Duration) error {
-	servers, err := findIsolatedHerdrServerProcesses(matches)
+	return stopProcesses("isolated Herdr server", func() ([]isolatedHerdrServerProcess, error) {
+		return findIsolatedHerdrServerProcesses(matches)
+	}, timeout)
+}
+
+func stopProcesses(kind string, find func() ([]isolatedHerdrServerProcess, error), timeout time.Duration) error {
+	processes, err := find()
 	if err != nil {
 		return err
 	}
-	for _, server := range servers {
-		if err := signalIsolatedHerdrServer(server, syscall.SIGTERM); err != nil {
-			return fmt.Errorf("send SIGTERM to isolated Herdr server %d: %w", server.PID, err)
+	for _, process := range processes {
+		if err := signalIsolatedHerdrServer(process, syscall.SIGTERM); err != nil {
+			return fmt.Errorf("send SIGTERM to %s %d: %w", kind, process.PID, err)
 		}
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		servers, err = findIsolatedHerdrServerProcesses(matches)
-		if err != nil || len(servers) == 0 {
+		processes, err = find()
+		if err != nil || len(processes) == 0 {
 			return err
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	for _, server := range servers {
-		if err := signalIsolatedHerdrServer(server, syscall.SIGKILL); err != nil {
-			return fmt.Errorf("send SIGKILL to isolated Herdr server %d: %w", server.PID, err)
+	for _, process := range processes {
+		if err := signalIsolatedHerdrServer(process, syscall.SIGKILL); err != nil {
+			return fmt.Errorf("send SIGKILL to %s %d: %w", kind, process.PID, err)
 		}
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		servers, err = findIsolatedHerdrServerProcesses(matches)
-		if err != nil || len(servers) == 0 {
+		processes, err = find()
+		if err != nil || len(processes) == 0 {
 			return err
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return fmt.Errorf("isolated Herdr servers remain after kill: %+v", servers)
+	return fmt.Errorf("%ss remain after kill: %+v", kind, processes)
 }
 
 func processExists(pid int) bool {

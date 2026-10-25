@@ -2199,6 +2199,7 @@ func isolatedE2EEnv(t *testing.T, root string) []string {
 	if e2eGoCache.err != nil || e2eGoCache.mod == "" || e2eGoCache.build == "" {
 		t.Fatalf("resolve shared Go caches: %v", e2eGoCache.err)
 	}
+	guardSpawnedProcesses(t, root)
 	env := herdr.IsolatedTestEnvironment(root)
 	env = setEnv(env, "GOMODCACHE", e2eGoCache.mod)
 	return setEnv(env, "GOCACHE", e2eGoCache.build)
