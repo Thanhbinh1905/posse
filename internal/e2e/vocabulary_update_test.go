@@ -313,19 +313,35 @@ func testEnvValue(env []string, key string) string {
 	return ""
 }
 
+// runReleaseCLI models a plain User shell. The binary is orphaned from the test
+// process before it runs, so a Herdr server or agent above the test (as in a
+// Worker pane) is not among its ancestors, as in CI.
 func runReleaseCLI(t *testing.T, binary, cwd string, env []string, args ...string) (int, string) {
 	t.Helper()
-	command := exec.Command(binary, args...)
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output")
+	command := exec.Command("sh", append([]string{"-c", `( "$@" >"$0" 2>&1 </dev/null; echo $? >"$0.status.tmp"; mv "$0.status.tmp" "$0.status" ) &`, outputPath, binary}, args...)...)
 	command.Dir, command.Env = cwd, env
-	output, err := command.CombinedOutput()
-	if err == nil {
-		return 0, string(output)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("launch %s %s: %v\n%s", binary, strings.Join(args, " "), err, output)
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		return exitErr.ExitCode(), string(output)
+	statusPath := outputPath + ".status"
+	if !waitForCondition(5*time.Minute, func() bool { _, err := os.Stat(statusPath); return err == nil }) {
+		t.Fatalf("%s %s did not finish", binary, strings.Join(args, " "))
 	}
-	t.Fatalf("run %s %s: %v\n%s", binary, strings.Join(args, " "), err, output)
-	return 1, string(output)
+	status, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(status)))
+	if err != nil {
+		t.Fatalf("parse exit status %q: %v", status, err)
+	}
+	output, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code, string(output)
 }
 
 func makeUpdateTestRelease(t *testing.T, binaryPath, tag string) testReleaseAsset {
