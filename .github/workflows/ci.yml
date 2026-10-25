@@ -89,7 +89,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # Keep in sync with shard_count in scripts/run-race-shard.sh.
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -122,7 +123,7 @@ jobs:
       - name: Run race-enabled test shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-test-${{ matrix.shard }}-
-        run: scripts/run-race-shard.sh "${{ matrix.shard }}"
+        run: scripts/run-race-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
       - name: Clean test temporary roots and caches
         if: ${{ always() }}
         run: |
