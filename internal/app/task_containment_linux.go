@@ -130,10 +130,7 @@ func retainTaskContainmentProcesses(authorization *sandboxProcessAuthorization, 
 		if err != nil {
 			return fmt.Errorf("inspect Task-contained process %d: %w", pid, err)
 		}
-		if !taskContainsProcess(pid, task, roots) {
-			if taskProcessExited(pid) {
-				continue
-			}
+		if taskProcessLeftContainment(pid, task, roots) {
 			return fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
 		}
 		retained, err := retainTaskProcessHandle(pid, bootID+"/"+startTime, task, roots, authorization)
@@ -300,10 +297,7 @@ func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, 
 		if err != nil {
 			return false, err
 		}
-		if alive && !taskContainsProcess(pid, task, roots) {
-			if taskProcessExited(pid) {
-				return false, nil
-			}
+		if alive && taskProcessLeftContainment(pid, task, roots) {
 			return false, fmt.Errorf("task process %d left its containment identity during ownership proof", pid)
 		}
 		return alive, nil
@@ -311,11 +305,56 @@ func retainTaskProcessHandle(pid int, observedIdentity string, task store.Task, 
 	return false, fmt.Errorf("task process %d kept changing identity while retaining its handle", pid)
 }
 
-// taskProcessExited reports whether pid is gone or a zombie. Containment reads
-// fail for such a process, so a failed read is only an escape when it is alive.
+// taskContainmentSettleTimeout bounds how long a live process instance may
+// show no containment identity before the ownership proof treats it as escaped.
+const taskContainmentSettleTimeout = time.Second
+
+// taskProcessLeftContainment reports whether pid, which just failed
+// taskContainsProcess, left its containment while alive. execve briefly exposes
+// an empty environment, so the same live instance must stay outside containment
+// for taskContainmentSettleTimeout before it counts as an escape.
+func taskProcessLeftContainment(pid int, task store.Task, roots []ownedProcessRoot) bool {
+	bootID, startTime, err := store.ProcessIdentityForPID(pid)
+	if processGone(err) {
+		return false
+	}
+	deadline := time.Now().Add(taskContainmentSettleTimeout)
+	for {
+		if taskProcessExited(pid) || taskContainsProcess(pid, task, roots) {
+			return false
+		}
+		if err == nil {
+			currentBootID, currentStartTime, currentErr := store.ProcessIdentityForPID(pid)
+			if processGone(currentErr) || currentErr == nil && currentBootID+"/"+currentStartTime != bootID+"/"+startTime {
+				return false
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// linuxProcessExiting is PF_EXITING in the flags field of /proc/PID/stat.
+const linuxProcessExiting = 0x4
+
+// taskProcessExited reports whether pid is gone, a zombie or exiting. An
+// exiting process drops its environment, cwd and files before it becomes a
+// zombie, so a failed containment read is only an escape when it still runs.
 func taskProcessExited(pid int) bool {
-	zombie, err := sandboxProcessIsZombie(pid)
-	return processGone(err) || err == nil && zombie
+	fields, err := sandboxProcessStatFields(pid)
+	if processGone(err) {
+		return true
+	}
+	if err != nil || len(fields) < 7 {
+		return false
+	}
+	if fields[0] == "Z" || fields[0] == "X" || fields[0] == "x" {
+		return true
+	}
+	flags, err := strconv.ParseUint(fields[6], 10, 64)
+	return err == nil && flags&linuxProcessExiting != 0
 }
 
 func taskProcessHasOwnershipProof(pid int, task store.Task, roots []ownedProcessRoot, authorization *sandboxProcessAuthorization) (bool, error) {
