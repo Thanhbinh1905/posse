@@ -32,7 +32,7 @@ func startQuickLoopChange(t *testing.T, f *prLifecycleFixture, autoStart string)
 
 // resubmitChange reopens the done Change Task and reports its current branch
 // tip done again, as a Worker does after a follow-up commit.
-func resubmitChange(t *testing.T, f *prLifecycleFixture, change store.Task, note string) {
+func resubmitChange(t *testing.T, f *prLifecycleFixture, change store.Task, note string, doneArgs ...string) {
 	t.Helper()
 	env := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
 	env = setEnv(env, "POSSE_WORKER_HOME", f.home)
@@ -43,7 +43,7 @@ func resubmitChange(t *testing.T, f *prLifecycleFixture, change store.Task, note
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, env, "signal", "done", note, "--turn", turn); code != 0 {
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, env, append([]string{"signal", "done", note, "--turn", turn}, doneArgs...)...); code != 0 {
 		t.Fatalf("complete follow-up: %d %s", code, output)
 	}
 }
@@ -150,5 +150,83 @@ func TestBlockingReviewFindingRefusesMergeUnderReviewNone(t *testing.T) {
 	}
 	if got := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")); got != strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD")) {
 		t.Fatal("accepted Task did not land")
+	}
+}
+
+// advanceTarget commits one file on the frozen target and pushes it to origin.
+func advanceTarget(t *testing.T, f *prLifecycleFixture, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.repo, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "add", name)
+	gitTest(t, f.env, f.repo, "commit", "-m", "advance target")
+	gitTest(t, f.env, f.repo, "push", "origin", "main")
+}
+
+func TestPRCarriedPassLandsPinnedToTheCarriedHead(t *testing.T) {
+	f := reviewEvidenceFixture(t, "quick")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.enabled", "true")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "true")
+	change := publishCandidate(t, f, "Carried PR change", "author", 17)
+	recordPassingReview(t, f, "t1")
+	passed := strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD"))
+	advanceTarget(t, f, "target-update.txt", "target update\n")
+	gitTest(t, f.env, change.WorktreePath, "merge", "--no-edit", "main")
+	gitTest(t, f.env, change.WorktreePath, "push", "origin", change.Branch)
+	merged := strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD"))
+	resubmitChange(t, f, change, "Merged the current target", "--pr", "https://github.com/acme/shop/pull/17")
+	var carries int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_carries WHERE ship_task_id=? AND from_head=? AND to_head=?`, change.ID, passed, merged).Scan(&carries); err != nil || carries != 1 {
+		t.Fatalf("clean target merge carry rows=%d err=%v", carries, err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 || !strings.Contains(out, "merging") {
+		t.Fatalf("carried pass did not open Merge: %d %s", code, out)
+	}
+	if got := f.mustTask(t, "t1").GatedSHA; got != merged {
+		t.Fatalf("gated %s, want carried head %s", got, merged)
+	}
+	// Green CI for the passed head never qualifies the carried head.
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", passed, "")
+	requireRefusal(t, f, "checks_not_green", "merge", "t1", "--execute")
+	observePR(t, f, change, 17, "OPEN", "SUCCESS", merged, "")
+	if code, out := runReviewIdentityCLI(t, f, "merge", "t1", "--execute"); code != 0 {
+		t.Fatalf("aligned gate, carry, observation and forge head refused: %d %s", code, out)
+	}
+	calls, err := os.ReadFile(f.ghLog)
+	if err != nil || strings.Count(string(calls), "pr merge") != 1 || !strings.Contains(string(calls), "--match-head-commit "+merged) {
+		t.Fatalf("merge was not pinned to the carried head: %v\n%s", err, calls)
+	}
+	if rounds := reviewRoundCount(t, f, change); rounds != 1 {
+		t.Fatalf("clean target merge started a new Review Round: rounds=%d", rounds)
+	}
+}
+
+func TestPRHandResolvedTargetMergeAfterPassHasNoCarry(t *testing.T) {
+	f := reviewEvidenceFixture(t, "quick")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.enabled", "true")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "false")
+	change := publishCandidate(t, f, "Conflicted PR change", "author", 17)
+	recordPassingReview(t, f, "t1")
+	// The target edits the candidate's file, so merging it needs a hand resolution.
+	advanceTarget(t, f, "candidate-t1.txt", "target version\n")
+	if code, out := runReleaseCLI(t, "git", change.WorktreePath, f.env, "merge", "--no-edit", "main"); code == 0 {
+		t.Fatalf("target merge did not conflict: %s", out)
+	}
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "candidate-t1.txt"), []byte("hand resolved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, change.WorktreePath, "add", "candidate-t1.txt")
+	gitTest(t, f.env, change.WorktreePath, "commit", "--no-edit")
+	gitTest(t, f.env, change.WorktreePath, "push", "origin", change.Branch)
+	resolved := strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD"))
+	resubmitChange(t, f, change, "Merged the current target by hand", "--pr", "https://github.com/acme/shop/pull/17")
+	requireRefusal(t, f, "review_required", "merge", "t1")
+	var carries int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_carries WHERE ship_task_id=?`, change.ID).Scan(&carries); err != nil || carries != 0 {
+		t.Fatalf("hand-resolved merge %s received a carry: rows=%d err=%v", resolved, carries, err)
+	}
+	if got := f.mustTask(t, "t1"); got.State != store.StateDone || got.GatedSHA != "" && got.GatedSHA != resolved {
+		t.Fatalf("Task without evidence advanced: %s gated=%s", got.State, got.GatedSHA)
 	}
 }
