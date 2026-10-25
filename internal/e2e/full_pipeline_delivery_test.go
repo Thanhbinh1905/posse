@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -596,5 +597,317 @@ func TestFullPipelineWorkspaceMergesEveryPRMemberInOneRun(t *testing.T) {
 	}
 	if main := gitRef(t, f, zeta, "refs/heads/main"); main != reviewedZeta {
 		t.Fatalf("zeta target=%s after Merge, want reviewed head %s", main, reviewedZeta)
+	}
+}
+
+// memberChecksForgeScript wraps the fixture's fake gh. A Member PR view that
+// asks for checks reports a failed required check while its head matches
+// $POSSE_TEST_ROOT/member-ci-failed and a passing one otherwise.
+const memberChecksForgeScript = `#!/bin/sh
+set -eu
+case "$1 $2 $*" in
+  "pr view "*statusCheckRollup*)
+    "$POSSE_TEST_ROOT/bin/gh-base" "$@" | python3 -c 'import json,os,sys
+pull=json.load(sys.stdin)
+failed=os.path.join(os.environ["POSSE_TEST_ROOT"],"member-ci-failed")
+conclusion="SUCCESS"
+if os.path.exists(failed) and open(failed).read().strip()==pull["headRefOid"]: conclusion="FAILURE"
+pull["statusCheckRollup"]=[{"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":conclusion,"detailsUrl":"https://checks.example/unit"}]
+print(json.dumps(pull))' ;;
+  *) exec "$POSSE_TEST_ROOT/bin/gh-base" "$@" ;;
+esac
+`
+
+// TestFullPipelineWorkspaceMemberCIRepairRevalidatesBeforeRepublish proves
+// the CI repair loop for a workspace PR Member: a failed check on the api
+// Member's published head queues a Member-scoped repair, the repair becomes a
+// fresh private api candidate that passes review -> test -> docs -> lint
+// before it replaces the published head, and neither bare origin nor the
+// local web Member's target moves at any other step.
+func TestFullPipelineWorkspaceMemberCIRepairRevalidatesBeforeRepublish(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	ws := newFullPipelineWorkspace(t, f)
+	bin := filepath.Join(f.root, "bin")
+	if err := os.Rename(filepath.Join(bin, "gh"), filepath.Join(bin, "gh-base")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(memberChecksForgeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The workspace Worker repairs inside its api Member and reports done
+	// without a PR URL, as the Member CI instruction asks.
+	worker := strings.Replace(ciRepairWorkerScript, "      printf 'repaired candidate content\\n' > change.txt\n", "      cd api\n      printf 'repaired candidate content\\n' > change.txt\n", 1)
+	worker = strings.Replace(worker, " --pr 'https://github.com/acme/shop/pull/17'", "", 1)
+	if worker == ciRepairWorkerScript || !strings.Contains(worker, "cd api") || strings.Contains(worker, "--pr") {
+		t.Fatal("could not derive the workspace CI repair Worker")
+	}
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(worker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, f.binary, ws.root, f.env, "config", "set", "ci_loop.max_fix_rounds", "2", "--project", "stack")
+	brief := filepath.Join(f.root, "workspace-ci-repair.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace CI repair\ndone_when: checked\nrepos: [api, web]\n---\nChange both Members.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "start", "--brief", brief, "--name", "workspace-ci-repair", "--profile", "author"); code != 0 {
+		t.Fatalf("start workspace Change Task: code=%d %s", code, output)
+	}
+	change := mustProjectTask(t, f, ws.project.ID, "t1")
+	if !waitForCondition(15*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(f.root, "ci-worker-ready"))
+		return err == nil
+	}) {
+		t.Fatal("workspace CI repair Worker did not start")
+	}
+	repos, err := f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || len(repos) != 2 {
+		t.Fatalf("workspace Members: %+v %v", repos, err)
+	}
+	worktrees := map[string]string{}
+	for _, repo := range repos {
+		worktrees[repo.Repo] = repo.WorktreePath
+		if err := os.WriteFile(filepath.Join(repo.WorktreePath, "change.txt"), []byte(repo.Repo+" candidate\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, repo.WorktreePath, "add", "change.txt")
+		gitTest(t, f.env, repo.WorktreePath, "commit", "-m", "change "+repo.Repo)
+	}
+	apiRefs := originRefs(t, f, f.remote)
+	webRefs := originRefs(t, f, ws.webRemote)
+	webTarget := gitRef(t, f, ws.web, "refs/heads/main")
+	// Workspace PR polling runs only in the Watch; a foreground poll needs
+	// no hidden Watch identity.
+	pollEnv := setEnv(ws.leadEnv, "POSSE_WATCH_TOKEN", "")
+	poll := func() {
+		t.Helper()
+		if code, output := runReleaseCLI(t, f.binary, ws.root, pollEnv, "watch", "--poll-only", "--timeout", "2500"); code != 0 {
+			t.Fatalf("posse watch --poll-only: code=%d %s", code, output)
+		}
+	}
+	audit := func(stage string) {
+		t.Helper()
+		assertOriginRefs(t, f, f.remote, apiRefs, "api "+stage)
+		assertOriginRefs(t, f, ws.webRemote, webRefs, "web "+stage)
+		if current := gitRef(t, f, ws.web, "refs/heads/main"); current != webTarget {
+			t.Fatalf("web local target moved to %s during %s", current, stage)
+		}
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	submit := func(member, summary string) store.ValidationCandidate {
+		t.Helper()
+		code, output := runReleaseCLI(t, f.binary, worktrees[member], workerEnv,
+			"publish", "--repo", member, summary, "--verify", "go test ./... -> passed",
+			"--proof", "Intent behavior verified", "--risk", "Risk: low\nRollback: revert the "+member+" change")
+		if code != 0 || !strings.Contains(output, "validation required before publication") {
+			t.Fatalf("submit %s private candidate: code=%d %s", member, code, output)
+		}
+		audit(member + " submission")
+		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, member)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return candidate
+	}
+	candidates := map[string]store.ValidationCandidate{"api": submit("api", "api candidate"), "web": submit("web", "web candidate")}
+	passCandidateReviewAs(t, f, ws.leadEnv, ws.root, change, "t2")
+	audit("review")
+	for _, member := range []string{"web", "api"} {
+		recordCandidateStages(t, f, workerEnv, candidates[member], func(stage string) { audit(member + " " + stage) }, "--repo", member)
+		if code, output := runReleaseCLI(t, f.binary, candidates[member].WorktreePath, workerEnv, "publish", "--repo", member, "Promote"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+			t.Fatalf("promote validated %s candidate: code=%d %s", member, code, output)
+		}
+	}
+	apiRefs["refs/heads/"+change.Branch] = candidates["api"].CandidateSHA
+	audit("promotion")
+	turn, err := f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Both Members validated", "--turn", turn); code != 0 {
+		t.Fatalf("done Signal: code=%d %s", code, output)
+	}
+
+	// Merge binds each Member's gated head; the forge holds the api PR open.
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "merge", "t1"); code != 0 {
+		t.Fatalf("start workspace Merge: code=%d %s", code, output)
+	}
+	audit("Merge start")
+	failedHead := candidates["api"].CandidateSHA
+	members, err := f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range members {
+		if member.Repo == "api" && member.GatedSHA != failedHead {
+			t.Fatalf("api Member gated head=%q, want published candidate %s", member.GatedSHA, failedHead)
+		}
+	}
+
+	// A failed required check on the published api head queues one repair
+	// scoped to the api Member.
+	if err := os.WriteFile(filepath.Join(f.root, "member-ci-failed"), []byte(failedHead+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(20*time.Second, func() bool {
+		poll()
+		_, err := os.Stat(filepath.Join(f.root, "ci-worker-fixed"))
+		return err == nil
+	}) {
+		input, _ := os.ReadFile(filepath.Join(f.root, "ci-worker-input.log"))
+		notices, _ := f.db.Notices(context.Background(), ws.project.ID, false)
+		members, _ := f.db.TaskRepos(context.Background(), change.ID)
+		observation, observationErr := f.db.LatestMemberPRObservation(context.Background(), change.ID, "api")
+		ghLog, _ := os.ReadFile(filepath.Join(f.root, "gh.log"))
+		t.Fatalf("failed api check did not reach the Worker as a repair: input=%s members=%+v observation=%+v err=%v gh=%s notices=%#v", input, members, observation, observationErr, ghLog, notices)
+	}
+	input, err := os.ReadFile(filepath.Join(f.root, "ci-worker-input.log"))
+	if err != nil || !strings.Contains(string(input), "for workspace member api") || !strings.Contains(string(input), failedHead) || !strings.Contains(string(input), "posse publish --repo api") {
+		t.Fatalf("CI repair instruction is not bound to the api Member head: %s err=%v", input, err)
+	}
+	var rounds int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, change.ID).Scan(&rounds); err != nil || rounds != 1 {
+		t.Fatalf("CI fix rounds=%d err=%v", rounds, err)
+	}
+	audit("CI repair commit")
+
+	// The repair publishes only as a fresh, fully revalidated api candidate.
+	repaired := submit("api", "Repaired api candidate")
+	if repaired.CandidateSHA == failedHead {
+		t.Fatal("CI repair did not produce a fresh api candidate")
+	}
+	if code, output := runReleaseCLI(t, f.binary, repaired.WorktreePath, workerEnv, "publish", "--repo", "api", "Promote"); code == 0 || !strings.Contains(output, "validation_review_required") {
+		t.Fatalf("unvalidated repaired api promotion: code=%d %s", code, output)
+	}
+	audit("refused repaired promotion")
+	passCandidateReviewAs(t, f, ws.leadEnv, ws.root, change, "t3")
+	audit("repaired review")
+	recordCandidateStages(t, f, workerEnv, repaired, func(stage string) { audit("repaired api " + stage) }, "--repo", "api")
+	if code, output := runReleaseCLI(t, f.binary, repaired.WorktreePath, workerEnv, "publish", "--repo", "api", "Promote"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+		t.Fatalf("republish repaired api candidate: code=%d %s", code, output)
+	}
+	apiRefs["refs/heads/"+change.Branch] = repaired.CandidateSHA
+	audit("republish")
+	if err := os.WriteFile(filepath.Join(f.root, "ci-worker-allow-done"), []byte("complete\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		signalLog, err := os.ReadFile(filepath.Join(f.root, "ci-worker-signal.log"))
+		return err == nil && strings.Contains(string(signalLog), "signal-ok")
+	}) {
+		signalLog, _ := os.ReadFile(filepath.Join(f.root, "ci-worker-signal.log"))
+		t.Fatalf("Worker did not complete the repaired Task: %s", signalLog)
+	}
+	poll()
+	observation, err := f.db.LatestMemberPRObservation(context.Background(), change.ID, "api")
+	if err != nil || observation.HeadSHA != repaired.CandidateSHA || !strings.Contains(observation.Checks, "SUCCESS") {
+		t.Fatalf("republished api head lacks a green CI observation: %#v err=%v", observation, err)
+	}
+	audit("green observation")
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "merge", "t1", "--execute", "--user-approved", "Merge both Members"); code != 0 {
+		t.Fatalf("Merge repaired workspace: code=%d %s", code, output)
+	}
+	if merged := gitRef(t, f, ws.web, "refs/heads/main"); merged != candidates["web"].CandidateSHA {
+		t.Fatalf("web target=%s after Merge, want validated candidate %s", merged, candidates["web"].CandidateSHA)
+	}
+	if published := gitRef(t, f, f.remote, "refs/heads/"+change.Branch); published != repaired.CandidateSHA {
+		t.Fatalf("api origin Task branch=%s after Merge, want repaired candidate %s", published, repaired.CandidateSHA)
+	}
+}
+
+// TestFullPipelineFailingLocalWorkflowJobBlocksPublication proves local CI
+// equivalence as a publication barrier: with workflow execution opted in, a
+// failing workflow shell step fails lint on the exact private candidate and
+// refuses promotion, and only a fresh candidate whose jobs pass, after
+// review -> test -> docs -> lint, reaches the bare origin.
+func TestFullPipelineFailingLocalWorkflowJobBlocksPublication(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "full-pipeline")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "full_pipeline.run_workflows", "true", "--project", "shop")
+	if code, output := startReviewIdentityTask(t, f, "Workflow barrier", "author", ""); code != 0 {
+		t.Fatalf("start Change Task: code=%d %s", code, output)
+	}
+	change := f.mustTask(t, "t1")
+	if err := os.MkdirAll(filepath.Join(change.WorktreePath, ".github", "workflows"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workflow := `name: Candidate CI
+on: pull_request
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a passing candidate
+        run: grep -qx pass status.txt
+`
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, ".github", "workflows", "ci.yml"), []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commitCandidateFile(t, f, change.WorktreePath, "status.txt", "fail\n")
+	gitTest(t, f.env, change.WorktreePath, "add", ".github/workflows/ci.yml")
+	gitTest(t, f.env, change.WorktreePath, "commit", "-m", "add candidate workflow")
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	submit := func(summary string) store.ValidationCandidate {
+		t.Helper()
+		code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv,
+			"publish", summary, "--verify", "go test ./... -> passed",
+			"--proof", "Intent behavior verified", "--risk", "Risk: low\nRollback: revert")
+		if code != 0 || !strings.Contains(output, "validation required before publication") {
+			t.Fatalf("submit private candidate: code=%d %s", code, output)
+		}
+		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return candidate
+	}
+
+	failing := submit("Failing candidate")
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+	passCandidateReview(t, f, f.repo, change, "t2")
+	for _, args := range [][]string{
+		{"validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent/E2E behavior verified"},
+		{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "Complete description prepared"},
+	} {
+		if code, output := runReleaseCLI(t, f.binary, failing.WorktreePath, workerEnv, args...); code != 0 {
+			t.Fatalf("candidate stage %v failed: %d %s", args, code, output)
+		}
+	}
+	code, output := runReleaseCLI(t, f.binary, failing.WorktreePath, workerEnv, "validate", "lint", "--proof", "Configured Gates passed", "--coverage", "Run the unit workflow job")
+	if code == 0 || !strings.Contains(output, "workflow_jobs_failed") {
+		t.Fatalf("lint with a failing workflow job: code=%d %s", code, output)
+	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+	stages, err := f.db.ValidationStages(context.Background(), change.ID)
+	if err != nil || len(stages) != 3 || stages[2].Stage != "lint" || stages[2].Status != "failed" || stages[2].CandidateSHA != failing.CandidateSHA || !strings.Contains(stages[2].Coverage, `"status":"failed"`) {
+		t.Fatalf("failed workflow job is not recorded on the exact candidate: %+v err=%v", stages, err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, failing.WorktreePath, workerEnv, "publish", "Failing candidate"); code == 0 || !strings.Contains(output, "validation_stage_required") {
+		t.Fatalf("promotion after a failed workflow job: code=%d %s", code, output)
+	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+
+	// The fix becomes a fresh candidate that must pass every stage again.
+	commitCandidateFile(t, f, change.WorktreePath, "status.txt", "pass\n")
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "Fixed candidate"); code == 0 || !strings.Contains(output, "candidate_author_moved") {
+		t.Fatalf("first submission after the author moved: code=%d %s", code, output)
+	}
+	fixed := submit("Fixed candidate")
+	if fixed.CandidateSHA == failing.CandidateSHA {
+		t.Fatal("workflow fix did not produce a fresh private candidate")
+	}
+	if code, output := runReleaseCLI(t, f.binary, fixed.WorktreePath, workerEnv, "publish", "Fixed candidate"); code == 0 || !strings.Contains(output, "validation_review_required") {
+		t.Fatalf("unvalidated fixed promotion: code=%d %s", code, output)
+	}
+	passCandidateReview(t, f, f.repo, change, "t3")
+	recordCandidateStages(t, f, workerEnv, fixed, func(string) { assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch) })
+	if code, output := runReleaseCLI(t, f.binary, fixed.WorktreePath, workerEnv, "publish", "Fixed candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+		t.Fatalf("promote fixed candidate: code=%d %s", code, output)
+	}
+	if published := gitRef(t, f, f.remote, "refs/heads/"+change.Branch); published != fixed.CandidateSHA {
+		t.Fatalf("bare origin published %s, want fixed candidate %s", published, fixed.CandidateSHA)
 	}
 }
