@@ -730,3 +730,86 @@ func TestTaskProcessExitedTreatsZombieAndGoneProcessesAsExited(t *testing.T) {
 		t.Fatal("reaped process not reported as exited")
 	}
 }
+
+// An exiting process drops its environment before it becomes a zombie. Tearing
+// down a large address space holds it in that state long enough to observe, as
+// a Task's short-lived child is when Teardown proves its containment.
+func TestTaskProcessLeftContainmentTreatsExitingProcessAsGone(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	exiting := exec.Command("python3", "-c", `import os, sys
+block = bytearray(b"x") * (256 << 20)
+print("ready", flush=True)
+sys.stdin.readline()
+os._exit(0)
+`)
+	exiting.Dir = root
+	exiting.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ready"), 0)
+	stdin, err := exiting.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := exiting.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exiting.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = exiting.Process.Kill()
+		_ = exiting.Wait()
+	})
+	if _, err := io.ReadFull(stdout, make([]byte, len("ready\n"))); err != nil {
+		t.Fatalf("Task-marked process did not allocate its memory: %v", err)
+	}
+	pid := exiting.Process.Pid
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	roots := []ownedProcessRoot{{path: root}}
+	if !taskContainsProcess(pid, task, roots) || taskProcessLeftContainment(pid, task, roots) {
+		t.Fatal("running Task process was not contained")
+	}
+	if _, err := stdin.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Poll without sleeping: the window lasts only milliseconds. Count a check
+	// only when the process was still unreaped after it returned.
+	running := func() bool {
+		zombie, err := sandboxProcessIsZombie(pid)
+		return err == nil && !zombie
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if !running() || taskContainsProcess(pid, task, roots) {
+			continue
+		}
+		if taskProcessLeftContainment(pid, task, roots) {
+			t.Fatal("exiting Task process was reported as escaped")
+		}
+		if running() {
+			return
+		}
+	}
+	t.Fatal("did not observe the exiting process without its containment identity")
+}
+
+func TestTaskProcessLeftContainmentReportsLiveEscapedProcess(t *testing.T) {
+	root := t.TempDir()
+	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
+	escaped := exec.Command("sleep", "300")
+	escaped.Dir = "/"
+	escaped.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ready"), 0)
+	if err := escaped.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = escaped.Process.Kill()
+		_ = escaped.Wait()
+	})
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool { return processHasTaskMarker(escaped.Process.Pid, marker) }) {
+		t.Fatal("Task-marked process did not start")
+	}
+	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
+	if !taskProcessLeftContainment(escaped.Process.Pid, task, []ownedProcessRoot{{path: root}}) {
+		t.Fatal("live process outside the Task paths was not reported as escaped")
+	}
+}
