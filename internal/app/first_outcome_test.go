@@ -617,7 +617,9 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	f.fake.RunOut["plugin link "+filepath.Join(f.home, "plugin", "herdr-plugin.toml")] = []byte(`{}`)
 	outcomeCLI(t, f.service, 0, "setup", "--binary", "/usr/bin/true")
 	f.fake.RunOut["plugin list --json"] = []byte(`{"plugins":[{"id":"posse.herdr","path":"` + filepath.Join(f.home, "plugin", "herdr-plugin.toml") + `"}]}`)
-	check(nil, []string{"forge_auth", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"})
+	check([]string{"no_mistakes_migration"}, []string{"forge_auth", "autonomy_ask", "no_mistakes_uninitialized", "machine_setup"})
+	// The deprecation gap lasts until the User runs the suggested replacement.
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "pr", "--project", "shop")
 	output = outcomeCLI(t, f.service, 0, "--json")
 	if strings.Contains(output, `"readiness"`) {
 		t.Fatalf("fully ready status retained readiness: %s", output)

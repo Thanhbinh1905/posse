@@ -560,6 +560,8 @@ type Task struct {
 	ContainmentPath      string
 	ContainmentMarker    string
 	PaneShellIdentity    string
+	AgentStatus          string
+	AgentStatusSince     int64
 }
 
 type TaskLaunchIdentity struct {

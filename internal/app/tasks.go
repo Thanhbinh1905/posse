@@ -1508,7 +1508,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 			if !privateCandidate {
 				if err := validateChangeSignal(ctx.Context, task); err != nil {
-					return axi.Failure("signal_invalid", err.Error(), false, "Commit the change and leave the worktree clean before signalling done")
+					help := "Commit the change and leave the worktree clean before signalling done"
+					if work, workErr := s.unmergedWork(ctx.Context, db, project, task); workErr == nil && work == "" {
+						help = "If the Task needs no change, run `posse signal done <note> --no-change`; otherwise commit the change and leave the worktree clean"
+					}
+					return axi.Failure("signal_invalid", err.Error(), false, help)
 				}
 			}
 			if !project.IsWorkspace() {
@@ -2870,7 +2874,10 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			}
 			// Record the successful launch's generation before another event
 			// can mistake this Worker for an unrecovered process.
-			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, current.AgentSessionKind, 0, 0, generation)
+			observation := current.Observation()
+			observation.AgentAbsentSince, observation.IdleSince, observation.AgentServerStartedAt = 0, 0, generation
+			observation.AgentStatus, observation.AgentStatusSince = "", 0
+			return db.UpdateTaskObservation(ctx, taskID, observation)
 		}
 		if current.State == store.StateWorking {
 			return track("task.progress", progress)

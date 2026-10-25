@@ -504,7 +504,15 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		{Key: "pane", Value: leadPane.PaneID},
 		{Key: "help", Value: []any{"The Lead is starting in this pane."}},
 	}
-	return ctx.Print(withReadiness(result, gaps))
+	result = withReadiness(result, gaps)
+	migrations, err := noMistakesMigrations(ctx.Context, db, project, cfg)
+	if err != nil {
+		return err
+	}
+	if len(migrations) > 0 {
+		result = append(result, axi.Field{Key: "no_mistakes_migration", Value: noMistakesMigrationOutput(migrations)})
+	}
+	return ctx.Print(result)
 }
 
 func agentName(project string, sequence, launch int) string {

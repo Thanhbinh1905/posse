@@ -84,7 +84,34 @@ func (s *Service) readiness(ctx context.Context, db *store.DB, project store.Pro
 		return nil, err
 	}
 	checks = append(checks, s.machineSetupCheck(ctx)...)
-	return projectReadiness(cfg, checks), nil
+	gaps := projectReadiness(cfg, checks)
+	migrations, err := noMistakesMigrations(ctx, db, project, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return append(gaps, noMistakesMigrationGaps(migrations)...), nil
+}
+
+// The full list, with lighter choices and notes, is in `posse doctor`.
+func noMistakesMigrationGaps(migrations []noMistakesMigration) []readinessGap {
+	gaps := []readinessGap{}
+	for _, migration := range migrations {
+		keys := make([]string, 0, len(migration.Uses))
+		for _, use := range migration.Uses {
+			key, _, _ := strings.Cut(use, "=")
+			keys = append(keys, key)
+		}
+		gaps = append(gaps, readinessGap{
+			Code:          "no_mistakes_migration",
+			Consequence:   strings.Join(migration.Uses, ", ") + " is deprecated; Posse does not change config.",
+			Key:           strings.Join(keys, ", "),
+			UserOnly:      true,
+			Fix:           "If the User chooses the replacement: " + strings.Join(migration.Set, "; ") + ". Run `posse doctor` for lighter review choices and migration notes; admitted Tasks keep their frozen no-mistakes plan.",
+			Informational: true,
+			Member:        migration.Member,
+		})
+	}
+	return gaps
 }
 
 func (s *Service) projectReadinessChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) ([]doctorCheck, error) {
