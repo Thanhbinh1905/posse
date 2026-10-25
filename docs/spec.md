@@ -325,6 +325,8 @@ tasks(
   launches INTEGER,                  -- agent launches, for unique agent names
   gated_sha TEXT,                    -- exact merge pin; the only commit --execute may merge
   idle_since INTEGER,                -- when Herdr last reported this Worker idle without a Signal
+  agent_status TEXT,                 -- observed Herdr agent status, or no_pane / no_agent; display only
+  agent_status_since INTEGER,        -- when Posse first observed that status
   herdr_workspace_id TEXT, pane_id TEXT, pane_label TEXT, agent_name TEXT,
   agent_session TEXT,                -- from Herdr, for resume
   agent_session_kind TEXT,           -- harness owner; empty legacy values are not resumed
@@ -465,6 +467,8 @@ For each live Task:
 For a `done` or `merging` Change Task, the done Signal arms its current Worker turn. The watcher does not reopen the Task while that turn remains `working`, so the Signal's closing reply cannot undo completion. An observed `idle` or `done` status ends that turn; a later `working` status identifies new input and immediately reopens the Task. The boundary is keyed by completion transition, pane and server generation. A new turn that leaves HEAD and the working tree unchanged, such as a background-task wake that only acknowledges a result, keeps the done Signal valid. The turn-end fingerprint is read before the Herdr snapshot that reports the turn end, so a following turn's change cannot become the baseline. A turn that changes either reopens the Task and queues an instruction to signal done again. A new completion or Worker identity starts a fresh boundary. Posse instruction delivery already reopens the Task before submission, so it produces no duplicate watcher transition. The reopen, merge-head invalidation and `worker_resumed` Lead Notice commit atomically. Merge refuses until a fresh Worker done Signal. A forge-reported merge remains authoritative under ADR 0011.
 
 Herdr idle is never evidence of completion. Only a Worker Signal moves a Task to `done`.
+
+**Agent observation.** Each pass records the live Task's observed agent status (`working`, `idle`, `done`, `blocked`, `unknown`, `no_agent`, or `no_pane` while a missing pane is inside its absence grace) and when Posse first observed it; Herdr `idle` and `done` count as one turn-ended observation. `posse`, `posse list` and `posse show` display it as `agent`, beside the authoritative `state`, for example `agent: idle 7h12m` or `agent: no pane`. An idle or done age comes from `idle_since`, the `worker_idle` clock. When a `working` Task has been idle for `idle_after`, the row also carries `agent_mismatch`. Herdr `done` means the agent ended a turn; it never becomes or replaces the Task state. Both fields are added to TOON and JSON output; existing fields are unchanged.
 
 The Lead is reconciled the same way through `lead_pane_id` and `lead_label`. A snapshot from a different Herdr server generation cannot update pane identities or stalls. Launch-capable Project commands and plugin events check the live server: a changed generation runs bounded recovery inline before reconciliation. A delayed snapshot from the old server is discarded and retried. `lead`, `show`, `ack` and `watch` observe state without relaunching Workers, retrying launch Briefs or waiting for an active recovery claim; a pending generation leaves pane identities untouched.
 
@@ -886,8 +890,8 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse preferences path <lead\|worker> [--project <name>]` | User, Lead | show canonical and legacy User and Project source paths |
 | `posse preferences set <lead\|worker> --file <file> [--project <name>] [--user-approved <quote>]` | User, Lead with User quote | atomically write canonical preferences; User shells need no quote and Workers cannot write |
 | `posse preferences move <lead\|worker> [--project <name>] [--user-approved <quote>]` | User, Lead with User quote | explicitly move one legacy file without overwriting existing preferences |
-| `posse list [--full] [--all]` | Lead, User | Tasks, with issue links and branches under `--full`, or every Project |
-| `posse show <task> [--full]` | Lead | Task detail, undelivered messages, PR state, last Signals, transitions |
+| `posse list [--full] [--all]` | Lead, User | Tasks with their observed `agent` status, with issue links and branches under `--full`, or every Project |
+| `posse show <task> [--full]` | Lead | Task detail, observed `agent` status, undelivered messages, PR state, last Signals, transitions |
 | `posse ask <task> <question> --option <choice> --option <choice>` | Lead | raise a Decision from a Worker question |
 | `posse decisions [--all]` | Lead, User | list pending or all Decisions |
 | `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |

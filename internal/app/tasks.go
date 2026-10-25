@@ -2874,7 +2874,10 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			}
 			// Record the successful launch's generation before another event
 			// can mistake this Worker for an unrecovered process.
-			return db.UpdateTaskObservation(ctx, taskID, current.PaneID, current.HerdrWorkspaceID, current.AgentSession, current.AgentSessionKind, 0, 0, generation)
+			observation := current.Observation()
+			observation.AgentAbsentSince, observation.IdleSince, observation.AgentServerStartedAt = 0, 0, generation
+			observation.AgentStatus, observation.AgentStatusSince = "", 0
+			return db.UpdateTaskObservation(ctx, taskID, observation)
 		}
 		if current.State == store.StateWorking {
 			return track("task.progress", progress)
