@@ -32,13 +32,7 @@ func newNoMistakesRemovalFixture(t *testing.T) noMistakesRemovalFixture {
 		t.Fatalf("build posse: %v\n%s", err, output)
 	}
 	home := filepath.Join(root, "posse")
-	env := []string{}
-	for _, entry := range isolatedE2EEnv(t, root) {
-		// Model a User shell even when the suite itself runs inside a Worker.
-		if !strings.HasPrefix(entry, "POSSE_WORKER_HOME=") && !strings.HasPrefix(entry, "POSSE_TASK_") {
-			env = append(env, entry)
-		}
-	}
+	env := isolatedE2EEnv(t, root)
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)

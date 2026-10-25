@@ -160,6 +160,27 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
+	case "quota":
+		if decision.Answer == "discard" && task.State == store.StateTornDown {
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		}
+		if task.Launches != decision.TaskLaunches || !store.QuotaDecisionState(task.State) {
+			return axi.Failure("decision_refused", "quota Decision no longer applies to this Task state or Worker launch", false)
+		}
+		switch decision.Answer {
+		case "relaunch":
+			if _, err := s.relaunchTask(out.Context, db, home, project, cfg, task, ""); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "working"}})
+		case "discard":
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		default:
+			return axi.Failure("decision_refused", "unknown quota Decision answer", false)
+		}
 	case "review_cap":
 		taskRef, expectedHead, ok := parseReviewCapOrigin(decision.Origin)
 		if !ok || taskRef != taskIDString(task.Seq) || task.Type != "change" {
@@ -413,6 +434,8 @@ func canDiscardFromDecision(kind string, state store.State) bool {
 		return state != store.StateReported && state != store.StateMerged
 	case "orphan":
 		return true
+	case "quota":
+		return store.QuotaDecisionState(state)
 	default:
 		return false
 	}

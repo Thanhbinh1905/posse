@@ -181,7 +181,7 @@ One repository of a Workspace, with its own default branch, remote and Merge Mod
 _Avoid_: Subproject, submodule, child repo
 
 **Profile**:
-A named Worker configuration, or an implicit resolution to the Lead's agent kind; a named Profile can also provide model, effort and arguments.
+A named Worker configuration, or an implicit resolution to the Lead's agent kind; a named Profile can also provide model, effort, arguments and a fallback Profile that continues its Tasks when its quota runs out.
 _Avoid_: Preset, agent config
 
 **Workflow profile**:

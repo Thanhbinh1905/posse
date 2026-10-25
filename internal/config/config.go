@@ -151,6 +151,9 @@ type Profile struct {
 	Args   []string `toml:"args" json:"args"`
 	// Attribution keeps the agent's commit and PR attribution; off by default.
 	Attribution bool `toml:"attribution" json:"attribution,omitempty"`
+	// Fallback names the Profile a Worker is relaunched with when this
+	// Profile's quota runs out.
+	Fallback string `toml:"fallback" json:"fallback,omitempty"`
 }
 
 type Rule struct {
@@ -856,6 +859,9 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		if profile.Effort != "" && len(kind.EffortArgs) == 0 {
 			issues = append(issues, &InvalidError{File: profileFile, Key: "profiles." + name + ".effort", Reason: "Worker kind has no effort_args template"})
 		}
+		if reason := c.fallbackIssue(name); reason != "" {
+			issues = append(issues, &InvalidError{File: profileFile, Key: "profiles." + name + ".fallback", Reason: reason})
+		}
 	}
 	for _, kind := range sortedMapKeys(c.Lead.Profiles) {
 		profileName := c.Lead.Profiles[kind]
@@ -885,6 +891,32 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		add("pool.keep_idle", "cannot be negative")
 	}
 	return uniqueValidationErrors(issues)
+}
+
+// fallbackIssue reports why a Profile's fallback chain cannot terminate in
+// known Profiles, or "" when it does.
+func (c Config) fallbackIssue(name string) string {
+	seen := map[string]bool{name: true}
+	for current := name; ; {
+		next := c.Profiles[current].Fallback
+		if next == "" {
+			return ""
+		}
+		if _, ok := c.Profiles[next]; !ok {
+			if current == name {
+				return "references unknown Profile " + next
+			}
+			return ""
+		}
+		if seen[next] {
+			if next == name {
+				return "fallback chain returns to " + name
+			}
+			return ""
+		}
+		seen[next] = true
+		current = next
+	}
 }
 
 func (c Config) profileFile(name, fallback string) string {

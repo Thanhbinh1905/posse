@@ -14,8 +14,9 @@ import (
 	"time"
 )
 
-// IsolatedTestEnvironment strips every inherited HERDR_* value and redirects all
-// persisted state to a short disposable test root.
+// IsolatedTestEnvironment strips every inherited HERDR_*, Worker and agent
+// harness value and redirects all persisted state to a short disposable test
+// root.
 func IsolatedTestEnvironment(root string) []string {
 	resolvedRoot := resolvedTestPath(root)
 	scratchRoot := os.Getenv("POSSE_E2E_TMP_ROOT")
@@ -28,7 +29,7 @@ func IsolatedTestEnvironment(root string) []string {
 	values := make([]string, 0, len(os.Environ())+8)
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
-		if found && (strings.HasPrefix(key, "HERDR_") || key == "CLAUDECODE" || key == "CLAUDE_AGENT_ID" || key == "CODEX_CI" || key == "CODEX_THREAD_ID" || key == "PI_CODING_AGENT" || key == "PI_SESSION_ID" || key == "OPENCODE_SESSION_ID") {
+		if found && (strings.HasPrefix(key, "HERDR_") || strings.HasPrefix(key, "POSSE_WORKER_") || strings.HasPrefix(key, "POSSE_TASK_") || strings.HasPrefix(key, "CLAUDE_CODE_") || key == "CLAUDE_PID" || key == "CLAUDE_EFFORT" || key == "CLAUDECODE" || key == "CLAUDE_AGENT_ID" || key == "CODEX_CI" || key == "CODEX_THREAD_ID" || key == "PI_CODING_AGENT" || key == "PI_SESSION_ID" || key == "OPENCODE_SESSION_ID") {
 			continue
 		}
 		if found && (key == "HOME" || key == "POSSE_HOME" || key == "CLAUDE_CONFIG_DIR" || key == "CODEX_HOME" || key == "PI_CODING_AGENT_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_TEST_HERDR" || key == "POSSE_TEST_HERDR_SOCKET_PATH" || key == "POSSE_E2E_TMP_ROOT" || key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_NOSYSTEM" || key == "LANG" || key == "LC_ALL" || key == "TERM" || key == "SHELL") {

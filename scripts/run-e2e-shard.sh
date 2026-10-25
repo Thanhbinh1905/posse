@@ -11,7 +11,7 @@ set -eu
 # test timeout, leaving room for compilation and runner variance so a shard
 # stays under about 60% of the timeout. When the self-check reports a shard
 # over budget, add a shard here and to every E2E matrix in .github/workflows/ci.yml.
-shard_count=10
+shard_count=12
 budget_seconds=360
 durations=$(cat "$(dirname "$0")/e2e-durations.txt")
 

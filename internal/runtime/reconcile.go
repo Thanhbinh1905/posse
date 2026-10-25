@@ -320,7 +320,16 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			return nil, err
 		}
 		modelErrorHandled := episode.Launch == task.Launches && episode.Status != "" && episode.Status != "resolved" && !store.ModelErrorAwaitingTurn(episode) && (episode.Status != "active" || episode.NextAttemptAt > 0)
+		quotaHandled := false
 		if !exists && !modelErrorHandled {
+			// A quota Notice already explains why this launch went idle.
+			_, err := db.TaskQuotaExhaustion(ctx, task.ID, task.Launches)
+			if err != nil && !store.IsNotFound(err) {
+				return nil, err
+			}
+			quotaHandled = err == nil
+		}
+		if !exists && !modelErrorHandled && !quotaHandled {
 			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d,"idle_since":%d}`, task.Launches, idleSince), now)
 			if err != nil {
 				return nil, err

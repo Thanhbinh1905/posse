@@ -487,3 +487,36 @@ func TestParseByteSize(t *testing.T) {
 		t.Error("overflowing size should be refused")
 	}
 }
+
+func TestProfileFallbackMustNameAKnownProfileWithoutALoop(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		profiles string
+		key      string
+		reason   string
+	}{
+		{name: "chain", profiles: "[profiles.a]\nkind = \"claude\"\nfallback = \"b\"\n[profiles.b]\nkind = \"codex\"\nfallback = \"c\"\n[profiles.c]\nkind = \"pi\"\n"},
+		{name: "unknown", profiles: "[profiles.a]\nkind = \"claude\"\nfallback = \"missing\"\n", key: "profiles.a.fallback", reason: "references unknown Profile missing"},
+		{name: "self", profiles: "[profiles.a]\nkind = \"claude\"\nfallback = \"a\"\n", key: "profiles.a.fallback", reason: "fallback chain returns to a"},
+		{name: "loop", profiles: "[profiles.a]\nkind = \"claude\"\nfallback = \"b\"\n[profiles.b]\nkind = \"codex\"\nfallback = \"a\"\n", key: "profiles.a.fallback", reason: "fallback chain returns to a"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeConfig(t, filepath.Join(home, "config.toml"), testCase.profiles)
+			cfg, err := Load(home, "")
+			if testCase.key == "" {
+				if err != nil {
+					t.Fatalf("valid fallback chain rejected: %v", err)
+				}
+				if cfg.Profiles["a"].Fallback != "b" || cfg.Profiles["b"].Fallback != "c" || cfg.Profiles["c"].Fallback != "" {
+					t.Fatalf("fallbacks = %#v", cfg.Profiles)
+				}
+				return
+			}
+			invalid, ok := err.(*InvalidError)
+			if !ok || invalid.Key != testCase.key || invalid.Reason != testCase.reason {
+				t.Fatalf("fallback error = %#v, want key=%q reason=%q", err, testCase.key, testCase.reason)
+			}
+		})
+	}
+}
