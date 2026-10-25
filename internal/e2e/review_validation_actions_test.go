@@ -606,3 +606,205 @@ func TestRethinkSuccessorSuppressesInheritedFingerprints(t *testing.T) {
 		t.Fatalf("successor round=%+v err=%v, want the inherited fingerprint suppressed", round, err)
 	}
 }
+
+// TestFullPipelineWorkspaceWholePatternFixBindsEveryMemberCandidate proves
+// that one Review fix instruction carries every selected pattern across the
+// workspace Members, that the Worker applies it inside each Member's private
+// candidate, and that nothing reaches a remote or target before validation.
+func TestFullPipelineWorkspaceWholePatternFixBindsEveryMemberCandidate(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	ws := newFullPipelineWorkspace(t, f)
+	brief := filepath.Join(f.root, "workspace-fix.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace fix\ndone_when: checked\nrepos: [api, web]\n---\nChange both Members safely.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "start", "--brief", brief, "--name", "workspace-fix", "--profile", "author"); code != 0 {
+		t.Fatalf("start workspace Change Task: code=%d %s", code, output)
+	}
+	change := mustProjectTask(t, f, ws.project.ID, "t1")
+	repos, err := f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || len(repos) != 2 {
+		t.Fatalf("workspace Members: %+v %v", repos, err)
+	}
+	worktrees := map[string]string{}
+	for _, repo := range repos {
+		worktrees[repo.Repo] = repo.WorktreePath
+		if err := os.WriteFile(filepath.Join(repo.WorktreePath, "change.txt"), []byte("unsafe "+repo.Repo+" operation\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, repo.WorktreePath, "add", "change.txt")
+		gitTest(t, f.env, repo.WorktreePath, "commit", "-m", "change "+repo.Repo)
+	}
+	webTarget := gitRef(t, f, ws.web, "refs/heads/main")
+	audit := func(stage string) {
+		t.Helper()
+		assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+		if current := gitRef(t, f, ws.web, "refs/heads/main"); current != webTarget {
+			t.Fatalf("web local target moved during %s", stage)
+		}
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	submitted := map[string]store.ValidationCandidate{}
+	authorHeads := map[string]string{}
+	for _, member := range []string{"api", "web"} {
+		if code, output := runReleaseCLI(t, f.binary, worktrees[member], workerEnv,
+			"publish", "--repo", member, member+" candidate summary", "--verify", "go test ./... -> passed",
+			"--proof", "Intent behavior verified", "--risk", "Risk: low\nRollback: revert the "+member+" change"); code != 0 {
+			t.Fatalf("submit %s private candidate: code=%d %s", member, code, output)
+		}
+		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, member)
+		if err != nil {
+			t.Fatal(err)
+		}
+		submitted[member] = candidate
+		authorHeads[member] = gitRef(t, f, worktrees[member], "HEAD")
+	}
+
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start workspace Review Round: code=%d %s", code, output)
+	}
+	review := mustProjectTask(t, f, ws.project.ID, "t2")
+	waitForReviewIdentityAgent(t, f, review.PaneID)
+	scratch := filepath.Join(f.home, "scratch", "stack", "t2")
+	report := filepath.Join(scratch, "report.md")
+	findings := filepath.Join(scratch, "findings.json")
+	if err := os.WriteFile(report, []byte("Each Member has one blocking pattern.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"schema":"posse.review-findings.v1","patterns":[` +
+		`{"key":"unsafe-api","title":"Unsafe api operation","rule":"API operations must be validated","root_cause":"The api value is used without validation","fix_guidance":"Validate every api operation","severity":"P1","origin":"introduced","instances":[{"repository":"api","path":"change.txt","line":1,"symbol":"operation","excerpt":"unsafe api operation","description":"Unvalidated api operation"}]},` +
+		`{"key":"unsafe-web","title":"Unsafe web operation","rule":"Web operations must be validated","root_cause":"The web value is used without validation","fix_guidance":"Validate every web operation","severity":"P1","origin":"introduced","instances":[{"repository":"web","path":"change.txt","line":1,"symbol":"operation","excerpt":"unsafe web operation","description":"Unvalidated web operation"}]}` +
+		`],"resolutions":[]}`
+	if err := os.WriteFile(findings, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "changes_requested")
+	audit("review")
+
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "review", "fix", "t1"); code != 0 || !strings.Contains(output, "queued") {
+		t.Fatalf("queue workspace whole-pattern fix: code=%d %s", code, output)
+	}
+	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "show", "t1"); code != 0 {
+		t.Fatalf("deliver queued fix instruction: code=%d %s", code, output)
+	}
+	var instructions int
+	var body, messageStatus string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*),MAX(m.body),MAX(m.status) FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='review'`, change.ID).Scan(&instructions, &body, &messageStatus); err != nil {
+		t.Fatal(err)
+	}
+	if instructions != 1 || messageStatus != "delivered" {
+		t.Fatalf("workspace fix instructions=%d status=%s, want one delivered instruction", instructions, messageStatus)
+	}
+	for _, want := range []string{"## P-1", "## P-2", "unsafe api operation", "unsafe web operation", "Fix every instance", "Do not publish directly",
+		"Member api private candidate checkout: `" + submitted["api"].WorktreePath + "`", "Member web private candidate checkout: `" + submitted["web"].WorktreePath + "`"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("workspace fix instruction lacks %q:\n%s", want, body)
+		}
+	}
+
+	turn, err := f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Missing answers", "--turn", turn); code != 1 || !strings.Contains(output, "review_resolution_missing") {
+		t.Fatalf("workspace done without whole-pattern answers: code=%d %s", code, output)
+	}
+	if code, output := runReleaseCLI(t, f.binary, submitted["api"].WorktreePath, workerEnv, "publish", "--repo", "api", "Promote before fixing"); code == 0 || !strings.Contains(output, "review_findings_open") {
+		t.Fatalf("api candidate published directly during a Review fix: code=%d %s", code, output)
+	}
+	audit("refused direct publication")
+	for _, member := range []string{"api", "web"} {
+		path := submitted[member].WorktreePath
+		if err := os.WriteFile(filepath.Join(path, "change.txt"), []byte("validated "+member+" operation\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, path, "add", "change.txt")
+		gitTest(t, f.env, path, "commit", "-m", "validate "+member+" operation")
+	}
+	resolutions := filepath.Join(f.home, "scratch", "stack", "t1", "review-resolutions.json")
+	writeResolutions := func(patterns ...string) {
+		t.Helper()
+		var answers []any
+		for _, pattern := range patterns {
+			answers = append(answers, map[string]any{"pattern": pattern, "status": "fixed", "note": "Fixed every instance of " + pattern})
+		}
+		payload, _ := json.Marshal(map[string]any{"schema": "posse.review-resolutions.v1", "patterns": answers})
+		if err := os.WriteFile(resolutions, payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeResolutions("P-1")
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "One answer", "--turn", turn, "--resolutions", resolutions); code != 1 || !strings.Contains(output, "review_resolution_missing") {
+		t.Fatalf("workspace done answering one of two patterns: code=%d %s", code, output)
+	}
+	writeResolutions("P-1", "P-2")
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Fixed both patterns", "--turn", turn, "--resolutions", resolutions); code != 0 {
+		t.Fatalf("record workspace candidate-bound resolutions: code=%d %s", code, output)
+	}
+	var claimed int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=? AND state='fix_claimed'`, change.ID).Scan(&claimed); err != nil || claimed != 2 {
+		t.Fatalf("fix_claimed findings=%d err=%v, want 2", claimed, err)
+	}
+	for _, member := range []string{"api", "web"} {
+		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, member)
+		if err != nil || candidate.ID != submitted[member].ID || candidate.CandidateSHA == submitted[member].CandidateSHA {
+			t.Fatalf("%s private candidate was not advanced by its fix: %#v %v", member, candidate, err)
+		}
+		if head := gitRef(t, f, worktrees[member], "HEAD"); head != authorHeads[member] {
+			t.Fatalf("%s Task branch moved to %s during the private fix, want %s", member, head, authorHeads[member])
+		}
+	}
+	audit("resolutions")
+
+	// Round 2 verifies both claimed fixes on the fixed candidates; each
+	// Member then validates and promotes exactly its fixed candidate.
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start second workspace Review Round: code=%d %s", code, output)
+	}
+	verify := mustProjectTask(t, f, ws.project.ID, "t3")
+	waitForReviewIdentityAgent(t, f, verify.PaneID)
+	scratch = filepath.Join(f.home, "scratch", "stack", "t3")
+	report = filepath.Join(scratch, "report.md")
+	findings = filepath.Join(scratch, "findings.json")
+	if err := os.WriteFile(report, []byte("Both fixes are verified.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findings, []byte(`{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[{"finding":"F-1","status":"resolved","note":"api validates"},{"finding":"F-2","status":"resolved","note":"web validates"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, verify, "--report", report, "--findings", findings, "--verdict", "pass")
+	audit("verification round")
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "working", "Validate the fixed candidates"); code != 0 {
+		t.Fatalf("reopen for local stages: code=%d %s", code, output)
+	}
+	for _, member := range []string{"web", "api"} {
+		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, member)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recordCandidateStages(t, f, workerEnv, candidate, func(stage string) { audit(member + " " + stage) }, "--repo", member)
+		if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "--repo", member, "Promote the fixed candidate"); code != 0 {
+			t.Fatalf("promote fixed %s candidate: code=%d %s", member, code, output)
+		}
+		if member == "api" {
+			if published := gitRef(t, f, f.remote, "refs/heads/"+change.Branch); published != candidate.CandidateSHA {
+				t.Fatalf("api origin Task branch=%s, want fixed candidate %s", published, candidate.CandidateSHA)
+			}
+		}
+	}
+	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Both fixed Members validated", "--turn", turn); code != 0 {
+		t.Fatalf("done Signal after promoting fixed candidates: code=%d %s", code, output)
+	}
+	var fixed int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=? AND state='fixed'`, change.ID).Scan(&fixed); err != nil || fixed != 2 {
+		t.Fatalf("fixed findings=%d err=%v, want 2", fixed, err)
+	}
+}

@@ -20,7 +20,7 @@ func TestValidationStateSurvivesSnapshotRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(before.ReviewRounds) != 1 || len(before.ReviewPatterns) != 1 || len(before.ReviewFindings) != 1 ||
-		len(before.ReviewFindingEvents) != 1 || len(before.ReviewCarries) != 1 || len(before.ReviewDispositions) != 1 || len(before.ValidationFixRounds) != 2 {
+		len(before.ReviewFindingEvents) != 1 || len(before.ReviewCarries) != 1 || len(before.ReviewDispositions) != 1 || len(before.ValidationFixRounds) != 3 || len(before.ValidationFixRounds[2].MemberHeads) != 2 {
 		t.Fatalf("fixture did not cover every validation table: %#v", before)
 	}
 	if count, err := f.db.RebuildFromSnapshots(f.ctx, f.home); err != nil || count != 2 {
@@ -224,6 +224,7 @@ func insertValidationStateFixture(t *testing.T, f reviewVerdictFixture) {
 		{`INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at) VALUES(802,?,?,NULL,'accepted by User',13)`, []any{f.change, reviewShaB}},
 		{`INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(803,?,'gate',1,?,'gate:1',901,14)`, []any{f.change, reviewShaB}},
 		{`INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at) VALUES(804,?,'ci',1,?,'ci:1',901,15)`, []any{f.change, reviewShaB}},
+		{`INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json) VALUES(805,?,'review',1,?,?,901,16,?)`, []any{f.change, reportHash, "review:" + reportHash + ":P-1", `[{"repository":"api","expected_base_head":"` + reviewShaA + `","candidate_id":7},{"repository":"web","expected_base_head":"` + reviewShaB + `"}]`}},
 	}
 	for _, statement := range statements {
 		if _, err := f.db.ExecContext(f.ctx, statement.query, statement.args...); err != nil {
@@ -422,5 +423,68 @@ func TestDoneSignalBindsValidationHeadsCheckedByCaller(t *testing.T) {
 	}
 	if heads, err := f.db.ValidationExpectedBaseHeads(f.ctx, f.change); err != nil || len(heads) != 0 {
 		t.Fatalf("completed instruction remained active: heads=%v err=%v", heads, err)
+	}
+}
+
+func TestWorkspaceReviewFixResolutionsBindEveryMemberHead(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "api", Commit: reviewShaA}, {Repository: "web", Commit: reviewShaB}})
+	candidate, err := f.db.CreateValidationCandidate(f.ctx, ValidationCandidate{
+		TaskID: f.change, Repo: "api", SubmittedSHA: reviewShaA, CandidateSHA: reviewShaA, TargetSHA: reviewShaB,
+		RefName: "refs/posse/candidate/t1", WorktreePath: "/home/test/posse/projects/stack/tasks/t1/candidates/api/g1", Summary: "api candidate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ActivateValidationCandidate(f.ctx, candidate.ID, reviewShaA); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,merged_into,created_round) VALUES(801,?,1,'unsafe','Unsafe','Validate','Unchecked','Validate all',NULL,1)`,
+		`INSERT INTO review_findings(id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,follow_up_url,inherited_from) VALUES(802,?,1,801,'` + reportHash + `',1,'api','x.go','f','unsafe',1,'` + reviewShaA + `','P1','introduced',1,'open','',NULL)`,
+	} {
+		if _, err := f.db.ExecContext(f.ctx, statement, f.change); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members := []ValidationFixMemberHead{{Repository: "api", ExpectedBaseHead: reviewShaA, CandidateID: candidate.ID}, {Repository: "web", ExpectedBaseHead: reviewShaB}}
+	if _, err := f.db.QueueReviewFixInstruction(f.ctx, f.change, reviewShaA, members, "review:"+reviewShaA+":P-1", "Fix P-1", nil, nil); err == nil {
+		t.Fatal("workspace Review fix was queued for a head that is not its Member digest")
+	}
+	digest := ValidationMemberHeadsDigest(members)
+	queued, err := f.db.QueueReviewFixInstruction(f.ctx, f.change, digest, members, "review:"+digest+":P-1", "Fix P-1", nil, nil)
+	if err != nil || !queued.Queued {
+		t.Fatalf("queue workspace Review fix = %#v, %v", queued, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE messages SET status='delivered' WHERE id=?`, queued.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	round, pending, err := f.db.ReviewFixRoundForTask(f.ctx, f.change)
+	if err != nil || !pending || !reflect.DeepEqual(round.MemberHeads, members) {
+		t.Fatalf("pending workspace round = %#v, %v, %v", round, pending, err)
+	}
+	if err := f.db.AdvanceValidationCandidate(f.ctx, candidate.ID, reviewShaA, reviewShaC); err != nil {
+		t.Fatal(err)
+	}
+	answer := func(heads ...ReviewFixMemberHead) error {
+		tx, err := f.db.beginTxWithRetry(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		return applyReviewFixResolutionsTx(f.ctx, tx, f.change, &ReviewFixResolutionsInput{ExpectedBaseHead: digest, Members: heads, Patterns: []ReviewFixResolution{{Pattern: "P-1", Status: "fixed"}}})
+	}
+	web := ReviewFixMemberHead{Repository: "web", ActualHead: reviewShaB}
+	for name, heads := range map[string][]ReviewFixMemberHead{
+		"missing Member":        {{Repository: "api", ActualHead: reviewShaC, CandidateID: candidate.ID}},
+		"other candidate":       {{Repository: "api", ActualHead: reviewShaC, CandidateID: candidate.ID + 1}, web},
+		"stale candidate head":  {{Repository: "api", ActualHead: reviewShaA, CandidateID: candidate.ID}, web},
+		"unbound Member branch": {{Repository: "api", ActualHead: reviewShaC}, web},
+	} {
+		if err := answer(heads...); !errors.Is(err, ErrReviewResolutionsInvalid) {
+			t.Fatalf("%s: answer err=%v, want ErrReviewResolutionsInvalid", name, err)
+		}
+	}
+	if err := answer(ReviewFixMemberHead{Repository: "api", ActualHead: reviewShaC, CandidateID: candidate.ID}, web); err != nil {
+		t.Fatalf("answer bound to every Member head: %v", err)
 	}
 }

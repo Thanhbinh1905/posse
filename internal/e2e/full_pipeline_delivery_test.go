@@ -181,24 +181,27 @@ func TestFullPipelineLocalDeliveryValidatesBeforeTargetFastForward(t *testing.T)
 	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
 
-// TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates proves the
-// per-Member barrier: a PR-delivery Member reaches its bare origin and a
-// local-delivery Member reaches its target ref only after that Member's own
-// private candidate passes review -> test -> docs -> lint, and a Member edit
-// after validation cannot be integrated.
-func TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates(t *testing.T) {
-	f := reviewIdentityFixture(t)
+// fullPipelineWorkspace is a "stack" workspace Project whose api Member
+// delivers by PR through the fake forge, backed by the bare origin f.remote,
+// and whose web Member delivers locally into its own target ref. Both Members
+// use full-pipeline review.
+type fullPipelineWorkspace struct {
+	root, api, web, webRemote string
+	project                   store.Project
+	leadEnv                   []string
+}
+
+func newFullPipelineWorkspace(t *testing.T, f *prLifecycleFixture) fullPipelineWorkspace {
+	t.Helper()
 	stopBackgroundWatch(t, f)
 	root := filepath.Join(f.root, "stack")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// api delivers by PR through the fake forge, backed by the bare origin.
 	api := filepath.Join(root, "api")
 	gitTest(t, f.env, root, "clone", "-q", f.remote, api)
 	gitTest(t, f.env, api, "remote", "set-url", "origin", "https://github.com/acme/shop.git")
 	gitTest(t, f.env, api, "config", "url.file://"+f.remote+".insteadOf", "https://github.com/acme/shop.git")
-	// web delivers locally into its own target ref.
 	web := filepath.Join(root, "web")
 	webRemote := filepath.Join(f.root, "web.git")
 	initRepository(t, web, webRemote, f.env)
@@ -224,6 +227,18 @@ func TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates(t *testing.T
 	} {
 		runPosse(t, f.binary, root, f.env, "config", "set", setting[0], setting[1], "--project", "stack")
 	}
+	return fullPipelineWorkspace{root: root, api: api, web: web, webRemote: webRemote, project: project, leadEnv: leadEnv}
+}
+
+// TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates proves the
+// per-Member barrier: a PR-delivery Member reaches its bare origin and a
+// local-delivery Member reaches its target ref only after that Member's own
+// private candidate passes review -> test -> docs -> lint, and a Member edit
+// after validation cannot be integrated.
+func TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	ws := newFullPipelineWorkspace(t, f)
+	root, web, webRemote, project, leadEnv := ws.root, ws.web, ws.webRemote, ws.project, ws.leadEnv
 	brief := filepath.Join(f.root, "workspace-candidates.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace candidates\ndone_when: checked\nrepos: [api, web]\n---\nChange both Members.\n"), 0o600); err != nil {
 		t.Fatal(err)

@@ -1448,15 +1448,21 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				return configError(err)
 			}
 			// Every changed full-pipeline Member must be delivered from its
-			// promoted, fully validated private candidate.
+			// promoted, fully validated private candidate. Answers to a Review
+			// fix come from the private candidates instead, before promotion.
+			round, fixPending, err := db.ReviewFixRoundForTask(ctx.Context, task.ID)
+			if err != nil {
+				return err
+			}
+			candidateFix := fixPending && len(round.MemberHeads) > 0
 			if lanes, err := changedCandidateLanes(ctx.Context, db, project, task); err != nil {
 				return err
-			} else if len(lanes) > 0 {
+			} else if len(lanes) > 0 && !candidateFix {
 				if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, ""); err != nil {
 					return err
 				}
 			}
-			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg); err != nil {
+			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg, candidateFix); err != nil {
 				return err
 			}
 		} else if task.Type == "change" && noChange {
@@ -1599,49 +1605,58 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return axi.Failure("review_resolutions_invalid", err.Error(), false)
 			}
-			actualHead := ""
-			candidateID := int64(0)
-			if fullPipelineSelected(task, "") {
-				candidate, err := db.LatestValidationCandidate(ctx.Context, task.ID, "")
-				if err != nil || candidate.State != store.ValidationCandidateActive {
-					return axi.Failure("candidate_missing", "full-pipeline Review fixes require the active private candidate", false)
-				}
-				if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
-					return err
-				}
-				candidate, err = db.LatestValidationCandidate(ctx.Context, task.ID, "")
+			if len(round.MemberHeads) > 0 {
+				members, err := s.reviewFixMemberAnswers(ctx.Context, db, home, project, task, round)
 				if err != nil {
 					return err
 				}
-				cwd, cwdErr := currentDir()
-				if cwdErr != nil || !pathWithin(candidate.WorktreePath, cwd) {
-					return axi.Failure("review_fix_candidate_required", "full-pipeline Review fixes must be completed in the private candidate checkout", false, candidate.WorktreePath)
-				}
-				actualHead, err = gitOutput(ctx.Context, candidate.WorktreePath, "rev-parse", "HEAD")
-				if err != nil {
-					return err
-				}
-				candidateID = candidate.ID
+				reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, "", 0)
+				reviewResolutions.Members = members
 			} else {
-				actualHead, err = gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
-				if err != nil {
-					return err
-				}
-			}
-			if _, err := gitOutput(ctx.Context, task.WorktreePath, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
-				root := task.WorktreePath
-				if candidateID > 0 {
-					candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
-					if candidateErr != nil {
-						return candidateErr
+				actualHead := ""
+				candidateID := int64(0)
+				if fullPipelineSelected(task, "") {
+					candidate, err := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+					if err != nil || candidate.State != store.ValidationCandidateActive {
+						return axi.Failure("candidate_missing", "full-pipeline Review fixes require the active private candidate", false)
 					}
-					root = candidate.WorktreePath
+					if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
+						return err
+					}
+					candidate, err = db.LatestValidationCandidate(ctx.Context, task.ID, "")
+					if err != nil {
+						return err
+					}
+					cwd, cwdErr := currentDir()
+					if cwdErr != nil || !pathWithin(candidate.WorktreePath, cwd) {
+						return axi.Failure("review_fix_candidate_required", "full-pipeline Review fixes must be completed in the private candidate checkout", false, candidate.WorktreePath)
+					}
+					actualHead, err = gitOutput(ctx.Context, candidate.WorktreePath, "rev-parse", "HEAD")
+					if err != nil {
+						return err
+					}
+					candidateID = candidate.ID
+				} else {
+					actualHead, err = gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
+					if err != nil {
+						return err
+					}
 				}
-				if _, err := gitOutput(ctx.Context, root, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
-					return recordHeadDiscontinuity(ctx.Context, db, project, task, round.ExpectedBaseHead, actualHead)
+				if _, err := gitOutput(ctx.Context, task.WorktreePath, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
+					root := task.WorktreePath
+					if candidateID > 0 {
+						candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+						if candidateErr != nil {
+							return candidateErr
+						}
+						root = candidate.WorktreePath
+					}
+					if _, err := gitOutput(ctx.Context, root, "merge-base", "--is-ancestor", round.ExpectedBaseHead, actualHead); err != nil {
+						return recordHeadDiscontinuity(ctx.Context, db, project, task, round.ExpectedBaseHead, actualHead)
+					}
 				}
+				reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, actualHead, candidateID)
 			}
-			reviewResolutions = convertReviewResolutions(parsedResolutions, round.ExpectedBaseHead, actualHead, candidateID)
 		}
 	} else if parsed.Flags["resolutions"] != "" {
 		return axi.Failure("signal_invalid", "--resolutions is only valid on a Change done Signal with a Review fix instruction", false)
