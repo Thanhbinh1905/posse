@@ -58,6 +58,14 @@ _Avoid_: Code review, audit
 The typed outcome (`pass`, `changes_requested` or `inconclusive`) of a Review Task, bound by Posse to the exact Change revision it examined. Only a current `pass` is a passing Review Verdict; selected review evidence may also include an explicit carry or User acceptance.
 _Avoid_: Approval, review result
 
+**Review Mode**:
+The User's choice of review evidence, frozen into each Change Task's plan: `none` (the default), `quick` (exact-head independent review before Merge) or `full-pipeline` (a Private Candidate passes review, test, docs and lint before every publication). All three are ready.
+_Avoid_: Review level, review gate
+
+**Private Candidate**:
+The unpublished checkout of one exact submitted Change head that `full-pipeline` validates before promotion pushes it or fast-forwards its Task branch; any later commit needs a fresh candidate.
+_Avoid_: Draft PR, staging branch
+
 **Review Loop**:
 The optional built-in protocol that turns successive Review Tasks of one Change Task into at most three Review Rounds over a Finding Ledger; part of the built-in validation that replaced no-mistakes.
 _Avoid_: Review pipeline, review cycle
@@ -127,6 +135,14 @@ _Avoid_: Deliver
 Posse's FIFO queue per target branch of done Change Tasks whose PR is behind that target; only its head is asked to merge the target. Used only when `defaults.require_current_target` is on.
 _Avoid_: Forge merge queue, merge train
 
+**Delivery**:
+The durable record of one forge pull request or merge request of a Change Task or Workspace Member. It outlives the Worker pane that opened it.
+_Avoid_: PR lifetime, Worker PR
+
+**Steward**:
+The Lead in its role as operator of a Delivery: it may inspect it, reply on it, refresh Posse-owned metadata and rerun an existing failed CI run, each recorded with actor and head. A Steward is not an author and has no merge, workflow or secret authority.
+_Avoid_: Owner, maintainer
+
 **Orphan**:
 Work a Worker made on a merged Task beyond what merged, such as later commits or uncommitted changes; the User decides whether it becomes a new Task or is discarded. Formerly: Leftover.
 _Avoid_: Follow-up (that is a message to a Worker), residue, diff
@@ -191,6 +207,10 @@ _Avoid_: Routing rule, policy
 **Identity**:
 The User-chosen Lead name, persona, language and form of address. Name, persona and form of address apply to User messages; language also selects neutral artifact prose. Persona is not evidence, and quoted User intent stays exact.
 _Avoid_: Alias, nickname
+
+**Knowledge**:
+Opt-in curated facts and lessons for a Lead or Worker, with a source, a last-verified date and a User or Project scope, stored under `<POSSE_HOME>/knowledge/` and `<POSSE_HOME>/projects/<project>/knowledge/`. Knowledge is reference context, not authority: it cannot answer Decisions, grant Autonomy or run commands. Task outcomes point to their Report instead of being copied. A startup budget shared with preferences is enforced at write time by curation, never by truncation.
+_Avoid_: Memory, learnings, notes
 
 **Preferences**:
 User-authored how-to-work guidance for a Lead or Worker, layered from `<POSSE_HOME>/preferences/` and `<POSSE_HOME>/projects/<project>/preferences/`. Project guidance follows User guidance and can change default workflow advice, but cannot grant authority or override runtime obligations. The User writes it with `posse preferences set`; a Lead's write requires User consent recorded with the quote, and Workers cannot write it. Deprecated `playbook/` paths remain readable until explicitly moved.

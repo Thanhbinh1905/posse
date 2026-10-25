@@ -242,6 +242,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		}
 	}
 	checks = append(checks, preferenceSizeWarnings(home, registeredProjects)...)
+	checks = append(checks, knowledgeWarnings(home, registeredProjects)...)
 	// A removed config value is already reported by the config checks above.
 	var kindMigration *config.MigrationError
 	if kindConfigErr != nil && !errors.As(kindConfigErr, &kindMigration) {

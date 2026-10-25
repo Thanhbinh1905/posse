@@ -99,6 +99,11 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		input.Layer, input.Legacy = source.Layer, source.Legacy
 		inputs = append(inputs, input)
 	}
+	knowledge, err := knowledgePlanInputs(home, project, cfg)
+	if err != nil {
+		return taskplan.Plan{}, err
+	}
+	inputs = append(inputs, knowledge...)
 	skills, err := selectedSkillInputs(launch.Profile.Kind)
 	if err != nil {
 		return taskplan.Plan{}, err
@@ -166,6 +171,7 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	}
 	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext, plan.ProseLanguage) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
+	contents = appendKnowledgeInstructions(contents, project, planKnowledge(plan))
 	return writeFile(launchPath, []byte(contents))
 }
 

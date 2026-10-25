@@ -725,9 +725,11 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	}
 	unchanged := err == nil && samePRObservation(previous, observation)
 	if !unchanged {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt, observation.ObservedAt); err != nil {
 			return false, err
 		}
+	} else if _, err := tx.ExecContext(ctx, `UPDATE pr_observations SET confirmed_at=? WHERE id=?`, observation.ObservedAt, previous.ID); err != nil {
+		return false, err
 	}
 	allowChangedEffects := !unchanged || effect.TransitionTo == StateMerged && transitions[current.State][StateMerged]
 	notices, err := filterMergeReadyNoticesTx(ctx, tx, observation.ProjectID, observation.TaskID, "", current.State, effect.Notices)
@@ -819,6 +821,14 @@ func latestPRObservationTx(ctx context.Context, tx *writeTx, taskID int64) (PROb
 	err := tx.QueryRowContext(ctx, `SELECT id, project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at FROM pr_observations WHERE task_id=? ORDER BY id DESC LIMIT 1`, taskID).
 		Scan(&observation.ID, &observation.ProjectID, &observation.TaskID, &observation.PRURL, &observation.HeadSHA, &observation.State, &observation.Checks, &observation.Review, &observation.Mergeable, &observation.MergeCommit, &observation.ObservedAt)
 	return observation, err
+}
+
+// PRObservationConfirmedAt is when the watch last read the observation's
+// state from the forge, including polls that found it unchanged.
+func (db *DB) PRObservationConfirmedAt(ctx context.Context, id int64) (int64, error) {
+	var confirmed int64
+	err := db.QueryRowContext(ctx, `SELECT confirmed_at FROM pr_observations WHERE id=?`, id).Scan(&confirmed)
+	return confirmed, err
 }
 
 func samePRObservation(left, right PRObservation) bool {

@@ -50,6 +50,7 @@ func startPrivateReviewChange(t *testing.T, f *prLifecycleFixture, maxRounds str
 	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Candidate submitted for validation", "--turn", turn); code != 0 {
 		t.Fatalf("complete candidate submission turn: %d %s", code, output)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 	return change.WorktreePath, candidate.WorktreePath, "t1"
 }
 
@@ -185,6 +186,7 @@ func TestFullPipelineWholePatternFixRequiresPrivateCandidateResolutions(t *testi
 	if err != nil || candidate.CandidateSHA == "" || candidate.CandidateSHA == candidate.SubmittedSHA {
 		t.Fatalf("private candidate was not advanced with its fix: %#v %v", candidate, err)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
 
 func TestReviewPatternMergeAndDispositionRecordWholePatternEvents(t *testing.T) {
@@ -280,6 +282,7 @@ func TestFullPipelineReviewCarryIsReviewOnlyAtPublication(t *testing.T) {
 	if code, output := runReleaseCLI(t, f.binary, refreshed.WorktreePath, workerEnv, "publish", "Refreshed candidate"); code == 0 || !strings.Contains(output, "validation_stage_required") {
 		t.Fatalf("Review carry incorrectly carried docs/lint stages: %d %s", code, output)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
 
 func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T) {
@@ -341,6 +344,7 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "publish", "Candidate summary"); code == 0 || !strings.Contains(output, "validation_stage_required") {
 		t.Fatalf("accept-head incorrectly skipped local stages: %d %s", code, output)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 	for _, args := range [][]string{
 		{"validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent behavior verified"},
 		{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "Complete PR description prepared"},
@@ -349,9 +353,13 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 		if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, args...); code != 0 {
 			t.Fatalf("record stage %v after User acceptance: %d %s", args, code, output)
 		}
+		assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 	}
 	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "publish", "Candidate summary"); code != 0 || !strings.Contains(output, "promoted: candidate") {
 		t.Fatalf("promote candidate with Review-only acceptance and required stages: %d %s", code, output)
+	}
+	if published := gitRef(t, f, f.remote, "refs/heads/"+change.Branch); published != candidate.CandidateSHA {
+		t.Fatalf("bare origin published %s, want accepted candidate %s", published, candidate.CandidateSHA)
 	}
 }
 
@@ -390,6 +398,7 @@ func TestReviewCapRethinkStartsAChangeWithInheritedFindings(t *testing.T) {
 	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=? AND inherited_from IN (SELECT id FROM review_findings WHERE ship_task_id=?) AND state='deferred'`, followup.ID, change.ID).Scan(&inherited); err != nil || inherited != 1 {
 		t.Fatalf("inherited findings=%d err=%v", inherited, err)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
 
 func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
@@ -458,6 +467,7 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	if err != nil || nextID == decisionID || !strings.HasSuffix(nextOrigin, candidate.CandidateSHA) {
 		t.Fatalf("next-head cap Decision id=%d origin=%s candidate=%s err=%v", nextID, nextOrigin, candidate.CandidateSHA, err)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
 
 // recordReviewRound admits the next Review Round of changeSeq and completes it
@@ -605,6 +615,8 @@ func TestRethinkSuccessorSuppressesInheritedFingerprints(t *testing.T) {
 	if err := json.Unmarshal([]byte(data), &round); err != nil || round.NewFindings != 0 || round.SuppressedRepeats != 1 {
 		t.Fatalf("successor round=%+v err=%v, want the inherited fingerprint suppressed", round, err)
 	}
+	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+	assertTaskBranchAbsentOnBareOrigin(t, f, successor.Branch)
 }
 
 // TestFullPipelineWorkspaceWholePatternFixBindsEveryMemberCandidate proves

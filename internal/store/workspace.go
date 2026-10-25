@@ -323,12 +323,17 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		return false, err
 	}
 	var previous PRObservation
-	err = tx.QueryRowContext(ctx, `SELECT project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
-		Scan(&previous.ProjectID, &previous.TaskID, &previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit)
+	err = tx.QueryRowContext(ctx, `SELECT id, project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
+		Scan(&previous.ID, &previous.ProjectID, &previous.TaskID, &previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	unchanged := err == nil && samePRObservation(previous, observation)
+	if unchanged {
+		if _, err := tx.ExecContext(ctx, `UPDATE pr_observations SET confirmed_at=? WHERE id=?`, observation.ObservedAt, previous.ID); err != nil {
+			return false, err
+		}
+	}
 	noticesToRecord := effect.Notices
 	if unchanged {
 		noticesToRecord = make([]Notice, 0, len(effect.Notices))
@@ -352,7 +357,7 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		return false, nil
 	}
 	if !unchanged {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pr_observations(project_id, task_id, repo, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.HeadSHA, observation.State, observation.Checks, observation.Review, observation.Mergeable, observation.MergeCommit, observation.ObservedAt, observation.ObservedAt); err != nil {
 			return false, err
 		}
 	}

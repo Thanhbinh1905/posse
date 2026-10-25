@@ -131,6 +131,11 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
 		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
+		{Name: "knowledge", Summary: "Inspect and curate opt-in User and Project knowledge.", Subcommands: []*axi.Command{
+			{Name: "show", Usage: "$ knowledge show [<id>] [--project <name>|--user]", Summary: "Show knowledge entries with provenance and the startup budget, or one entry.", Handler: s.knowledgeShow},
+			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
+			{Name: "archive", Usage: "$ knowledge archive <id> --reason <why> [--project <name>|--user]", Summary: "Move an entry to the never-loaded archive with provenance.", Handler: s.knowledgeArchive},
+		}},
 		{Name: "preferences", Summary: "Inspect and update layered User and Project preferences.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Worker preferences with their sources.", Handler: s.preferencesShow},
 			{Name: "path", Usage: "$ preferences path <lead|worker> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},
@@ -147,6 +152,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
+		{Name: "stats", Summary: "Show each Profile's landed rate, median time to done, tokens per landed Task and relaunches over the last 30 days.", Handler: s.stats},
 		{Name: "workflow", Summary: "Inspect and advance User-owned workflow runs.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ workflow show <name> [--project <name>]", Summary: "Show a resolved workflow profile, its source and digest.", Handler: s.workflowShow},
 			{Name: "status", Usage: "$ workflow status [<run>]", Summary: "Show workflow run position, stage Tasks, results and advance history.", Handler: s.workflowStatus},
@@ -157,6 +163,12 @@ func (s *Service) commands() *axi.Command {
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "validate", Usage: "$ validate <status|test|docs|lint> [--repo <member>] [stage evidence flags]", Summary: "Record ordered, exact-head full-pipeline evidence from the private candidate checkout.", Handler: s.validateCandidate},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
+		{Name: "pr", Summary: "Steward a Task's PR/MR as the Lead: inspect it, reply, refresh Posse-owned metadata or rerun an existing failed CI run. Each operation is recorded; merge keeps its own approval.", Subcommands: []*axi.Command{
+			{Name: "inspect", Usage: "$ pr inspect <task> [--repo <member>]", Summary: "Read the current PR/MR state, failed checks, authors and recent steward operations.", Handler: s.prInspect},
+			{Name: "reply", Usage: "$ pr reply <task> --body <text> [--repo <member>]", Summary: "Post a reply on the PR/MR once; an unconfirmed reply is checked on the forge before any repeat.", Handler: s.prReply},
+			{Name: "refresh", Usage: "$ pr refresh <task> [--repo <member>]", Summary: "Rewrite the Posse-owned title and Validation block; other PR/MR text is unchanged.", Handler: s.prRefresh},
+			{Name: "rerun", Usage: "$ pr rerun <task> (--run <id>|--job <id>) [--repo <member>]", Summary: "Rerun an existing failed CI run (GitHub) or job (GitLab) on the current head, at most twice per run and head.", Handler: s.prRerun},
+		}},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
 		{Name: "status", Summary: "Read only this Worker's recorded status and admitted plan without maintenance.", Handler: s.status},
 		{Name: "send", Usage: "$ send <task> <message> [--queue] | send <task> --interrupt <message>", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Worker.", Handler: s.send},
@@ -897,7 +909,7 @@ func configRepairHelp(invalid *config.InvalidError) []string {
 			help = append(help, "Or choose the lighter `posse config set "+key+" "+lighter+scope+"`")
 		}
 		if migration.Value == config.NoMistakes {
-			help = append(help, "Keep no-mistakes commands.test and commands.lint in the repository CI workflow; a full-pipeline Worker records test evidence with `posse validate test`")
+			help = append(help, "Keep no-mistakes commands.test and commands.lint in the repository CI workflow; a full-pipeline Worker records test evidence with `posse validate test`, and `full_pipeline.run_workflows = true` runs those workflow jobs locally at lint")
 		}
 		return append(help, "Posse never changes config for this migration", "Run `posse setup` after the config is valid")
 	}
