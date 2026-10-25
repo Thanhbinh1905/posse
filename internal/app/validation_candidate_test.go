@@ -457,6 +457,36 @@ func TestCandidatePromotionFastForwardsTaskBranchAndOrigin(t *testing.T) {
 	}
 }
 
+func TestCandidatePromotionResumesAfterCrashBetweenPushAndPullRequest(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	submitThroughCLI(t, fixture)
+	candidateHead := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, candidateHead)
+	recordCandidateStages(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An earlier promotion recorded promoting, fast-forwarded and pushed the
+	// Task branch, then died before it opened or updated the PR.
+	if err := fixture.db.BeginValidationCandidatePromotion(context.Background(), candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "merge", "--ff-only", candidateHead)
+	gitTest(t, fixture.worktree, "push", "origin", candidateHead+":refs/heads/posse/t1")
+	fixture.setGHHead(t, candidateHead)
+	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidateHead)
+	if err := runCandidatePromotionForTest(t, fixture); err != nil {
+		t.Fatalf("resume interrupted promotion: %v (%s)", err, fixture.output.String())
+	}
+	candidate, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || candidate.State != store.ValidationCandidatePromoted || candidate.PromotedSHA != candidateHead {
+		t.Fatalf("resumed candidate=%+v err=%v", candidate, err)
+	}
+}
+
 func TestCandidatePromotionRefusesMovedRemoteAndDirtySandbox(t *testing.T) {
 	for _, scenario := range []string{"remote moved", "dirty sandbox"} {
 		t.Run(scenario, func(t *testing.T) {

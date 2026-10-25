@@ -34,7 +34,7 @@ func TestNoChangeTaskFinishesAndTearsDownWithoutDiscard(t *testing.T) {
 	task := f.start(t, "t1", "Already satisfied", "already-satisfied")
 	workerEnv := workerSignalEnv(f, task)
 
-	runPosseExpectingFailure(t, f, task.WorktreePath, workerEnv, "signal_invalid", "signal", "done", "Already fixed on main")
+	runPosseExpectingFailure(t, f, task.WorktreePath, workerEnv, "--no-change", "signal", "done", "Already fixed on main")
 	runPosse(t, f.binary, task.WorktreePath, workerEnv, "signal", "done", "--no-change", "Focused test passes on main: go test ./... -> ok")
 	if done := f.task(t, "t1"); done.State != store.StateDone {
 		t.Fatalf("no-change done Signal left Task in %s", done.State)
@@ -76,12 +76,21 @@ func TestTeardownStillRefusesUnapprovedUnmergedWork(t *testing.T) {
 				gitTest(t, f.env, task.WorktreePath, "add", "work.txt")
 				gitTest(t, f.env, task.WorktreePath, "commit", "-m", "work")
 				runPosseExpectingFailure(t, f, task.WorktreePath, workerEnv, "signal_invalid", "signal", "done", "--no-change", "claims no change")
-				runPosse(t, f.binary, task.WorktreePath, workerEnv, "signal", "done", "Work complete")
+				command := exec.Command(f.binary, "signal", "done", "Work complete")
+				command.Dir, command.Env = task.WorktreePath, workerEnv
+				if out, err := command.CombinedOutput(); err != nil || strings.Contains(string(out), "--no-change") {
+					t.Fatalf("committed work must keep commit guidance: err=%v output=%s", err, out)
+				}
 			case "dirty":
 				if err := os.WriteFile(filepath.Join(task.WorktreePath, "README.md"), []byte("edited\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				runPosseExpectingFailure(t, f, task.WorktreePath, workerEnv, "signal_invalid", "signal", "done", "--no-change", "claims no change")
+				command := exec.Command(f.binary, "signal", "done", "Dirty")
+				command.Dir, command.Env = task.WorktreePath, workerEnv
+				if out, err := command.CombinedOutput(); err == nil || strings.Contains(string(out), "posse signal done <note> --no-change") {
+					t.Fatalf("dirty worktree must keep commit guidance: err=%v output=%s", err, out)
+				}
 			case "untracked":
 				if err := os.WriteFile(file, []byte("work\n"), 0o600); err != nil {
 					t.Fatal(err)

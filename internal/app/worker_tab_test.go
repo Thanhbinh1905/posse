@@ -266,7 +266,7 @@ func TestOpenWorkerTabRejectsAnOccupiedLegacySandboxButAllowsAnEmptyWorkspace(t 
 	service := testService(t.TempDir(), adapter)
 	_, err := service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
-	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("tab.create") != 0 {
+	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || !strings.Contains(cliErr.Message, "legacy:p1") || adapter.CallCount("tab.create") != 0 {
 		t.Fatalf("openWorkerTab with an occupied legacy workspace = %v, calls %#v", err, adapter.Calls)
 	}
 
