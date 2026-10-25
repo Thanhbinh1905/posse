@@ -147,6 +147,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote>]", Summary: "Record the User's answer and notify the Lead.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
+		{Name: "stats", Summary: "Show each Profile's landed rate, median time to done, tokens per landed Task and relaunches over the last 30 days.", Handler: s.stats},
 		{Name: "workflow", Summary: "Inspect and advance User-owned workflow runs.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ workflow show <name> [--project <name>]", Summary: "Show a resolved workflow profile, its source and digest.", Handler: s.workflowShow},
 			{Name: "status", Usage: "$ workflow status [<run>]", Summary: "Show workflow run position, stage Tasks, results and advance history.", Handler: s.workflowStatus},
