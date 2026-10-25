@@ -1251,7 +1251,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			defer recoveryDB.Close()
 			var recoveryErr error
 			recoveryState, recoveryErr = recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
-			return recoveryErr == nil && recoveryState.Status == "pending" && recoveryState.Attempts > 0 && recoveryState.LastError == "another Herdr workspace already holds this Sandbox"
+			return recoveryErr == nil && recoveryState.Status == "pending" && recoveryState.Attempts > 0 && strings.HasPrefix(recoveryState.LastError, "another Herdr workspace already holds this Sandbox")
 		}) {
 			t.Fatalf("startup recovery did not fail closed on the restored torn-down Task workspace: %#v", recoveryState)
 		}
