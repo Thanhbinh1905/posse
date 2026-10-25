@@ -205,6 +205,10 @@ func (s *Service) deliverClaimedMessage(ctx context.Context, db *store.DB, task 
 }
 
 func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task store.Task, message store.Message, paneID string, cfg config.Config, token string, allowFocused bool) (bool, string, error) {
+	params := map[string]any{"target": paneID, "text": workerInstruction(task, message)}
+	// Only a prompt into an idle agent starts an observable turn. Steering a
+	// working agent has no state change that confirms its submission.
+	confirmTurn := false
 	check := func(snapshot herdr.Snapshot) error {
 		pane, found := findAppPane(snapshot.Panes, paneID, task.PaneLabel)
 		if !found || pane.PaneID != paneID {
@@ -218,6 +222,7 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		if queuedMessageReason(task, message, pane, snapshot, cfg, allowFocused) != "" {
 			return axi.Failure("message_not_ready", "Worker is not ready for this message", true)
 		}
+		confirmTurn = pane.AgentStatus == "idle" || pane.AgentStatus == "done"
 		// Herdr can keep the previous idle/done status when a modal matches
 		// an unknown detection rule (for example Claude's model picker).
 		// Check the live TUI classification before submitting an Enter.
@@ -264,13 +269,17 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			return err
 		}
 		submitting = true
+		if confirmTurn {
+			params["wait"] = map[string]any{"until": []string{"working", "blocked"}, "timeout_ms": messageSubmitWait.Milliseconds()}
+		}
 		return nil
 	}
-	var promptErr error
-	if allowFocused {
-		promptErr = s.safePromptWhenBeforeFocused(ctx, paneID, workerInstruction(task, message), check, beforePrompt)
-	} else {
-		promptErr = s.safePromptWhenBefore(ctx, paneID, workerInstruction(task, message), check, beforePrompt)
+	send := func(ctx context.Context, method string, params map[string]any, beforeSend func() error) error {
+		return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, method, params, check, beforeSend, nil, allowFocused)
+	}
+	promptErr := send(ctx, "agent.prompt", params, beforePrompt)
+	if promptErr != nil && submitting && confirmTurn && isPromptStall(promptErr) {
+		promptErr = s.confirmMessageSubmitted(ctx, paneID, send)
 	}
 	if err := promptErr; err != nil {
 		if submitting {
@@ -311,4 +320,38 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		return true, "", err
 	}
 	return true, "", nil
+}
+
+var (
+	messageSubmitAttempts = 3
+	messageSubmitWait     = 5 * time.Second
+)
+
+// confirmMessageSubmitted handles a prompt that started no turn. Claude Code
+// collapses a long or multi-line paste into a "[Pasted text #N]" placeholder
+// and can swallow an Enter that arrives while the placeholder is created,
+// leaving the instruction unsubmitted. While that placeholder is visible,
+// Posse presses Enter again; the text is never retyped, because a second copy
+// could reach the Worker twice. A placeholder that survives every Enter makes
+// delivery uncertain. Without one, nothing shows the accepted prompt was lost.
+func (s *Service) confirmMessageSubmitted(ctx context.Context, paneID string, send func(context.Context, string, map[string]any, func() error) error) error {
+	var lastErr error
+	for attempt := 1; attempt <= messageSubmitAttempts; attempt++ {
+		if s.agentActive(ctx, paneID) || !s.pastePlaceholderOnScreen(ctx, paneID) {
+			return nil
+		}
+		if err := send(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"enter"}}, nil); err != nil {
+			return err
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, messageSubmitWait+5*time.Second)
+		_, lastErr = s.herdrCall(waitCtx, "agent.wait", map[string]any{"target": paneID, "until": []string{"working", "blocked"}, "timeout_ms": messageSubmitWait.Milliseconds()})
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if !isPromptStall(lastErr) {
+			return lastErr
+		}
+	}
+	return axi.Failure("message_not_submitted", fmt.Sprintf("the Worker input still holds a paste placeholder after %d Enter attempts: %v", messageSubmitAttempts, lastErr), false)
 }
