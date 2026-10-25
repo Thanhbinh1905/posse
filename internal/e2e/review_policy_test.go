@@ -520,9 +520,15 @@ esac
 		input, _ := os.ReadFile(filepath.Join(f.root, "ci-worker-input.log"))
 		t.Fatalf("fake Worker did not consume the queued CI instruction: %s", input)
 	}
+	// Posse records delivery once Herdr confirms the new turn, which can land
+	// after the fake Worker already finished the repair.
 	var messageStatus string
-	if err := f.db.QueryRowContext(context.Background(), `SELECT m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='ci'`, change.ID).Scan(&messageStatus); err != nil || messageStatus != "delivered" {
-		t.Fatalf("CI repair instruction status=%q err=%v, want delivered", messageStatus, err)
+	var messageErr error
+	if !waitForCondition(15*time.Second, func() bool {
+		messageErr = f.db.QueryRowContext(context.Background(), `SELECT m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='ci'`, change.ID).Scan(&messageStatus)
+		return messageErr == nil && messageStatus == "delivered"
+	}) {
+		t.Fatalf("CI repair instruction status=%q err=%v, want delivered", messageStatus, messageErr)
 	}
 	workerInput, err := os.ReadFile(filepath.Join(f.root, "ci-worker-input.log"))
 	if err != nil || !strings.Contains(string(workerInput), "Required CI checks failed") || !strings.Contains(string(workerInput), firstHead) {
