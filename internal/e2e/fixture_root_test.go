@@ -129,6 +129,12 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	// honor a Worker's non-/tmp scratch directory when one is supplied.
 	if temporary := os.TempDir(); parent == "/var/tmp" && temporary != "/tmp" && !strings.HasPrefix(temporary, "/tmp/") {
 		parent = temporary
+		if os.Getenv("POSSE_E2E_TMP_ROOT") == "" && isTaskScratchRoot(parent) {
+			if !validTaskScratchRoot(parent) {
+				t.Fatalf("unsafe Task scratch TMPDIR: %q", parent)
+			}
+			t.Setenv("POSSE_E2E_TMP_ROOT", parent)
+		}
 	}
 	configuredRoot := filepath.Clean(os.Getenv("POSSE_E2E_TMP_ROOT"))
 	parent, err := filepath.Abs(parent)

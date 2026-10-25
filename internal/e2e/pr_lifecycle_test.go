@@ -2239,6 +2239,7 @@ esac
 	ghScript := `#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
+if [ -e "$POSSE_TEST_ROOT/gh-outage" ]; then printf 'could not connect to api.github.com\n' >&2; exit 1; fi
 case "$1 $2" in
   "api graphql") cat "$POSSE_TEST_GH_STATE"; if [ -e "$POSSE_TEST_ROOT/gh-exit-nonzero" ]; then exit 1; fi ;;
   "api --hostname")
@@ -2294,8 +2295,38 @@ case "$1 $2" in
     done
     if [ "${POSSE_TEST_GH_KILL_AFTER_EDIT:-}" = 1 ]; then kill -9 "$PPID"; fi
     printf 'Edited\n' ;;
+  "pr comment")
+    if [ -e "$POSSE_TEST_ROOT/gh-comment-fail" ]; then printf 'comment failed\n' >&2; exit 1; fi
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in --body) body=$2; shift 2 ;; *) shift ;; esac
+    done
+    python3 -c 'import json,os,sys
+path=sys.argv[1]
+comments=json.load(open(path)) if os.path.exists(path) else []
+comments.append({"body":sys.argv[2]})
+open(path,"w").write(json.dumps(comments))' "$POSSE_TEST_ROOT/gh-comments.json" "$body"
+    # An ambiguous reply posts the comment but loses the response.
+    if [ -e "$POSSE_TEST_ROOT/gh-comment-ambiguous" ]; then printf 'connection reset\n' >&2; exit 1; fi
+    printf '%s#issuecomment-1\n' "$3" ;;
+  "run view")
+    if [ -e "$POSSE_TEST_ROOT/gh-run-view-fail" ]; then printf 'run view failed\n' >&2; exit 1; fi
+    cat "$POSSE_TEST_ROOT/gh-run-$3.json" ;;
+  "run rerun")
+    run=$3
+    if [ "$run" = --failed ]; then run=$4; fi
+    if [ -e "$POSSE_TEST_ROOT/gh-rerun-fail" ]; then printf 'rerun failed\n' >&2; exit 1; fi
+    python3 -c 'import json,sys
+run=json.load(open(sys.argv[1]))
+run["attempt"]+=1
+run["status"]="queued"
+open(sys.argv[1],"w").write(json.dumps(run))' "$POSSE_TEST_ROOT/gh-run-$run.json"
+    # An ambiguous rerun starts the run but loses the response.
+    if [ -e "$POSSE_TEST_ROOT/gh-rerun-ambiguous" ]; then printf 'connection reset\n' >&2; exit 1; fi
+    printf 'Requested rerun\n' ;;
   "pr view")
     case "$*" in
+      *'--json comments'*) if [ -e "$POSSE_TEST_ROOT/gh-comments.json" ]; then python3 -c 'import json,sys; print(json.dumps({"comments":json.load(open(sys.argv[1]))}))' "$POSSE_TEST_ROOT/gh-comments.json"; else printf '{"comments":[]}\n'; fi ;;
       *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$POSSE_TEST_GH_TITLE" "$POSSE_TEST_GH_BODY" ;;
       *)
         case "$3" in */1[7-9]|*/[2-9][0-9]) branch="posse/t$((${3##*/} - 16))" ;; *) exit 90 ;; esac
@@ -2696,6 +2727,8 @@ func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, chec
 // fakePull is one PR in the fake GraphQL response; alias prN is Task tN.
 type fakePull struct {
 	alias, state, checks, review, mergeable, mergeCommit, head string
+	// detailsURL overrides the failed check's details link.
+	detailsURL string
 }
 
 func (fixture *prLifecycleFixture) writeGraphQLPulls(t *testing.T, pulls ...fakePull) {
@@ -2704,7 +2737,11 @@ func (fixture *prLifecycleFixture) writeGraphQLPulls(t *testing.T, pulls ...fake
 	for _, fake := range pulls {
 		contexts := []any{}
 		if fake.checks == "FAILURE" {
-			contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://checks.example/unit"})
+			details := fake.detailsURL
+			if details == "" {
+				details = "https://checks.example/unit"
+			}
+			contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": details})
 		}
 		number, err := strconv.Atoi(strings.TrimPrefix(fake.alias, "pr"))
 		if err != nil {

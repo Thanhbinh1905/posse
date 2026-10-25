@@ -305,10 +305,27 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 	return s.mergePullRequest(out, db, project, cfg, task, userQuote, *mergeIntent)
 }
 
+// findOrCreatePullRequest opens or reuses the Task's PR/MR and records it as
+// a delivery stewarded by the Lead.
 func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
+	var prURL string
+	var opened bool
+	var err error
 	if forge.Kind == "gitlab" {
-		return s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
+		prURL, opened, err = s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
+	} else {
+		prURL, opened, err = s.findOrCreateGitHubPullRequest(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
 	}
+	if err != nil {
+		return prURL, opened, err
+	}
+	if _, err := db.EnsureDelivery(ctx, task.ID, member, prURL, "publish"); err != nil {
+		return prURL, opened, err
+	}
+	return prURL, opened, nil
+}
+
+func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
 	args := []string{"pr", "list", "--state", "open", "--head", task.Branch, "--json", "url,headRefName,headRefOid,baseRefName,headRepository", "--limit", "100"}
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()

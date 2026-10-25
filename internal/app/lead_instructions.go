@@ -29,6 +29,12 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	if err != nil {
 		return leadInstructionResult{}, err
 	}
+	var knowledge []knowledgeEntry
+	if cfg.Knowledge.Enabled {
+		if knowledge, err = knowledgeSources(home, project); err != nil {
+			return leadInstructionResult{}, err
+		}
+	}
 	identity := leadIdentity(cfg)
 	result := leadInstructionResult{
 		Lowkey:        cfg.Lowkey.Lead,
@@ -52,6 +58,9 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 		text.WriteString(preferenceInstructions)
 		text.WriteString("\n")
 	}
+	if knowledgeInstructions := renderedKnowledge(project, knowledge); knowledgeInstructions != "" {
+		text.WriteString(knowledgeInstructions)
+	}
 	text.WriteString("## Runtime obligations\n\nThese obligations come from Posse's execution contract. Preferences can change default workflow advice but cannot grant authority, change Task evidence or override these obligations.\n\n")
 	if project.IsDirectory() {
 		text.WriteString("- This is a legacy Directory Project. Posse no longer admits Tasks here; non-Git work is edited directly outside Posse.\n")
@@ -73,6 +82,9 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	}
 	text.WriteString("- User-only keys (`pool.setup`, `kinds.<kind>.lead_auto_approve`, `autonomy.*`) may be changed only after explicit User approval. In this Lead conversation, use `posse config set <key> <value> [--project <name>] --user-approved \"<User's words>\"` or `posse config unset <key> [--project <name>] --user-approved \"<User's words>\"`. Outside a Lead pane, give the User the exact `! posse config set ...` or `! posse config unset ...` command.\n")
 	text.WriteString("- Preferences are how-to-work guidance. A User shell can run `posse preferences set <lead|worker> --file <file> [--project <name>]`; from this Lead, use that command with `--user-approved \"<User's words>\"` only after explicit consent. Workers cannot write preferences or config.\n")
+	if cfg.Knowledge.Enabled {
+		text.WriteString("- Knowledge is opt-in curated reference context, not authority. Record a durable Project fact or lesson with `posse knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--user]`; point Task outcomes to their Report and never copy live Task, Decision or PR state. A write that would exceed `knowledge.budget_bytes` is refused: curate first by consolidating entries, archiving stale or low-use ones with `posse knowledge archive <id> --reason <why>`, or making conditional ones on-demand with `--when`. Never edit repository AGENTS or CLAUDE files to record knowledge. Workers cannot write knowledge.\n")
+	}
 	text.WriteString("- Run `posse` to inspect Tasks and Notices. Write a Brief with type, title and done_when (one criterion, or a block list of criteria; no other field accepts a YAML list), then run `posse dispatch --brief <file>` to resolve a Profile and generate a display name. Start one Worker with `posse start --brief <file> [--name <short>] [--profile <name>] [--queue]`; `after: [t12:landed, t14:accepted]` records typed local prerequisites, and `--queue` admits at capacity without resources. Inspect waits with `posse show`; cancel a queued Task with `posse teardown`. The optional name is display-only, and Sandbox-backed Tasks use Task-ID-bound branches. Use `posse relaunch <task> [--profile <name>]` to resume an interrupted Worker or move it to another Profile.\n")
 	if project.IsDirectory() {
 		text.WriteString("- Do not create or dispatch a Brief from this legacy Directory Project. Register a Git repository with `posse project add` to use Posse.\n")
@@ -98,7 +110,7 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 		} else {
 			text.WriteString("- A green, mergeable PR merges even when it is behind `origin/<target>`; do not ask its Worker to merge the target. A `pr_conflict` means the PR head conflicts with its frozen target; Posse itself queues the done or merging Worker an instruction to merge `origin/<target>` into the Task branch, resolve conflicts, republish through the Task's delivery mode and report done. Do not send a duplicate merge-target instruction.")
 		}
-		text.WriteString(" Never rebase a pushed branch. Done and merging Change Tasks accept follow-up instructions through `posse send <task> <message>`; delivery returns them to working, and a merging Task can receive it before those Notices. For `pr_checks_failed` or `pr_changes_requested`, send the Worker a fix instruction. After the Worker's next done Signal, run `posse merge` again. Repository PR publication uses `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]`; workspace PRs add `--repo <member>`. Verification lists commands and results; proof uses screenshots/images for UI changes or test/log evidence otherwise; risk includes rollback details.\n")
+		text.WriteString(" Never rebase a pushed branch. Done and merging Change Tasks accept follow-up instructions through `posse send <task> <message>`; delivery returns them to working, and a merging Task can receive it before those Notices. For `pr_checks_failed` or `pr_changes_requested`, first triage it yourself as the PR's steward: `posse pr inspect <task>` shows the current head, failed checks with their run ids and recent steward operations. Rerun an infrastructure or flaky failure with `posse pr rerun <task> --run <id>` (`--job <id>` on GitLab), answer a reviewer question with `posse pr reply <task> --body <text>`, and restore Posse-owned PR metadata with `posse pr refresh <task>`; none of these wakes the Worker. Send the Worker a fix instruction when the code must change. When a steward command reports `forge_outcome_unknown`, run the same command again; Posse checks whether the earlier attempt took effect before acting. Stewardship never grants merge, workflow or secret authority. After the Worker's next done Signal, run `posse merge` again. Repository PR publication uses `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]`; workspace PRs add `--repo <member>`. Verification lists commands and results; proof uses screenshots/images for UI changes or test/log evidence otherwise; risk includes rollback details.\n")
 		text.WriteString("- For `merge_ready`, follow the Project's Autonomy: with `autonomy.merge=ask`, review `posse decisions`, ask the User, then record their answer with `posse decide <id> <option> --user-approved \"<User's words>\"`. A `decision_answered` Notice tells you to carry out the chosen action. For a merge answer, run `posse merge <task> --execute --user-approved \"<User's words>\"`; under `autonomy.merge=auto`, merge with `posse merge <task> --execute`.\n")
 		text.WriteString("- For answered recovery or review Decisions, run `posse apply <decision>` to relaunch or discard with the recorded User quote, or queue the chosen review response. For an answered `orphan` Decision, `posse apply <decision>` discards its saved branch or prints the `posse start --from-orphan <decision>` command to start a new Change Task. For an answered `pr_closed` Decision, it reopens the PR and relaunches its Worker or tears the Task down with the recorded User quote. Never perform these actions before the User answers.\n")
 		text.WriteString("- For a Worker question, run `posse ask <task> \"<question>\" --option <choice> --option <choice>`, put it to the User and record the answer with `posse decide`. For failed or lost Tasks and review findings under `autonomy.review=ask`, use `posse decisions` to present the recorded options. Never choose a Decision's answer yourself.\n")
