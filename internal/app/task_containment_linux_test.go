@@ -759,50 +759,17 @@ func TestTaskProcessStatExitedReadsStateAndExitingFlag(t *testing.T) {
 func TestTaskProcessLeftContainmentTreatsExitingProcessAsGone(t *testing.T) {
 	root := t.TempDir()
 	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
-	exiting := exec.Command("python3", "-c", `import ctypes, platform, sys, threading, time
-exit_syscall = {"x86_64": 60, "aarch64": 93}[platform.machine()]
-threading.Thread(target=time.sleep, args=(3600,), daemon=True).start()
-print("ready", flush=True)
-sys.stdin.readline()
-ctypes.CDLL(None).syscall(exit_syscall, 0)
-`)
+	exiting := exec.Command("python3")
 	exiting.Dir = root
 	exiting.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ready"), 0)
-	stdin, err := exiting.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := exiting.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := exiting.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = exiting.Process.Kill()
-		_ = exiting.Wait()
-	})
-	if _, err := io.ReadFull(stdout, make([]byte, len("ready\n"))); err != nil {
-		t.Fatalf("Task-marked process did not start: %v", err)
-	}
+	exitLeader := startZombieLeaderTestProcess(t, exiting)
 	pid := exiting.Process.Pid
 	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
 	roots := []ownedProcessRoot{{path: root}}
 	if !taskContainsProcess(pid, task, roots) || taskProcessLeftContainment(pid, task, roots) {
 		t.Fatal("running Task process was not contained")
 	}
-	if _, err := stdin.Write([]byte("\n")); err != nil {
-		t.Fatal(err)
-	}
-	// The leader stays a zombie while its other thread runs, so waiting for it
-	// is not a race against a closing window.
-	if !waitForTaskContainmentCondition(5*time.Second, func() bool {
-		zombie, err := sandboxProcessIsZombie(pid)
-		return err == nil && zombie
-	}) {
-		t.Fatal("Task process leader did not exit")
-	}
+	exitLeader()
 	if processHasTaskMarker(pid, marker) || taskContainsProcess(pid, task, roots) {
 		t.Fatal("exited leader still reads as contained")
 	}
@@ -812,6 +779,119 @@ ctypes.CDLL(None).syscall(exit_syscall, 0)
 	owned, err := taskProcessHasOwnershipProof(pid, task, roots, newSandboxProcessAuthorization())
 	if err != nil || !owned {
 		t.Fatalf("exited Task process lost its ownership proof: owned=%v err=%v", owned, err)
+	}
+}
+
+// startZombieLeaderTestProcess starts command as a Python process whose thread
+// group leader can exit while a second thread keeps running. The returned
+// function makes the leader exit and waits until it is a zombie. The leader
+// then holds its PID without an environment or executable image until the
+// group ends, as leaked Task processes do.
+func startZombieLeaderTestProcess(t *testing.T, command *exec.Cmd) func() {
+	t.Helper()
+	command.Args = append(command.Args, "-c", `import ctypes, platform, sys, threading, time
+exit_syscall = {"x86_64": 60, "aarch64": 93}[platform.machine()]
+threading.Thread(target=time.sleep, args=(3600,), daemon=True).start()
+print("ready", flush=True)
+sys.stdin.readline()
+ctypes.CDLL(None).syscall(exit_syscall, 0)
+`)
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	})
+	if _, err := io.ReadFull(stdout, make([]byte, len("ready\n"))); err != nil {
+		t.Fatalf("zombie-leader test process did not start: %v", err)
+	}
+	pid := command.Process.Pid
+	return func() {
+		t.Helper()
+		if _, err := stdin.Write([]byte("\n")); err != nil {
+			t.Fatal(err)
+		}
+		// The leader stays a zombie while its other thread runs, so waiting for
+		// it is not a race against a closing window.
+		if !waitForTaskContainmentCondition(5*time.Second, func() bool {
+			zombie, err := sandboxProcessIsZombie(pid)
+			return err == nil && zombie
+		}) {
+			t.Fatal("test process leader did not exit")
+		}
+		if alive, err := processThreadGroupHasLiveThread(pid); err != nil || !alive {
+			t.Fatalf("zombie leader %d has no live thread: alive=%t err=%v", pid, alive, err)
+		}
+	}
+}
+
+func processThreadGroupHasLiveThread(pid int) (bool, error) {
+	threads, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "task"))
+	if err != nil {
+		return false, err
+	}
+	for _, thread := range threads {
+		status, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "task", thread.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(status)[strings.LastIndexByte(string(status), ')')+1:])
+		if len(fields) > 0 && fields[0] != "Z" && fields[0] != "X" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func TestSandboxProcessHandleOpensZombieLeaderWithLiveThread(t *testing.T) {
+	command := exec.Command("python3")
+	exitLeader := startZombieLeaderTestProcess(t, command)
+	pid := command.Process.Pid
+	running, err := sandboxProcessExecutableIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitLeader()
+	handle, err := openSandboxProcessHandle(pid)
+	if err != nil {
+		t.Fatalf("open handle for zombie leader with a live thread: %v", err)
+	}
+	defer handle.Close()
+	if handle.ExecutableIdentity() != running {
+		t.Fatalf("zombie leader executable identity = %q, want the running image %q", handle.ExecutableIdentity(), running)
+	}
+	if alive, err := handle.Alive(); err != nil || !alive {
+		t.Fatalf("zombie leader with a live thread reads as gone: alive=%t err=%v", alive, err)
+	}
+}
+
+func TestSandboxProcessExecutableIdentityStillFailsForReapableZombie(t *testing.T) {
+	command := exec.Command("sleep", "300")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	t.Cleanup(func() { _ = command.Wait() })
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool {
+		zombie, err := sandboxProcessIsZombie(pid)
+		return err == nil && zombie
+	}) {
+		t.Fatal("killed process did not become a zombie")
+	}
+	if identity, err := sandboxProcessExecutableIdentity(pid); err == nil {
+		t.Fatalf("zombie without live threads reported executable identity %q", identity)
 	}
 }
 

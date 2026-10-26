@@ -3,10 +3,19 @@
 package app
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func TestTaskCgroupMemberDoesNotNeedTaskMarker(t *testing.T) {
@@ -23,4 +32,71 @@ func TestTaskCgroupMemberDoesNotNeedTaskMarker(t *testing.T) {
 	if !taskCgroupMemberBelongsToTask(pid, 0, cgroupPath) {
 		t.Fatalf("process %d belongs to cgroup %s but was rejected without marker %q", pid, cgroupPath, marker)
 	}
+}
+
+// A leaked Task process whose leader exited while another thread runs keeps
+// its zombie leader in the Task cgroup with no executable image to inspect.
+func TestStopTaskCgroupStopsZombieLeaderWithLiveThread(t *testing.T) {
+	task, cgroupFD := createTestTaskCgroup(t)
+	command := exec.Command("python3")
+	command.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
+	exitLeader := startZombieLeaderTestProcess(t, command)
+	pid := command.Process.Pid
+	if !processInCgroup(pid, task.ContainmentPath) {
+		t.Fatalf("test process %d did not start in Task cgroup %s", pid, task.ContainmentPath)
+	}
+	exitLeader()
+
+	if err := stopTaskCgroupWithGuard(context.Background(), task, nil, nil, 0); err != nil {
+		t.Fatalf("stop Task cgroup with a zombie leader: %v", err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- command.Wait() }()
+	select {
+	case <-waitErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("zombie leader's thread group survived Task cgroup shutdown")
+	}
+	if _, err := os.Stat(task.ContainmentPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("emptied Task cgroup was not removed: %v", err)
+	}
+}
+
+// createTestTaskCgroup creates an empty Task cgroup under the user's delegated
+// app.slice and returns its Task with an open directory descriptor for it.
+func createTestTaskCgroup(t *testing.T) (store.Task, int) {
+	t.Helper()
+	if !taskCgroupsAvailable(context.Background()) {
+		t.Skip("delegated user cgroups are unavailable")
+	}
+	base, err := userAppSlicePath(context.Background())
+	if err != nil {
+		t.Skipf("user app.slice is unavailable: %v", err)
+	}
+	random := make([]byte, 24)
+	if _, err := rand.Read(random); err != nil {
+		t.Fatal(err)
+	}
+	task := store.Task{ID: 1 << 30, ContainmentMode: "cgroup", ContainmentMarker: hex.EncodeToString(random)}
+	task.ContainmentPath = filepath.Join(base, "posse-task-t1073741824-"+task.ContainmentMarker[:12]+".scope")
+	if err := validateTaskCgroupPath(task.ContainmentPath, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(task.ContainmentPath, 0o755); err != nil {
+		t.Skipf("cannot create a Task cgroup: %v", err)
+	}
+	directory, err := os.Open(task.ContainmentPath)
+	if err != nil {
+		_ = os.Remove(task.ContainmentPath)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = directory.Close()
+		_ = os.WriteFile(filepath.Join(task.ContainmentPath, "cgroup.kill"), []byte("1"), 0)
+		waitForTaskContainmentCondition(5*time.Second, func() bool {
+			err := os.Remove(task.ContainmentPath)
+			return err == nil || errors.Is(err, os.ErrNotExist)
+		})
+	})
+	return task, int(directory.Fd())
 }
