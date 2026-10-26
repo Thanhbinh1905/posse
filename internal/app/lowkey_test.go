@@ -38,7 +38,7 @@ func TestNoticeWakeUsesCanonicalTaskID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tab := workerTabLabel(task); tab != "login-cleanup" {
+	if tab := workerTabLabel(task); tab != "login-cleanup-"+taskIDString(task.Seq) {
 		t.Fatalf("legacy branch tab = %q", tab)
 	}
 	if metadata := workerDisplayMetadata(task, "", ""); metadata["display_agent"] != nil || metadata["clear_display_agent"] != true {

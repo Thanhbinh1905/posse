@@ -57,8 +57,8 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 			got[call.Params["tab_id"].(string)] = call.Params["label"].(string)
 		}
 	}
-	want := map[string]string{"t1": "Lead", "t3": "second-worker", "t4": "first-worker"}
-	wantRows := map[string]string{"p1": "Lead:shop", "p3": "├─ second-worker", "p4": "└─ first-worker"}
+	want := map[string]string{"t1": "Lead", "t3": "second-worker-t2", "t4": "first-worker-t1"}
+	wantRows := map[string]string{"p1": "Lead:shop", "p3": "├─ second-worker-t2", "p4": "└─ first-worker-t1"}
 	for _, call := range fake.Calls {
 		if call.Method != "pane.report_metadata" {
 			continue
