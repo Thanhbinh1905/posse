@@ -128,7 +128,7 @@ func (s *Service) commands() *axi.Command {
 	root := &axi.Command{Usage: "$ [--full] [--json] [--format human|toon|json]", Summary: "A local-first Lead and Worker CLI for Herdr. `posse --full` prints the full Project dashboard."}
 	root.Handler = s.home
 	root.Subcommands = []*axi.Command{
-		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes]", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead.", Handler: s.up},
+		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes] | up --all", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead; --all restores the Lead, Workers and Watch of every Project that is not down.", Handler: s.up},
 		{Name: "down", Usage: "$ down", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
 		{Name: "knowledge", Summary: "Inspect and curate opt-in User and Project knowledge.", Subcommands: []*axi.Command{
@@ -215,7 +215,8 @@ func (s *Service) commands() *axi.Command {
 		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-watches]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},
-		{Name: "recover", Usage: "$ recover [--all|--rebuild]", Summary: "Recover Workers or rebuild Projects, Tasks, Sandboxes, Decisions and Notices from snapshots.", Handler: s.recover},
+		{Name: "recover", Usage: "$ recover --rebuild", Summary: "Rebuild Projects, Tasks, Sandboxes, Decisions and Notices from snapshots.", Handler: s.recover},
+		{Name: "_herdr_started", Summary: "Record a Herdr restart and tell the User how to restore.", Hidden: true, Handler: s.herdrStarted},
 		{Name: "_context", Summary: "Print Lead or Worker context inside a posse pane.", Hidden: true, Handler: s.context},
 		{Name: "doctor", Usage: "$ doctor [--full] [--verbose] [--json]", Summary: "Check Herdr, plugin, config, database and merging tools; --verbose expands successful checks.", Handler: s.doctor},
 	}
@@ -332,11 +333,12 @@ func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) 
 	return project, err
 }
 
-// reconcileProject recovers a real Herdr restart before proceeding with a
-// generation-mismatched snapshot. A delayed event from the old server instead
-// retries against the current server, without rolling pane ids backward.
-// Only userStart (`posse up`) may recover a Project whose recovery is held;
-// other callers get errRecoveryHeld and must not reconcile its stale panes.
+// reconcileProject handles a real Herdr restart or group close before
+// proceeding with a generation-mismatched snapshot. A delayed event from the
+// old server instead retries against the current server, without rolling pane
+// ids backward. Only userStart (`posse up`) restores the stopped agents; other
+// callers record the episode, get errRecoveryHeld and must not reconcile the
+// stale panes (ADR 0035).
 func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, userStart bool) (runtime.RunResult, error) {
 	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
 		return runtime.RunResult{}, err
@@ -348,8 +350,8 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	if !project.IsWorkspace() {
 		if snapshot, err := s.snapshot(ctx); err == nil {
 			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && workerGroupClosed(snapshot, project, tasks) {
-				if !userStart && recoveryHeld(project, cfg) {
-					return runtime.RunResult{}, errRecoveryHeld
+				if !userStart {
+					return runtime.RunResult{}, s.holdRestore(ctx, db, project, snapshot.ServerStartedAt+"/group/"+project.HerdrWorkspaceID+"/"+project.LeadPaneID)
 				}
 				home, err := s.homePath()
 				if err != nil {
@@ -390,14 +392,18 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		}
 	}
 	run := func() (runtime.RunResult, error) {
-		return runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		if err == nil && !result.GenerationMismatch {
+			err = observeLeadAgent(ctx, db, project, result.Snapshot)
+		}
+		return result, err
 	}
 	result, err := run()
 	if err != nil {
 		return result, err
 	}
 	if !result.GenerationMismatch {
-		if userStart || !recoveryHeld(project, cfg) {
+		if userStart {
 			pendingGroupRecovery, err := pendingGroupRecoveryDue(ctx, db, project.ID)
 			if err != nil {
 				return result, err
@@ -434,8 +440,8 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	}
 	deferredRecovery := false
 	if current.ServerStartedAt != "" && recorded != "" && current.ServerStartedAt != recorded {
-		if !userStart && recoveryHeld(project, cfg) {
-			return result, errRecoveryHeld
+		if !userStart {
+			return result, s.holdRestore(ctx, db, project, current.ServerStartedAt)
 		}
 		home, err := s.homePath()
 		if err != nil {
@@ -653,6 +659,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 					if runErr == nil && result.GenerationMismatch {
 						runErr = errRecoveryDeferred
+					}
+					if runErr == nil {
+						runErr = observeLeadAgent(ctx, db, project, result.Snapshot)
 					}
 					// A Worker stuck at its quota message may emit no further
 					// events, and the Lead may share its exhausted account, so
@@ -935,7 +944,7 @@ func herdrError(err error) error {
 			message = apiError.Error()
 		}
 		if code == "pane_not_found" || code == "agent_pane_not_found" {
-			return axi.Failure(code, message, true, "The pane may have closed during this command. Run `posse recover --all`; then inspect the Task and relaunch it if it still holds a Sandbox")
+			return axi.Failure(code, message, true, "The pane may have closed during this command. Run `posse up --all`; then inspect the Task and relaunch it if it still holds a Sandbox")
 		}
 		return axi.Failure(code, message, code == "herdr_unavailable", "Run `posse doctor` to inspect Herdr connectivity")
 	}

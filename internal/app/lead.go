@@ -21,6 +21,7 @@ type upArgs struct {
 	Kind        string
 	Replace     bool
 	Yes         bool
+	All         bool
 	Positionals []string
 }
 
@@ -57,6 +58,11 @@ func parseUpArgs(args []string) (upArgs, error) {
 				return upArgs{}, axi.Usage("--yes does not take a value")
 			}
 			result.Yes = true
+		case "all":
+			if hasValue {
+				return upArgs{}, axi.Usage("--all does not take a value")
+			}
+			result.All = true
 		default:
 			if name == "" {
 				return upArgs{}, axi.Usage("up requires an agent kind flag such as --claude")
@@ -187,6 +193,12 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("up does not take positional arguments")
 	}
+	if parsed.All {
+		if parsed.Kind != "" || parsed.Name != "" || parsed.Replace || parsed.Yes {
+			return axi.Usage("up --all takes no other flags; each Lead restores with its recorded agent kind")
+		}
+		return s.restoreAll(ctx)
+	}
 	if s.herdrContext == nil || !s.herdrContext() {
 		return axi.Failure("not_in_herdr", "posse up must run from a Herdr pane", false, "Open a shell pane in Herdr and run `posse up`")
 	}
@@ -241,6 +253,16 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	kind := parsed.Kind
 	kindSource := "flag"
+	recorded := store.LeadAgent{}
+	if registered {
+		if recorded, err = db.ProjectLeadAgent(ctx.Context, project.ID); err != nil {
+			return err
+		}
+	}
+	if _, configured := cfg.Kinds[recorded.Kind]; kind == "" && configured {
+		kindSource = "recorded Lead"
+		kind = recorded.Kind
+	}
 	if kind == "" {
 		kindSource = "lead.kind"
 		kind = cfg.Lead.Kind
@@ -327,6 +349,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		runtimeResult, err := s.reconcileProject(ctx.Context, db, project, cfg, true)
 		if err != nil {
 			return herdrError(err)
+		}
+		if _, err := db.AckUndeliveredNotices(ctx.Context, project.ID, "restore_needed", currentTime()); err != nil {
+			return err
 		}
 		snapshot = runtimeResult.Snapshot
 		if err := s.reconcileTaskPanes(ctx.Context, db, project, snapshot); err != nil {
@@ -444,12 +469,22 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	// A Lead that stopped with Herdr resumes its conversation; a replaced
+	// Lead or another kind starts a new one.
+	session := ""
+	if liveLead == nil && kind == recorded.Kind {
+		session = recorded.Session
+	}
+	launch = launch.withResume(cfg.Kinds[kind], session)
 	leadLaunch, err := db.NextLeadLaunch(ctx.Context, project.ID)
 	if err != nil {
 		return err
 	}
 	agentName := leadAgentName(name, leadLaunch)
 	if err := db.SetProjectLead(ctx.Context, project.ID, callerWorkspaceID, leadPane.PaneID, label); err != nil {
+		return err
+	}
+	if err := db.SetProjectLeadAgent(ctx.Context, project.ID, store.LeadAgent{Kind: kind, Session: session}); err != nil {
 		return err
 	}
 	project, err = db.ProjectByID(ctx.Context, project.ID)

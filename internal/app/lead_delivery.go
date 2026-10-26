@@ -107,6 +107,8 @@ type leadLaunch struct {
 	// StartsBusy is true when Args carry the agent's first prompt, so the
 	// agent is working as soon as it launches.
 	StartsBusy bool
+	// OpeningPromptArg is true when the last of Args is that first prompt.
+	OpeningPromptArg bool
 }
 
 func (s *Service) waitLeadStarted(ctx context.Context, paneID string, launch leadLaunch) error {
@@ -231,6 +233,7 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	} else if noticeDelivery(kindConfig) == config.NoticeDeliveryCodexQueue {
 		launch.Args = append(launch.Args, codexOpeningPrompt)
 		launch.StartsBusy = true
+		launch.OpeningPromptArg = true
 	}
 	return launch, nil
 }

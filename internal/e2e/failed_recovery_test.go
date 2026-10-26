@@ -15,7 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
+func TestFailedRestoreIsBoundedAndPluginEventsStartNothing(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "failed-recovery")
 	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
@@ -62,7 +62,17 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 	h.session.promptGate = gate
 	h.session.mu.Unlock()
 	f.env = setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, f.project.LeadPaneID))
-	command := exec.Command(h.binary, "_ingest")
+	// A Herdr restart seen by plugin events and the startup hook relaunches
+	// nothing (ADR 0035).
+	for _, args := range [][]string{{"_ingest"}, {"_herdr_started"}, {"list"}} {
+		if code, out := f.run(t, "", args...); code != 0 {
+			t.Fatalf("%v after a Herdr restart: %d %s", args, code, out)
+		}
+	}
+	if got := workerStarts(); got != 0 {
+		t.Fatalf("plugin events relaunched %d Workers after a Herdr restart", got)
+	}
+	command := exec.Command(h.binary, "up", "--all")
 	command.Dir, command.Env = f.repo, f.env
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
@@ -92,15 +102,16 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("ingest: %v %s", err, output.String())
+			t.Fatalf("up --all: %v %s", err, output.String())
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("recovery did not finish")
 	}
 	for i := 0; i < 12; i++ {
-		code, out := f.run(t, "", "_ingest")
-		if code != 0 || !strings.Contains(out, "ingested: true") {
-			t.Fatalf("event %d: %d %s", i, code, out)
+		time.Sleep(20 * time.Millisecond)
+		code, out := f.run(t, "", "up", "--all")
+		if code != 0 || !strings.Contains(out, "state: ") {
+			t.Fatalf("restore %d: %d %s", i, code, out)
 		}
 	}
 	after := readTask()
@@ -132,9 +143,12 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 		if code, out := f.run(t, "", "_ingest"); code != 0 {
 			t.Fatalf("late event: %d %s", code, out)
 		}
+		if code, out := f.run(t, "", "up", "--all"); code != 0 {
+			t.Fatalf("late restore: %d %s", code, out)
+		}
 	}
 	if workerStarts() != 2 || readTask().Launches != after.Launches {
-		t.Fatal("late events re-armed exhausted recovery")
+		t.Fatal("late events or restores re-armed exhausted recovery")
 	}
 	if err := f.openDB(t, func(db *store.DB) error {
 		return db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='recovery_failed'`, after.ID).Scan(&notices)
@@ -142,7 +156,7 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 		t.Fatalf("exhaustion Notice count=%d err=%v", notices, err)
 	}
 	t.Logf("configured bound=2: launches=%d, Worker process groups=%d, exhaustion Notices=%d; inspection succeeded during active prompt-wait", after.Launches-before.Launches, workerStarts(), notices)
-	// Explicit successful relaunch is the escape hatch, not a plugin event.
+	// Explicit successful relaunch is the escape hatch, not another restore.
 	h.session.mu.Lock()
 	h.session.promptError, h.session.promptGate = nil, nil
 	h.session.mu.Unlock()
@@ -158,7 +172,7 @@ func TestFailedRecoveryIsBoundedUnderPluginEvents(t *testing.T) {
 	}
 }
 
-func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
+func TestRestorePreservesLateFailedSignal(t *testing.T) {
 	h := newIntentCLIHarness(t)
 	f := h.newProject(t, "late-failed")
 	if _, err := f.addChangeTask(t, store.StateWorking); err != nil {
@@ -176,7 +190,7 @@ func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 	h.session.promptGate = gate
 	h.session.mu.Unlock()
 	f.env = setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, f.project.LeadPaneID))
-	command := exec.Command(h.binary, "_ingest")
+	command := exec.Command(h.binary, "up", "--all")
 	command.Dir, command.Env = f.repo, f.env
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
@@ -196,7 +210,7 @@ func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("ingest: %v %s", err, output.String())
+			t.Fatalf("up --all: %v %s", err, output.String())
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("recovery did not finish")
@@ -204,7 +218,7 @@ func TestAutomaticRecoveryPreservesLateFailedSignal(t *testing.T) {
 	if err := f.openDB(t, func(db *store.DB) error {
 		task, err := db.Task(context.Background(), f.project.ID, "t1")
 		if err == nil && task.State != store.StateFailed {
-			return fmt.Errorf("automatic recovery revived a failed Worker: %s", task.State)
+			return fmt.Errorf("restore revived a failed Worker: %s", task.State)
 		}
 		return err
 	}); err != nil {
@@ -230,8 +244,8 @@ func TestExplicitRelaunchSettlesPendingRecovery(t *testing.T) {
 	startsBefore := len(h.session.agentStartNames)
 	h.session.mu.Unlock()
 	f.env = setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, f.project.LeadPaneID))
-	if code, out := f.run(t, "", "_ingest"); code != 0 {
-		t.Fatalf("recovery: %d %s", code, out)
+	if code, out := f.run(t, "", "up", "--all"); code != 0 {
+		t.Fatalf("restore: %d %s", code, out)
 	}
 	h.session.mu.Lock()
 	h.session.promptError = nil
@@ -244,6 +258,9 @@ func TestExplicitRelaunchSettlesPendingRecovery(t *testing.T) {
 			t.Fatalf("late event: %d %s", code, out)
 		}
 	}
+	if code, out := f.run(t, "", "up", "--all"); code != 0 {
+		t.Fatalf("late restore: %d %s", code, out)
+	}
 	h.session.mu.Lock()
 	starts := 0
 	for _, name := range h.session.agentStartNames[startsBefore:] {
@@ -253,7 +270,7 @@ func TestExplicitRelaunchSettlesPendingRecovery(t *testing.T) {
 	}
 	h.session.mu.Unlock()
 	if starts != 2 {
-		t.Fatalf("pending generation re-triggered recovery after successful explicit relaunch: starts=%d, want one failed automatic attempt plus one explicit launch", starts)
+		t.Fatalf("pending generation re-triggered recovery after successful explicit relaunch: starts=%d, want one failed restore attempt plus one explicit launch", starts)
 	}
 }
 
@@ -297,7 +314,7 @@ func TestRecoveryRepairsWorkersFromAnInterruptedGroupEpisode(t *testing.T) {
 	delete(h.session.panes, before.PaneID)
 	delete(h.session.workspaces, before.HerdrWorkspaceID)
 	h.session.mu.Unlock()
-	code, out := f.run(t, "", "recover", "--all")
+	code, out := f.run(t, "", "up", "--all")
 	t.Logf("group repair: %d %s", code, out)
 	if code != 0 {
 		t.Fatalf("repair: %d %s", code, out)
@@ -369,7 +386,7 @@ func TestRecoveryRetriesMissingWorkerMarkedRecoveredInSameGroupEpisode(t *testin
 		}
 	}
 	h.session.mu.Unlock()
-	if code, out := f.run(t, "", "recover", "--all"); code != 0 {
+	if code, out := f.run(t, "", "up", "--all"); code != 0 {
 		t.Fatalf("same-generation group recovery: %d %s", code, out)
 	}
 	after := readTask()
@@ -413,12 +430,15 @@ func TestRecoveryCrashConsumesFinalAttempt(t *testing.T) {
 	startsBefore := len(h.session.agentStartNames)
 	h.session.mu.Unlock()
 	f.env = setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, f.project.LeadPaneID))
-	if code, out := f.run(t, "relaunch:after:agent.start", "_ingest"); code != 86 {
-		t.Fatalf("recovery did not crash after spawn: %d %s", code, out)
+	if code, out := f.run(t, "relaunch:after:agent.start", "up", "--all"); code != 86 {
+		t.Fatalf("restore did not crash after spawn: %d %s", code, out)
 	}
 	for i := 0; i < 5; i++ {
 		if code, out := f.run(t, "", "_ingest"); code != 0 {
 			t.Fatalf("late event: %d %s", code, out)
+		}
+		if code, out := f.run(t, "", "up", "--all"); code != 0 {
+			t.Fatalf("late restore: %d %s", code, out)
 		}
 	}
 	var state store.TaskRecovery

@@ -436,3 +436,52 @@ func TestWatchRecoveryPersistsAcrossStoreReopen(t *testing.T) {
 		t.Fatalf("reset Watch recovery = %#v, want empty state", got)
 	}
 }
+
+func TestObserveProjectLeadAgentWritesOnlyChanges(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ observed, want LeadAgent }{
+		{LeadAgent{Kind: "claude", Session: "s1"}, LeadAgent{Kind: "claude", Session: "s1"}},
+		{LeadAgent{Kind: "claude"}, LeadAgent{Kind: "claude", Session: "s1"}},
+		{LeadAgent{Kind: "claude", Session: "s2"}, LeadAgent{Kind: "claude", Session: "s2"}},
+		{LeadAgent{Kind: "pi"}, LeadAgent{Kind: "pi"}},
+	} {
+		if err := db.ObserveProjectLeadAgent(ctx, project.ID, step.observed); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := db.ProjectLeadAgent(ctx, project.ID); err != nil || got != step.want {
+			t.Fatalf("after observing %#v: recorded %#v, want %#v (%v)", step.observed, got, step.want, err)
+		}
+	}
+	// A steady-state reconcile must not need the write lock.
+	writer, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(ctx, `ROLLBACK`)
+	started := time.Now()
+	if err := db.ObserveProjectLeadAgent(ctx, project.ID, LeadAgent{Kind: "pi"}); err != nil {
+		t.Fatalf("unchanged observation waited for the write lock: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("unchanged observation took %s while another writer held the lock", elapsed)
+	}
+}

@@ -116,9 +116,6 @@ while IFS= read -r line; do :; done
 		os.MkdirAll(filepath.Join(root, dir), 0700)
 	}
 	config := "[lead]\nkind = \"claude\"\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\n[profiles.test]\nkind = \"claude\"\n[dispatch.default]\nuse = \"test\"\n"
-	if mode == "failed-discard-ordering" {
-		config = strings.Replace(config, "auto_teardown = \"never\"\n", "auto_teardown = \"never\"\nauto_recover = false\n", 1)
-	}
 	os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config), 0600)
 	repo := filepath.Join(root, "repo")
 	os.MkdirAll(repo, 0700)

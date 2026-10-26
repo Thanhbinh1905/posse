@@ -45,9 +45,8 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.stall_after", Type: TypeDuration, Default: "20m", Meaning: "Time without output or worktree progress before a Worker is stalled."},
 	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Worker may be idle without a Signal before a Notice is created."},
 	{Key: "defaults.auto_teardown", Type: TypeString, Allowed: []string{"finished", "merged", "never"}, Default: "finished", Meaning: "Whether completed Tasks are automatically Teardown after merging or Notice acknowledgement."},
-	{Key: "defaults.auto_recover", Type: TypeBoolean, Default: true, Meaning: "Whether plugin events and the Herdr startup hook restart the Lead and Workers after a Herdr restart or a closed Lead workspace; when false, `posse up` recovers them."},
-	{Key: "defaults.recovery_attempts", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic relaunch attempts per Worker recovery episode; exhaustion requires explicit relaunch."},
-	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed automatic Worker relaunches; doubles up to one minute."},
+	{Key: "defaults.recovery_attempts", Type: TypeInteger, Default: 3, Meaning: "Maximum relaunch attempts per Worker during one `posse up --all` restore episode; exhaustion requires explicit relaunch."},
+	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed Worker relaunches during a restore; doubles up to one minute."},
 	{Key: "defaults.merge_mode", Type: TypeString, Allowed: []string{"local", "pr"}, Default: "pr", Meaning: "How Change Task changes are Merged."},
 	{Key: "defaults.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for Change Tasks; empty uses each repository's default branch."},
 	{Key: "defaults.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Forge for this Project; auto detects from each repository remote."},
@@ -348,7 +347,11 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 			}
 			key := canonicalSchemaKey(prefix)
 			if _, found := Lookup(key); !found {
-				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"})
+				reason := "unknown configuration key"
+				if key == "defaults.auto_recover" {
+					reason = autoRecoverRemoved
+				}
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: reason})
 				return
 			}
 			if err := ValidateSetting(key, value, projectFile); err != nil {

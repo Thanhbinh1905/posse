@@ -302,7 +302,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatalf("setup did not link the isolated plugin: %s", output)
 	}
 	plugin, err := os.ReadFile(filepath.Join(root, "posse", "plugin", "herdr-plugin.toml"))
-	if err != nil || !strings.Contains(string(plugin), `id = "posse.herdr"`) || !strings.Contains(string(plugin), stableBinary) || !strings.Contains(string(plugin), `"recover", "--all"`) {
+	if err != nil || !strings.Contains(string(plugin), `id = "posse.herdr"`) || !strings.Contains(string(plugin), stableBinary) || !strings.Contains(string(plugin), `"_herdr_started"`) {
 		t.Fatalf("embedded plugin manifest is incomplete: %s, %v", plugin, err)
 	}
 	for _, fixture := range []struct {
@@ -758,7 +758,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			}
 		}
 	}
-	runPosse(t, posseBinary, repo, leadEnv, "list")
+	runPosse(t, posseBinary, repo, leadEnv, "up", "--all")
 	if !waitForCondition(30*time.Second, func() bool {
 		observer, openErr := store.OpenReadOnly(home)
 		if openErr != nil {
@@ -1213,6 +1213,36 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	}) {
 		t.Fatalf("Herdr restart generation did not change: before=%q after=%q", beforeRestart.ServerStartedAt, afterRestart.ServerStartedAt)
 	}
+	// The startup hook only records the restart; nothing relaunches until the
+	// User restores (ADR 0035).
+	if !waitForCondition(30*time.Second, func() bool {
+		noticeDB, openErr := store.OpenReadOnly(home)
+		if openErr != nil {
+			return false
+		}
+		defer noticeDB.Close()
+		notices, noticesErr := noticeDB.Notices(context.Background(), project.ID, false)
+		if noticesErr != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.Kind == "restore_needed" && strings.Contains(notice.Summary, "recovery-worker") && strings.Contains(notice.Summary, "posse up --all") {
+				return true
+			}
+		}
+		return false
+	}) {
+		pluginLogs, _ := client.Run(context.Background(), "plugin", "log", "list", "--plugin", "posse.herdr")
+		t.Fatalf("Herdr startup did not raise a restore_needed Notice: pluginLogs=%s", pluginLogs)
+	}
+	time.Sleep(3 * time.Second)
+	if workerArgsHeld, _ := os.ReadFile(workerArgsLog); strings.Count(string(workerArgsHeld), "start ") != workerStartsBefore {
+		t.Fatalf("Herdr startup relaunched a Worker before the User restored: %s", workerArgsHeld)
+	}
+	if leadArgsHeld, _ := os.ReadFile(leadArgsLog); strings.Count(string(leadArgsHeld), "start ") != leadStartsBefore {
+		t.Fatalf("Herdr startup relaunched the Lead before the User restored: %s", leadArgsHeld)
+	}
+	restoreOutput := runPosse(t, posseBinary, repo, leadEnv, "up", "--all")
 	var restoredTornDownPane *herdr.Pane
 	for index := range afterRestart.Panes {
 		pane := &afterRestart.Panes[index]
@@ -1253,7 +1283,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			recoveryState, recoveryErr = recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
 			return recoveryErr == nil && recoveryState.Status == "pending" && recoveryState.Attempts > 0 && strings.HasPrefix(recoveryState.LastError, "another Herdr workspace already holds this Sandbox")
 		}) {
-			t.Fatalf("startup recovery did not fail closed on the restored torn-down Task workspace: %#v", recoveryState)
+			t.Fatalf("restore did not fail closed on the restored torn-down Task workspace: %#v; up --all=%s", recoveryState, restoreOutput)
 		}
 		if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": restoredTornDownPane.PaneID}); err != nil {
 			t.Fatalf("remove the fixture's restored torn-down Task shell after confirming recovery refused it: %v", err)
@@ -1281,10 +1311,10 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			recovery, recoveryErr := recoveryDB.TaskRecovery(context.Background(), thirdTask.ID)
 			return recoveryErr == nil && recovery.NextAttemptAt <= time.Now().UnixMilli()
 		}) {
-			t.Fatal("startup recovery retry backoff did not elapse after the stale fixture workspace was removed")
+			t.Fatal("restore retry backoff did not elapse after the stale fixture workspace was removed")
 		}
-		if output := runPosse(t, posseBinary, repo, leadEnv, "recover", "--all"); !strings.Contains(output, "restarted: 2") {
-			t.Fatalf("explicit recovery after removing the fixture's stale shell did not restart the Worker and Lead: %s", output)
+		if output := runPosse(t, posseBinary, repo, leadEnv, "up", "--all"); !strings.Contains(output, "state: restored") {
+			t.Fatalf("repeated restore after removing the fixture's stale shell did not restore the Worker and Lead: %s", output)
 		}
 		if leadAlreadyLiveBeforeRestart {
 			recoveryDB, openErr := store.Open(home)
@@ -1303,7 +1333,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			}
 		}
 	}
-	recoveryOutput := "automatic Herdr startup recovery"
+	recoveryOutput := "posse up --all: " + restoreOutput
 	if !waitForCondition(30*time.Second, func() bool {
 		recoveryDB, openErr := store.OpenReadOnly(home)
 		if openErr != nil {
@@ -1359,7 +1389,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 			panes = current.Panes
 		}
 		pluginLogs, pluginLogsErr := client.Run(context.Background(), "plugin", "log", "list", "--plugin", "posse.herdr")
-		t.Fatalf("startup recovery did not finish: generation=%q want=%q recovery=%#v task=%#v taskRecovery=%#v transitions=%s panes=%#v intents=%#v dbErr=%v pluginLogs=%s pluginLogsErr=%v", generation, afterRestart.ServerStartedAt, recovery, task, taskRecovery, transitions, panes, intents, debugErr, pluginLogs, pluginLogsErr)
+		t.Fatalf("restore did not finish: generation=%q want=%q recovery=%#v task=%#v taskRecovery=%#v transitions=%s panes=%#v intents=%#v dbErr=%v pluginLogs=%s pluginLogsErr=%v", generation, afterRestart.ServerStartedAt, recovery, task, taskRecovery, transitions, panes, intents, debugErr, pluginLogs, pluginLogsErr)
 	}
 	db, err = store.Open(home)
 	if err != nil {

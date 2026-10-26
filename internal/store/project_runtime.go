@@ -67,3 +67,47 @@ func (db *DB) SetProjectServerStartedAt(ctx context.Context, projectID int64, st
 	_, err := db.ExecContext(ctx, `INSERT INTO project_runtime(project_id,server_started_at) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET server_started_at=excluded.server_started_at`, projectID, startedAt)
 	return err
 }
+
+// LeadAgent is the agent kind and session of the Project's last known Lead.
+type LeadAgent struct {
+	Kind    string
+	Session string
+}
+
+func (db *DB) ProjectLeadAgent(ctx context.Context, projectID int64) (LeadAgent, error) {
+	var lead LeadAgent
+	err := db.QueryRowContext(ctx, `SELECT lead_agent_kind,lead_agent_session FROM project_runtime WHERE project_id=?`, projectID).Scan(&lead.Kind, &lead.Session)
+	if IsNotFound(err) {
+		return LeadAgent{}, nil
+	}
+	return lead, err
+}
+
+// SetProjectLeadAgent records the Lead a launch starts, replacing any earlier
+// session.
+func (db *DB) SetProjectLeadAgent(ctx context.Context, projectID int64, lead LeadAgent) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO project_runtime(project_id,server_started_at,lead_agent_kind,lead_agent_session) VALUES(?,'',?,?) ON CONFLICT(project_id) DO UPDATE SET lead_agent_kind=excluded.lead_agent_kind,lead_agent_session=excluded.lead_agent_session`, projectID, lead.Kind, lead.Session)
+	return err
+}
+
+// ObserveProjectLeadAgent records the Lead seen running in Herdr. A missing
+// session keeps the recorded one for the same kind, since harnesses report
+// their session only after startup. Every reconcile observes the Lead, so an
+// unchanged observation only reads: an upsert takes the write lock even when
+// its WHERE skips the update.
+func (db *DB) ObserveProjectLeadAgent(ctx context.Context, projectID int64, lead LeadAgent) error {
+	if lead.Kind == "" {
+		return nil
+	}
+	recorded, err := db.ProjectLeadAgent(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if recorded.Kind == lead.Kind && (lead.Session == "" || lead.Session == recorded.Session) {
+		return nil
+	}
+	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(ctx, `INSERT INTO project_runtime(project_id,server_started_at,lead_agent_kind,lead_agent_session) VALUES(?,'',?,?) ON CONFLICT(project_id) DO UPDATE SET lead_agent_session=CASE WHEN excluded.lead_agent_session<>'' OR excluded.lead_agent_kind<>project_runtime.lead_agent_kind THEN excluded.lead_agent_session ELSE project_runtime.lead_agent_session END,lead_agent_kind=excluded.lead_agent_kind WHERE project_runtime.lead_agent_kind<>excluded.lead_agent_kind OR (excluded.lead_agent_session<>'' AND project_runtime.lead_agent_session<>excluded.lead_agent_session)`, projectID, lead.Kind, lead.Session)
+		return err
+	})
+}

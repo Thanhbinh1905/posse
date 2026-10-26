@@ -283,6 +283,8 @@ type ProjectRuntime struct {
 	WatchRetryAt       int64
 	WatchFailedStarts  int64
 	WatchNoticeRaised  int64
+	LeadAgentKind      string
+	LeadAgentSession   string
 }
 
 type ProjectWatchRuntime struct {

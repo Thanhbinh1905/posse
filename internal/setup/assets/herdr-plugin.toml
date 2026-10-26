@@ -26,4 +26,4 @@ on = "pane.focused"
 command = [{{POSSE_BINARY}}, "_ingest"]
 
 [[startup]]
-command = [{{POSSE_BINARY}}, "recover", "--all"]
+command = [{{POSSE_BINARY}}, "_herdr_started"]

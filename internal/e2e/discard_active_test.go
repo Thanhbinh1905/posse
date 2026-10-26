@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -104,11 +105,16 @@ esac
 			break
 		}
 	}
+	// Nothing restarts the Lead until the User restores (ADR 0035).
 	runPosse(t, f.binary, f.repo, f.env, "list")
-	snapshot := f.snapshot(t)
-	lead, found := findLeadInSnapshot(snapshot)
-	if !found {
-		t.Fatal("Lead pane disappeared after Herdr restart")
+	restoreOutput := runPosse(t, f.binary, f.repo, f.env, "up", "--all")
+	var lead herdr.Pane
+	if !waitForCondition(20*time.Second, func() bool {
+		var found bool
+		lead, found = findLeadInSnapshot(f.snapshot(t))
+		return found && lead.Agent != ""
+	}) {
+		t.Fatalf("up --all did not restore the Lead after a Herdr restart: %s", restoreOutput)
 	}
 	db, err := store.OpenReadOnly(f.home)
 	if err != nil {
@@ -127,6 +133,8 @@ esac
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_PANE_ID", project.LeadPaneID)
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
 	f.leadEnv = setEnv(f.leadEnv, "HERDR_TAB_ID", lead.TabID)
+	// The restored Lead's next command reconciles the vanished done Worker.
+	runPosse(t, f.binary, f.repo, f.leadEnv, "list")
 	current := f.task(t, "t1")
 	if current.State != store.StateDone || current.Launches != before.Launches {
 		t.Fatalf("vanished done Worker changed state or relaunched: before=%#v after=%#v", before, current)
@@ -231,7 +239,7 @@ esac
 	if err != nil || len(bundles) != 1 {
 		t.Fatalf("discard tip bundle paths = %v, %v", bundles, err)
 	}
-	lead, found = findLeadInSnapshot(f.snapshot(t))
+	lead, found := findLeadInSnapshot(f.snapshot(t))
 	if !found {
 		t.Fatal("Lead pane disappeared during discard")
 	}

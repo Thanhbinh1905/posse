@@ -41,7 +41,6 @@ type Defaults struct {
 	StallAfter          string `toml:"stall_after" json:"stall_after"`
 	IdleAfter           string `toml:"idle_after" json:"idle_after"`
 	AutoTeardown        string `toml:"auto_teardown" json:"auto_teardown"`
-	AutoRecover         bool   `toml:"auto_recover" json:"auto_recover"`
 	RecoveryAttempts    int    `toml:"recovery_attempts" json:"recovery_attempts"`
 	RecoveryBackoff     string `toml:"recovery_backoff" json:"recovery_backoff"`
 	MergeMode           string `toml:"merge_mode" json:"merge_mode"`
@@ -408,6 +407,10 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	return cfg, nil
 }
 
+// autoRecoverRemoved explains defaults.auto_recover: Posse never restarts
+// agents on its own (ADR 0035), so a config that sets it fails to load.
+const autoRecoverRemoved = "was removed: Posse no longer restarts agents automatically. Delete the key; run `posse up --all` to restore Projects after a Herdr restart"
+
 func removeLegacyGateSettings(path string, values map[string]any) []string {
 	warnings := []string{}
 	if _, found := values["gate"]; found {
@@ -660,7 +663,7 @@ func defaultMap() map[string]any {
 		"lowkey":          map[string]any{"lead": false},
 		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
 		"defaults": map[string]any{
-			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
+			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
 		},
 		"kinds": map[string]any{
