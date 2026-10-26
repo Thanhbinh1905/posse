@@ -98,5 +98,14 @@ func createTestTaskCgroup(t *testing.T) (store.Task, int) {
 			return err == nil || errors.Is(err, os.ErrNotExist)
 		})
 	})
+	// Creating a cgroup does not prove the right to move processes into it,
+	// which needs write access to the common ancestor's cgroup.procs.
+	probe := exec.Command("true")
+	probe.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(directory.Fd())}
+	if err := probe.Run(); errors.Is(err, os.ErrPermission) {
+		t.Skipf("cannot start a process in a Task cgroup: %v", err)
+	} else if err != nil {
+		t.Fatal(err)
+	}
 	return task, int(directory.Fd())
 }
