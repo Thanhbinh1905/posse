@@ -20,6 +20,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -1156,7 +1157,11 @@ func assertCodexWorkerDeveloperInstructions(t *testing.T, args []string, globalR
 	if !containsArgPair(args, "-m", "gpt-5") || !containsArgPair(args, "-c", "model_reasoning_effort=high") {
 		t.Fatalf("Codex launch lost non-developer config overrides: %#v", args)
 	}
-	for _, required := range []string{globalRule, profileRule, "launch-skills", filepath.Join("skills", "posse", "SKILL.md"), filepath.Join("skills", "posse-setup", "SKILL.md"), filepath.Join("skills", "posse-down", "SKILL.md"), filepath.Join("skills", "posse-update", "SKILL.md")} {
+	required := []string{globalRule, profileRule, "launch-skills"}
+	for _, name := range setupassets.SkillNames() {
+		required = append(required, filepath.Join("skills", name, "SKILL.md"))
+	}
+	for _, required := range required {
 		if !strings.Contains(developerInstructions[0], required) {
 			t.Fatalf("Codex developer_instructions omitted %q: %s", required, developerInstructions[0])
 		}

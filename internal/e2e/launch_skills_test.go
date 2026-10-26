@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -50,7 +51,7 @@ case "$kind" in
       if [ "$previous" = plugin-dir ]; then
         case "$argument" in
           "$POSSE_HOME/projects/"*/launch-skills/*)
-            for skill in posse posse-setup posse-down posse-update; do cat "$argument/skills/$skill/SKILL.md" >> "$POSSE_E2E_SKILL_READS"; done
+            cat "$argument"/skills/*/SKILL.md >> "$POSSE_E2E_SKILL_READS"
             ;;
         esac
         previous=
@@ -80,9 +81,9 @@ case "$kind" in
             python3 - "$POSSE_E2E_SKILL_READS" <<'PY'
 import json, os, re, sys
 instructions = json.loads(os.environ["POSSE_E2E_SKILL_INSTRUCTIONS"])
-paths = re.findall(r'[^ ;]+/skills/(?:posse|posse-setup|posse-down|posse-update)/SKILL\.md', instructions)
-if len(paths) != 4:
-    raise SystemExit(f"expected four exact skill paths, got {paths!r}")
+paths = re.findall(r'[^ ;]+/skills/posse[a-z-]*/SKILL\.md', instructions)
+if not paths:
+    raise SystemExit(f"expected exact skill paths in {instructions!r}")
 with open(sys.argv[1], "a", encoding="utf-8") as output:
     for path in paths:
         with open(path, encoding="utf-8") as skill:
@@ -207,12 +208,12 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 					t.Fatalf("Claude launch omitted the scoped plugin argument: %s", argsContents)
 				}
 			case "pi":
-				if strings.Count(string(argsContents), "--skill") < 8 {
+				if strings.Count(string(argsContents), "--skill") < 2*len(setupassets.SkillNames()) {
 					t.Fatalf("Pi Lead/Worker args omitted skill paths: %s", argsContents)
 				}
 			}
 			contents, err := os.ReadFile(skillReads)
-			if err != nil || !strings.Contains(string(contents), "name: posse") || !strings.Contains(string(contents), "name: posse-setup") || !strings.Contains(string(contents), "name: posse-down") || !strings.Contains(string(contents), "name: posse-update") {
+			if err != nil || !containsEverySkill(string(contents)) {
 				t.Fatalf("%s fake harness could not read all injected skills: %s err=%v", kind, contents, err)
 			}
 			for _, path := range []string{
@@ -242,4 +243,14 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			}
 		})
 	}
+}
+
+// containsEverySkill reports whether contents holds the frontmatter of every shipped skill.
+func containsEverySkill(contents string) bool {
+	for _, name := range setupassets.SkillNames() {
+		if !strings.Contains(contents, "name: "+name+"\n") {
+			return false
+		}
+	}
+	return true
 }

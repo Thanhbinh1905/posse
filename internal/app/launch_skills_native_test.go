@@ -49,7 +49,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 				t.Fatalf("freeze launch skills: %v", err)
 			}
 			var frozenPaths []string
-			for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
+			for _, skillName := range setupassets.SkillNames() {
 				frozenPaths = append(frozenPaths, filepath.Join(skills.ClaudePluginDir, "skills", skillName, "SKILL.md"))
 			}
 			fixture, err := json.Marshal(map[string]any{
@@ -86,7 +86,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 					}
 				}
 			} else {
-				for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
+				for _, skillName := range setupassets.SkillNames() {
 					want, err := setupassets.Skill(skillName)
 					if err != nil {
 						t.Fatal(err)
@@ -102,7 +102,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 					t.Errorf("Pi native discovery reported a skill collision: %s", diagnostic.Message)
 				}
 			}
-			for _, skillName := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
+			for _, skillName := range setupassets.SkillNames() {
 				want, err := setupassets.Skill(skillName)
 				if err != nil {
 					t.Fatal(err)
