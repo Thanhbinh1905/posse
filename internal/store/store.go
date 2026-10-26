@@ -2847,8 +2847,14 @@ func (db *DB) RecordNoticeNotification(ctx context.Context, projectID, at int64)
 // no Lead decision or follow-up. A claimed/delivered Notice belongs to its
 // existing delivery path and must not be silently acknowledged here.
 func (db *DB) AckUndeliveredPROpened(ctx context.Context, projectID, at int64) (int64, error) {
+	return db.AckUndeliveredNotices(ctx, projectID, "pr_opened", at)
+}
+
+// AckUndeliveredNotices quietly handles undelivered Notices of one kind that
+// no longer need the Lead, such as restore_needed after a restore.
+func (db *DB) AckUndeliveredNotices(ctx context.Context, projectID int64, kind string, at int64) (int64, error) {
 	result, err := db.ExecContext(ctx, `UPDATE notices SET delivered_at=?, acked_at=?
-		WHERE project_id=? AND kind='pr_opened' AND delivered_at IS NULL AND acked_at IS NULL AND claim_token=''`, at, at, projectID)
+		WHERE project_id=? AND kind=? AND delivered_at IS NULL AND acked_at IS NULL AND claim_token=''`, at, at, projectID, kind)
 	if err != nil {
 		return 0, err
 	}

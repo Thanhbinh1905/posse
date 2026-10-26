@@ -293,7 +293,7 @@ func TestStartCrashImmediatelyAfterTaskCreationIsRecovered(t *testing.T) {
 	}
 }
 
-func TestStartupAndExplicitRecoveryDoNotDoubleRelaunch(t *testing.T) {
+func TestConcurrentRestoresDoNotDoubleRelaunch(t *testing.T) {
 	harness := newIntentCLIHarness(t)
 	fixture := harness.newProject(t, "concurrent-recovery")
 	_, err := fixture.addChangeTask(t, store.StateWorking)
@@ -335,7 +335,7 @@ func TestStartupAndExplicitRecoveryDoNotDoubleRelaunch(t *testing.T) {
 
 requestsDrained:
 	startRecover := func() (*exec.Cmd, *bytes.Buffer, <-chan error) {
-		command := exec.Command(harness.binary, "recover", "--all")
+		command := exec.Command(harness.binary, "up", "--all")
 		command.Dir = fixture.repo
 		command.Env = fixture.env
 		output := &bytes.Buffer{}
@@ -357,8 +357,8 @@ requestsDrained:
 		done  <-chan error
 		out   *bytes.Buffer
 	}{
-		{label: "startup recovery", done: startupDone, out: startupOutput},
-		{label: "explicit recover --all", done: explicitDone, out: explicitOutput},
+		{label: "first up --all", done: startupDone, out: startupOutput},
+		{label: "concurrent up --all", done: explicitDone, out: explicitOutput},
 	}
 	for _, result := range results {
 		select {

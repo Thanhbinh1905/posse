@@ -374,9 +374,6 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		return Config{}, err
 	}
 	warnings := removeLegacyGateSettings(globalPath, global)
-	if err := refuseAutoRecover(globalPath, global); err != nil {
-		return Config{}, err
-	}
 	if _, found := global["autonomy"]; found {
 		return Config{}, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
 	}
@@ -392,9 +389,6 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 			return Config{}, err
 		}
 		warnings = append(warnings, removeLegacyGateSettings(projectPath, project)...)
-		if err := refuseAutoRecover(projectPath, project); err != nil {
-			return Config{}, err
-		}
 		if _, found := project["worker_go_cache"]; found {
 			return Config{}, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")}
 		}
@@ -413,16 +407,9 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	return cfg, nil
 }
 
-// refuseAutoRecover names the removed defaults.auto_recover key (ADR 0035):
-// Posse never restarts agents on its own, so the key has no meaning left.
-func refuseAutoRecover(path string, values map[string]any) error {
-	if defaults, ok := values["defaults"].(map[string]any); ok {
-		if _, found := defaults["auto_recover"]; found {
-			return &InvalidError{File: path, Key: "defaults.auto_recover", Reason: "defaults.auto_recover was removed: Posse no longer restarts agents automatically. Delete the key; run `posse up --all` to restore Projects after a Herdr restart"}
-		}
-	}
-	return nil
-}
+// autoRecoverRemoved explains defaults.auto_recover: Posse never restarts
+// agents on its own (ADR 0035), so a config that sets it fails to load.
+const autoRecoverRemoved = "was removed: Posse no longer restarts agents automatically. Delete the key; run `posse up --all` to restore Projects after a Herdr restart"
 
 func removeLegacyGateSettings(path string, values map[string]any) []string {
 	warnings := []string{}

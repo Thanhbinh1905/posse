@@ -347,7 +347,11 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 			}
 			key := canonicalSchemaKey(prefix)
 			if _, found := Lookup(key); !found {
-				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"})
+				reason := "unknown configuration key"
+				if key == "defaults.auto_recover" {
+					reason = autoRecoverRemoved
+				}
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: reason})
 				return
 			}
 			if err := ValidateSetting(key, value, projectFile); err != nil {

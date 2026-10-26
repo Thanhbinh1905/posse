@@ -16,7 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestUpReportsWatchRecoveryLeadStartClaim(t *testing.T) {
+func TestUpReportsRestoreLeadStartClaim(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	t.Cleanup(func() {
 		_ = os.Remove(filepath.Join(f.root, "hold-lead-start"))
@@ -27,7 +27,7 @@ func TestUpReportsWatchRecoveryLeadStartClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	closeWorkerGroup(t, f)
-	recovery := exec.Command(f.binary, "recover", "--all")
+	recovery := exec.Command(f.binary, "up", "--all")
 	recovery.Dir, recovery.Env = f.repo, f.leadEnv
 	var recoveryLog bytes.Buffer
 	recovery.Stdout, recovery.Stderr = &recoveryLog, &recoveryLog
@@ -36,7 +36,7 @@ func TestUpReportsWatchRecoveryLeadStartClaim(t *testing.T) {
 		err    error
 	}, 1)
 	if err := recovery.Start(); err != nil {
-		t.Fatalf("start isolated recovery: %v", err)
+		t.Fatalf("start isolated restore: %v", err)
 	}
 	go func() {
 		err := recovery.Wait()
@@ -61,9 +61,9 @@ func TestUpReportsWatchRecoveryLeadStartClaim(t *testing.T) {
 		}
 		defer db.Close()
 		claim, err = db.LeadStartClaim(context.Background(), f.projectID)
-		return err == nil && claim.Holder == "watch-recovery"
+		return err == nil && claim.Holder == "restore"
 	}) {
-		t.Fatalf("watch recovery did not acquire the Lead start claim: %+v", claim)
+		t.Fatalf("restore did not acquire the Lead start claim: %+v", claim)
 	}
 
 	for _, args := range [][]string{{"up", "--name", "shop"}, {"up", "--name", "shop", "--replace"}} {
@@ -71,9 +71,9 @@ func TestUpReportsWatchRecoveryLeadStartClaim(t *testing.T) {
 		command.Dir, command.Env = f.repo, f.leadEnv
 		output, runErr := command.CombinedOutput()
 		if runErr == nil || !strings.Contains(string(output), `"lead_starting"`) {
-			t.Fatalf("posse %s was not refused by active watch recovery: err=%v output=%s", strings.Join(args, " "), runErr, output)
+			t.Fatalf("posse %s was not refused by an active restore: err=%v output=%s", strings.Join(args, " "), runErr, output)
 		}
-		for _, want := range []string{"watch-recovery", "pid " + strconv.FormatInt(claim.PID, 10), "claimed at", "claim expires at", "(in "} {
+		for _, want := range []string{"restore", "pid " + strconv.FormatInt(claim.PID, 10), "claimed at", "claim expires at", "(in "} {
 			if !strings.Contains(string(output), want) {
 				t.Errorf("posse %s claim refusal omitted %q: %s", strings.Join(args, " "), want, output)
 			}

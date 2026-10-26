@@ -89,23 +89,24 @@ func TestDownKeepsProjectStoppedUntilUp(t *testing.T) {
 	if output := runPosse(t, f.binary, f.root, f.env, "--json"); !strings.Contains(output, `"lead":"down"`) {
 		t.Fatalf("the dashboard did not show the Lead down: %s", output)
 	}
-	if output := runPosse(t, f.binary, f.repo, f.env, "recover", "--all"); !strings.Contains(output, "held_projects[1]: shop") {
-		t.Fatalf("recover --all did not hold the down Project: %s", output)
+	if output := runPosse(t, f.binary, f.repo, f.env, "up", "--all"); !strings.Contains(output, "down_projects[1]: shop") {
+		t.Fatalf("up --all did not skip the down Project: %s", output)
 	}
-	f.assertLeadStaysGone(t, "after recover --all")
+	f.assertLeadStaysGone(t, "after up --all")
 
 	// Closing what is left of the Lead workspace must not bring it back.
 	if _, err := f.client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": f.leadWorkspaceID}); err != nil {
 		t.Fatal(err)
 	}
-	runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	runPosse(t, f.binary, f.repo, f.env, "up", "--all")
 	runPosse(t, f.binary, f.repo, f.env, "list")
 	f.assertLeadStaysGone(t, "after its workspace closed")
 
 	// A machine restart runs the startup hook against a new Herdr generation.
 	killServer(t, f.server)
 	f.server = startServer(t, f.client)
-	runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	runPosse(t, f.binary, f.repo, f.env, "_herdr_started")
+	runPosse(t, f.binary, f.repo, f.env, "up", "--all")
 	f.assertLeadStaysGone(t, "after a Herdr restart")
 
 	f.upInNewWorkspace(t)
@@ -134,18 +135,17 @@ func TestDownRefusesRunningTasks(t *testing.T) {
 	}
 }
 
-func TestAutoRecoverOffHoldsGroupCloseUntilUp(t *testing.T) {
+func TestGroupCloseHoldsUntilUp(t *testing.T) {
 	f := newWorkerTabsFixture(t)
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.auto_recover", "false", "--project", "shop")
 	f.start(t, "t1", "Held worker", "held-worker")
 	closeWorkerGroup(t, f)
-	if output := runPosse(t, f.binary, f.repo, f.env, "recover", "--all"); !strings.Contains(output, "held_projects[1]: shop") {
-		t.Fatalf("recover --all did not hold the Project: %s", output)
+	if output := runPosse(t, f.binary, f.repo, f.env, "_herdr_started"); !strings.Contains(output, "held_projects[1]: shop") {
+		t.Fatalf("the startup hook did not hold the Project: %s", output)
 	}
 	runPosse(t, f.binary, f.repo, f.env, "list")
-	f.assertLeadStaysGone(t, "with auto_recover off")
+	f.assertLeadStaysGone(t, "after a group close")
 	if task := f.task(t, "t1"); task.State != store.StateWorking {
-		t.Fatalf("held recovery changed the Worker's state to %s", task.State)
+		t.Fatalf("held restore changed the Worker's state to %s", task.State)
 	}
 
 	workspace := f.upInNewWorkspace(t)

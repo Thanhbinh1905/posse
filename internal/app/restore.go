@@ -192,6 +192,9 @@ func (s *Service) restoreProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return workers, err
 	}
+	if _, err := db.AckUndeliveredNotices(ctx, project.ID, "restore_needed", currentTime()); err != nil {
+		return workers, err
+	}
 	if leadAgentStarted(project, snapshot) {
 		return workers, s.ensureWatchRuntime(ctx, db, home, project)
 	}

@@ -22,9 +22,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// This fixture installs no posse startup plugin: a normal command must
-// recover the Project even when Herdr never invokes recover --all.
-func TestListRecoversRestartWithoutStartupHook(t *testing.T) {
+// A normal command after a Herdr restart records it and relaunches nothing;
+// `posse up --all` then restores the Lead and Workers (ADR 0035).
+func TestListHoldsRestartUntilUpAll(t *testing.T) {
 	fixture := newWorkerTabsFixture(t)
 	before := fixture.start(t, "t1", "Tabs missing hook", "tabs-missing-hook")
 	db, err := store.OpenReadOnly(fixture.home)
@@ -42,14 +42,33 @@ func TestListRecoversRestartWithoutStartupHook(t *testing.T) {
 	if newGeneration == oldGeneration {
 		t.Fatalf("Herdr generation did not change: %q", newGeneration)
 	}
-	// With no startup hook, nothing can relaunch the Worker before this command.
-	if current := fixture.task(t, "t1"); current.Launches != before.Launches {
-		t.Fatalf("Worker relaunched without a startup hook: %#v", current)
-	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "list")
+	if current := fixture.task(t, "t1"); current.Launches != before.Launches || current.State != store.StateWorking {
+		t.Fatalf("list relaunched or changed the Worker after a Herdr restart: before=%#v after=%#v", before, current)
+	}
+	if _, found := findLeadInSnapshot(fixture.snapshot(t)); found {
+		t.Fatal("list restarted the Lead after a Herdr restart")
+	}
+	db, err = store.OpenReadOnly(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.UndeliveredNotices(context.Background(), fixture.projectID)
+	held, heldErr := db.ProjectServerStartedAt(context.Background(), fixture.projectID)
+	_ = db.Close()
+	restoreNotices := 0
+	for _, notice := range notices {
+		if notice.Kind == "restore_needed" && strings.Contains(notice.Summary, "posse up --all") {
+			restoreNotices++
+		}
+	}
+	if err != nil || heldErr != nil || restoreNotices != 1 || held != oldGeneration {
+		t.Fatalf("held restart: restore_needed=%d generation=%q want %q notices=%#v err=%v %v", restoreNotices, held, oldGeneration, notices, err, heldErr)
+	}
+	output := runPosse(t, fixture.binary, fixture.repo, fixture.env, "up", "--all")
 	after := fixture.task(t, "t1")
 	if after.Launches != before.Launches+1 || after.AgentName == before.AgentName {
-		t.Fatalf("list did not recover the Worker: before=%#v after=%#v", before, after)
+		t.Fatalf("up --all did not restore the Worker: before=%#v after=%#v output=%s", before, after, output)
 	}
 	var restored herdr.Pane
 	for _, pane := range fixture.snapshot(t).Panes {
@@ -334,7 +353,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture.waitSessionPersisted(t)
 	killServer(t, fixture.server)
 	fixture.server = startServer(t, client)
-	output = runPosse(t, fixture.binary, fixture.repo, fixture.env, "recover", "--all")
+	output = runPosse(t, fixture.binary, fixture.repo, fixture.env, "up", "--all")
 	fixture.waitState(t, "t3", store.StateWorking)
 	recovered := fixture.task(t, "t3")
 	if recovered.Launches <= relaunched.Launches {

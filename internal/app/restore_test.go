@@ -120,12 +120,18 @@ func TestUpAllRestoresRecordedClaudeLeadOverLeadKind(t *testing.T) {
 		}
 	}
 	service := testService(home, fake)
+	if err := service.holdRestore(ctx, db, project, "new-generation"); !errors.Is(err, errRecoveryHeld) {
+		t.Fatal(err)
+	}
 	output := &bytes.Buffer{}
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, output
 	t.Setenv("HERDR_PANE_ID", "")
 	if code := cli.Run([]string{"up", "--all"}); code != 0 || !strings.Contains(output.String(), "state: restored") {
 		t.Fatalf("up --all = %d: %s", code, output)
+	}
+	if pending, err := db.UndeliveredNotices(ctx, project.ID); err != nil || len(pending) != 0 {
+		t.Fatalf("restore left its restore_needed Notice for the restored Lead: %#v, %v", pending, err)
 	}
 	var starts []herdr.CallRecord
 	for _, call := range fake.Calls {

@@ -350,6 +350,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		if err != nil {
 			return herdrError(err)
 		}
+		if _, err := db.AckUndeliveredNotices(ctx.Context, project.ID, "restore_needed", currentTime()); err != nil {
+			return err
+		}
 		snapshot = runtimeResult.Snapshot
 		if err := s.reconcileTaskPanes(ctx.Context, db, project, snapshot); err != nil {
 			return err

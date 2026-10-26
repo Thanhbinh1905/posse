@@ -47,7 +47,7 @@ func TestT247IdleObservationBeforeEndHookDoesNotStrand(t *testing.T) {
 	// Restart the hook in a fresh process, then exercise normal CLI recovery.
 	event := fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"idle"}}`, task.PaneID)
 	runPosse(t, f.base.binary, f.base.repo, setEnv(f.base.env, "HERDR_PLUGIN_EVENT_JSON", event), "_ingest")
-	runPosse(t, f.base.binary, f.base.repo, f.base.leadEnv, "recover", "--all")
+	runPosse(t, f.base.binary, f.base.repo, f.base.leadEnv, "up", "--all")
 	show = runPosse(t, f.base.binary, f.base.repo, f.base.leadEnv, "show", "t1", "--full")
 	snapshot, err := f.client.Snapshot(context.Background())
 	if err != nil {

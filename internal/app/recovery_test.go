@@ -557,7 +557,7 @@ func (a shellAfterInterruptAdapter) Snapshot(context.Context) (herdr.Snapshot, e
 	return snapshot, nil
 }
 
-func TestRecoverAllContinuesAcrossProjectsAndRecordsGeneration(t *testing.T) {
+func TestUpAllContinuesAcrossProjectsAndRecordsGeneration(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	alphaRoot, betaRoot := filepath.Join(root, "alpha"), filepath.Join(root, "beta")
@@ -576,6 +576,11 @@ func TestRecoverAllContinuesAcrossProjectsAndRecordsGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, project := range []store.Project{alpha, beta} {
+		if err := db.SetProjectLead(ctx, project.ID, "w-"+project.Name, "w-"+project.Name+":p1", "posse:"+project.Name+":lead"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := db.RememberProjectServerStartedAt(ctx, alpha.ID, "old-generation"); err != nil {
 		t.Fatal(err)
 	}
@@ -593,17 +598,24 @@ func TestRecoverAllContinuesAcrossProjectsAndRecordsGeneration(t *testing.T) {
 	}
 	adapter := herdr.NewFake()
 	adapter.SnapshotValue.ServerStartedAt = "new-generation"
+	adapter.SnapshotValue.Panes = []herdr.Pane{{PaneID: "w-beta:p1", WorkspaceID: "w-beta", Label: "posse:beta:lead", Agent: "claude", AgentStatus: "idle"}}
 	service := testService(home, adapter)
 	output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
 	cli := service.CLI()
 	cli.Out, cli.ErrOut = output, errorsOut
 	t.Setenv("HERDR_PANE_ID", "")
 	t.Chdir(alphaRoot)
-	if code := cli.Run([]string{"recover", "--all"}); code != 0 {
-		t.Fatalf("recover --all stopped at the first Project error: code=%d out=%s err=%s", code, output, errorsOut)
+	if code := cli.Run([]string{"up", "--all"}); code != 0 {
+		t.Fatalf("up --all stopped at the first Project error: code=%d out=%s err=%s", code, output, errorsOut)
 	}
-	if !strings.Contains(output.String(), "attempted: 2") || !strings.Contains(output.String(), "alpha") || !strings.Contains(output.String(), "projects: 1") {
-		t.Fatalf("recover --all did not isolate alpha's failure and reconcile beta: %s", output)
+	if !strings.Contains(output.String(), "restored[1]{project,workers}:\n  beta,0") || !strings.Contains(output.String(), "failed_projects[1]") || !strings.Contains(output.String(), "alpha") || !strings.Contains(output.String(), "state: partial") {
+		t.Fatalf("up --all did not isolate alpha's failure and restore beta: %s", output)
+	}
+	if adapter.CallCount("agent.start") != 0 {
+		t.Fatalf("up --all restarted beta's running Lead: %#v", adapter.Calls)
+	}
+	if code := cli.Run([]string{"recover", "--all"}); code == 0 || !strings.Contains(output.String(), "command_removed") {
+		t.Fatalf("recover --all was not refused with its replacement: %s", output)
 	}
 	db, err = store.Open(home)
 	if err != nil {

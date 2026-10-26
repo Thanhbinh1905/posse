@@ -168,6 +168,10 @@ _Avoid_: Hang, freeze, wedge
 Removing a Task's Worker and releasing its custody after its work is preserved; Tasks require Merge, reporting or approved discard.
 _Avoid_: Cleanup, discard
 
+**Restore**:
+The User's explicit `posse up --all` that brings back the Lead, Workers and Watch of every Project that is not down after Herdr stopped them; Posse never restores agents on its own. A restored Lead keeps the agent kind and session that were running.
+_Avoid_: Auto-recovery, recover
+
 **Project**:
 One Git repository or one Workspace of repositories, with its own Tasks, state and policy.
 _Avoid_: Repo (in prose), home

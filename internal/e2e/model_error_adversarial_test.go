@@ -143,7 +143,7 @@ func TestT242InterruptedIngestRecoversOrRaisesNotice(t *testing.T) {
 	event := fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"idle"}}`, task.PaneID)
 	env := setEnv(f.base.env, "HERDR_PLUGIN_EVENT_JSON", event)
 	runPosse(t, f.base.binary, f.base.repo, env, "_ingest")
-	runPosse(t, f.base.binary, f.base.repo, f.base.leadEnv, "recover", "--all")
+	runPosse(t, f.base.binary, f.base.repo, f.base.leadEnv, "up", "--all")
 	runPosse(t, f.base.binary, f.base.repo, f.base.leadEnv, "show", "t1")
 	// Check the fallback without waiting three real minutes.
 	snapshot, err := f.client.Snapshot(context.Background())

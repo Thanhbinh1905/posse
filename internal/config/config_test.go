@@ -274,6 +274,22 @@ func TestLoadRejectsUnknownAndInvalidKeys(t *testing.T) {
 	}
 }
 
+func TestLoadRefusesRemovedAutoRecover(t *testing.T) {
+	for _, project := range []bool{false, true} {
+		home := t.TempDir()
+		path := filepath.Join(home, "config.toml")
+		if project {
+			path = filepath.Join(home, "projects", "shop", "config.toml")
+		}
+		writeConfig(t, path, "[defaults]\nauto_recover = false\n")
+		_, err := Load(home, "shop")
+		invalid, ok := err.(*InvalidError)
+		if !ok || invalid.Key != "defaults.auto_recover" || invalid.File != path || !strings.Contains(invalid.Reason, "posse up --all") {
+			t.Fatalf("project=%v: expected a removed defaults.auto_recover error naming its replacement, got %#v", project, err)
+		}
+	}
+}
+
 func TestValidationLoopDefaultsAndProjectOverrides(t *testing.T) {
 	home := t.TempDir()
 	writeConfig(t, filepath.Join(home, "config.toml"), `[review_loop]

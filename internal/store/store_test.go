@@ -614,6 +614,8 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`ALTER TABLE project_runtime DROP COLUMN lead_agent_session`,
+		`ALTER TABLE project_runtime DROP COLUMN lead_agent_kind`,
 		`DROP TABLE quota_exhaustions`,
 		`DROP TABLE delivery_operations`,
 		`DROP TABLE deliveries`,
@@ -754,6 +756,8 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`ALTER TABLE project_runtime DROP COLUMN lead_agent_session`,
+		`ALTER TABLE project_runtime DROP COLUMN lead_agent_kind`,
 		`DROP TABLE quota_exhaustions`,
 		`DROP TABLE delivery_operations`,
 		`DROP TABLE deliveries`,
@@ -962,6 +966,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`ALTER TABLE project_runtime DROP COLUMN lead_agent_session`,
+		`ALTER TABLE project_runtime DROP COLUMN lead_agent_kind`,
 		`DROP TABLE quota_exhaustions`,
 		`DROP TABLE delivery_operations`,
 		`DROP TABLE deliveries`,
@@ -1647,7 +1653,7 @@ func TestLeadStartClaimAllowsOnlyOneConcurrentLead(t *testing.T) {
 	if claims != 1 {
 		t.Fatalf("concurrent Lead claims = %d, want 1", claims)
 	}
-	claimed, err := second.ClaimLeadStart(ctx, project.ID, now+3*time.Minute.Milliseconds(), now+time.Minute.Milliseconds(), "watch-recovery", os.Getpid())
+	claimed, err := second.ClaimLeadStart(ctx, project.ID, now+3*time.Minute.Milliseconds(), now+time.Minute.Milliseconds(), "restore", os.Getpid())
 	if err != nil || !claimed {
 		t.Fatalf("stale Lead start claim was not recovered = %t, %v", claimed, err)
 	}
@@ -1732,7 +1738,7 @@ func TestLeadStartClaimReclaimsDeadProcessImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UnixMilli()
-	claimed, err := db.ClaimLeadStart(ctx, project.ID, now, now-2*time.Minute.Milliseconds(), "watch-recovery", 2147483647)
+	claimed, err := db.ClaimLeadStart(ctx, project.ID, now, now-2*time.Minute.Milliseconds(), "restore", 2147483647)
 	if err != nil || !claimed {
 		t.Fatalf("seed dead-process claim = %t, %v", claimed, err)
 	}

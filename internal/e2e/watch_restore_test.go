@@ -30,13 +30,6 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	heldConfig := strings.Replace(string(originalConfig), "auto_teardown = \"finished\"", "auto_teardown = \"finished\"\nauto_recover = false", 1)
-	if heldConfig == string(originalConfig) {
-		t.Fatal("fixture config has no defaults.auto_teardown line")
-	}
-	if err := os.WriteFile(configPath, []byte(heldConfig), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	beforeProject, err := f.db.ProjectByID(context.Background(), f.project.ID)
 	if err != nil {
@@ -63,9 +56,11 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 		t.Fatalf("killed watch remains visible: %v", watchPIDs(f.root))
 	}
 
-	recovery := runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	// A recorded generation that differs from Herdr's holds the Project for
+	// an explicit restore.
+	recovery := runPosse(t, f.binary, f.repo, f.env, "_herdr_started")
 	if !strings.Contains(recovery, "held_projects") || !strings.Contains(recovery, "shop") {
-		t.Fatalf("recover --all did not leave the held Project alone: %s", recovery)
+		t.Fatalf("the startup hook did not hold the Project: %s", recovery)
 	}
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
 		t.Fatalf("command supervision did not repair the held Project watch: %v", watchPIDs(f.root))
@@ -86,7 +81,7 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 		t.Fatalf("watch repair changed Herdr generation: %q -> %q (%v)", beforeGeneration, afterGeneration, err)
 	}
 	configAfter, err := os.ReadFile(configPath)
-	if err != nil || string(configAfter) != heldConfig {
+	if err != nil || string(configAfter) != string(originalConfig) {
 		t.Fatalf("watch repair changed config: %v", err)
 	}
 	if panes := watchPanes(t, client); len(panes) != 0 {

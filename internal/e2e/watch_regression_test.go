@@ -331,11 +331,11 @@ func checkWatchRestore(t *testing.T, clearGeneration bool) {
 	for _, key := range []string{"HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"} {
 		env = setEnv(env, key, "")
 	}
-	command := exec.Command(f.binary, "recover", "--all")
+	command := exec.Command(f.binary, "up", "--all")
 	command.Dir, command.Env = f.repo, env
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("recover --all after Herdr restart: %v\n%s", err, output)
+		t.Fatalf("up --all after Herdr restart: %v\n%s", err, output)
 	}
 	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
 		t.Fatalf("hidden watch missing after Herdr restart: %v\n%s", watchPIDs(f.root), output)

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -55,7 +56,12 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	for _, args := range [][]string{{"show", "t1"}, {"ack", "all"}, {"lead"}, {"watch", "--timeout", "10"}} {
 		runPosse(t, f.binary, f.repo, f.leadEnv, args...)
 	}
+	if held, _ := os.ReadFile(startsPath); string(held) != string(startsBefore) || f.task(t, "t1").Launches != before.Launches {
+		t.Fatal("plugin events or commands relaunched the Worker before the User restored")
+	}
 	for i := 0; i < 8; i++ {
+		time.Sleep(20 * time.Millisecond)
+		runPosse(t, f.binary, f.repo, f.env, "up", "--all")
 		runPosse(t, f.binary, f.repo, eventEnv, "_ingest")
 	}
 	after := f.task(t, "t1")

@@ -68,6 +68,9 @@ func ReplacementKey(key string) string {
 }
 
 func unknownKeyReason(key string) string {
+	if key == "defaults.auto_recover" {
+		return autoRecoverRemoved
+	}
 	if replacement := ReplacementKey(key); replacement != "" {
 		return "was removed; use " + replacement
 	}

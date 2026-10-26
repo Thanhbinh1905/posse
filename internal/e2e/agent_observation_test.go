@@ -36,9 +36,6 @@ while IFS= read -r line; do :; done
 	if err := os.WriteFile(filepath.Join(fixture.root, "bin", "claude"), []byte(fakeAgent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "config", "set", "defaults.auto_recover", "false"); !strings.Contains(output, "auto_recover") {
-		t.Fatalf("could not disable automatic recovery: %s", output)
-	}
 	brief := filepath.Join(fixture.root, "research.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: research\ntitle: Observed agent\ndone_when: report.md is complete\n---\nWrite a concise Report.\n"), 0o600); err != nil {
 		t.Fatal(err)

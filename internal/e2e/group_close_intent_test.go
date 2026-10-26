@@ -59,7 +59,7 @@ func closeWorkerGroup(t *testing.T, f *workerTabsFixture) {
 
 func restoreWorkerGroup(t *testing.T, f *workerTabsFixture) {
 	t.Helper()
-	runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	runPosse(t, f.binary, f.repo, f.env, "up", "--all")
 	if !waitForCondition(20*time.Second, func() bool { _, found := findLeadInSnapshot(f.snapshot(t)); return found }) {
 		t.Fatal("Lead was not recovered after group close")
 	}
@@ -76,7 +76,7 @@ func TestGroupCloseDuringStartRecoversLeadAndSandbox(t *testing.T) {
 		if !strings.Contains(output, "state: working") {
 			t.Fatalf("start succeeded without a working Task: %s", output)
 		}
-	} else if !strings.Contains(output, `"pane_not_found"`) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
+	} else if !strings.Contains(output, `"pane_not_found"`) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse up --all") {
 		t.Fatalf("start failed without a recoverable pane-close error: %s %v", output, err)
 	}
 	restoreWorkerGroup(t, f)
@@ -115,7 +115,7 @@ func TestGroupCloseDuringRelaunchRestoresLeadAndWorker(t *testing.T) {
 		if !strings.Contains(output, "t1") {
 			t.Fatalf("relaunch succeeded without reporting Task t1: %s", output)
 		}
-	} else if (!strings.Contains(output, `"agent_pane_not_found"`) && !strings.Contains(output, `"pane_not_found"`)) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse recover --all") {
+	} else if (!strings.Contains(output, `"agent_pane_not_found"`) && !strings.Contains(output, `"pane_not_found"`)) || !strings.Contains(output, ",true,") || !strings.Contains(output, "posse up --all") {
 		t.Fatalf("relaunch failed without a recoverable pane-close error: %s %v", output, commandErr)
 	}
 	restoreWorkerGroup(t, f)

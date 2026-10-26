@@ -32,7 +32,7 @@ func TestWatchRepairDoesNotStartLeadOrChangeHeldRecoveryPolicy(t *testing.T) {
 	output := &bytes.Buffer{}
 	commandContext := &axi.Context{Context: ctx, Out: output, ErrOut: &bytes.Buffer{}}
 	configPath := filepath.Join(home, "config.toml")
-	configBefore := []byte("[defaults]\nauto_recover = false\n")
+	configBefore := []byte("[defaults]\nmax_workers = 2\n")
 	if err := os.WriteFile(configPath, configBefore, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -16,13 +16,6 @@ import (
 )
 
 func TestFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T) {
-	for _, trigger := range []string{"plugin-event", "recover-all"} {
-		t.Run(trigger, func(t *testing.T) { runFailedGroupAttemptRetriesAfterLeadStarts(t, trigger) })
-	}
-}
-
-func runFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T, trigger string) {
-	t.Helper()
 	f := newWorkerTabsFixture(t)
 	t.Cleanup(func() { stopIsolatedFinalizers(t, f.root) })
 	startsLog := filepath.Join(f.root, "failed-group-starts.log")
@@ -37,7 +30,7 @@ func runFailedGroupAttemptRetriesAfterLeadStarts(t *testing.T, trigger string) {
   *) printf 'lead\n' >> "$POSSE_TEST_ROOT/failed-group-starts.log" ;;
 esac
 `
-	// Fail only automatic recovery's prompt delivery. The initial Worker and
+	// Fail only the first restore's prompt delivery. The initial Worker and
 	// later retry use the healthy harness.
 	script := strings.Replace(string(agent), "#!/bin/sh\n", "#!/bin/sh\n"+instrument, 1)
 	script = strings.Replace(script,
@@ -91,7 +84,7 @@ esac
 		t.Fatal(err)
 	}
 	closeWorkerGroup(t, f)
-	output := runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	output := runPosse(t, f.binary, f.repo, f.env, "up", "--all")
 	state := readRecovery()
 	if state.Status != "pending" || state.Attempts != 1 || state.NextAttemptAt <= time.Now().UnixMilli() {
 		t.Fatalf("did not produce a real pending backoff: %#v output=%s", state, output)
@@ -101,7 +94,7 @@ esac
 		t.Fatalf("failed attempt process did not start: starts=%d", workerStarts())
 	}
 	if got := workerStarts(); got != 2 {
-		t.Fatalf("failed automatic attempt starts=%d, want original plus failed attempt", got)
+		t.Fatalf("failed restore attempt starts=%d, want original plus failed attempt", got)
 	}
 	if err := os.Remove(failPrompts); err != nil {
 		t.Fatal(err)
@@ -145,18 +138,19 @@ esac
 	if delay := time.Until(time.UnixMilli(state.NextAttemptAt)); delay > 0 {
 		time.Sleep(delay + 250*time.Millisecond)
 	}
+	// Plugin events never retry the pending episode; only a restore does.
 	pluginEnv := setEnv(f.env, "HERDR_PLUGIN_EVENT_JSON", fmt.Sprintf(`{"event":"pane.agent_status_changed","data":{"pane_id":%q,"agent_status":"working"}}`, lead.PaneID))
-	if trigger == "plugin-event" {
-		for range 4 {
-			runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
-		}
-	} else {
-		output = runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
+	for range 4 {
+		runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
 	}
+	if held := f.task(t, "t1"); held.Launches != before.Launches+1 || readRecovery().Attempts != 1 {
+		t.Fatalf("plugin events retried the pending Worker: before=%#v held=%#v recovery=%#v", before, held, readRecovery())
+	}
+	output = runPosse(t, f.binary, f.repo, f.env, "up", "--all")
 	current := f.task(t, "t1")
 	state = readRecovery()
 	if current.State != store.StateWorking || current.Launches != before.Launches+2 || state.Status != "recovered" || state.Attempts != 2 || workerStarts() < 4 || leadStarts() != 1 {
-		t.Fatalf("%s did not recover the pending Worker once after backoff: before=%#v current=%#v recovery=%#v worker_starts=%d lead_starts=%d", trigger, before, current, state, workerStarts(), leadStarts())
+		t.Fatalf("up --all did not restore the pending Worker once after backoff: before=%#v current=%#v recovery=%#v worker_starts=%d lead_starts=%d output=%s", before, current, state, workerStarts(), leadStarts(), output)
 	}
 	if currentHealthy := f.task(t, "t2"); currentHealthy.Launches != healthy.Launches || currentHealthy.AgentName != healthy.AgentName || workerStarts() != 4 {
 		t.Fatalf("deferred group recovery restarted healthy new Worker: before=%#v after=%#v worker_starts=%d", healthy, currentHealthy, workerStarts())
@@ -166,18 +160,15 @@ esac
 	if !found || healthyPane.Agent == "" || healthyPane.AgentStatus == "exited" || healthyPane.AgentStatus == "stopped" {
 		t.Fatalf("deferred group recovery stopped healthy Worker agent: pane=%#v found=%v", healthyPane, found)
 	}
-	if trigger == "plugin-event" {
-		output = runPosse(t, f.binary, f.repo, f.env, "recover", "--all")
-	} else {
-		for range 4 {
-			runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
-		}
+	output = runPosse(t, f.binary, f.repo, f.env, "up", "--all")
+	for range 4 {
+		runPosse(t, f.binary, f.repo, pluginEnv, "_ingest")
 	}
-	if after := f.task(t, "t1"); after.Launches != current.Launches || workerStarts() != 4 {
-		t.Fatalf("second recovery trigger duplicated the completed retry: trigger=%s current=%#v after=%#v starts=%d output=%s", trigger, current, after, workerStarts(), output)
+	if after := f.task(t, "t1"); after.Launches != current.Launches || workerStarts() != 4 || leadStarts() != 1 {
+		t.Fatalf("a repeated restore duplicated the completed retry: current=%#v after=%#v starts=%d lead_starts=%d output=%s", current, after, workerStarts(), leadStarts(), output)
 	}
 	if afterHealthy := f.task(t, "t2"); afterHealthy.Launches != healthy.Launches || afterHealthy.AgentName != healthy.AgentName {
-		t.Fatalf("second recovery trigger restarted healthy new Worker: before=%#v after=%#v", healthy, afterHealthy)
+		t.Fatalf("a repeated restore restarted healthy new Worker: before=%#v after=%#v", healthy, afterHealthy)
 	}
 	if current.SandboxID != before.SandboxID || current.Branch != before.Branch {
 		t.Fatalf("retry changed held work identity: before=%#v current=%#v", before, current)
