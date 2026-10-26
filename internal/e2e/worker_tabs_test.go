@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -89,7 +90,7 @@ func TestListHoldsRestartUntilUpAll(t *testing.T) {
 	}
 	foundTab := false
 	for _, tab := range recoveredSnapshot.Tabs {
-		if tab.WorkspaceID == lead.WorkspaceID && tab.TabID == restored.TabID && tab.Label == after.ShortName {
+		if tab.WorkspaceID == lead.WorkspaceID && tab.TabID == restored.TabID && tab.Label == after.ShortName+"-t"+strconv.Itoa(after.Seq) {
 			foundTab = true
 		}
 	}
@@ -762,7 +763,7 @@ func (f *workerTabsFixture) assertRenderedSidebar(t *testing.T, first, second st
 	if err != nil && !strings.Contains(err.Error(), "exit status 124") {
 		t.Fatalf("attach isolated Herdr client: %v: %s", err, output)
 	}
-	for _, want := range []string{"Lead:shop", "  " + first.ShortName + "  ", "  " + second.ShortName + "  "} {
+	for _, want := range []string{"Lead:shop", "  " + first.ShortName + "-t" + strconv.Itoa(first.Seq) + "  ", "  " + second.ShortName + "-t" + strconv.Itoa(second.Seq) + "  "} {
 		if !bytes.Contains(output, []byte(want)) {
 			t.Errorf("desktop client missing sidebar or plain tab %q; output tail: %q", want, output[max(0, len(output)-4000):])
 		}
@@ -1092,7 +1093,7 @@ func (f *workerTabsFixture) assertWorkerLabels(t *testing.T, snapshot herdr.Snap
 		if count == len(byTab)-1 {
 			branch = "└─"
 		}
-		want := task.ShortName
+		want := task.ShortName + "-t" + strconv.Itoa(task.Seq)
 		if tab.Label != want {
 			t.Fatalf("Worker tab label = %q, want %q in Herdr order", tab.Label, want)
 		}

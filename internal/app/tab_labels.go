@@ -157,7 +157,7 @@ func projectTabPresentation(snapshot herdr.Snapshot, project store.Project, task
 		workerTabs = append(workerTabs, struct {
 			tab  herdr.Tab
 			name string
-		}{tab: tab, name: taskDisplayName(candidate.task)})
+		}{tab: tab, name: workerTabLabel(candidate.task)})
 	}
 	for index, worker := range workerTabs {
 		labels[worker.tab.TabID] = worker.name

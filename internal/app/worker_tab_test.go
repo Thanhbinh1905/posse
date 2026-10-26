@@ -229,14 +229,14 @@ func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 	for _, call := range adapter.Calls {
 		methods = append(methods, call.Method)
 		if call.Method == "tab.create" {
-			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "first-worker" || call.Params["focus"] != false || call.Params["env"].(map[string]string)[workerHomeEnv] != filepath.Clean(home) {
+			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "first-worker-t1" || call.Params["focus"] != false || call.Params["env"].(map[string]string)[workerHomeEnv] != filepath.Clean(home) {
 				t.Fatalf("tab.create params = %#v", call.Params)
 			}
 		}
 		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w1:p5" || call.Params["label"] != task.PaneLabel) {
 			t.Fatalf("pane.rename params = %#v", call.Params)
 		}
-		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w1:p5" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "└─ first-worker") {
+		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w1:p5" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "└─ first-worker-t1") {
 			t.Fatalf("initial Worker metadata = %#v", call.Params)
 		}
 	}

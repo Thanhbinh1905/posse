@@ -805,8 +805,16 @@ func workerDisplayMetadata(task store.Task, detectedAgent, expectedAgent string)
 	return metadata
 }
 
+// workerTabLabel is the Worker's tab label and sidebar row text: its display
+// name followed by the Task ID, so a reported ID maps to a tab. The suffix is
+// presentation only and is not repeated when the name already ends with it.
 func workerTabLabel(task store.Task) string {
-	return taskDisplayName(task)
+	name := taskDisplayName(task)
+	id := taskIDString(task.Seq)
+	if name == id || strings.HasSuffix(name, "-"+id) {
+		return name
+	}
+	return name + "-" + id
 }
 
 // refreshWorkerDisplay reports a Worker's pane title and tokens. Workers are

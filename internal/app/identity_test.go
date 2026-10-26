@@ -183,7 +183,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	if err := json.Unmarshal(renders[0].display, &display); err != nil {
 		t.Fatal(err)
 	}
-	if display.Tab != "stable-output" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != nil || display.Pane["display_agent"] != "pi" {
+	if display.Tab != "stable-output-t1" || display.Pane["title"] != "Stable output · stable-output · " || display.Pane["clear_display_agent"] != nil || display.Pane["display_agent"] != "pi" {
 		t.Fatalf("Worker display metadata = %#v", display)
 	}
 	var lead map[string]any

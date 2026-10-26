@@ -18,9 +18,9 @@ func TestLeadHarnessAndRepositoryWorkerSidebar(t *testing.T) {
 	second := f.start(t, "t2", "Sidebar second", "sidebar-second")
 	assertLeadWorkerSidebarSnapshot(t, f, first, second)
 
-	output := assertNativeWorktreeSidebar(t, f, first.ShortName, second.ShortName)
+	output := assertNativeWorktreeSidebar(t, f, first.ShortName+"-t1", second.ShortName+"-t2")
 	if len(output) > 0 {
-		assertRenderedLeadWorkerRows(t, output, first.ShortName, second.ShortName)
+		assertRenderedLeadWorkerRows(t, output, first.ShortName+"-t1", second.ShortName+"-t2")
 	}
 	if f.snapshot(t).FocusedPaneID != f.leadPaneID {
 		t.Fatal("sidebar client stole focus")
@@ -56,9 +56,9 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 			}
 		}
 		for _, task := range tasks {
-			wantRow := "└─ " + task.ShortName
+			wantRow := "└─ " + task.ShortName + "-t" + strconv.Itoa(task.Seq)
 			if task.Seq == 1 {
-				wantRow = "├─ " + task.ShortName
+				wantRow = "├─ " + task.ShortName + "-t" + strconv.Itoa(task.Seq)
 			}
 			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != wantRow) {
 				t.Errorf("Worker sidebar row = %q harness=%q, want %q and claude", pane.Tokens["posse_row"], pane.DisplayAgent, wantRow)

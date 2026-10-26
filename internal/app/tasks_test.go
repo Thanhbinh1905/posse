@@ -61,7 +61,7 @@ func TestOpenCodeWorkerArgsAndResume(t *testing.T) {
 
 func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testing.T) {
 	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/t12", WorktreePath: "/tmp/pool/shop/sandbox-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
-	if got := workerTabLabel(task); got != "stable-output" {
+	if got := workerTabLabel(task); got != "stable-output-t12" {
 		t.Fatalf("Worker tab label = %q", got)
 	}
 	metadata := workerDisplayMetadata(task, "claude", "")
@@ -756,7 +756,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		case "workspace.rename":
 			workspaceRenamed = true
 		case "tab.create":
-			tabCreated = call.Params["label"] == "worker-tree" && call.Params["cwd"] == sandbox && call.Params["workspace_id"] == "w3"
+			tabCreated = call.Params["label"] == "worker-tree-t1" && call.Params["cwd"] == sandbox && call.Params["workspace_id"] == "w3"
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":
@@ -1584,5 +1584,17 @@ func TestDoneChangeTaskKeepsWorkerSlotAgainstQueuedRefill(t *testing.T) {
 	}
 	if started, err := db.Task(ctx, fixture.project.ID, "t2"); err != nil || started.State != store.StateWorking {
 		t.Fatalf("queued Task did not start after the Worker exited: task=%+v err=%v", started, err)
+	}
+}
+
+func TestWorkerTabLabelAppendsTaskIDOnce(t *testing.T) {
+	for name, want := range map[string]string{
+		"restore-lead-agent":     "restore-lead-agent-t7",
+		"restore-lead-agent-t7":  "restore-lead-agent-t7",
+		"restore-lead-agent-t70": "restore-lead-agent-t70-t7",
+	} {
+		if got := workerTabLabel(store.Task{Seq: 7, ShortName: name}); got != want {
+			t.Errorf("workerTabLabel(%q) = %q, want %q", name, got, want)
+		}
 	}
 }
