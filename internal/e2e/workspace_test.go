@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -283,7 +284,7 @@ esac
 	}
 	workerTabFound := false
 	for _, tab := range snapshot.Tabs {
-		if tab.TabID == workerPane.TabID && tab.WorkspaceID == leadPane.Workspace.WorkspaceID && tab.Label == task.ShortName {
+		if tab.TabID == workerPane.TabID && tab.WorkspaceID == leadPane.Workspace.WorkspaceID && tab.Label == task.ShortName+"-t"+strconv.Itoa(task.Seq) {
 			workerTabFound = true
 		}
 	}

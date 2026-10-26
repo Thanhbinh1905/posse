@@ -1832,7 +1832,7 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
 		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_sandbox"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
-		tab.Label != task.ShortName {
+		tab.Label != task.ShortName+"-t"+strconv.Itoa(task.Seq) {
 		t.Fatalf("Worker tab/sidebar mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }
@@ -1857,7 +1857,7 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	workerTabID := tabOf(t, snapshot, task.PaneID)
 	workerTab := false
 	for _, candidate := range snapshot.Tabs {
-		if candidate.TabID == workerTabID && candidate.WorkspaceID == lead.WorkspaceID && candidate.Label == task.ShortName {
+		if candidate.TabID == workerTabID && candidate.WorkspaceID == lead.WorkspaceID && candidate.Label == task.ShortName+"-t"+strconv.Itoa(task.Seq) {
 			workerTab = true
 		}
 	}
