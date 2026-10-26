@@ -92,9 +92,18 @@ func (db *DB) SetProjectLeadAgent(ctx context.Context, projectID int64, lead Lea
 
 // ObserveProjectLeadAgent records the Lead seen running in Herdr. A missing
 // session keeps the recorded one for the same kind, since harnesses report
-// their session only after startup.
+// their session only after startup. Every reconcile observes the Lead, so an
+// unchanged observation only reads: an upsert takes the write lock even when
+// its WHERE skips the update.
 func (db *DB) ObserveProjectLeadAgent(ctx context.Context, projectID int64, lead LeadAgent) error {
 	if lead.Kind == "" {
+		return nil
+	}
+	recorded, err := db.ProjectLeadAgent(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if recorded.Kind == lead.Kind && (lead.Session == "" || lead.Session == recorded.Session) {
 		return nil
 	}
 	return db.withBusyTimeout(ctx, reconcileWriteBusyTimeoutMillis, func(conn *sql.Conn) error {
