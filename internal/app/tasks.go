@@ -1947,7 +1947,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		if refreshPR {
 			pollCtx, cancelPoll := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
-			pollErr := s.pollProjectPullRequests(pollCtx, db, project, cfg, true)
+			pollErr := s.refreshProjectPullRequests(pollCtx, db, project, cfg)
 			timedOut := errors.Is(pollCtx.Err(), context.DeadlineExceeded)
 			cancelPoll()
 			if !timedOut && pollErr == nil {
@@ -2035,7 +2035,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	case "claimed":
 		reason = "delivery_in_progress"
 	case "submitting":
-		return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Worker pane before sending another instruction")
+		if reason, err = s.submittingMessageReason(ctx.Context, db, message); err != nil {
+			return err
+		}
 	case "queued":
 		candidate, queueErr := db.OldestQueuedMessage(ctx.Context, task.ID)
 		if queueErr == nil && !message.WaitForIdle && paneFound && canSteerPane(task, sendPane, snapshot, cfg, true) {
@@ -2090,7 +2092,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		case "claimed":
 			reason = "delivery_in_progress"
 		case "submitting":
-			return axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Worker pane before sending another instruction")
+			if reason, err = s.submittingMessageReason(ctx.Context, db, message); err != nil {
+				return err
+			}
 		case "queued":
 			switch {
 			case candidate.ID == messageID && attemptedReason != "":
@@ -2133,6 +2137,20 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return ctx.Print(result)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}}})
+}
+
+// submittingMessageReason reports a message another dispatcher, such as the
+// Project watch, is still submitting as in progress. Only a submission whose
+// owner gave up or vanished is uncertain.
+func (s *Service) submittingMessageReason(ctx context.Context, db *store.DB, message store.Message) (string, error) {
+	uncertain, err := db.MessageDeliveryUncertain(ctx, message.ID, currentTime()-deliveryClaimTimeout.Milliseconds())
+	if err != nil {
+		return "", err
+	}
+	if uncertain {
+		return "", axi.Failure("message_delivery_uncertain", "Herdr may have submitted this instruction, so Posse will not retry it automatically", false, "Inspect the Worker pane before sending another instruction")
+	}
+	return "delivery_in_progress", nil
 }
 
 func (s *Service) unsend(ctx *axi.Context, args []string) error {

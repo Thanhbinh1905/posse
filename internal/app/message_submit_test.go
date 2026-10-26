@@ -147,3 +147,54 @@ func TestSteeredInstructionDoesNotWaitForNewTurn(t *testing.T) {
 		t.Fatalf("steering a working agent waited for a state change it cannot observe: %#v", prompts[0].Params)
 	}
 }
+
+// #554: the User focused the Worker pane during the submit wait and the loaded
+// agent started its turn after that wait. The refused Enter typed nothing, so
+// the started turn still confirms the instruction.
+func TestFocusedSlowStartingInstructionStaysDelivered(t *testing.T) {
+	ctx, db, project, messageID, fake, service := newMessageSubmitFixture(t, "idle")
+	fake.ErrorQueue["agent.prompt"] = []error{&herdr.Error{Code: "agent_prompt_stalled", Message: "agent did not start working"}}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"> [Pasted text #1 +1 lines]"}}`)
+	fake.BeforeCall = func(method string) {
+		if method == "agent.prompt" {
+			fake.SnapshotValue.Panes[0].Focused = true
+		}
+	}
+
+	if err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue); err != nil {
+		t.Fatal(err)
+	}
+	if status := messageSubmitStatus(t, db, messageID); status != "delivered" {
+		t.Fatalf("message status=%s, want delivered", status)
+	}
+	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("agent.send_keys") != 0 || fake.CallCount("agent.wait") != 1 {
+		t.Fatalf("calls: prompt=%d send_keys=%d wait=%d; want 1, 0, 1", fake.CallCount("agent.prompt"), fake.CallCount("agent.send_keys"), fake.CallCount("agent.wait"))
+	}
+	if notices, err := db.Notices(ctx, project.ID, false); err != nil || len(notices) != 0 {
+		t.Fatalf("received instruction raised Notices: %#v, %v", notices, err)
+	}
+}
+
+func TestFocusedInstructionWithoutTurnRaisesUncertainty(t *testing.T) {
+	ctx, db, project, messageID, fake, service := newMessageSubmitFixture(t, "idle")
+	fake.ErrorQueue["agent.prompt"] = []error{&herdr.Error{Code: "agent_prompt_stalled", Message: "agent did not start working"}}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"> [Pasted text #1 +1 lines]"}}`)
+	fake.Errors["agent.wait"] = &herdr.Error{Code: "timeout", Message: "timed out"}
+	fake.BeforeCall = func(method string) {
+		if method == "agent.prompt" {
+			fake.SnapshotValue.Panes[0].Focused = true
+		}
+	}
+
+	err := service.deliverQueuedMessages(ctx, db, project, fake.SnapshotValue)
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "message_delivery_uncertain" {
+		t.Fatalf("unconfirmed submission error=%v, want message_delivery_uncertain", err)
+	}
+	if status := messageSubmitStatus(t, db, messageID); status != "submitting" {
+		t.Fatalf("message status=%s, want submitting", status)
+	}
+	if fake.CallCount("agent.send_keys") != 0 || fake.CallCount("agent.wait") != messageSubmitAttempts {
+		t.Fatalf("calls: send_keys=%d wait=%d; want no Enter into the focused pane and %d waits", fake.CallCount("agent.send_keys"), fake.CallCount("agent.wait"), messageSubmitAttempts)
+	}
+}

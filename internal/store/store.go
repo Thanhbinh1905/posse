@@ -2544,6 +2544,18 @@ ORDER BY m.claimed_at, m.id`, projectID, taskID, before)
 	return messages, nil
 }
 
+// MessageDeliveryUncertain reports whether a submitting message has no live
+// owner left to confirm it: its delivery lease expired, or its owner raised a
+// message_delivery_uncertain Notice. A submitting message with a live lease is
+// still being delivered by another command or the Project watch.
+func (db *DB) MessageDeliveryUncertain(ctx context.Context, messageID, activeBefore int64) (bool, error) {
+	var uncertain bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages m WHERE m.id=? AND m.status='submitting' AND (m.claimed_at<=? OR EXISTS (
+	SELECT 1 FROM notices n WHERE n.task_id=m.task_id AND n.kind='message_delivery_uncertain' AND json_extract(n.data_json, '$.message_id')=m.id
+)))`, messageID, activeBefore).Scan(&uncertain)
+	return uncertain, err
+}
+
 func (db *DB) CreateMessageDeliveryUncertainNotice(ctx context.Context, projectID, taskID, messageID int64, summary, body string) (bool, error) {
 	data, err := json.Marshal(map[string]any{"message_id": messageID, "instruction": body})
 	if err != nil {
