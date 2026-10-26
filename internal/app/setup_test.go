@@ -438,7 +438,7 @@ func TestDoctorOffersRemovalOfUnchangedGlobalSkills(t *testing.T) {
 	}
 	for _, check := range result.Checks {
 		if check.Name == "global skills" {
-			if check.Status != "warn" || !strings.Contains(check.Detail, "posse, posse-setup, posse-down, posse-update") || check.Action != "Run `posse setup --remove-global-skills` to remove unchanged Posse-owned files" {
+			if check.Status != "warn" || !strings.Contains(check.Detail, strings.Join(setupassets.SkillNames(), ", ")) || check.Action != "Run `posse setup --remove-global-skills` to remove unchanged Posse-owned files" {
 				t.Fatalf("doctor global skills check = %#v", check)
 			}
 			return

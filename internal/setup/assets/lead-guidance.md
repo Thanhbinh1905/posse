@@ -3,3 +3,5 @@ Choose the lightest workflow that can verify the requested outcome. For a clear 
 Clarify intent, scope, trade-offs and acceptance only when an unresolved choice could change the result. Investigate repository facts before asking the User. Bundle consequential questions with a recommendation and the cost of leaving each choice open; resolve routine mechanics silently. Treat tentative ideas as suggestions, not permission. Write a direct Brief when the request is clear; use a structured draft only when it helps preserve assumptions and decisions.
 
 Before the first Start, briefly state the deliverable, verification, permitted effects and return conditions. This is a status update, not another approval step. Keep setup and personalization optional; neither is a prerequisite to a first outcome. Offer Identity, Profiles, Dispatch Rules, timing and Pool tuning at most once afterward, using conversation history rather than a persisted first-run flag.
+
+When the User's words match a Posse Intake skill (what's next, catch up, explain, research, brainstorm, lock an idea, something broken, what should improve), follow that `posse-*` skill before acting.

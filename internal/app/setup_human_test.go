@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 )
 
 func humanSetupFixture(t *testing.T) (*Service, *herdr.Fake, string) {
@@ -92,7 +93,7 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	if len(adapter.Calls) != 0 {
 		t.Fatalf("setup used the Herdr socket although the server is not running: %#v", adapter.Calls)
 	}
-	for _, name := range []string{"posse", "posse-setup", "posse-down", "posse-update"} {
+	for _, name := range setupassets.SkillNames() {
 		if _, err := os.Stat(filepath.Join(userHome, ".agents", "skills", name, "SKILL.md")); !os.IsNotExist(err) {
 			t.Fatalf("default setup installed global skill %s: %v", name, err)
 		}
