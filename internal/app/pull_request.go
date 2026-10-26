@@ -967,17 +967,47 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 		return s.pollWorkspacePullRequestsAndNotify(ctx, db, project, cfg, force, onWorkspaceTaskMerged)
 	}
 	targetMoved := false
-	if err := s.pollProjectPullRequestsPass(ctx, db, project, cfg, force, &targetMoved); err != nil || !targetMoved {
+	if err := s.pollProjectPullRequestsPass(ctx, db, project, cfg, force, &targetMoved, nil); err != nil || !targetMoved {
 		return err
 	}
 	// An open PR whose target advanced during the forge query may have merged
 	// or fallen behind. Query again now rather than at the next poll.
-	return s.pollProjectPullRequestsPass(ctx, db, project, cfg, true, nil)
+	return s.pollProjectPullRequestsPass(ctx, db, project, cfg, true, nil, nil)
+}
+
+var prPollContendedRetry = 50 * time.Millisecond
+
+// refreshProjectPullRequests is a forced poll whose result a caller guards
+// on. While another poller, such as the Project watch, holds the poll claim,
+// its observations may predate this call, so the refresh waits for that poll
+// to finish and polls again until ctx ends.
+func (s *Service) refreshProjectPullRequests(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
+	if project.IsWorkspace() {
+		return s.pollProjectPullRequests(ctx, db, project, cfg, true)
+	}
+	for {
+		targetMoved, contended := false, false
+		if err := s.pollProjectPullRequestsPass(ctx, db, project, cfg, true, &targetMoved, &contended); err != nil {
+			return err
+		}
+		if targetMoved {
+			return s.pollProjectPullRequestsPass(ctx, db, project, cfg, true, nil, nil)
+		}
+		if !contended {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(prPollContendedRetry):
+		}
+	}
 }
 
 // pollProjectPullRequestsPass observes every watched PR once. It sets
-// targetMoved when an open PR's target advanced during the forge query.
-func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, targetMoved *bool) error {
+// targetMoved when an open PR's target advanced during the forge query, and
+// contended when another poller held the claim so nothing was observed.
+func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, force bool, targetMoved, contended *bool) error {
 	now := time.Now()
 	interval := parseDurationOr(cfg.Defaults.PRPoll, 2*time.Minute)
 	claim, err := db.ClaimPRPoll(ctx, project.ID, now, interval, force)
@@ -985,6 +1015,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		return err
 	}
 	if claim == "" {
+		if contended != nil {
+			*contended = true
+		}
 		return nil
 	}
 	defer releaseProjectPRPollWithRetry(db, project.ID, claim)

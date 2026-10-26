@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2086,5 +2087,54 @@ func TestPRWatchMissingGraphQLRepositoryDataEscalatesAtProjectScope(t *testing.T
 	state, err := fixture.db.ProjectWatchState(ctx, fixture.project.ID)
 	if err != nil || state.PRConsecutiveFailures != 3 {
 		t.Fatalf("Project failure streak=%d err=%v, want 3", state.PRConsecutiveFailures, err)
+	}
+}
+
+// #554: the Project watch held the poll claim while `posse send` refreshed
+// its merged-PR guard, so the forced poll observed nothing and send delivered
+// to a Task whose PR had merged. The refresh waits for that poll, then polls.
+func TestRefreshProjectPullRequestsWaitsForContendedPoll(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, herdr.NewFake())
+	holder, err := db.ClaimPRPoll(ctx, project.ID, time.Now(), time.Minute, true)
+	if err != nil || holder == "" {
+		t.Fatalf("watch claim=%q err=%v", holder, err)
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	err = service.refreshProjectPullRequests(timeoutCtx, db, project, config.Config{})
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("refresh under a held claim returned %v, want the caller's deadline", err)
+	}
+
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		released <- db.ReleasePRPoll(ctx, project.ID, holder)
+	}()
+	started := time.Now()
+	if err := service.refreshProjectPullRequests(ctx, db, project, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	var polledAt int64
+	if err := db.QueryRowContext(ctx, `SELECT pr_polled_at FROM project_watch_state WHERE project_id=?`, project.ID).Scan(&polledAt); err != nil {
+		t.Fatal(err)
+	}
+	if polledAt < started.UnixMilli() {
+		t.Fatalf("refresh returned without its own poll: polled_at=%d started=%d", polledAt, started.UnixMilli())
 	}
 }

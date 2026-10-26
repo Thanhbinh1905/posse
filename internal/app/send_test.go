@@ -599,11 +599,18 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 		name, wantState, wantReason, wantStatus string
 		claimOnly, queueLater                   bool
 		wantPrompts                             int
+		// submit marks the claim submitting, as the Project watch does
+		// while Herdr confirms the prompt; abandon adds its owner's Notice.
+		submit, abandon bool
 	}{
-		{"delivered", "delivered", "steered", "delivered", false, false, 1},
-		{"claimed", "queued", "delivery_in_progress", "claimed", true, false, 0},
-		{"claimed with later queued message", "queued", "delivery_in_progress", "claimed", true, true, 0},
-		{"delivered with later queued message", "delivered", "steered", "delivered", false, true, 1},
+		{"delivered", "delivered", "steered", "delivered", false, false, 1, false, false},
+		{"claimed", "queued", "delivery_in_progress", "claimed", true, false, 0, false, false},
+		{"claimed with later queued message", "queued", "delivery_in_progress", "claimed", true, true, 0, false, false},
+		{"delivered with later queued message", "delivered", "steered", "delivered", false, true, 1, false, false},
+		// #554: the Project watch was still submitting the message when
+		// send re-read it, so its delivery was in progress, not uncertain.
+		{"submitting", "queued", "delivery_in_progress", "submitting", true, false, 0, true, false},
+		{"submitting abandoned by its owner", "", "", "submitting", true, false, 0, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -658,6 +665,12 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 				deliveryStarted = true
 				if tc.claimOnly {
 					_, deliveryErr = deliveryDB.ClaimMessage(ctx, message.ID, "concurrent-delivery", currentTime(), currentTime()-deliveryClaimTimeout.Milliseconds())
+					if deliveryErr == nil && tc.submit {
+						deliveryErr = deliveryDB.MarkMessageSubmitting(ctx, message.ID, "concurrent-delivery")
+					}
+					if deliveryErr == nil && tc.abandon {
+						_, deliveryErr = service.createMessageDeliveryUncertainNotice(ctx, deliveryDB, project.ID, 1, message)
+					}
 					if deliveryErr == nil && tc.queueLater {
 						_, deliveryErr = deliveryDB.QueueMessage(ctx, taskID, "Later queued instruction", true)
 					}
@@ -673,7 +686,11 @@ func TestSendHandlesConcurrentDeliveryOfQueuedMessage(t *testing.T) {
 			var output bytes.Buffer
 			cli := service.CLI()
 			cli.Out = &output
-			if code := cli.Run([]string{"send", "t1", "Check the tests"}); code != 0 || !strings.Contains(output.String(), "state: "+tc.wantState) || !strings.Contains(output.String(), "reason: "+tc.wantReason) {
+			code := cli.Run([]string{"send", "t1", "Check the tests"})
+			if tc.abandon && (code == 0 || !strings.Contains(output.String(), "message_delivery_uncertain")) {
+				t.Fatalf("abandoned submission was not uncertain: exit=%d output=%s", code, output.String())
+			}
+			if !tc.abandon && (code != 0 || !strings.Contains(output.String(), "state: "+tc.wantState) || !strings.Contains(output.String(), "reason: "+tc.wantReason)) {
 				t.Fatalf("send raced with concurrent delivery: exit=%d output=%s", code, output.String())
 			}
 			if deliveryErr != nil || !deliveryStarted {
