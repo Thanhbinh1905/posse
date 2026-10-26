@@ -1,6 +1,6 @@
 ---
 name: posse-catch-up
-description: "Catches the User up in plain words: what waits on them first, then what happened, then one next step. Use when the User asks where things stand, what happened, what they missed, or returns after time away."
+description: "Catches the User up in plain words: what waits on them first, then what happened, then one next step. Use when the User asks where things stand, for a status update, what happened or what they missed, or returns after time away."
 ---
 
 # posse catch-up

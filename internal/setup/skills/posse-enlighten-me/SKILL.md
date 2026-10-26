@@ -1,6 +1,6 @@
 ---
 name: posse-enlighten-me
-description: "Explains how code works or why it is shaped that way, from code, docs and history, with each claim labelled seen, inferred or guess. Use when the User asks how X works, why X is like this, where X lives, or which option to pick."
+description: "Explains how code works or why it is shaped that way, from code, docs and history, with each claim labelled seen, inferred or guess. Use when the User asks how X works, why X is like this, where X lives, or which option to pick, before you start reading code to answer."
 ---
 
 # posse enlighten me

@@ -1,6 +1,6 @@
 ---
 name: posse-diagnose
-description: "Turns a reported bug into a reproduced root cause and a proposed fix for the User to approve. Use when the User says something is broken, failing, flaky, slow or wrong."
+description: "Turns a reported bug into a reproduced root cause and a proposed fix for the User to approve. Use when the User says something is broken, failing, flaky, slow, stuck or wrong, before you start investigating."
 ---
 
 # posse diagnose

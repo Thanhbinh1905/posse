@@ -1,6 +1,6 @@
 ---
 name: posse-research
-description: "Splits a question into 2-4 source directions and runs each as a read-only Research Task on primary sources, then sums up the findings. Use when the User asks to research, investigate or compare something, or another skill needs outside evidence."
+description: "Splits a question into 2-4 source directions and runs each as a read-only Research Task on primary sources, then sums up the findings. Use when the User asks to research, investigate, dig into or compare something with sources, before you start searching yourself."
 ---
 
 # posse research
