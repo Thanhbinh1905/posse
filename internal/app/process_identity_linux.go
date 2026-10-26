@@ -30,8 +30,17 @@ type sandboxProcessHandle struct {
 
 func processIdentityCapabilityError() string { return "" }
 
+// sandboxProcessExecutableIdentity returns the file identity of pid's
+// executable image. A thread group leader that exited while other threads run
+// is a zombie without an image of its own, so its group's image is read
+// through one of those threads.
 func sandboxProcessExecutableIdentity(pid int) (string, error) {
 	info, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if errors.Is(err, os.ErrNotExist) {
+		if threadInfo, threadErr := zombieLeaderThreadExecutable(pid); threadErr == nil {
+			info, err = threadInfo, nil
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -40,6 +49,33 @@ func sandboxProcessExecutableIdentity(pid int) (string, error) {
 		return "", fmt.Errorf("process executable for PID %d has no Linux file identity", pid)
 	}
 	return fmt.Sprintf("%d:%d", stat.Dev, stat.Ino), nil
+}
+
+// zombieLeaderThreadExecutable stats the executable image of a live thread in
+// pid's thread group when pid is a zombie leader. Threads listed under
+// /proc/PID/task share the leader's thread group and so its image.
+func zombieLeaderThreadExecutable(pid int) (os.FileInfo, error) {
+	zombie, err := sandboxProcessIsZombie(pid)
+	if err != nil {
+		return nil, err
+	}
+	if !zombie {
+		return nil, fmt.Errorf("process %d is not a zombie thread group leader", pid)
+	}
+	taskDirectory := filepath.Join("/proc", strconv.Itoa(pid), "task")
+	threads, err := os.ReadDir(taskDirectory)
+	if err != nil {
+		return nil, err
+	}
+	for _, thread := range threads {
+		if thread.Name() == strconv.Itoa(pid) {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(taskDirectory, thread.Name(), "exe")); err == nil {
+			return info, nil
+		}
+	}
+	return nil, fmt.Errorf("zombie leader %d has no live thread with an executable image", pid)
 }
 
 // loginShellNames are interactive shells a Herdr pane can run as its shell.
