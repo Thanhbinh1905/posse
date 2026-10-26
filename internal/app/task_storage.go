@@ -34,12 +34,11 @@ func taskDiskLeakSummary(home string, project store.Project, tasks []store.Task)
 			total += bytes
 			sizes = append(sizes, fmt.Sprintf("t%d=%d", task.Seq, bytes))
 		}
-		switch task.State {
-		case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateDone, store.StateMerging:
+		if taskHoldsSandboxState(task.State) {
 			continue
 		}
 		processes := taskContainmentProcessDetails(task)
-		if task.WorktreePath != "" {
+		if task.WorktreePath != "" && !sandboxHeldByAnotherTask(task, tasks) {
 			sandboxProcesses, sandboxErr := sandboxTaskProcessDetails(task.WorktreePath)
 			if sandboxErr == nil {
 				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
@@ -87,6 +86,26 @@ func taskDiskLeakSummary(home string, project store.Project, tasks []store.Task)
 		status = "warn"
 	}
 	return status, detail
+}
+
+func taskHoldsSandboxState(state store.State) bool {
+	switch state {
+	case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateDone, store.StateMerging:
+		return true
+	}
+	return false
+}
+
+// sandboxHeldByAnotherTask reports whether a live Task now holds the Sandbox that
+// a finished Task used, so processes found there belong to the live Task.
+func sandboxHeldByAnotherTask(task store.Task, tasks []store.Task) bool {
+	path := filepath.Clean(task.WorktreePath)
+	for _, other := range tasks {
+		if other.ID != task.ID && taskHoldsSandboxState(other.State) && other.WorktreePath != "" && filepath.Clean(other.WorktreePath) == path {
+			return true
+		}
+	}
+	return false
 }
 
 func projectDiskUsage(home string, project store.Project) (string, error) {
