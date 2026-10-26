@@ -375,7 +375,13 @@ func taskProcessExited(pid int) bool {
 	if processGone(err) {
 		return true
 	}
-	if err != nil || len(fields) < 7 {
+	return err == nil && taskProcessStatExited(fields)
+}
+
+// taskProcessStatExited reports whether the /proc/PID/stat fields after the
+// command name describe a zombie, dead or exiting process.
+func taskProcessStatExited(fields []string) bool {
+	if len(fields) < 7 {
 		return false
 	}
 	if fields[0] == "Z" || fields[0] == "X" || fields[0] == "x" {

@@ -731,17 +731,40 @@ func TestTaskProcessExitedTreatsZombieAndGoneProcessesAsExited(t *testing.T) {
 	}
 }
 
-// An exiting process drops its environment before it becomes a zombie. Tearing
-// down a large address space holds it in that state long enough to observe, as
-// a Task's short-lived child is when Teardown proves its containment.
+func TestTaskProcessStatExitedReadsStateAndExitingFlag(t *testing.T) {
+	for name, test := range map[string]struct {
+		fields []string
+		want   bool
+	}{
+		"running":          {[]string{"R", "1", "1", "1", "0", "-1", "4194304"}, false},
+		"sleeping":         {[]string{"S", "1", "1", "1", "0", "-1", "4194304"}, false},
+		"exiting but live": {[]string{"S", "1", "1", "1", "0", "-1", "4194308"}, true},
+		"zombie":           {[]string{"Z", "1", "1", "1", "0", "-1", "4194304"}, true},
+		"dead":             {[]string{"X", "1", "1", "1", "0", "-1", "4194304"}, true},
+		"unparsable flags": {[]string{"S", "1", "1", "1", "0", "-1", "nope"}, false},
+		"truncated":        {[]string{"S", "1"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := taskProcessStatExited(test.fields); got != test.want {
+				t.Fatalf("taskProcessStatExited(%v) = %v, want %v", test.fields, got, test.want)
+			}
+		})
+	}
+}
+
+// An exiting process drops its environment, cwd and files before it becomes a
+// zombie. A thread group leader that exits while another thread runs reaches
+// the same state and stays there until the group ends, so the test holds it
+// without a timing window.
 func TestTaskProcessLeftContainmentTreatsExitingProcessAsGone(t *testing.T) {
 	root := t.TempDir()
 	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
-	exiting := exec.Command("python3", "-c", `import os, sys
-block = bytearray(b"x") * (256 << 20)
+	exiting := exec.Command("python3", "-c", `import ctypes, platform, sys, threading, time
+exit_syscall = {"x86_64": 60, "aarch64": 93}[platform.machine()]
+threading.Thread(target=time.sleep, args=(3600,), daemon=True).start()
 print("ready", flush=True)
 sys.stdin.readline()
-os._exit(0)
+ctypes.CDLL(None).syscall(exit_syscall, 0)
 `)
 	exiting.Dir = root
 	exiting.Env = taskContainmentTestEnvironment(marker, filepath.Join(root, "ready"), 0)
@@ -761,7 +784,7 @@ os._exit(0)
 		_ = exiting.Wait()
 	})
 	if _, err := io.ReadFull(stdout, make([]byte, len("ready\n"))); err != nil {
-		t.Fatalf("Task-marked process did not allocate its memory: %v", err)
+		t.Fatalf("Task-marked process did not start: %v", err)
 	}
 	pid := exiting.Process.Pid
 	task := store.Task{ContainmentMode: "marker", ContainmentMarker: marker}
@@ -772,28 +795,24 @@ os._exit(0)
 	if _, err := stdin.Write([]byte("\n")); err != nil {
 		t.Fatal(err)
 	}
-	// Poll without sleeping: the window lasts only milliseconds. Count a check
-	// only when the process was still unreaped after it returned.
-	running := func() bool {
+	// The leader stays a zombie while its other thread runs, so waiting for it
+	// is not a race against a closing window.
+	if !waitForTaskContainmentCondition(5*time.Second, func() bool {
 		zombie, err := sandboxProcessIsZombie(pid)
-		return err == nil && !zombie
+		return err == nil && zombie
+	}) {
+		t.Fatal("Task process leader did not exit")
 	}
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-		if !running() || taskContainsProcess(pid, task, roots) {
-			continue
-		}
-		if taskProcessLeftContainment(pid, task, roots) {
-			t.Fatal("exiting Task process was reported as escaped")
-		}
-		owned, err := taskProcessHasOwnershipProof(pid, task, roots, newSandboxProcessAuthorization())
-		if err != nil || !owned {
-			t.Fatalf("exiting Task process lost its ownership proof: owned=%v err=%v", owned, err)
-		}
-		if running() {
-			return
-		}
+	if processHasTaskMarker(pid, marker) || taskContainsProcess(pid, task, roots) {
+		t.Fatal("exited leader still reads as contained")
 	}
-	t.Fatal("did not observe the exiting process without its containment identity")
+	if taskProcessLeftContainment(pid, task, roots) {
+		t.Fatal("exited Task process was reported as escaped")
+	}
+	owned, err := taskProcessHasOwnershipProof(pid, task, roots, newSandboxProcessAuthorization())
+	if err != nil || !owned {
+		t.Fatalf("exited Task process lost its ownership proof: owned=%v err=%v", owned, err)
+	}
 }
 
 func TestTaskProcessLeftContainmentReportsLiveEscapedProcess(t *testing.T) {
