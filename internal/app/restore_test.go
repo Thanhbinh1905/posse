@@ -100,6 +100,9 @@ func TestHerdrRestartDoesNotRelaunchLead(t *testing.T) {
 	if restoreNotices != 1 {
 		t.Fatalf("restore_needed Notices = %d, want one: %#v", restoreNotices, notices)
 	}
+	if fake.CallCount("notification.show") != 1 {
+		t.Fatalf("the User was not notified once through Herdr: %#v", fake.Calls)
+	}
 	if generation, err := db.ProjectServerStartedAt(ctx, project.ID); err != nil || generation != "old-generation" {
 		t.Fatalf("held restart consumed the generation: %q, %v", generation, err)
 	}

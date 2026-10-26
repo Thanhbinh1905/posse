@@ -47,6 +47,9 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "restore_needed", Summary: summary, DataJSON: data}); err != nil {
 			return err
 		}
+		// With no Lead agent, delivery is a Herdr notification to the User.
+		// The Notice stays durable if Herdr cannot show it yet.
+		_ = s.deliverNotices(ctx, db, project)
 	}
 	return errRecoveryHeld
 }
