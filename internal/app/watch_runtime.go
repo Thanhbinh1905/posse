@@ -633,7 +633,7 @@ func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args 
 		return
 	}
 	selected := make([]store.Project, 0, len(projects))
-	if command == "" || command == "doctor" || command == "recover" && containsArgument(args, "--all") {
+	if command == "" || command == "doctor" || command == "_herdr_started" || command == "up" && containsArgument(args, "--all") {
 		selected = projects
 	} else {
 		dir, dirErr := currentDir()

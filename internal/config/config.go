@@ -41,7 +41,6 @@ type Defaults struct {
 	StallAfter          string `toml:"stall_after" json:"stall_after"`
 	IdleAfter           string `toml:"idle_after" json:"idle_after"`
 	AutoTeardown        string `toml:"auto_teardown" json:"auto_teardown"`
-	AutoRecover         bool   `toml:"auto_recover" json:"auto_recover"`
 	RecoveryAttempts    int    `toml:"recovery_attempts" json:"recovery_attempts"`
 	RecoveryBackoff     string `toml:"recovery_backoff" json:"recovery_backoff"`
 	MergeMode           string `toml:"merge_mode" json:"merge_mode"`
@@ -375,6 +374,9 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		return Config{}, err
 	}
 	warnings := removeLegacyGateSettings(globalPath, global)
+	if err := refuseAutoRecover(globalPath, global); err != nil {
+		return Config{}, err
+	}
 	if _, found := global["autonomy"]; found {
 		return Config{}, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
 	}
@@ -390,6 +392,9 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 			return Config{}, err
 		}
 		warnings = append(warnings, removeLegacyGateSettings(projectPath, project)...)
+		if err := refuseAutoRecover(projectPath, project); err != nil {
+			return Config{}, err
+		}
 		if _, found := project["worker_go_cache"]; found {
 			return Config{}, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")}
 		}
@@ -406,6 +411,17 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// refuseAutoRecover names the removed defaults.auto_recover key (ADR 0035):
+// Posse never restarts agents on its own, so the key has no meaning left.
+func refuseAutoRecover(path string, values map[string]any) error {
+	if defaults, ok := values["defaults"].(map[string]any); ok {
+		if _, found := defaults["auto_recover"]; found {
+			return &InvalidError{File: path, Key: "defaults.auto_recover", Reason: "defaults.auto_recover was removed: Posse no longer restarts agents automatically. Delete the key; run `posse up --all` to restore Projects after a Herdr restart"}
+		}
+	}
+	return nil
 }
 
 func removeLegacyGateSettings(path string, values map[string]any) []string {
@@ -660,7 +676,7 @@ func defaultMap() map[string]any {
 		"lowkey":          map[string]any{"lead": false},
 		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
 		"defaults": map[string]any{
-			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "auto_recover": true, "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
+			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
 		},
 		"kinds": map[string]any{

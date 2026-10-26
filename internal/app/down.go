@@ -150,6 +150,14 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err := db.ClearDownProjectLead(ctx.Context, project.ID); err != nil {
 		return err
 	}
+	// The next `posse up` keeps the Lead's kind but starts a new conversation.
+	if recorded, err := db.ProjectLeadAgent(ctx.Context, project.ID); err != nil {
+		return err
+	} else if recorded.Session != "" {
+		if err := db.SetProjectLeadAgent(ctx.Context, project.ID, store.LeadAgent{Kind: recorded.Kind}); err != nil {
+			return err
+		}
+	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}

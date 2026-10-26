@@ -84,101 +84,53 @@ func (s *Service) recover(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(parsed.Positionals) != 0 || parsed.Bool("all") == parsed.Bool("rebuild") {
-		return axi.Usage("recover requires exactly one of --all or --rebuild")
+	if parsed.Bool("all") {
+		return axi.Failure("command_removed", "recover --all was replaced by `posse up --all`", false, "Run `posse up --all` to restore every Project that is not down")
 	}
-	if parsed.Bool("rebuild") {
-		home, err := s.homePath()
-		if err != nil {
-			return err
-		}
-		if !rebuildCallerMayBeUser(ctx.Context, home) {
-			return axi.Failure("user_only", "recover --rebuild can only be run by the User", false)
-		}
-		databasePath := filepath.Join(home, "posse.db")
-		var orphanedSidecars []string
-		if _, statErr := os.Stat(databasePath); errors.Is(statErr, os.ErrNotExist) {
-			orphanedSidecars, err = preserveMissingDatabaseSidecars(databasePath)
-			if err != nil {
-				return fmt.Errorf("preserve orphaned database sidecars before rebuild: %w", err)
-			}
-		} else if statErr != nil {
-			return statErr
-		} else if store.IsCorruptDatabaseFile(databasePath) {
-			if _, moveErr := moveCorruptDatabaseAside(databasePath); moveErr != nil {
-				return fmt.Errorf("preserve corrupt database before rebuild: %w", moveErr)
-			}
-		}
-		db, err := store.Open(home)
-		if err != nil {
-			return schemaFailure(err)
-		}
-		defer db.Close()
-		if s.configCallerRole(ctx.Context, db) != "user" {
-			return axi.Failure("user_only", "recover --rebuild can only be run by the User", false)
-		}
-		count, err := db.RebuildFromSnapshots(ctx.Context, home)
-		if err != nil {
-			return axi.Failure("rebuild_failed", "could not rebuild the database from Task snapshots", false, err.Error())
-		}
-		if err := execution.NewManager(db).EnsureSandboxLeases(ctx.Context); err != nil {
-			return axi.Failure("rebuild_failed", "database was rebuilt, but Sandbox resource custody could not be reconciled", false, err.Error())
-		}
-		result := axi.Object{{Key: "rebuilt_tasks", Value: count}, {Key: "source", Value: filepath.Join(home, "projects")}}
-		if len(orphanedSidecars) > 0 {
-			result = append(result, axi.Field{Key: "orphaned_sidecars", Value: orphanedSidecars})
-		}
-		return ctx.Print(result)
+	if len(parsed.Positionals) != 0 || !parsed.Bool("rebuild") {
+		return axi.Usage("recover requires --rebuild")
 	}
-	db, home, err := s.openDB()
+	home, err := s.homePath()
 	if err != nil {
 		return err
+	}
+	if !rebuildCallerMayBeUser(ctx.Context, home) {
+		return axi.Failure("user_only", "recover --rebuild can only be run by the User", false)
+	}
+	databasePath := filepath.Join(home, "posse.db")
+	var orphanedSidecars []string
+	if _, statErr := os.Stat(databasePath); errors.Is(statErr, os.ErrNotExist) {
+		orphanedSidecars, err = preserveMissingDatabaseSidecars(databasePath)
+		if err != nil {
+			return fmt.Errorf("preserve orphaned database sidecars before rebuild: %w", err)
+		}
+	} else if statErr != nil {
+		return statErr
+	} else if store.IsCorruptDatabaseFile(databasePath) {
+		if _, moveErr := moveCorruptDatabaseAside(databasePath); moveErr != nil {
+			return fmt.Errorf("preserve corrupt database before rebuild: %w", moveErr)
+		}
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		return schemaFailure(err)
 	}
 	defer db.Close()
-	projects, err := db.Projects(ctx.Context)
+	if s.configCallerRole(ctx.Context, db) != "user" {
+		return axi.Failure("user_only", "recover --rebuild can only be run by the User", false)
+	}
+	count, err := db.RebuildFromSnapshots(ctx.Context, home)
 	if err != nil {
-		return err
+		return axi.Failure("rebuild_failed", "could not rebuild the database from Task snapshots", false, err.Error())
 	}
-	reconciled := 0
-	restarted := 0
-	failed := []any{}
-	held := []any{}
-	for _, project := range projects {
-		cfg, err := config.Load(home, project.Name)
-		if err != nil {
-			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
-			continue
-		}
-		if recoveryHeld(project, cfg) {
-			held = append(held, project.Name)
-			continue
-		}
-		count, err := s.recoverProject(ctx.Context, db, home, project)
-		if err != nil {
-			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
-			continue
-		}
-		restarted += count
-		reconciled++
+	if err := execution.NewManager(db).EnsureSandboxLeases(ctx.Context); err != nil {
+		return axi.Failure("rebuild_failed", "database was rebuilt, but Sandbox resource custody could not be reconciled", false, err.Error())
 	}
-	state := "reconciled"
-	if len(failed) > 0 {
-		state = "partial"
+	result := axi.Object{{Key: "rebuilt_tasks", Value: count}, {Key: "source", Value: filepath.Join(home, "projects")}}
+	if len(orphanedSidecars) > 0 {
+		result = append(result, axi.Field{Key: "orphaned_sidecars", Value: orphanedSidecars})
 	}
-	result := axi.Object{{Key: "projects", Value: reconciled}, {Key: "attempted", Value: len(projects) - len(held)}, {Key: "restarted", Value: restarted}, {Key: "failed_projects", Value: failed}}
-	if len(held) > 0 {
-		result = append(result, axi.Field{Key: "held_projects", Value: held}, axi.Field{Key: "help", Value: []any{"Run `posse up` in a held Project's folder to start its Lead and recover its Workers"}})
-	}
-	return ctx.Print(append(result, axi.Field{Key: "state", Value: state}))
-}
-
-// errRecoveryHeld marks a Project that only `posse up` may restart.
-var errRecoveryHeld = errors.New("recovery is held until posse up")
-
-// recoveryHeld reports a Project that nothing but `posse up` may restart:
-// the User stopped it with `posse down` or turned off defaults.auto_recover.
-func recoveryHeld(project store.Project, cfg config.Config) bool {
-	return project.IsDown() || !cfg.Defaults.AutoRecover
+	return ctx.Print(result)
 }
 
 func recoveryWork(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot, previousGeneration, projectRecoveryGeneration string) ([]store.Task, bool, string, error) {
@@ -523,7 +475,7 @@ func (s *Service) claimProjectRecovery(ctx context.Context, db *store.DB, projec
 		case <-ctx.Done():
 			return false, state, ctx.Err()
 		case <-deadline.C:
-			return false, state, axi.Failure("recovery_active", "another recovery is still running", true, "Retry `posse recover --all` after it completes")
+			return false, state, axi.Failure("recovery_active", "another recovery is still running", true, "Retry `posse up --all` after it completes")
 		case <-ticker.C:
 		}
 	}
@@ -657,7 +609,7 @@ func (s *Service) ensureRecoveryWorkspace(ctx context.Context, db *store.DB, pro
 
 func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, snapshot herdr.Snapshot) (returnErr error) {
 	now := time.Now()
-	claimed, err := db.ClaimLeadStart(ctx, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "watch-recovery", os.Getpid())
+	claimed, err := db.ClaimLeadStart(ctx, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "restore", os.Getpid())
 	if err != nil {
 		return err
 	}
@@ -667,7 +619,7 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		if releaseErr := db.ReleaseLeadStart(releaseCtx, project.ID, "watch-recovery", os.Getpid()); releaseErr != nil {
+		if releaseErr := db.ReleaseLeadStart(releaseCtx, project.ID, "restore", os.Getpid()); releaseErr != nil {
 			returnErr = errors.Join(returnErr, fmt.Errorf("release Lead start claim: %w", releaseErr))
 		}
 	}()
@@ -718,7 +670,10 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": current.WorkspaceID, "label": leadWorkspaceLabel(project)}); err != nil {
 		return err
 	}
-	kind := s.currentLeadKind(ctx, project, cfg, cfg.Lead.Kind)
+	kind, session, err := s.restoreLeadAgent(ctx, db, project, cfg)
+	if err != nil {
+		return err
+	}
 	if _, ok := cfg.Kinds[kind]; !ok {
 		return axi.Failure("config_invalid", "unknown Lead agent kind "+kind, false)
 	}
@@ -733,6 +688,7 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if err != nil {
 		return err
 	}
+	leadStart = leadStart.withResume(cfg.Kinds[kind], session)
 	launch, err := db.NextLeadLaunch(ctx, project.ID)
 	if err != nil {
 		return err
@@ -744,6 +700,9 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 		return err
 	}
 	if err := s.waitLeadStarted(ctx, current.PaneID, leadStart); err != nil {
+		return err
+	}
+	if err := db.SetProjectLeadAgent(ctx, project.ID, store.LeadAgent{Kind: kind, Session: session}); err != nil {
 		return err
 	}
 	if err := db.SetProjectLead(ctx, project.ID, current.WorkspaceID, current.PaneID, label); err != nil {

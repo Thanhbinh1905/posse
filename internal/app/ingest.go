@@ -119,7 +119,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 						return err
 					}
 				}
-				if taskErr == nil && (task.State == store.StateDone || task.State == store.StateMerging) && !recoveryHeld(project, cfg) {
+				if taskErr == nil && (task.State == store.StateDone || task.State == store.StateMerging) && !project.IsDown() {
 					server, err := db.ProjectServerStartedAt(ctx, project.ID)
 					if err != nil {
 						return err
@@ -135,7 +135,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 			}
 			if status == "idle" || status == "done" {
 				paneSnapshot, snapshotErr := s.snapshot(ctx)
-				if snapshotErr == nil && !recoveryHeld(project, cfg) {
+				if snapshotErr == nil && !project.IsDown() {
 					recordedGeneration, generationErr := db.ProjectServerStartedAt(ctx, project.ID)
 					if generationErr != nil {
 						return generationErr
