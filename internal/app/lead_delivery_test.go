@@ -856,3 +856,38 @@ func TestWorkerWaitRulesByKind(t *testing.T) {
 		t.Fatalf("detached command rule missing: background=%q foreground=%q", background, foreground)
 	}
 }
+
+func TestLeadInstructionsAndChecksFailedNoticeAgreeOnFixOwner(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	composed, err := composeLeadInstructions(home, store.Project{Name: "shop"}, cfg, "codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phrase := range []string{
+		"Posse's automatic CI fix round owns the Worker instruction and raises `ci_fix_queued`",
+		"unless a `ci_fix_exhausted` Notice names it",
+		"for `pr_checks_failed` after `ci_fix_exhausted`",
+	} {
+		if !strings.Contains(composed.Text, phrase) {
+			t.Errorf("Lead instructions omitted %q", phrase)
+		}
+	}
+	if strings.Contains(composed.Text, "Send the Worker a fix instruction when the code must change.") {
+		t.Error("Lead instructions still tell the Lead to send a fix for any failed check")
+	}
+
+	effect := prObservationEffect(store.Project{ID: 1}, store.Task{ID: 1, Title: "t"},
+		store.PRObservation{State: "OPEN", HeadSHA: "abc", PRURL: "https://github.com/acme/shop/pull/1"},
+		[]failedCheck{{Name: "unit"}}, store.PRObservation{}, false)
+	if len(effect.Notices) != 1 || effect.Notices[0].Kind != "pr_checks_failed" {
+		t.Fatalf("notices = %#v", effect.Notices)
+	}
+	summary := effect.Notices[0].Summary
+	if !strings.Contains(summary, "ci_fix_queued") || !strings.Contains(summary, "only after ci_fix_exhausted") {
+		t.Errorf("pr_checks_failed summary does not state the fix owner: %s", summary)
+	}
+}
