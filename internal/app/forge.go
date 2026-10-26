@@ -203,7 +203,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 					return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
 				}
 				if foundOpenMR {
-					return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+					return "", false, pullRequestHeadMismatch(intent, lastHead, task.GatedSHA)
 				}
 			}
 			return "", false, axi.Failure("pr_list_failed", "could not list GitLab merge requests", true, err.Error())
@@ -256,7 +256,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 				}
 			}
 			if !lastHeadLagging {
-				return "", false, pullRequestHeadMismatch(mr.SHA, task.GatedSHA)
+				return "", false, pullRequestHeadMismatch(intent, mr.SHA, task.GatedSHA)
 			}
 			break
 		}
@@ -278,7 +278,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 				return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
 			}
 			if foundOpenMR {
-				return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+				return "", false, pullRequestHeadMismatch(intent, lastHead, task.GatedSHA)
 			}
 			return "", false, axi.Failure("pr_list_failed", "timed out while looking for an existing GitLab merge request", true)
 		}

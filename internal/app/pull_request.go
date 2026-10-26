@@ -343,7 +343,7 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 					return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
 				}
 				if foundOpenPR {
-					return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+					return "", false, pullRequestHeadMismatch(intent, lastHead, task.GatedSHA)
 				}
 			}
 			return "", false, axi.Failure("pr_list_failed", "could not find an existing open pull request for the Task branch", true, truncate(err.Error(), 1200))
@@ -397,7 +397,7 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 				}
 			}
 			if !lastHeadLagging {
-				return "", false, pullRequestHeadMismatch(candidateHead, task.GatedSHA)
+				return "", false, pullRequestHeadMismatch(intent, candidateHead, task.GatedSHA)
 			}
 		}
 		timer := time.NewTimer(delay)
@@ -412,7 +412,7 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 				return "", false, pullRequestHeadLagTimeout(lastHead, task.GatedSHA)
 			}
 			if foundOpenPR {
-				return "", false, pullRequestHeadMismatch(lastHead, task.GatedSHA)
+				return "", false, pullRequestHeadMismatch(intent, lastHead, task.GatedSHA)
 			}
 			return "", false, axi.Failure("pr_list_failed", "timed out while looking for an existing open pull request", true)
 		}
@@ -590,8 +590,12 @@ func pullRequestTargetMismatch(prURL, actual, expected string) error {
 	)
 }
 
-func pullRequestHeadMismatch(actual, expected string) error {
-	return axi.Failure("branch_moved", fmt.Sprintf("open request for the Task branch has head %s; expected %s", actual, expected), false, "Re-run `posse merge` to verify the Task branch tip")
+func pullRequestHeadMismatch(intent store.Intent, actual, expected string) error {
+	hint := "Re-run `posse merge` to verify the Task branch tip"
+	if intent.Command == "publish" {
+		hint = "Push the local Task head to the Task branch and re-run `posse publish`, or signal needs-decision if the request head keeps differing"
+	}
+	return axi.Failure("branch_moved", fmt.Sprintf("open request for the Task branch has head %s; expected %s", actual, expected), false, hint)
 }
 
 func pullRequestHeadLagTimeout(actual, expected string) error {
