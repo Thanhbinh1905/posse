@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -1431,4 +1432,15 @@ func (fixture *prMergeFixture) run(args ...string) (int, string, string) {
 func withValidationBlock(body, head string) string {
 	block := validationSummary{Head: head, Review: "unknown", Findings: map[string]int{}, CI: "unknown"}.markdown()
 	return strings.TrimRight(body, "\n") + "\n\n" + block + "\n"
+}
+
+func TestPullRequestHeadMismatchHintMatchesCaller(t *testing.T) {
+	publish := strings.Join(pullRequestHeadMismatch(store.Intent{Command: "publish"}, "aaa", "bbb").(*axi.Error).Help, " ")
+	if !strings.Contains(publish, "re-run `posse publish`") || strings.Contains(publish, "posse merge") {
+		t.Fatalf("publish hint does not match a Worker: %s", publish)
+	}
+	merge := strings.Join(pullRequestHeadMismatch(store.Intent{Command: "merge"}, "aaa", "bbb").(*axi.Error).Help, " ")
+	if !strings.Contains(merge, "Re-run `posse merge`") {
+		t.Fatalf("merge hint changed: %s", merge)
+	}
 }

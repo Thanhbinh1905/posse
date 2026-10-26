@@ -174,7 +174,7 @@ func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB
 		return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	}
 	if head != task.GatedSHA {
-		return pullRequestHeadMismatch(head, task.GatedSHA)
+		return pullRequestHeadMismatch(intent, head, task.GatedSHA)
 	}
 	if err := validatePullRequestOrigin(ctx, project.Root, prURL); err != nil {
 		return err
