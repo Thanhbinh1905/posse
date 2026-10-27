@@ -842,3 +842,55 @@ func TestSetupUpgradeWritesTheRecommendedSkillsOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestSetupOffersTheRecommendedSkillsAndWritesThemOnlyWhenConfirmed(t *testing.T) {
+	service, _, _ := humanSetupFixture(t)
+	configPath := filepath.Join(service.Home, "config.toml")
+	preview, code := runHumanSetup(t, service, "--check")
+	if code != 0 || !strings.Contains(preview, "No workflow skills in") || !strings.Contains(preview, "posse skills add") {
+		t.Fatalf("preview = %d %s", code, preview)
+	}
+	if out, code := runHumanSetup(t, service, "--no-recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "No workflow skills in") {
+		t.Fatalf("declined setup = %d %s", code, out)
+	}
+	if configured, _ := config.ConfiguredSkills(configPath); len(configured["lead"]) != 0 {
+		t.Fatalf("skills written without confirmation: %v", configured)
+	}
+	if out, code := runHumanSetup(t, service, "--recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "Added the recommended workflow skills") {
+		t.Fatalf("confirmed setup = %d %s", code, out)
+	}
+	configured, err := config.ConfiguredSkills(configPath)
+	if err != nil || len(configured["lead"]) == 0 || len(configured["change"]) == 0 {
+		t.Fatalf("configured = %v, %v", configured, err)
+	}
+	if out, _ := runHumanSetup(t, service, "--check"); strings.Contains(out, "workflow skills") {
+		t.Fatalf("complete config still reports skills: %s", out)
+	}
+}
+
+func TestDoctorReportsRecommendedSkillsMissingFromConfig(t *testing.T) {
+	service, _, _ := humanSetupFixture(t)
+	configPath := filepath.Join(service.Home, "config.toml")
+	doctor := func() string {
+		output := &strings.Builder{}
+		cli := service.CLI()
+		cli.Out, cli.ErrOut = output, output
+		cli.Run([]string{"doctor"})
+		return output.String()
+	}
+	if got := doctor(); !strings.Contains(got, "workflow skills,warn,\"no [skills] block") {
+		t.Fatalf("doctor without a block: %s", got)
+	}
+	if _, err := config.AddSkills(configPath, map[string][]string{"change": {"posse-tdd"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := doctor(); !strings.Contains(got, "workflow skills,ok,") || !strings.Contains(got, "recommended skills are not in config") {
+		t.Fatalf("doctor with a partial block: %s", got)
+	}
+	if _, err := config.AddSkills(configPath, setupassets.RecommendedSkills()); err != nil {
+		t.Fatal(err)
+	}
+	if got := doctor(); !strings.Contains(got, "every recommended skill is in config") {
+		t.Fatalf("doctor with the full set: %s", got)
+	}
+}

@@ -112,3 +112,45 @@ func TestWriteRecommendedSkillsAppendsTheBlockOnce(t *testing.T) {
 		t.Fatalf("WriteRecommendedSkills over an existing [skills] block = %v, %v", written, err)
 	}
 }
+
+func TestAddSkillsKeepsCommentsAndExistingEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeConfig(t, path, "# my config\n[defaults]\nreview = \"none\" # keep\n\n[skills]\n# mine\nchange = [\"~/x\", \"posse-tdd\"]\n")
+	added, err := AddSkills(path, map[string][]string{"change": {"posse-tdd", "posse-deslop"}, "review": {"posse-review"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string][]string{"change": {"posse-deslop"}, "review": {"posse-review"}}; !reflect.DeepEqual(added, want) {
+		t.Fatalf("added = %#v, want %#v", added, want)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"# my config\n", "review = \"none\" # keep\n", "# mine\n", "\"~/x\",\n  \"posse-tdd\",\n  \"posse-deslop\",\n"} {
+		if !strings.Contains(string(contents), want) {
+			t.Fatalf("config lost %q:\n%s", want, contents)
+		}
+	}
+	configured, err := ConfiguredSkills(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(configured["review"], []string{"posse-review"}) || len(configured["lead"]) != 0 {
+		t.Fatalf("configured = %#v", configured)
+	}
+	if again, err := AddSkills(path, map[string][]string{"change": {"posse-deslop"}}); err != nil || len(again) != 0 {
+		t.Fatalf("repeat add = %#v, %v", again, err)
+	}
+}
+
+func TestAddSkillsCreatesTheSkillsBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if _, err := AddSkills(path, map[string][]string{"lead": {"posse-spec"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ConfiguredSkills(path)
+	if err != nil || !reflect.DeepEqual(cfg["lead"], []string{"posse-spec"}) {
+		t.Fatalf("configured = %#v, %v", cfg, err)
+	}
+}

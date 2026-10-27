@@ -69,6 +69,27 @@ func RecommendedSkills() map[string][]string {
 	}
 }
 
+// SkillSummary is the first sentence of an embedded skill's description.
+func SkillSummary(name string) string {
+	contents, err := Skill(name)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		value, found := strings.CutPrefix(line, "description:")
+		if !found {
+			continue
+		}
+		description, err := strconv.Unquote(strings.TrimSpace(value))
+		if err != nil {
+			description = strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+		sentence, _, _ := strings.Cut(description, ". ")
+		return strings.TrimSuffix(sentence, ".")
+	}
+	return ""
+}
+
 func IsSkill(name string) bool {
 	for _, skill := range skillNames {
 		if name == skill {

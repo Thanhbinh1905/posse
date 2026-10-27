@@ -15,7 +15,7 @@ Posse is a local-first CLI for coordinating coding agents in Git repositories an
 
 Posse keeps task state in a local SQLite database and uses Herdr to run the agents. See the [domain glossary](CONTEXT.md), [specification](docs/spec.md), and [architecture decisions](docs/adr/) for details.
 
-## Install
+## Install Posse
 
 You need [Herdr](https://github.com/herdrdev/herdr) (protocol 22 or newer), Git, and a coding agent supported by your Herdr installation. PR-based merging also requires authentication with your repository's forge CLI (`gh` for GitHub or `glab` for GitLab).
 
@@ -56,7 +56,11 @@ Posse never restarts agents on its own. After closing or restarting Herdr, run `
 
 For a clear implementation request, the Lead can dispatch one Change directly. Research Tasks, specifications, tickets and separate review Tasks are optional. Customize workflow guidance with `posse preferences show|path|set`; User and Project preferences can change advice but not Posse's runtime obligations or authority checks. Legacy preference files remain readable; move them explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement. See [ADR 0026](docs/adr/0026-functional-vocabulary.md) for the vocabulary mapping and automatic 0.14 upgrade.
 
-The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) remains available as an optional full configuration tour. The User-invoked `posse-down` and `posse-update` skills (Claude Code: `/posse-down`, `/posse-update`; Codex: `$posse-down`, `$posse-update`) guide safe shutdown and update/restart. `posse-better-each-day` ("what should improve?") consolidates friction into upstream issues and proposed skill edits. These skills always load. The workflow skills below load only when listed for a role in the `[skills]` config block ([ADR 0036](docs/adr/0036-workflow-skills-are-selected-per-role-in-config.md)); an upgraded install gets the recommended lists once. Twelve Intake skills start from plain words: "what should I do now?" (`posse-whats-next`), "where are we?" (`posse-catch-up`), "explain X" (`posse-enlighten-me`), "research X" (`posse-research`), "develop this idea" (`posse-brainstorming`), "lock this idea" (`posse-sharpen`), "write the spec" (`posse-spec`), "compare designs for this one-way door" (`posse-arena`), "break it into tickets" (`posse-tickets`), "triage these issues" (`posse-triage`), "build the tickets" (`posse-build`) and "this is broken" (`posse-diagnose`). Workers follow `posse-tdd` to implement test-first, `posse-deslop` and `posse-no-comments` to clean their own diff before publishing, and `posse-review` in a Review Round. Lead and Workers follow `posse-technical-writing` and `posse-unslop` for prose in any language. Use `posse config` to personalize later and `posse --help` to explore the CLI.
+The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) remains available as an optional full configuration tour. The User-invoked `posse-down` and `posse-update` skills (Claude Code: `/posse-down`, `/posse-update`; Codex: `$posse-down`, `$posse-update`) guide safe shutdown and update/restart. `posse-better-each-day` ("what should improve?") consolidates friction into upstream issues and proposed skill edits. These platform skills always load. Use `posse config` to personalize later and `posse --help` to explore the CLI.
+
+## Adopt the recommended skill set
+
+Installing Posse does not load the workflow skills. Add them with `posse skills add`: a picker on a terminal, or `--all` for the whole set. `posse setup` offers it once, and an upgraded install gets it written once. See [docs/skills.md](docs/skills.md) for the `[skills]` block, the role table and every skill.
 
 To uninstall, run the installer with `--uninstall` after `sh -s --`. Posse keeps local task history and configuration unless you confirm their removal.
 

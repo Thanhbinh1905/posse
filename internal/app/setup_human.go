@@ -132,6 +132,16 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 		return change("Create the default config at "+displayPath(target), "Created the default config at "+displayPath(target))
 	case "recommended_skills":
 		return change("Add the recommended workflow skills to "+displayPath(target)+" so this upgrade keeps loading them", "Added the recommended workflow skills to "+displayPath(target))
+	case "recommended_skills_offer":
+		switch action {
+		case "installed":
+			return []string{humanDone + "  Added the recommended workflow skills to " + displayPath(target)}
+		case "keep":
+			status, _ := row["status"].(string)
+			return kept(status)
+		default:
+			return []string{humanManual + "  No workflow skills in " + displayPath(target) + "; run `posse setup` to add the recommended set, or `posse skills add` to pick"}
+		}
 	case "skill":
 		name := filepath.Base(target)
 		switch action {

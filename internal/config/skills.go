@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -160,14 +161,88 @@ func WriteRecommendedSkills(path string) (bool, error) {
 	block.WriteString("# Workflow skills loaded on top of the platform skills, per role.\n[skills]\n")
 	recommended := setupassets.RecommendedSkills()
 	for _, role := range SkillRoles {
-		block.WriteString(role + " = [\n")
-		for _, name := range recommended[role] {
-			block.WriteString("  " + strconv.Quote(name) + ",\n")
-		}
-		block.WriteString("]\n")
+		block.WriteString(role + " = " + skillListLiteral(recommended[role]) + "\n")
 	}
 	if err := atomicfile.Write(path, append(original, block.String()...), filePerm(path)); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func skillListLiteral(names []string) string {
+	var literal strings.Builder
+	literal.WriteString("[\n")
+	for _, name := range names {
+		literal.WriteString("  " + strconv.Quote(name) + ",\n")
+	}
+	literal.WriteString("]")
+	return literal.String()
+}
+
+// ConfiguredSkills reads the [skills] lists written in the config file at path.
+func ConfiguredSkills(path string) (map[string][]string, error) {
+	values, _, err := ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	table, _ := values["skills"].(map[string]any)
+	configured := map[string][]string{}
+	for _, role := range SkillRoles {
+		entries, _ := table[role].([]any)
+		for _, entry := range entries {
+			if name, ok := entry.(string); ok {
+				configured[role] = append(configured[role], name)
+			}
+		}
+	}
+	return configured, nil
+}
+
+// AddSkills appends the selected skill names to each role's [skills] list in
+// the config at path, keeping its comments and entries it already lists. It
+// returns the names it added per role.
+func AddSkills(path string, selection map[string][]string) (map[string][]string, error) {
+	configured, err := ConfiguredSkills(path)
+	if err != nil {
+		return nil, err
+	}
+	_, original, err := ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	contents := string(original)
+	added := map[string][]string{}
+	for _, role := range SkillRoles {
+		merged := append([]string(nil), configured[role]...)
+		for _, name := range selection[role] {
+			if !slices.Contains(merged, name) {
+				merged = append(merged, name)
+				added[role] = append(added[role], name)
+			}
+		}
+		if len(added[role]) == 0 {
+			continue
+		}
+		if contents, err = replaceTOMLValue(contents, "skills."+role, skillListLiteral(merged)); err != nil {
+			return nil, err
+		}
+	}
+	if len(added) == 0 {
+		return added, nil
+	}
+	return added, atomicfile.Write(path, []byte(contents), filePerm(path))
+}
+
+// MissingRecommendedSkills lists, per role, the recommended skills that
+// configured does not list.
+func MissingRecommendedSkills(configured map[string][]string) map[string][]string {
+	missing := map[string][]string{}
+	for role, names := range setupassets.RecommendedSkills() {
+		for _, name := range names {
+			if !slices.Contains(configured[role], name) {
+				missing[role] = append(missing[role], name)
+			}
+		}
+	}
+	return missing
 }

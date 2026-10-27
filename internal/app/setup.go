@@ -100,7 +100,7 @@ type setupRun struct {
 }
 
 func (s *Service) setup(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "sidebar-layout": {boolean: true}, "no-sidebar-layout": {boolean: true}, "global-skills": {boolean: true}, "remove-global-skills": {boolean: true}, "binary": {}})
+	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "sidebar-layout": {boolean: true}, "no-sidebar-layout": {boolean: true}, "recommended-skills": {boolean: true}, "no-recommended-skills": {boolean: true}, "global-skills": {boolean: true}, "remove-global-skills": {boolean: true}, "binary": {}})
 	if err != nil {
 		return err
 	}
@@ -110,6 +110,9 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	human := parsed.Bool("human")
 	if human && (parsed.Bool("uninstall") || ctx.JSON) {
 		return axi.Usage("--human cannot be combined with --uninstall or --json")
+	}
+	if parsed.Bool("recommended-skills") && parsed.Bool("no-recommended-skills") || (parsed.Bool("recommended-skills") || parsed.Bool("no-recommended-skills")) && (parsed.Bool("check") || parsed.Bool("uninstall")) {
+		return axi.Usage("recommended skills flags apply only when installing setup, and not together")
 	}
 	if parsed.Bool("exit-code") && !parsed.Bool("check") {
 		return axi.Usage("--exit-code applies only to setup --check")
@@ -161,6 +164,26 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 				}
 			}
 			err = pathErr
+		}
+	}
+	if err == nil && run.applied && recommendedSkillsOffered(run.plan) && !parsed.Bool("no-recommended-skills") {
+		confirmed := parsed.Bool("recommended-skills")
+		if !confirmed && !human && setupInputIsTerminal() {
+			fmt.Fprint(ctx.Out, "Install the recommended workflow skills for every role into your config? Choose individually with `posse skills add` [y/N] ")
+			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			confirmed = strings.EqualFold(strings.TrimSpace(answer), "y")
+		}
+		if confirmed {
+			var written bool
+			written, err = config.WriteRecommendedSkills(filepath.Join(home, "config.toml"))
+			if written && err == nil {
+				run.changed = append(run.changed, "recommended_skills")
+				for _, row := range run.plan {
+					if row["step"] == "recommended_skills_offer" {
+						row["action"] = "installed"
+					}
+				}
+			}
 		}
 	}
 	if human {
@@ -229,6 +252,9 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 		row["error"] = "Herdr 0.9.1 or newer is required for styled sidebar rules"
 	}
 	run.plan = append(run.plan, row)
+	if skillsRow, ok := recommendedSkillsOfferRow(home, run.plan); ok {
+		run.plan = append(run.plan, skillsRow)
+	}
 	run.prerequisites = setupPrerequisites(run.inspection)
 	if setupPrerequisiteMissing(run.prerequisites, "git") {
 		return run, axi.Failure("setup_prerequisite_missing", "git is required for posse", false)
@@ -425,6 +451,48 @@ func recommendedSkillsPending(configPath string, manifest setupManifest) bool {
 	}
 	_, found := values["skills"]
 	return !found
+}
+
+// recommendedSkillsOfferRow reports the recommended workflow skills the config
+// lacks. It offers the whole set when the config has no [skills] block, and
+// only notes the gap once the User has chosen a list.
+func recommendedSkillsOfferRow(home string, plan []map[string]any) (map[string]any, bool) {
+	for _, row := range plan {
+		if row["step"] == "recommended_skills" {
+			return nil, false
+		}
+	}
+	configPath := filepath.Join(home, "config.toml")
+	configured, err := config.ConfiguredSkills(configPath)
+	if err != nil {
+		return nil, false
+	}
+	values, _, err := config.ReadFile(configPath)
+	if err != nil {
+		return nil, false
+	}
+	row := map[string]any{"step": "recommended_skills_offer", "target": configPath, "action": "offer"}
+	if _, found := values["skills"]; found {
+		missing := 0
+		for _, names := range config.MissingRecommendedSkills(configured) {
+			missing += len(names)
+		}
+		if missing == 0 {
+			return nil, false
+		}
+		row["action"] = "keep"
+		row["status"] = fmt.Sprintf("%d recommended skills are not in config; run `posse skills add` to pick them", missing)
+	}
+	return row, true
+}
+
+func recommendedSkillsOffered(plan []map[string]any) bool {
+	for _, row := range plan {
+		if row["step"] == "recommended_skills_offer" && row["action"] == "offer" {
+			return true
+		}
+	}
+	return false
 }
 
 func skillSetupPlanRow(name, version string, dirs setupDirs, records []setupSkillRecord, mode string) map[string]any {
