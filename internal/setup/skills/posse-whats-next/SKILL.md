@@ -16,7 +16,7 @@ Facts are your job; decisions are the User's. Label each claim seen, inferred or
 3. **Give one next step.** Name one action and the skill that does it, with a one-line reason. Something waiting on the User comes first.
    - Something waiting on the User or time away: `posse-catch-up`.
    - Wants to understand code or a past choice: `posse-enlighten-me`; a broad question that needs sources: `posse-research`.
-   - A thin idea: `posse-brainstorming`; an idea to lock for a spec: `posse-sharpen`; a done lock card to specify: `posse-spec`.
+   - A thin idea: `posse-brainstorming`; an idea to lock for a spec: `posse-sharpen`; a done lock card to specify: `posse-spec`; a locked spec to break into tickets: `posse-tickets`.
    - Something broken: `posse-diagnose`.
    - A clear change: write a Brief and run `posse start --name <two-to-four-words>` after the User's yes.
    - Recurring friction or end of day: `posse-better-each-day`.

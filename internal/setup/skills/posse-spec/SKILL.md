@@ -26,4 +26,4 @@ The input is a lock card with status `done` in `~/.posse/projects/<project>/draf
 5. **Publish** the spec as one parent issue labelled `ready-for-agent` with the forge CLI, and record its URL in the draft.
    Done when the issue URL is in the draft.
 
-The User decides the next stage. Offer Tickets, or Build when the spec is one ticket, in one line; never start a Worker yourself.
+The User decides the next stage. Offer the `posse-tickets` skill, or Build when the spec is one ticket, in one line; never start a Worker yourself.
