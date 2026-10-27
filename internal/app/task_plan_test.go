@@ -325,7 +325,7 @@ func TestSkillSelectionIsFrozenIntoThePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := skillInputNames(inputs), []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-tdd"}; !slices.Equal(got, want) {
+	if got, want := skillInputNames(inputs), []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-better-each-day", "posse-tdd"}; !slices.Equal(got, want) {
 		t.Fatalf("Change Worker skills = %v, want %v", got, want)
 	}
 	resolve := func(kind string, inputs []taskplan.Input) taskplan.Plan {
@@ -356,7 +356,7 @@ func TestSkillSelectionIsFrozenIntoThePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := skillInputNames(reconfigured.Inputs), []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-deslop"}; !slices.Equal(got, want) {
+	if got, want := skillInputNames(reconfigured.Inputs), []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-better-each-day", "posse-deslop"}; !slices.Equal(got, want) {
 		t.Fatalf("plan without frozen skills selected %v, want %v", got, want)
 	}
 }

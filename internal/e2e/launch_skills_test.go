@@ -217,7 +217,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 				}
 				return task
 			}
-			platform := []string{"posse", "posse-setup", "posse-down", "posse-update"}
+			platform := []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-better-each-day"}
 			task := startWorker("t1", "launch-skills")
 			argsContents, err := os.ReadFile(capture)
 			if err != nil {

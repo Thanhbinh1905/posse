@@ -4,7 +4,11 @@ Every Lead and Worker used to load all embedded skills. Workers carried Lead ski
 
 > không nên là add hay remove, hãy coi bộ skills này là đề xuất của tôi thôi, người dùng cài về thì áp dụng thêm cái workfow của tôi, còn nền tảng thì đã có sẵn rồi, thì khi cài bộ skill sẽ có thêm thao tác add hết skill này vào config và tùy biến nạp luôn
 
-Posse always loads the platform skills: `posse`, `posse-setup`, `posse-down` and `posse-update`. It loads workflow skills only from the `[skills]` config block, which holds one list per role:
+Posse always loads the platform skills: `posse`, `posse-setup`, `posse-down`, `posse-update` and `posse-better-each-day`. `posse-better-each-day` is a platform skill, not part of the recommended workflow set (User, 2026-10-27):
+
+> better each day không nằm trong việc user tải về nhé, nó vẫn nằm trong setup skills nhưng mà không nằm trong cli tải skills về
+
+Posse loads workflow skills only from the `[skills]` config block, which holds one list per role:
 
 | Key | Loaded into |
 |---|---|

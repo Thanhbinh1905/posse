@@ -201,7 +201,7 @@ One step in a workflow profile, mapped to a frame or to Ship, with a User decisi
 _Avoid_: Frame, Task state, Gate
 
 **Platform skills**:
-The embedded skills every Posse-launched Lead and Worker loads: `posse`, `posse-setup`, `posse-down` and `posse-update`.
+The embedded skills every Posse-launched Lead and Worker loads: `posse`, `posse-setup`, `posse-down`, `posse-update` and `posse-better-each-day`.
 _Avoid_: Default skills, core skills
 
 **Workflow skills**:
