@@ -71,6 +71,21 @@ func (db *DB) ReviewRoundsFor(ctx context.Context, changeTaskID int64) ([]Review
 	return rounds, rows.Err()
 }
 
+func (db *DB) ReviewTargetsCovered(ctx context.Context, changeTaskID int64, targets []ReviewTarget) (bool, error) {
+	for _, target := range targets {
+		var covered bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM review_rounds WHERE ship_task_id=? AND repository=? AND status='verdict' AND head_sha=?
+UNION ALL
+SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?)`,
+			changeTaskID, target.Repository, target.Commit,
+			changeTaskID, target.Repository, target.Commit).Scan(&covered); err != nil || !covered {
+			return false, err
+		}
+	}
+	return len(targets) > 0, nil
+}
+
 func validateReviewRoundAdmissionTx(ctx context.Context, tx *writeTx, admission ReviewRoundAdmission) error {
 	if admission.ChangeTaskID < 1 || admission.Round < 1 || admission.MaxRounds < 1 || admission.MaxRounds > 3 || len(admission.Bindings) == 0 {
 		return fmt.Errorf("invalid review round admission")
