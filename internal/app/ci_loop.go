@@ -309,8 +309,6 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 	return strings.TrimSpace(body.String())
 }
 
-// briefFixerSection returns the Brief's Intent block under a User-intent label,
-// or the whole body under a Change Brief label when the Brief has no Intent block.
 func briefFixerSection(plan *taskplan.Plan) (label, text string) {
 	if plan == nil {
 		return "", ""
