@@ -24,6 +24,4 @@ The input is a locked parent spec issue from `posse-spec`, read with all its com
 6. **Publish** with the forge CLI in dependency order, as sub-issues of the spec issue, each labelled `ready-for-agent` with a `Blocked by: #n` line. Record the issue URLs in the draft. Never close the parent issue or modify its body.
    Done when every ticket URL is in the draft.
 
-In Build, map each `Blocked by: #n` to `after: [tN:landed]` in the Brief.
-
-The User decides the next stage. Offer Build in one line; never start a Worker yourself.
+The User decides the next stage. Offer the `posse-build` skill in one line; never start a Worker yourself.
