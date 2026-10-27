@@ -81,12 +81,12 @@ case "$kind" in
             python3 - "$POSSE_E2E_SKILL_READS" <<'PY'
 import json, os, re, sys
 instructions = json.loads(os.environ["POSSE_E2E_SKILL_INSTRUCTIONS"])
-paths = re.findall(r'[^ ;]+/skills/posse[a-z-]*/SKILL\.md', instructions)
-if not paths:
-    raise SystemExit(f"expected exact skill paths in {instructions!r}")
+match = re.search(r'(\S+)/\{name\}/SKILL\.md when relevant, where \{name\} is one of: ([a-z, -]+)\.', instructions)
+if not match:
+    raise SystemExit(f"expected the frozen skills directory and names in {instructions!r}")
 with open(sys.argv[1], "a", encoding="utf-8") as output:
-    for path in paths:
-        with open(path, encoding="utf-8") as skill:
+    for name in match.group(2).split(", "):
+        with open(os.path.join(match.group(1), name, "SKILL.md"), encoding="utf-8") as skill:
             output.write(skill.read())
 PY
             ;;
@@ -200,8 +200,8 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			}
 			switch kind {
 			case "codex":
-				if strings.Count(string(argsContents), "developer_instructions=") < 2 || !strings.Contains(string(argsContents), filepath.Join("skills", "posse", "SKILL.md")) || !strings.Contains(string(argsContents), filepath.Join("skills", "posse-setup", "SKILL.md")) || !strings.Contains(string(argsContents), filepath.Join(root, "posse", "projects", "shop", "launch-skills")) {
-					t.Fatalf("Codex developer_instructions omitted exact snapshot paths: %s", argsContents)
+				if strings.Count(string(argsContents), "developer_instructions=") < 2 || !strings.Contains(string(argsContents), filepath.Join("skills", "{name}", "SKILL.md")) || !strings.Contains(string(argsContents), strings.Join(setupassets.SkillNames(), ", ")) || !strings.Contains(string(argsContents), filepath.Join(root, "posse", "projects", "shop", "launch-skills")) {
+					t.Fatalf("Codex developer_instructions omitted the frozen skills directory or names: %s", argsContents)
 				}
 			case "claude":
 				if strings.Count(string(argsContents), "--plugin-dir") < 2 {

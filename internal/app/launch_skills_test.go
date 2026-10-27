@@ -89,6 +89,10 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if !found || json.Unmarshal([]byte(value), &instructions) != nil {
 		t.Fatalf("Codex developer_instructions is not a quoted string: %#v", codexArgs)
 	}
+	skillsRoot := filepath.Join(skills.ClaudePluginDir, "skills")
+	if strings.Count(instructions, skillsRoot) != 1 || !strings.Contains(instructions, filepath.Join(skillsRoot, "{name}", "SKILL.md")) || !strings.Contains(instructions, strings.Join(setupassets.SkillNames(), ", ")) {
+		t.Fatalf("Codex developer instructions must name the frozen skills directory once and list every skill: %s", instructions)
+	}
 	for _, name := range setupassets.SkillNames() {
 		want, err := setupassets.Skill(name)
 		if err != nil {
@@ -101,9 +105,6 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 		got, err := os.ReadFile(frozenPath)
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("frozen skill %s = %q, %v; want embedded bytes", name, got, err)
-		}
-		if !strings.Contains(instructions, frozenPath) {
-			t.Fatalf("Codex developer instructions omitted exact frozen skill path %s", frozenPath)
 		}
 		if !containsString(piSkillPaths, frozenPath) {
 			t.Fatalf("Pi skill paths omitted %s: %q", name, piArgs)

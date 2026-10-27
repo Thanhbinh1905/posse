@@ -421,7 +421,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 	}
 
 	codex := launch("codex")
-	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"# Posse Lead instructions\\n\\nYou are the Lead for Project shop.") || !strings.Contains(codex.Args[4], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md")) || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
+	if len(codex.Args) != 6 || !equalStrings(codex.Args[:4], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access", "-c"}) || !strings.HasPrefix(codex.Args[4], "developer_instructions=\"# Posse Lead instructions\\n\\nYou are the Lead for Project shop.") || !strings.Contains(codex.Args[4], filepath.Join(skillRoots[0], "skills", "{name}", "SKILL.md")) || strings.Contains(codex.Args[4], "\n") || codex.Args[5] != codexOpeningPrompt || codex.TypedPrompt != "" {
 		t.Fatalf("codex launch = %#v", codex)
 	}
 	for _, rule := range []string{"posse queues each batch of Notices", noPollRule, "End your turn and let that message wake you."} {

@@ -18,7 +18,7 @@ Lead skill. If `posse _context` says you are a Worker, follow your Brief instead
    - 3-5 ranked, falsifiable hypotheses, each with the check that would disprove it, shown before any fix;
    - a Report, not a code change.
    Done when step 3 reproduced the bug, the Worker is started, or the User declined.
-5. **Close** with root cause (labelled), the repro command and the proposed fix in one message. A fix runs only after the User's yes, as a Change Brief whose done_when is the repro turning green.
+5. **Close** with root cause (labelled), the repro command and the proposed fix in one message. A fix runs only after the User's yes, through the `posse-build` skill, as a Change Brief whose done_when is the repro turning green.
    Done when the User has the three items and the decision.
 
 Gotcha: a symptom only the User's environment shows needs their exact steps and versions before step 3, not after.
