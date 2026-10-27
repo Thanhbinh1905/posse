@@ -41,7 +41,7 @@ func LeadGuidance() ([]byte, error) {
 	return files.ReadFile("assets/lead-guidance.md")
 }
 
-var skillNames = []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-whats-next", "posse-catch-up", "posse-enlighten-me", "posse-research", "posse-brainstorming", "posse-sharpen", "posse-diagnose", "posse-better-each-day"}
+var skillNames = []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-whats-next", "posse-catch-up", "posse-enlighten-me", "posse-research", "posse-brainstorming", "posse-sharpen", "posse-spec", "posse-diagnose", "posse-better-each-day"}
 
 func SkillNames() []string {
 	return append([]string(nil), skillNames...)
