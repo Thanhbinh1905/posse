@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -506,5 +507,63 @@ func TestStartAgentReturnsOtherErrorsWithoutRetry(t *testing.T) {
 	}
 	if got := fake.CallCount("agent.start"); got != 1 {
 		t.Fatalf("agent.start calls = %d, want 1", got)
+	}
+}
+
+func TestLaunchAgentTypesShortLaunchDirectly(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	script := filepath.Join(t.TempDir(), "agent-launch.sh")
+	if err := service.launchAgent(context.Background(), "w1:p1", "w", "codex", []string{"--flag", "Read it"}, nil, script); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.Calls) != 1 || fake.Calls[0].Method != "agent.start" || !equalStrings(fake.Calls[0].Params["args"].([]string), []string{"--flag", "Read it"}) {
+		t.Fatalf("short launch calls = %#v", fake.Calls)
+	}
+	if _, err := os.Stat(script); !os.IsNotExist(err) {
+		t.Fatalf("short launch wrote a launch script: %v", err)
+	}
+}
+
+func TestLaunchAgentSourcesLaunchOverTTYLineLimitFromScript(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "agent-launch.sh")
+	long := strings.Repeat("it's long ", ttyLineMaxBytes/10)
+	if err := service.launchAgent(context.Background(), "w1:p1", "w", "codex", []string{"--flag", long}, map[string]string{"POSSE_LONG": long}, script); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.Calls) != 2 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["text"] != ". "+shellQuote(script) {
+		t.Fatalf("long launch did not source its script first: %#v", fake.Calls)
+	}
+	// Herdr rejects a null argument list.
+	if args := fake.Calls[1].Params["args"].([]string); fake.Calls[1].Method != "agent.start" || args == nil || len(args) != 0 {
+		t.Fatalf("long launch did not start the agent with an empty argument list: %#v", fake.Calls[1])
+	}
+	// Run the script as the pane's shell would: source it, then run the bare
+	// command Herdr types. The function must call the real command once.
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nprintf '%s|' \"$POSSE_LONG\" \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("/bin/sh", "-c", `. "$1" && codex extra && codex`, "sh", script)
+	command.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
+	output, err := command.CombinedOutput()
+	if want := long + "|--flag|" + long + "|extra|" + long + "|"; err != nil || string(output) != want {
+		t.Fatalf("sourced launch output = %q err=%v, want %q", output, err, want)
+	}
+}
+
+func TestLaunchAgentRefusesLongLaunchForCommandThatCannotBeAFunction(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	err := service.launchAgent(context.Background(), "w1:p1", "w", "cursor", []string{strings.Repeat("x", ttyLineMaxBytes)}, nil, filepath.Join(t.TempDir(), "agent-launch.sh"))
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "launch_line_too_long" || !strings.Contains(failure.Message, "4095-byte tty line limit") {
+		t.Fatalf("cursor long launch error = %v, want launch_line_too_long naming the limit", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("refused launch still called Herdr: %#v", fake.Calls)
 	}
 }

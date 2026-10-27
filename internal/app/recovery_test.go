@@ -474,13 +474,13 @@ func TestRestartLeadUsesDefaultAutoApproveArgsForCodexAndOpenCode(t *testing.T) 
 					break
 				}
 			}
-			if len(args) == 0 {
-				t.Fatalf("restart did not start a %s Lead: %#v", kind, fake.Calls)
-			}
 			switch kind {
 			case "codex":
-				if len(args) < 4 || !equalStrings(args[:3], []string{"--dangerously-bypass-approvals-and-sandbox", "--sandbox", "danger-full-access"}) || args[len(args)-1] != codexOpeningPrompt {
-					t.Fatalf("restarted Codex Lead argv = %#v", args)
+				// The inline Lead instructions pass the tty line limit, so the
+				// launch is sourced from a script instead of typed.
+				script, err := os.ReadFile(filepath.Join(home, "projects", "shop", "lead-launch.sh"))
+				if len(args) != 0 || err != nil || !strings.Contains(string(script), "\tcommand codex '--dangerously-bypass-approvals-and-sandbox' '--sandbox' 'danger-full-access' ") || !strings.Contains(string(script), " "+shellQuote(codexOpeningPrompt)+` "$@"`) {
+					t.Fatalf("restarted Codex Lead args=%#v script=%s err=%v", args, script, err)
 				}
 			case "opencode":
 				if !equalStrings(args, []string{"--auto", "--prompt", codexOpeningPrompt}) {
@@ -495,10 +495,10 @@ func TestOpenCodeRestartExportsInlinePluginOnlyToLeadShell(t *testing.T) {
 	fake := herdr.NewFake()
 	service := testService(t.TempDir(), fake)
 	value := `{"plugin":["file:///tmp/lead's-plugin.js"]}`
-	if err := service.exportLeadEnvironment(context.Background(), "w1:p1", map[string]string{"OPENCODE_CONFIG_CONTENT": value}); err != nil {
+	if err := service.launchAgent(context.Background(), "w1:p1", "lead", "opencode", nil, map[string]string{"OPENCODE_CONFIG_CONTENT": value}, filepath.Join(t.TempDir(), "lead-launch.sh")); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.Calls) != 1 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["pane_id"] != "w1:p1" || !strings.Contains(fake.Calls[0].Params["text"].(string), `lead'"'"'s-plugin`) {
+	if len(fake.Calls) != 2 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["pane_id"] != "w1:p1" || !strings.Contains(fake.Calls[0].Params["text"].(string), `lead'"'"'s-plugin`) {
 		t.Fatalf("Lead shell export = %#v", fake.Calls)
 	}
 }
