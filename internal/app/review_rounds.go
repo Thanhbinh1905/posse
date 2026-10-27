@@ -673,6 +673,9 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 	} else if len(targets) != 1 || change.GatedSHA == "" || targets[0].Commit != change.GatedSHA {
 		return false, nil
 	}
+	if covered, err := db.ReviewTargetsCovered(ctx.Context, change.ID, targets); err != nil || covered {
+		return false, err
+	}
 	err = s.startReviewRound(ctx, db, home, project, change, "", "")
 	if failure, unavailable := autoStartReviewerUnavailable(err); unavailable {
 		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, change, failure); noticeErr != nil {

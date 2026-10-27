@@ -331,12 +331,30 @@ auto_start = true
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			assertAutoStartSkipsUnavailableReviewer(t, test.config, test.explicitCode)
+			assertAutoStartSkipsUnavailableReviewer(t, test.config, test.explicitCode, false)
 		})
 	}
 }
 
-func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitCode string) {
+func TestAutoStartDoesNotReportSkippedReviewForPassedHead(t *testing.T) {
+	assertAutoStartSkipsUnavailableReviewer(t, `[defaults]
+merge_mode = "local"
+review = "quick"
+
+[profiles.author]
+kind = "claude"
+
+[[dispatch]]
+type = "change"
+use = "author"
+
+[review_loop]
+enabled = true
+auto_start = true
+`, "profile_required", true)
+}
+
+func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitCode string, passedHead bool) {
 	t.Helper()
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
@@ -375,6 +393,23 @@ func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitC
 		if err != nil || started {
 			t.Fatalf("auto-start result = started %v, err %v", started, err)
 		}
+	}
+	if passedHead {
+		if _, err := db.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at)
+VALUES(?,1,?,?,'delta',?,?,?,?,?,'[]','verdict','pass',0)`, change.ID, change.ID, f.project.Name, change.GatedSHA, change.GatedSHA, change.GatedSHA, change.GatedSHA, strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+		start()
+		notices, err := db.Notices(ctx, change.ProjectID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, notice := range notices {
+			if notice.Kind == "review_auto_start_skipped" {
+				t.Fatalf("passed head raised %#v", notice)
+			}
+		}
+		return
 	}
 	start()
 	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
