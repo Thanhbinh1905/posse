@@ -15,6 +15,7 @@ It complements the generated Review Round instructions (findings schema, delta s
    - Correctness.
    - Test evidence as `posse-tdd` requires: red-before with its quoted failure, green-after, and a real-path run, or a stated reason for no test.
    - Hygiene: no slop or needless comments in added lines, no cleanup outside touched hunks.
+   - Prose added in docs or PR text follows `posse-technical-writing` and `posse-unslop`.
    - The repository guidance in `review/guidance/`.
    Done when the delta was checked against each item.
 3. **Grade** each finding on the fixed scale:

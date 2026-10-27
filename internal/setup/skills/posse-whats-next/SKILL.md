@@ -18,6 +18,7 @@ Facts are your job; decisions are the User's. Label each claim seen, inferred or
    - Wants to understand code or a past choice: `posse-enlighten-me`; a broad question that needs sources: `posse-research`.
    - A thin idea: `posse-brainstorming`; an idea to lock for a spec: `posse-sharpen`; a done lock card to specify: `posse-spec`; a locked spec to break into tickets: `posse-tickets`; approved tickets or an approved fix to build: `posse-build`.
    - Something broken: `posse-diagnose`.
+   - A batch of open or old issues to check and group for Build: `posse-triage`.
    - A clear change: write a Brief and run `posse start --name <two-to-four-words>` after the User's yes.
    - Recurring friction or end of day: `posse-better-each-day`.
    - An open draft: "continue <topic>" resumes it in the skill that wrote it.

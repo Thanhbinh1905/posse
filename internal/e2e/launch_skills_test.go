@@ -64,7 +64,11 @@ case "$kind" in
     previous=
     for argument in "$@"; do
       if [ "$previous" = skill ]; then
-        cat "$argument" >> "$POSSE_E2E_SKILL_READS"
+        if [ -d "$argument" ]; then
+          cat "$argument"/*/SKILL.md >> "$POSSE_E2E_SKILL_READS"
+        else
+          cat "$argument" >> "$POSSE_E2E_SKILL_READS"
+        fi
         previous=
         continue
       fi
@@ -208,8 +212,8 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 					t.Fatalf("Claude launch omitted the scoped plugin argument: %s", argsContents)
 				}
 			case "pi":
-				if strings.Count(string(argsContents), "--skill") < 2*len(setupassets.SkillNames()) {
-					t.Fatalf("Pi Lead/Worker args omitted skill paths: %s", argsContents)
+				if strings.Count(string(argsContents), "--skill "+filepath.Join(root, "posse", "projects", "shop", "launch-skills")) < 2 {
+					t.Fatalf("Pi Lead/Worker args omitted the frozen skills directory: %s", argsContents)
 				}
 			}
 			contents, err := os.ReadFile(skillReads)

@@ -74,10 +74,9 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 		if containsString(piSkillPaths, legacy) {
 			t.Errorf("Pi launch passed legacy global %s alongside frozen copy: %#v", name, piSkillPaths)
 		}
-		frozen := filepath.Join(skills.ClaudePluginDir, "skills", name, "SKILL.md")
-		if !containsString(piSkillPaths, frozen) {
-			t.Errorf("Pi launch omitted frozen skill %s: %#v", name, piSkillPaths)
-		}
+	}
+	if frozenRoot := filepath.Join(skills.ClaudePluginDir, "skills"); !containsString(piSkillPaths, frozenRoot) {
+		t.Errorf("Pi launch omitted the frozen skills directory %s: %#v", frozenRoot, piSkillPaths)
 	}
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex-home"))
 	codexArgs, err := appendPosseSkillLaunchArgs("codex", nil, skills)
@@ -105,9 +104,6 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 		got, err := os.ReadFile(frozenPath)
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("frozen skill %s = %q, %v; want embedded bytes", name, got, err)
-		}
-		if !containsString(piSkillPaths, frozenPath) {
-			t.Fatalf("Pi skill paths omitted %s: %q", name, piArgs)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(skills.ClaudePluginDir, ".claude-plugin", "plugin.json")); err != nil {
