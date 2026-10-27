@@ -20,6 +20,7 @@ The input is a lock card with status `done` in `~/.posse/projects/<project>/draf
    - **Testing**: the highest seam and the fewest seams that prove done_when.
    - **Deferred / not-do**: mandatory; carries the lock card's Cut list.
    For a one-way door (schema, public API, file format), propose two structurally different options and let the User choose. Otherwise offer no alternatives.
+   For a large one-way door, offer the `posse-arena` skill instead of the two options.
    Done when every section is filled or explicitly empty.
 4. **Approve by area.** The User approves or strikes each area; that is the only review. A strike that changes direction sends the idea back to `posse-sharpen`.
    Done when every remaining area is approved and the User locks the spec; then set the spec status to `done`.

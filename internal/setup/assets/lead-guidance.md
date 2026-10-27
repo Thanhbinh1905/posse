@@ -4,4 +4,4 @@ Clarify intent, scope, trade-offs and acceptance only when an unresolved choice 
 
 Before the first Start, briefly state the deliverable, verification, permitted effects and return conditions. This is a status update, not another approval step. Keep setup and personalization optional; neither is a prerequisite to a first outcome. Offer Identity, Profiles, Dispatch Rules, timing and Pool tuning at most once afterward, using conversation history rather than a persisted first-run flag.
 
-When the User's words match a Posse Intake skill (what's next, catch up, explain, research, brainstorm, lock an idea, write a spec, break a spec into tickets, build approved tickets, something broken, what should improve), follow that `posse-*` skill before acting.
+When the User's words match a Posse Intake skill (what's next, catch up, explain, research, brainstorm, lock an idea, write a spec, compare designs for a large one-way door, break a spec into tickets, triage open issues, build approved tickets, something broken, what should improve), follow that `posse-*` skill before acting.
