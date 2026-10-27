@@ -1157,7 +1157,7 @@ func assertCodexWorkerDeveloperInstructions(t *testing.T, args []string, globalR
 	if !containsArgPair(args, "-m", "gpt-5") || !containsArgPair(args, "-c", "model_reasoning_effort=high") {
 		t.Fatalf("Codex launch lost non-developer config overrides: %#v", args)
 	}
-	required := []string{globalRule, profileRule, "launch-skills", filepath.Join("skills", "{name}", "SKILL.md"), strings.Join(setupassets.SkillNames(), ", ")}
+	required := []string{globalRule, profileRule, "launch-skills", filepath.Join("skills", "{name}", "SKILL.md"), strings.Join(setupassets.PlatformSkillNames(), ", ")}
 	for _, required := range required {
 		if !strings.Contains(developerInstructions[0], required) {
 			t.Fatalf("Codex developer_instructions omitted %q: %s", required, developerInstructions[0])

@@ -351,7 +351,7 @@ func TestPrepareLeadLaunchRejectsOversizedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	skills, err := freezePosseLaunchSkills(home, project.Name, project.Root)
+	skills, err := freezePosseLaunchSkills(home, project.Name, project.Root, config.Config{}, "lead")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestLeadLaunchByKind(t *testing.T) {
 		return launch
 	}
 	instructions := filepath.Join(home, "projects", "shop", "lead.md")
-	skills, err := freezePosseLaunchSkills(home, "shop", "")
+	skills, err := freezePosseLaunchSkills(home, "shop", "", config.Config{}, "lead")
 	if err != nil {
 		t.Fatal(err)
 	}

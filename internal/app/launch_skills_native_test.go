@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 )
 
@@ -44,12 +45,12 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 			writePiSkill(t, filepath.Join(piHome, "skills", "pi-user"), "pi-user", "PI_USER_SKILL")
 			writePiSkill(t, filepath.Join(projectRoot, ".agents", "skills", "project-user"), "project-user", "PROJECT_USER_SKILL")
 
-			skills, err := freezePosseLaunchSkills(posseHome, "shop", projectRoot)
+			skills, err := freezePosseLaunchSkills(posseHome, "shop", projectRoot, config.Config{}, "lead")
 			if err != nil {
 				t.Fatalf("freeze launch skills: %v", err)
 			}
 			var frozenPaths []string
-			for _, skillName := range setupassets.SkillNames() {
+			for _, skillName := range setupassets.PlatformSkillNames() {
 				frozenPaths = append(frozenPaths, filepath.Join(skills.ClaudePluginDir, "skills", skillName, "SKILL.md"))
 			}
 			fixture, err := json.Marshal(map[string]any{
@@ -86,7 +87,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 					}
 				}
 			} else {
-				for _, skillName := range setupassets.SkillNames() {
+				for _, skillName := range setupassets.PlatformSkillNames() {
 					want, err := setupassets.Skill(skillName)
 					if err != nil {
 						t.Fatal(err)
@@ -102,7 +103,7 @@ func TestPiNativeSkillDiscoveryUsesFrozenCopiesWithoutDroppingUserSkills(t *test
 					t.Errorf("Pi native discovery reported a skill collision: %s", diagnostic.Message)
 				}
 			}
-			for _, skillName := range setupassets.SkillNames() {
+			for _, skillName := range setupassets.PlatformSkillNames() {
 				want, err := setupassets.Skill(skillName)
 				if err != nil {
 					t.Fatal(err)

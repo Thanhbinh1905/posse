@@ -10,7 +10,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
-	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -104,7 +103,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		return taskplan.Plan{}, err
 	}
 	inputs = append(inputs, knowledge...)
-	skills, err := selectedSkillInputs(launch.Profile.Kind)
+	skills, err := selectedSkillInputs(cfg, task.Type, launch.Profile.Kind)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
@@ -231,7 +230,7 @@ func admittedPlanFailure(err error) error {
 	return axi.Failure("plan_invalid", fmt.Sprintf("Task execution plan refused: %v", err), false)
 }
 
-func selectedSkillInputs(kind string) ([]taskplan.Input, error) {
+func selectedSkillInputs(cfg config.Config, taskType, kind string) ([]taskplan.Input, error) {
 	var inputs []taskplan.Input
 	if kind == "codex" {
 		instructions, err := codexConfigDeveloperInstructions()
@@ -241,30 +240,48 @@ func selectedSkillInputs(kind string) ([]taskplan.Input, error) {
 		inputs = append(inputs, taskplan.Select("codex-developer-instructions", "Codex config: developer_instructions", []byte(instructions)))
 	}
 	if kind == "claude" || kind == "codex" || kind == "pi" {
-		for _, name := range setupassets.SkillNames() {
-			data, err := setupassets.Skill(name)
-			if err != nil {
-				return nil, err
-			}
-			inputs = append(inputs, taskplan.Select("skill", name, data))
+		skills, err := roleSkillInputs(cfg, taskType)
+		if err != nil {
+			return nil, err
 		}
+		inputs = append(inputs, skills...)
 	}
 	return inputs, nil
 }
 
-func selectReconfiguredLaunchInputs(plan taskplan.Plan) (taskplan.Plan, error) {
+// selectReconfiguredLaunchInputs keeps the skills frozen at admission; a plan
+// that had none, because its old kind loads no skills, selects them now.
+func selectReconfiguredLaunchInputs(plan taskplan.Plan, cfg config.Config) (taskplan.Plan, error) {
 	inputs := []taskplan.Input{}
+	var frozenSkills []taskplan.Input
 	for _, input := range plan.Inputs {
-		if input.Role != "launch-settings" && input.Role != "skill" && input.Role != "codex-developer-instructions" {
+		switch input.Role {
+		case "skill":
+			frozenSkills = append(frozenSkills, input)
+		case "launch-settings", "codex-developer-instructions":
+		default:
 			inputs = append(inputs, input)
 		}
 	}
 	inputs = append(inputs, selectedLaunchSettings(plan.Launch))
-	skills, err := selectedSkillInputs(plan.Launch.Profile.Kind)
+	selected, err := selectedSkillInputs(cfg, plan.Type, plan.Launch.Profile.Kind)
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
-	plan.Inputs = append(inputs, skills...)
+	loadsSkills := false
+	for _, input := range selected {
+		if input.Role == "skill" {
+			loadsSkills = true
+			if len(frozenSkills) > 0 {
+				continue
+			}
+		}
+		inputs = append(inputs, input)
+	}
+	if loadsSkills {
+		inputs = append(inputs, frozenSkills...)
+	}
+	plan.Inputs = inputs
 	return plan, plan.Validate()
 }
 

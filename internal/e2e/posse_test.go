@@ -560,16 +560,13 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err != nil || !strings.Contains(string(leadArgs), "--plugin-dir "+bundleRoots[0]) || !strings.Contains(string(workerArgs), "--plugin-dir "+bundleRoots[0]) {
 		t.Fatalf("Claude Lead and Worker were not given the isolated plugin snapshot: lead=%q worker=%q err=%v", leadArgs, workerArgs, err)
 	}
-	for _, name := range setupassets.SkillNames() {
+	for _, name := range setupassets.PlatformSkillNames() {
 		path := filepath.Join(bundleRoots[0], "skills", name, "SKILL.md")
 		if contents, err := os.ReadFile(path); err != nil || !strings.Contains(string(contents), "name: "+name) {
 			t.Fatalf("frozen skill %s was not readable by the fake harness: %s err=%v", name, contents, err)
 		}
 	}
-	readSkills, err := os.ReadFile(skillReadsLog)
-	if err != nil || !containsEverySkill(string(readSkills)) {
-		t.Fatalf("fake Claude could not read all injected skills: %s err=%v", readSkills, err)
-	}
+	assertReadSkills(t, "fake Claude", skillReadsLog, setupassets.PlatformSkillNames())
 	for _, path := range []string{filepath.Join(repo, ".agents"), filepath.Join(repo, ".claude", "skills"), filepath.Join(task.WorktreePath, ".agents")} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("Posse created skill files in Project/workspace path %s: %v", path, err)

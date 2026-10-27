@@ -71,3 +71,23 @@ func TestShippedSkillFrontmatter(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryWorkflowSkillIsRecommended(t *testing.T) {
+	covered := map[string]bool{}
+	for _, name := range PlatformSkillNames() {
+		covered[name] = true
+	}
+	for role, names := range RecommendedSkills() {
+		for _, name := range names {
+			if !IsSkill(name) {
+				t.Errorf("recommended %s skill %s is not embedded", role, name)
+			}
+			covered[name] = true
+		}
+	}
+	for _, name := range SkillNames() {
+		if !covered[name] {
+			t.Errorf("embedded skill %s is neither a platform skill nor recommended", name)
+		}
+	}
+}

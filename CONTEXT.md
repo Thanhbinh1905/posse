@@ -200,6 +200,18 @@ _Avoid_: Stage, phase, Task type
 One step in a workflow profile, mapped to a frame or to Ship, with a User decision before advancing; several stages may share a frame.
 _Avoid_: Frame, Task state, Gate
 
+**Platform skills**:
+The embedded skills every Posse-launched Lead and Worker loads: `posse`, `posse-setup`, `posse-down` and `posse-update`.
+_Avoid_: Default skills, core skills
+
+**Workflow skills**:
+Skills a session loads on top of the platform skills, chosen per role (`lead`, `change`, `review`, `research`) in the `[skills]` config block as bundled names or skill directory paths, and frozen into each Task's plan.
+_Avoid_: Skill deltas, hidden defaults
+
+**Recommended skill set**:
+The embedded workflow skills Posse suggests for each role; Posse writes them into `[skills]` only on request or once when upgrading an install that loaded them all, and the User edits the block from then on.
+_Avoid_: Default skill set, bundle
+
 **Launch Identity Record**:
 A Task's launch number, Profile name and configured model value or unknown status, derived from that launch's arguments and persisted with its Task id.
 _Avoid_: Runtime identity, provider identity

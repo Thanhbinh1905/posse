@@ -121,6 +121,8 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 			return kept("Config already exists at " + displayPath(target))
 		}
 		return change("Create the default config at "+displayPath(target), "Created the default config at "+displayPath(target))
+	case "recommended_skills":
+		return change("Add the recommended workflow skills to "+displayPath(target)+" so this upgrade keeps loading them", "Added the recommended workflow skills to "+displayPath(target))
 	case "skill":
 		name := filepath.Base(target)
 		switch action {

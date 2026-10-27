@@ -191,6 +191,7 @@ type Config struct {
 	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
 	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`
 	Knowledge           Knowledge                  `toml:"knowledge" json:"knowledge"`
+	Skills              Skills                     `toml:"skills" json:"skills"`
 	Identity            Identity                   `toml:"identity" json:"identity"`
 	Lead                Lead                       `toml:"lead" json:"lead"`
 	Defaults            Defaults                   `toml:"defaults" json:"defaults"`
@@ -893,6 +894,7 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	if c.Pool.KeepIdle < 0 {
 		add("pool.keep_idle", "cannot be negative")
 	}
+	issues = append(issues, c.skillIssues(file)...)
 	return uniqueValidationErrors(issues)
 }
 

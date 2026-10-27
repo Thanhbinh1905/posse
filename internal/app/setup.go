@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"golang.org/x/sys/unix"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
@@ -42,6 +43,9 @@ type setupManifest struct {
 	PiGuardPath        string             `json:"pi_guard_path,omitempty"`
 	PiGuardHash        string             `json:"pi_guard_hash,omitempty"`
 	PiGuardDirs        []string           `json:"pi_guard_dirs,omitempty"`
+	// RecommendedSkills records that setup made its one-time choice to write
+	// the recommended [skills] block, which only an upgraded install gets.
+	RecommendedSkills bool `json:"recommended_skills,omitempty"`
 }
 
 type setupSkillRecord struct {
@@ -305,6 +309,9 @@ func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manife
 		configAction = "create"
 	}
 	rows = append(rows, map[string]any{"step": "default_config", "target": configPath, "action": configAction})
+	if recommendedSkillsPending(configPath, manifest) {
+		rows = append(rows, map[string]any{"step": "recommended_skills", "target": configPath, "action": "write"})
+	}
 	for _, name := range setupassets.SkillNames() {
 		rows = append(rows, skillSetupPlanRow(name, version, dirs, manifest.Skills, state.GlobalSkillsMode))
 	}
@@ -355,6 +362,25 @@ func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manife
 		rows = append(rows, map[string]any{"step": "pi_guard", "target": path, "action": action})
 	}
 	return rows
+}
+
+// recommendedSkillsPending reports whether setup will write the recommended
+// [skills] block: once, for an install set up before workflow skills became
+// configurable, unless its config already has the block.
+func recommendedSkillsPending(configPath string, manifest setupManifest) bool {
+	if manifest.Version == "" || manifest.RecommendedSkills {
+		return false
+	}
+	contents, err := os.ReadFile(configPath)
+	if err != nil {
+		return true
+	}
+	var values map[string]any
+	if _, err := toml.Decode(string(contents), &values); err != nil {
+		return true
+	}
+	_, found := values["skills"]
+	return !found
 }
 
 func skillSetupPlanRow(name, version string, dirs setupDirs, records []setupSkillRecord, mode string) map[string]any {
@@ -755,6 +781,7 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 	} else if err != nil {
 		return nil, err
 	}
+	upgrading := manifest.Version != ""
 	if manifest.Version == "" {
 		manifest.Integrations = []string{}
 		manifest.Skills = []setupSkillRecord{}
@@ -837,6 +864,21 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 	}
 	if err := writeSetupManifest(manifestPath, manifest); err != nil {
 		return changed, err
+	}
+	if !manifest.RecommendedSkills {
+		if upgrading {
+			written, err := config.WriteRecommendedSkills(configPath)
+			if err != nil {
+				return changed, err
+			}
+			if written {
+				changed = append(changed, "recommended_skills")
+			}
+		}
+		manifest.RecommendedSkills = true
+		if err := writeSetupManifest(manifestPath, manifest); err != nil {
+			return changed, err
+		}
 	}
 	if state.GlobalSkillsMode == "install" {
 		for _, name := range setupassets.SkillNames() {
