@@ -15,6 +15,7 @@ The input is the approved `ready-for-agent` sub-issues of a spec issue from `pos
    - `after: [tN:landed]` for each `Blocked by: #n`.
    - The Profile its Dispatch Rules select, and a `--name` of 2-4 words, at most 24 characters.
    - A body that says "Follow the `posse-tdd` skill" with its entry: bug, plus the repro command and root cause, or feature.
+   - A `## Intent` block in the body: the User words that triggered the dispatch, verbatim in their original language, the goal in one sentence, and a separate `Lead assumptions:` line for anything you added.
    Done when every ticket has a Brief.
 2. **Approve.** Show all Briefs as one table: name, Profile, blocked by. One User approval covers every ticket in it.
    Done when the User approves the set.

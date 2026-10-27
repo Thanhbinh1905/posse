@@ -3,11 +3,12 @@ package setup
 import (
 	"embed"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"strings"
 )
 
-//go:embed assets/herdr-plugin.toml assets/pi-worker-guard.ts assets/lead-guidance.md skills/*/SKILL.md
+//go:embed assets/herdr-plugin.toml assets/pi-worker-guard.ts assets/lead-guidance.md skills
 var files embed.FS
 
 func PluginManifest(binary, version string) ([]byte, error) {
@@ -103,4 +104,47 @@ func Skill(name string) ([]byte, error) {
 		return nil, fmt.Errorf("unknown embedded skill %q", name)
 	}
 	return files.ReadFile("skills/" + name + "/SKILL.md")
+}
+
+// SkillAsset is a file a skill ships beside its SKILL.md; Path is relative to
+// the skill directory and slash-separated.
+type SkillAsset struct {
+	Path string
+	Data []byte
+}
+
+func SkillAssets(name string) ([]SkillAsset, error) {
+	if !IsSkill(name) {
+		return nil, fmt.Errorf("unknown embedded skill %q", name)
+	}
+	directory, err := fs.Sub(files, "skills/"+name)
+	if err != nil {
+		return nil, err
+	}
+	return ReadSkillAssets(directory)
+}
+
+func ReadSkillAssets(directory fs.FS) ([]SkillAsset, error) {
+	var assets []SkillAsset
+	err := fs.WalkDir(directory, ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != "." && strings.HasPrefix(entry.Name(), ".") {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !entry.Type().IsRegular() || path == "SKILL.md" {
+			return nil
+		}
+		data, err := fs.ReadFile(directory, path)
+		if err != nil {
+			return err
+		}
+		assets = append(assets, SkillAsset{Path: path, Data: data})
+		return nil
+	})
+	return assets, err
 }

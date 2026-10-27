@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -84,6 +85,14 @@ type taskSummary struct {
 	Reason        string       `json:"reason,omitempty"`
 	Issues        []string     `json:"issues,omitempty"`
 	Refs          []string     `json:"refs,omitempty"`
+	CreatedAt     string       `json:"created_at,omitempty"`
+	Age           string       `json:"age,omitempty"`
+	After         []string     `json:"after,omitempty"`
+	WaitReason    string       `json:"wait_reason,omitempty"`
+	Ticket        string       `json:"ticket,omitempty"`
+	CI            string       `json:"ci,omitempty"`
+	ReviewRound   int          `json:"review_round,omitempty"`
+	Intent        string       `json:"intent,omitempty"`
 	Usage         usage.Counts `json:"usage"`
 }
 
@@ -185,6 +194,10 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
@@ -194,6 +207,11 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
+				return err
+			}
+		}
+		if full {
+			if err := addTaskDetails(ctx.Context, db, home, project, cfg, task, now, &row); err != nil {
 				return err
 			}
 		}
@@ -212,10 +230,6 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		noticeRows = append(noticeRows, noticeSummary{ID: notice.ID, Task: noticeTaskID(ctx.Context, db, project.ID, notice.TaskID), Name: noticeTaskName(ctx.Context, db, project.ID, notice.TaskID), Kind: notice.Kind, Summary: notice.Summary})
 	}
 	help := homeHelp(project, tasks, openNotices)
-	home, homeErr := s.homePath()
-	if homeErr != nil {
-		return homeErr
-	}
 	result := axi.Object{
 		{Key: "project", Value: summarizeHomeProject(project, cfg, s.leadStatus(ctx.Context, project))},
 		{Key: "watch", Value: s.watchRuntimeRow(ctx.Context, db, home, project)},
@@ -505,6 +519,71 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 		return "waiting for " + blockerReason, nil
 	}
 	return "waiting for a Worker slot", nil
+}
+
+func addTaskDetails(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, now time.Time, row *taskSummary) error {
+	row.Profile = task.Profile
+	if task.CreatedAt > 0 {
+		created := time.UnixMilli(task.CreatedAt)
+		row.CreatedAt = created.UTC().Format(time.RFC3339)
+		row.Age = now.Sub(created).Round(time.Second).String()
+	}
+	if task.State == store.StateQueued {
+		reason, err := queuedTaskWaitReason(ctx, db, project, task, cfg)
+		if err != nil {
+			return err
+		}
+		row.WaitReason = reason
+	}
+	brief, err := readTaskBrief(home, project, task)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		for _, dependency := range brief.After {
+			row.After = append(row.After, dependency.TaskID+":"+dependency.Milestone)
+		}
+		if brief.Ticket != nil {
+			row.Ticket = brief.Ticket.String()
+		}
+		row.Intent = briefSection(brief.Body, "Intent")
+	}
+	if task.PRURL != "" {
+		observation, err := db.LatestPRObservation(ctx, task.ID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			row.CI = "pending"
+		case err != nil:
+			return err
+		default:
+			row.CI = strings.ToLower(decodeChecks(observation.Checks).State)
+		}
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, round := range rounds {
+		if round.Status != "void" {
+			row.ReviewRound = max(row.ReviewRound, round.Round)
+		}
+	}
+	return nil
+}
+
+func briefSection(body, heading string) string {
+	var section []string
+	inside := false
+	for _, line := range strings.Split(body, "\n") {
+		if title, found := strings.CutPrefix(line, "## "); found {
+			inside = strings.TrimSpace(title) == heading
+			continue
+		}
+		if inside {
+			section = append(section, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(section, "\n"))
 }
 
 func taskUsage(task store.Task, cfg config.Config) usage.Counts {
