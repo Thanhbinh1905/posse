@@ -292,8 +292,8 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 		}
 		fmt.Fprintf(&body, "- Check: %s\n  Log URL: %s\n  Failed-log tail (up to 200 lines):\n```text\n%s\n```\n", name, defaultValue(check.URL, "not supplied"), strings.TrimSpace(tails[name]))
 	}
-	if intent := briefIntent(plan); intent != "" {
-		fmt.Fprintf(&body, "\nUser intent (verbatim):\n%s\n", intent)
+	if label, text := briefFixerSection(plan); text != "" {
+		fmt.Fprintf(&body, "\n%s:\n%s\n", label, text)
 	}
 	if isFullPipelineTask(task, member) {
 		if member != "" {
@@ -309,20 +309,24 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 	return strings.TrimSpace(body.String())
 }
 
-func briefIntent(plan *taskplan.Plan) string {
+func briefFixerSection(plan *taskplan.Plan) (label, text string) {
 	if plan == nil {
-		return ""
+		return "", ""
 	}
 	for _, input := range plan.Inputs {
 		if input.Role != "brief" {
 			continue
 		}
 		brief, err := dispatch.ParseHistoricalBriefText(string(input.Bytes))
-		if err == nil {
-			return strings.TrimSpace(brief.Body)
+		if err != nil {
+			continue
 		}
+		if intent := briefSection(brief.Body, "Intent"); intent != "" {
+			return "User intent (verbatim)", intent
+		}
+		return "Change Brief (verbatim)", strings.TrimSpace(brief.Body)
 	}
-	return ""
+	return "", ""
 }
 
 func uniqueFailedCheckNames(checks []failedCheck) []string {
