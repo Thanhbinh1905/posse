@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"gopkg.in/yaml.v3"
 )
@@ -89,5 +90,38 @@ func TestEveryWorkflowSkillIsRecommended(t *testing.T) {
 		if !covered[name] {
 			t.Errorf("embedded skill %s is neither a platform skill nor recommended", name)
 		}
+	}
+}
+
+func TestReadSkillAssetsListsFilesBesideSkill(t *testing.T) {
+	skill := fstest.MapFS{
+		"SKILL.md":           {Data: []byte("skill")},
+		"assets/board.html":  {Data: []byte("<html>")},
+		"assets/js/board.js": {Data: []byte("render()")},
+		".cache/state":       {Data: []byte("hidden")},
+		"assets/.draft.html": {Data: []byte("hidden")},
+		"assets/link.html":   {Data: []byte("board.html"), Mode: fs.ModeSymlink},
+	}
+	assets, err := ReadSkillAssets(skill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, asset := range assets {
+		got = append(got, asset.Path+"="+string(asset.Data))
+	}
+	if want := "assets/board.html=<html>,assets/js/board.js=render()"; strings.Join(got, ",") != want {
+		t.Fatalf("assets = %q, want %q", strings.Join(got, ","), want)
+	}
+}
+
+func TestEmbeddedSkillAssetsAreReadable(t *testing.T) {
+	for _, name := range SkillNames() {
+		if _, err := SkillAssets(name); err != nil {
+			t.Errorf("SkillAssets(%q): %v", name, err)
+		}
+	}
+	if _, err := SkillAssets("not-a-skill"); err == nil {
+		t.Fatal("SkillAssets accepted an unknown skill")
 	}
 }

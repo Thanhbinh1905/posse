@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -271,5 +273,80 @@ func TestPeekReadsPaneIdAfterLabelReconciliation(t *testing.T) {
 	}
 	if paneID != "w3:p1" || !strings.Contains(output.String(), "latest output") {
 		t.Fatalf("peek used stale pane id %q or missed output: %s", paneID, output.String())
+	}
+}
+
+func TestFullJSONHomeCarriesBoardFields(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	brief := "---\ntype: change\ntitle: E2E Brief title\ndone_when: commit exists\nticket: 571\n---\nDo the work.\n\n## Intent\nUser's words: \"one view\"\n\n## Notes\nNot intent.\n"
+	if err := os.WriteFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "brief.md"), []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().Add(-2 * time.Hour).UnixMilli()
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET profile='deep',created_at=? WHERE id=?`, created, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 40)
+	for round, status := range []string{"verdict", "admitted"} {
+		reviewID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: round + 2, Type: "review", Title: "Review", ReviewsTaskID: fixture.task.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		verdict := any(nil)
+		if status == "verdict" {
+			verdict = "changes_requested"
+		}
+		if _, err := fixture.db.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,?,?,'shop','full',?,?,?,?,?,'[]',?,?,1)`,
+			fixture.task.ID, round+1, reviewID, sha, sha, sha, sha, strings.Repeat("b", 64), status, verdict); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, output, errOutput := fixture.run("--json", "--full")
+	if code != 0 {
+		t.Fatalf("home exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	var home struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(output), &home); err != nil {
+		t.Fatalf("decode home: %v: %s", err, output)
+	}
+	var row map[string]any
+	for _, task := range home.Tasks {
+		if task["id"] == "t1" {
+			row = task
+		}
+	}
+	if row == nil {
+		t.Fatalf("home omitted t1: %s", output)
+	}
+	want := map[string]any{
+		"profile":      "deep",
+		"created_at":   time.UnixMilli(created).UTC().Format(time.RFC3339),
+		"ticket":       "#571",
+		"ci":           "failure",
+		"review_round": float64(2),
+		"intent":       "User's words: \"one view\"",
+		"pr_state":     "OPEN",
+	}
+	for key, value := range want {
+		if row[key] != value {
+			t.Errorf("t1 %s = %#v, want %#v", key, row[key], value)
+		}
+	}
+	if age, _ := row["age"].(string); !strings.HasPrefix(age, "2h0m") {
+		t.Errorf("t1 age = %#v, want about 2h", row["age"])
 	}
 }
