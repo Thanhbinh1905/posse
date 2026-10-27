@@ -135,6 +135,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			detail += "; disabled dispatch kinds=" + strings.Join(disabledKinds, ",")
 		}
 		addCheck("config", "ok", detail, "")
+		addCheck(recommendedSkillsCheck(home))
 	}
 	db, _, dbErr := s.openDB()
 	if dbErr != nil {
@@ -484,4 +485,17 @@ func stringListContains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func recommendedSkillsCheck(home string) (name, status, detail, action string) {
+	name = "workflow skills"
+	row, offered := recommendedSkillsOfferRow(home, nil)
+	if !offered {
+		return name, "ok", "every recommended skill is in config", ""
+	}
+	if row["action"] == "offer" {
+		return name, "warn", "no [skills] block in config, so Leads and Workers load only the platform skills", "Run `posse skills add` to pick recommended skills"
+	}
+	status, _ = row["status"].(string)
+	return name, "ok", status, ""
 }

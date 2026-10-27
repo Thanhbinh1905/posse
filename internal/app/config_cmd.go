@@ -197,6 +197,12 @@ func (s *Service) configApprovalProject(ctx context.Context, db *store.DB, key, 
 	if !config.IsUserOnlyFor(key, projectName != "") {
 		return 0, nil
 	}
+	return s.requireUserApproval(ctx, db, key, projectName, quote)
+}
+
+// requireUserApproval lets the User through and a Lead with the User's quote,
+// returning the Project the approval is recorded under.
+func (s *Service) requireUserApproval(ctx context.Context, db *store.DB, key, projectName, quote string) (int64, error) {
 	actor := s.configCaller(ctx, db)
 	role := actor.role
 	if role == "user" {

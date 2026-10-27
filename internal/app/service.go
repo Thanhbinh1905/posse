@@ -212,6 +212,9 @@ func (s *Service) commands() *axi.Command {
 			{Name: "set", Usage: "$ config set <key> <value> [--project <n>] [--user-approved <quote>]", Summary: "Set one validated config value; Lead needs a User quote for user-only keys.", Handler: s.configSet},
 			{Name: "unset", Usage: "$ config unset <key> [--project <n>] [--user-approved <quote>]", Summary: "Remove one config value; Lead needs a User quote for user-only keys.", Handler: s.configUnset},
 		}},
+		{Name: "skills", Usage: "$ skills [--project <n>]", Summary: "Show configured and recommended workflow skills per role; `skills add` installs the recommended set.", Handler: s.skillsShow, Subcommands: []*axi.Command{
+			{Name: "add", Usage: "$ skills add [--all | <name>...] [--project <n>] [--user-approved <quote>]", Summary: "Add recommended skills to the [skills] config: pick on a terminal, or pass --all or names.", Handler: s.skillsAdd},
+		}},
 		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-watches]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},

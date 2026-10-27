@@ -91,3 +91,15 @@ func TestEveryWorkflowSkillIsRecommended(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillSummaryIsTheFirstSentenceOfTheDescription(t *testing.T) {
+	for _, name := range SkillNames() {
+		summary := SkillSummary(name)
+		if summary == "" || strings.Contains(summary, ". ") || strings.HasSuffix(summary, ".") {
+			t.Errorf("%s summary = %q", name, summary)
+		}
+	}
+	if SkillSummary("not-a-skill") != "" {
+		t.Fatal("unknown skill has a summary")
+	}
+}
