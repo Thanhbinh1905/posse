@@ -562,8 +562,17 @@ func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scop
 	}
 	builder.WriteString("---\n")
 	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `review/delta.patch`, using `review/cumulative.patch` for context. The immutable bindings are in `review/round.json`; conflicts are listed in `review/conflicts.txt`; the Finding Ledger is in `review/ledger.md`. Repository guidance is copied into `review/guidance/` from the frozen target's origin ref, never from the Change branch. Do not modify the checkout.\n\nFinish by writing a JSON file in this Task's scratch directory using this schema, then signal done with `--report <report-file> --verdict <pass|changes_requested|inconclusive> --findings <findings-file>`. A pass must have no blocking open findings; Posse derives and checks the verdict. Use an empty patterns array for no findings.\n\n```json\n{\n  \"schema\": \"posse.review-findings.v1\",\n  \"patterns\": [{\n    \"key\": \"unchecked-error-return\",\n    \"title\": \"Store write errors are dropped\",\n    \"rule\": \"Every store write error reaches the caller\",\n    \"root_cause\": \"New helpers ignore database errors\",\n    \"fix_guidance\": \"Check every new write call in the affected package\",\n    \"severity\": \"P1\",\n    \"origin\": \"introduced\",\n    \"instances\": [{\n      \"repository\": \"posse\", \"path\": \"internal/app/x.go\", \"line\": 42,\n      \"symbol\": \"saveRound\", \"excerpt\": \"db.Exec(ctx, q)\",\n      \"description\": \"The returned error is ignored\", \"cause\": null,\n      \"matches\": null, \"regresses\": null\n    }]\n  }],\n  \"resolutions\": []\n}\n```\n\nEach excerpt must occur in its repository file at the bound head after whitespace normalization. Use `cause: \"path:line\"` only to cite an added line in `review/delta.patch` that caused an interaction finding. `matches` and `regresses` use existing IDs such as `F-3`. Include one pattern per root cause, with every located instance. Missing or unknown severity is treated as unclassified and blocks. For every ledger finding claimed fixed, include a resolution with status `resolved` or `unresolved`; omitted answers remain unverified.\n\n", round)
-	if label, text := briefFixerSection(&plan); text != "" {
-		fmt.Fprintf(&builder, "## %s\n\n%s\n", label, text)
+	for _, input := range plan.Inputs {
+		if input.Role != "brief" {
+			continue
+		}
+		label, text := briefFixerSection(&plan)
+		if label == "User intent (verbatim)" {
+			fmt.Fprintf(&builder, "## %s\n\n%s\n\n## Change Brief (Lead text)\n\n%s", label, text, withoutBriefSection(string(input.Bytes), "Intent"))
+		} else {
+			fmt.Fprintf(&builder, "## Change Brief (verbatim)\n\n%s", input.Bytes)
+		}
+		break
 	}
 	return []byte(builder.String())
 }

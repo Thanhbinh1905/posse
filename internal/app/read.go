@@ -586,6 +586,20 @@ func briefSection(body, heading string) string {
 	return strings.TrimSpace(strings.Join(section, "\n"))
 }
 
+func withoutBriefSection(body, heading string) string {
+	var kept []string
+	skipping := false
+	for _, line := range strings.SplitAfter(body, "\n") {
+		if title, found := strings.CutPrefix(line, "## "); found {
+			skipping = strings.TrimSpace(title) == heading
+		}
+		if !skipping {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
+}
+
 func taskUsage(task store.Task, cfg config.Config) usage.Counts {
 	kind := task.AgentSessionKind
 	if kind == "" {

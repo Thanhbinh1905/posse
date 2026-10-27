@@ -31,11 +31,13 @@ func TestBriefFixerSectionFallsBackToWholeBody(t *testing.T) {
 
 func TestGeneratedReviewBriefSeparatesIntentFromLeadText(t *testing.T) {
 	with := string(generatedReviewBrief(store.Task{}, *briefPlan(briefWithIntent), 1, nil, false))
-	if !strings.Contains(with, "## User intent (verbatim)\n\nUser's words") || strings.Contains(with, "Lead assumption text.") || strings.Contains(with, "Change Brief (verbatim)") {
+	intentAt := strings.Index(with, "## User intent (verbatim)\n\nUser's words")
+	leadAt := strings.Index(with, "## Change Brief (Lead text)\n\n")
+	if intentAt < 0 || leadAt < intentAt || !strings.Contains(with[leadAt:], "done_when: done") || !strings.Contains(with[leadAt:], "Lead assumption text.") || !strings.Contains(with[leadAt:], "Lead notes.") || strings.Contains(with[leadAt:], "ship it") {
 		t.Fatalf("Review Round brief with Intent block: %s", with)
 	}
 	without := string(generatedReviewBrief(store.Task{}, *briefPlan(briefWithoutIntent), 1, nil, false))
-	if !strings.Contains(without, "## Change Brief (verbatim)\n\nLead assumption text.") {
+	if !strings.Contains(without, "## Change Brief (verbatim)\n\n---\ntype: change") || !strings.Contains(without, "done_when: done") || !strings.Contains(without, "Lead assumption text.") {
 		t.Fatalf("Review Round brief without Intent block: %s", without)
 	}
 }
