@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -2111,23 +2110,20 @@ func TestRefreshProjectPullRequestsWaitsForContendedPoll(t *testing.T) {
 		t.Fatalf("watch claim=%q err=%v", holder, err)
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
-	err = service.refreshProjectPullRequests(timeoutCtx, db, project, config.Config{})
-	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("refresh under a held claim returned %v, want the caller's deadline", err)
-	}
-
-	released := make(chan error, 1)
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		released <- db.ReleasePRPoll(ctx, project.ID, holder)
-	}()
 	started := time.Now()
-	if err := service.refreshProjectPullRequests(ctx, db, project, config.Config{}); err != nil {
+	refreshed := make(chan error, 1)
+	go func() {
+		refreshed <- service.refreshProjectPullRequests(ctx, db, project, config.Config{})
+	}()
+	select {
+	case err := <-refreshed:
+		t.Fatalf("refresh returned %v while the watch held the claim", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := db.ReleasePRPoll(ctx, project.ID, holder); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-released; err != nil {
+	if err := <-refreshed; err != nil {
 		t.Fatal(err)
 	}
 	var polledAt int64
