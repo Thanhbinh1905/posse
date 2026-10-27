@@ -121,9 +121,7 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 			piArgs = append(piArgs, "--skill", path)
 		}
 	}
-	for _, file := range files {
-		piArgs = append(piArgs, "--skill", filepath.Join(root, "skills", file.name, "SKILL.md"))
-	}
+	piArgs = append(piArgs, "--skill", filepath.Join(root, "skills"))
 	return posseLaunchSkills{
 		ClaudePluginDir:   root,
 		PiArgs:            piArgs,
