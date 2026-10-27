@@ -14,6 +14,15 @@ import (
 
 const sidebarLayoutSnippet = `[ui.sidebar.agents]
 rows = [
+  ["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true, dim = false }],
+  ["agent"],
+]
+`
+
+// legacySidebarLayoutSnippet is the layout Posse offered before dim = false; Herdr
+// dims custom tokens by default, so Posse upgrades it in place.
+const legacySidebarLayoutSnippet = `[ui.sidebar.agents]
+rows = [
   ["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true }],
   ["agent"],
 ]
@@ -21,6 +30,18 @@ rows = [
 
 var agentsTableHeader = regexp.MustCompile(`(?m)^\s*\[ui\.sidebar\.agents\]\s*(?:#.*)?$`)
 var agentsChildHeader = regexp.MustCompile(`(?m)^\s*\[ui\.sidebar\.agents\.[^\]]+\]\s*(?:#.*)?$`)
+
+func herdrConfigPath() (string, error) {
+	root := os.Getenv("XDG_CONFIG_HOME")
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(home, ".config")
+	}
+	return filepath.Join(root, "herdr", "config.toml"), nil
+}
 
 // sidebarLayoutState reads the actual Herdr config, not Posse's setup manifest.
 // A custom rows value is always left alone, even when it resembles our layout.
@@ -45,11 +66,14 @@ func sidebarLayoutState(path string) (string, error) {
 		return "invalid", err
 	}
 	if rows, exists := sidebarRows(document); exists {
-		var expected map[string]any
-		_, _ = toml.Decode(sidebarLayoutSnippet, &expected)
-		want, _ := sidebarRows(expected)
-		if reflect.DeepEqual(rows, want) {
+		if reflect.DeepEqual(rows, snippetRows(sidebarLayoutSnippet)) {
 			return "keep", nil
+		}
+		if reflect.DeepEqual(rows, snippetRows(legacySidebarLayoutSnippet)) {
+			if isSymlink {
+				return "symlink", nil
+			}
+			return "upgrade", nil
 		}
 		return "manual", nil
 	}
@@ -57,6 +81,13 @@ func sidebarLayoutState(path string) (string, error) {
 		return "symlink", nil
 	}
 	return "offer", nil
+}
+
+func snippetRows(snippet string) any {
+	var document map[string]any
+	_, _ = toml.Decode(snippet, &document)
+	rows, _ := sidebarRows(document)
+	return rows
 }
 
 func sidebarRows(document map[string]any) (any, bool) {
@@ -75,7 +106,7 @@ func sidebarRows(document map[string]any) (any, bool) {
 // any comments. Reinspect immediately before writing to respect newer edits.
 func installSidebarLayout(path string) (bool, error) {
 	state, err := sidebarLayoutState(path)
-	if err != nil || state != "offer" {
+	if err != nil || state != "offer" && state != "upgrade" {
 		return false, err
 	}
 	original, err := os.ReadFile(path)
@@ -83,6 +114,13 @@ func installSidebarLayout(path string) (bool, error) {
 		return false, err
 	}
 	text := string(original)
+	if state == "upgrade" {
+		rows := strings.TrimPrefix(legacySidebarLayoutSnippet, "[ui.sidebar.agents]\n")
+		if !strings.Contains(text, rows) {
+			return false, fmt.Errorf("cannot upgrade the Posse sidebar layout: rows are formatted differently from the layout Posse wrote")
+		}
+		return writeSidebarLayout(path, strings.Replace(text, rows, strings.TrimPrefix(sidebarLayoutSnippet, "[ui.sidebar.agents]\n"), 1))
+	}
 	insert := sidebarLayoutSnippet
 	position := len(text)
 	if match := agentsTableHeader.FindStringIndex(text); match != nil {
@@ -100,7 +138,10 @@ func installSidebarLayout(path string) (bool, error) {
 	if position == len(text) && len(text) > 0 && !strings.HasSuffix(text, "\n") {
 		insert = "\n" + insert
 	}
-	updated := text[:position] + insert + text[position:]
+	return writeSidebarLayout(path, text[:position]+insert+text[position:])
+}
+
+func writeSidebarLayout(path, updated string) (bool, error) {
 	var check map[string]any
 	if _, err := toml.Decode(updated, &check); err != nil {
 		return false, fmt.Errorf("cannot add sidebar layout without changing existing Herdr config: %w", err)

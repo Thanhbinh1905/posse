@@ -71,6 +71,15 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 			return kept("Posse Agents sidebar layout already present at " + displayPath(target))
 		case "installed":
 			return []string{humanDone + "  Added Posse Agents sidebar layout to " + displayPath(target)}
+		case "symlink":
+			lines := []string{humanManual + "  " + displayPath(target) + " is managed elsewhere; add this layout through its config manager:"}
+			snippet, _ := row["snippet"].(string)
+			for _, line := range strings.Split(strings.TrimSuffix(snippet, "\n"), "\n") {
+				lines = append(lines, "     "+line)
+			}
+			return lines
+		case "upgrade":
+			return []string{humanManual + "  Upgrade Posse Agents sidebar layout in " + displayPath(target) + " (adds dim = false)? Run `posse setup` to confirm."}
 		case "manual":
 			message := "Herdr Agents rows already configured at " + displayPath(target)
 			if reason, ok := row["error"].(string); ok && reason != "" {
