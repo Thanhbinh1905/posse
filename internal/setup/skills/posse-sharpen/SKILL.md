@@ -23,4 +23,4 @@ The output is a lock card for the Spec stage, not a Worker Brief. Keep it in the
 
 Ceiling: 3 rounds. At the ceiling never start a fourth: lock what is settled, turn each open item into a stated assumption or a Cut, and propose splitting the idea into several small lock cards.
 
-The User decides the next stage. Offer it in one line; never start a spec or a Worker yourself.
+The User decides the next stage. Offer it in one line, such as the `posse-spec` skill to write a spec; never start a spec or a Worker yourself.
