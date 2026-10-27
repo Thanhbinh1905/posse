@@ -693,10 +693,9 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	if err != nil {
 		return err
 	}
-	if err := s.exportLeadEnvironment(ctx, current.PaneID, leadStart.Env); err != nil {
-		return err
-	}
-	if _, err := s.startAgent(ctx, map[string]any{"name": leadAgentName(project.Name, launch), "kind": kind, "pane_id": current.PaneID, "args": leadStart.Args}); err != nil {
+	// Herdr's agent.start has no env parameter, so launchAgent exports the
+	// environment only into the Lead's shell, not global config or other panes.
+	if err := s.launchAgent(ctx, current.PaneID, leadAgentName(project.Name, launch), kind, leadStart.Args, leadStart.Env, filepath.Join(home, "projects", project.Name, "lead-launch.sh")); err != nil {
 		return err
 	}
 	if err := s.waitLeadStarted(ctx, current.PaneID, leadStart); err != nil {
@@ -725,18 +724,6 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 	}
 	if leadStart.TypedPrompt != "" {
 		if err := s.deliverLaunchPrompt(ctx, current.PaneID, leadStart.TypedPrompt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Herdr's agent.start has no env parameter. Export only into the Lead's
-// shell before starting OpenCode, not into global config or unrelated panes.
-func (s *Service) exportLeadEnvironment(ctx context.Context, paneID string, env map[string]string) error {
-	for key, value := range env {
-		quoted := "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-		if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": "export " + key + "=" + quoted, "keys": []string{"enter"}}); err != nil {
 			return err
 		}
 	}

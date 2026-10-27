@@ -716,17 +716,13 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	case "opencode":
 		argsForAgent = append(argsForAgent, "--prompt", openingText)
 	}
-	var started json.RawMessage
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.start", func() error {
-		var callErr error
-		started, callErr = s.startAgent(ctx.Context, map[string]any{"name": workerName, "kind": kind, "pane_id": opened.PaneID, "args": argsForAgent})
-		return callErr
+		return s.launchAgent(ctx.Context, opened.PaneID, workerName, kind, argsForAgent, nil, filepath.Join(taskHome, "agent-launch.sh"))
 	})
 	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	_ = started
 	if openingPrompt {
 		err = s.waitAgentLaunched(ctx.Context, opened.PaneID)
 	} else {
@@ -2853,8 +2849,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
 	if err := track("agent.start", func() error {
-		_, callErr := s.startAgent(ctx, map[string]any{"name": workerName, "kind": kind, "pane_id": pane.PaneID, "args": startArgs})
-		return callErr
+		return s.launchAgent(ctx, pane.PaneID, workerName, kind, startArgs, nil, filepath.Join(filepath.Dir(relaunchPath), "agent-launch.sh"))
 	}); err != nil {
 		return failure(err)
 	}

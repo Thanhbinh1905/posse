@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -115,6 +116,55 @@ var (
 	agentStartBusyWait   = 10 * time.Second
 	agentStartRetryDelay = 250 * time.Millisecond
 )
+
+// ttyLineMaxBytes is the longest line a tty in canonical mode accepts, as in a
+// /bin/sh pane. The kernel discards a longer line without an error.
+const ttyLineMaxBytes = 4095
+
+var shellFunctionName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// launchAgent exports env into a pane's shell and starts an agent there. Each
+// is typed as one shell line, so when a line would pass the tty limit the
+// exports and a shell function named after the agent's command, holding its
+// arguments, are written to script. The pane sources script, and Herdr then
+// types the bare command, which runs the function once.
+func (s *Service) launchAgent(ctx context.Context, paneID, name, kind string, args []string, env map[string]string, script string) error {
+	command := agentCLIName(kind)
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, "export "+key+"="+shellQuote(env[key]))
+	}
+	launch := command
+	for _, argument := range args {
+		launch += " " + shellQuote(argument)
+	}
+	longest := len(launch)
+	for _, line := range lines {
+		longest = max(longest, len(line))
+	}
+	if longest > ttyLineMaxBytes {
+		if !shellFunctionName.MatchString(command) {
+			return axi.Failure("launch_line_too_long", fmt.Sprintf("the %s launch needs a %d-byte shell line, over the %d-byte tty line limit, and %s cannot be a shell function name", kind, longest, ttyLineMaxBytes, command), false, "Shorten the Profile arguments or launch environment")
+		}
+		contents := strings.Join(append(lines, command+"() {", "\tunset -f "+command, "\tcommand "+launch+` "$@"`, "}"), "\n") + "\n"
+		if err := writeFile(script, []byte(contents)); err != nil {
+			return err
+		}
+		lines, args = []string{". " + shellQuote(script)}, []string{}
+	}
+	for _, line := range lines {
+		if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": line, "keys": []string{"enter"}}); err != nil {
+			return err
+		}
+	}
+	_, err := s.startAgent(ctx, map[string]any{"name": name, "kind": kind, "pane_id": paneID, "args": args})
+	return err
+}
 
 // startAgent starts an agent in a pane that may have just opened. Herdr queues
 // a launch before the pane's shell starts, but rejects it with agent_pane_busy
