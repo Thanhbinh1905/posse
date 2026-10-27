@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -37,31 +38,39 @@ func freezePosseLaunchSkills(home, project, projectRoot string, cfg config.Confi
 	return freezePosseLaunchSkillInputs(home, project, projectRoot, selected)
 }
 
-// roleSkillInputs reads the platform skills and the role's [skills] entries.
+// roleSkillInputs reads the platform skills and the role's [skills] entries,
+// each followed by the asset files it ships beside its SKILL.md.
 func roleSkillInputs(cfg config.Config, role string) ([]taskplan.Input, error) {
-	var inputs []taskplan.Input
+	var sources []config.SkillSource
 	for _, name := range setupassets.PlatformSkillNames() {
-		data, err := setupassets.Skill(name)
-		if err != nil {
-			return nil, err
-		}
-		inputs = append(inputs, taskplan.Select("skill", name, data))
+		sources = append(sources, config.SkillSource{Name: name})
 	}
-	sources, err := cfg.RoleSkills(role)
+	configured, err := cfg.RoleSkills(role)
 	if err != nil {
 		return nil, axi.Failure("config_invalid", "skills."+role+": "+err.Error(), false)
 	}
-	for _, source := range sources {
+	var inputs []taskplan.Input
+	for _, source := range append(sources, configured...) {
 		var data []byte
+		var assets []setupassets.SkillAsset
 		if source.Path == "" {
 			data, err = setupassets.Skill(source.Name)
+			if err == nil {
+				assets, err = setupassets.SkillAssets(source.Name)
+			}
 		} else {
 			data, err = os.ReadFile(filepath.Join(source.Path, "SKILL.md"))
+			if err == nil {
+				assets, err = setupassets.ReadSkillAssets(os.DirFS(source.Path))
+			}
 		}
 		if err != nil {
 			return nil, err
 		}
 		inputs = append(inputs, taskplan.Select("skill", source.Name, data))
+		for _, asset := range assets {
+			inputs = append(inputs, taskplan.Select("skill-asset", source.Name+"/"+asset.Path, asset.Data))
+		}
 	}
 	return inputs, nil
 }
@@ -71,16 +80,24 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 		name string
 		data []byte
 	}
-	var files []skillFile
+	var files, assets []skillFile
 	var digestInput bytes.Buffer
 	for _, input := range selected {
-		if input.Role != "skill" {
+		switch input.Role {
+		case "skill":
+			if !config.IsSkillName(input.Source) {
+				return posseLaunchSkills{}, fmt.Errorf("selected skill name %q cannot name a skill directory", input.Source)
+			}
+			files = append(files, skillFile{name: input.Source, data: input.Bytes})
+		case "skill-asset":
+			if !validSkillAssetSource(input.Source) {
+				return posseLaunchSkills{}, fmt.Errorf("selected skill asset %q is not a relative path inside a skill directory", input.Source)
+			}
+			assets = append(assets, skillFile{name: input.Source, data: input.Bytes})
+		default:
 			continue
 		}
-		if !config.IsSkillName(input.Source) {
-			return posseLaunchSkills{}, fmt.Errorf("selected skill name %q cannot name a skill directory", input.Source)
-		}
-		files = append(files, skillFile{name: input.Source, data: input.Bytes})
+		// Skill names have no slash and asset sources do, so entries stay distinct.
 		fmt.Fprintf(&digestInput, "%s\x00%d\x00", input.Source, len(input.Bytes))
 		digestInput.Write(input.Bytes)
 	}
@@ -120,6 +137,11 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 			return posseLaunchSkills{}, err
 		}
 	}
+	for _, asset := range assets {
+		if err := writeFrozenSkill(root, filepath.Join(root, "skills", filepath.FromSlash(asset.name)), asset.data); err != nil {
+			return posseLaunchSkills{}, err
+		}
+	}
 	pluginManifest, err := json.MarshalIndent(map[string]string{
 		"name":        "posse-launch-skills",
 		"version":     "1.0.0",
@@ -154,6 +176,11 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 		PiArgs:            piArgs,
 		CodexInstructions: codexInstructions,
 	}, nil
+}
+
+func validSkillAssetSource(source string) bool {
+	name, path, found := strings.Cut(source, "/")
+	return found && config.IsSkillName(name) && fs.ValidPath(path) && path != "SKILL.md"
 }
 
 func collectPiSkillPaths() ([]string, bool) {

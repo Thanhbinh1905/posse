@@ -256,7 +256,7 @@ func selectReconfiguredLaunchInputs(plan taskplan.Plan, cfg config.Config) (task
 	var frozenSkills []taskplan.Input
 	for _, input := range plan.Inputs {
 		switch input.Role {
-		case "skill":
+		case "skill", "skill-asset":
 			frozenSkills = append(frozenSkills, input)
 		case "launch-settings", "codex-developer-instructions":
 		default:
@@ -270,7 +270,7 @@ func selectReconfiguredLaunchInputs(plan taskplan.Plan, cfg config.Config) (task
 	}
 	loadsSkills := false
 	for _, input := range selected {
-		if input.Role == "skill" {
+		if input.Role == "skill" || input.Role == "skill-asset" {
 			loadsSkills = true
 			if len(frozenSkills) > 0 {
 				continue

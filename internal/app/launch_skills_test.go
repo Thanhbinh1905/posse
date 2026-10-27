@@ -306,3 +306,45 @@ func containsString(values []string, wanted string) bool {
 	}
 	return false
 }
+
+func TestSkillAssetsAreFrozenBesideTheirSkill(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "user-home"))
+	skillDir := filepath.Join(root, "board")
+	for name, content := range map[string]string{
+		"SKILL.md":           "---\nname: board\ndescription: Board\n---\nCopy assets/board.html.\n",
+		"assets/board.html":  "<html>",
+		"assets/js/board.js": "render()",
+		".cache/state":       "hidden",
+	} {
+		path := filepath.Join(skillDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Config{Skills: config.Skills{Lead: []string{skillDir}}}
+	skills, err := freezePosseLaunchSkills(filepath.Join(root, "posse-home"), "shop", "", cfg, "lead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := filepath.Join(skills.ClaudePluginDir, "skills", "board")
+	for name, want := range map[string]string{"assets/board.html": "<html>", "assets/js/board.js": "render()"} {
+		got, err := os.ReadFile(filepath.Join(frozen, name))
+		if err != nil || string(got) != want {
+			t.Errorf("frozen %s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(frozen, ".cache")); !os.IsNotExist(err) {
+		t.Errorf("hidden skill files were frozen: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "assets", "board.html"), []byte("<html>v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := freezePosseLaunchSkills(filepath.Join(root, "posse-home"), "shop", "", cfg, "lead")
+	if err != nil || changed.ClaudePluginDir == skills.ClaudePluginDir {
+		t.Fatalf("an asset change reused snapshot %s: %v", skills.ClaudePluginDir, err)
+	}
+}
