@@ -60,6 +60,20 @@ The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) rem
 
 To uninstall, run the installer with `--uninstall` after `sh -s --`. Posse keeps local task history and configuration unless you confirm their removal.
 
+## Better look
+
+Herdr's default Agents panel shows every Worker as `Lead:<project> · <tab>`. With Herdr 0.9.1 or newer, `posse setup` offers a row layout that shows the Lead row, then its Workers as `├─` and `└─` rows. Answer `y` and it adds the block to `~/.config/herdr/config.toml`, keeping your comments. `posse setup --check` and `posse doctor` report when it is missing or outdated; a layout from an earlier Posse without `dim = false` is upgraded in place.
+
+If your Herdr config is a symlink (for example Nix home-manager) or already sets custom Agents `rows`, Posse never writes it. Paste this block into the config's source instead:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true, dim = false }],
+  ["agent"],
+]
+```
+
 ## Acknowledgements
 
 Inspired by [firstmate](https://github.com/kunchenguid/firstmate). The CLI follows [AXI](https://axi.md).

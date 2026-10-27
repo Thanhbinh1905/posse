@@ -104,6 +104,22 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 	}
 	workerCacheStatus, workerCacheDetail, workerCacheAction := workerGoBuildCacheDiagnostic(home, workerCachePolicy)
 	addCheck("Posse Worker Go build cache", workerCacheStatus, workerCacheDetail, workerCacheAction)
+	if path, pathErr := herdrConfigPath(); pathErr != nil {
+		addCheck("Herdr Agents sidebar layout", "warn", pathErr.Error(), "Inspect Herdr config path")
+	} else if state, stateErr := sidebarLayoutState(path); stateErr != nil {
+		addCheck("Herdr Agents sidebar layout", "warn", stateErr.Error(), "Repair the Herdr config and run `posse setup`")
+	} else if state == "keep" {
+		addCheck("Herdr Agents sidebar layout", "ok", "Posse layout present", "")
+	} else if state == "symlink" {
+		detail := "Herdr config is a symlink (managed elsewhere, e.g. Nix home-manager); add this snippet to its source:\n\n" + sidebarLayoutSnippet
+		addCheck("Herdr Agents sidebar layout", "warn", detail, "Add the snippet to the symlink target's source")
+	} else if state == "upgrade" {
+		addCheck("Herdr Agents sidebar layout", "warn", "Posse layout lacks dim = false, so Worker rows render dimmed", "Run `posse setup` to upgrade the layout")
+	} else if state == "manual" {
+		addCheck("Herdr Agents sidebar layout", "warn", "custom Agents rows present", "Review the snippet from `posse setup --check` before editing Herdr config")
+	} else {
+		addCheck("Herdr Agents sidebar layout", "warn", "not installed", "Run `posse setup` to add the optional layout")
+	}
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), configCheckAction(configErr))
 	} else {
