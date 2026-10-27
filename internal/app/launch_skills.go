@@ -106,11 +106,11 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 		return posseLaunchSkills{}, err
 	}
 
-	var skillPaths []string
+	var skillNames []string
 	for _, file := range files {
-		skillPaths = append(skillPaths, filepath.Join(root, "skills", file.name, "SKILL.md"))
+		skillNames = append(skillNames, file.name)
 	}
-	codexInstructions := "Read these frozen Posse skill files when relevant: " + strings.Join(skillPaths, "; ") + "."
+	codexInstructions := "Read the frozen Posse skill file " + filepath.Join(root, "skills", "{name}", "SKILL.md") + " when relevant, where {name} is one of: " + strings.Join(skillNames, ", ") + "."
 
 	// Preserve native discovery unless legacy Posse copies would shadow the frozen files.
 	userSkillPaths, hasLegacyPosseSkills := collectPiSkillPaths()

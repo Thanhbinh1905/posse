@@ -812,7 +812,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	for _, call := range fake.Calls {
 		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
 			args := call.Params["args"].([]string)
-			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "posse-setup", "SKILL.md"))
+			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "{name}", "SKILL.md"))
 		}
 	}
 	deliveredRelaunch := false
@@ -1157,10 +1157,7 @@ func assertCodexWorkerDeveloperInstructions(t *testing.T, args []string, globalR
 	if !containsArgPair(args, "-m", "gpt-5") || !containsArgPair(args, "-c", "model_reasoning_effort=high") {
 		t.Fatalf("Codex launch lost non-developer config overrides: %#v", args)
 	}
-	required := []string{globalRule, profileRule, "launch-skills"}
-	for _, name := range setupassets.SkillNames() {
-		required = append(required, filepath.Join("skills", name, "SKILL.md"))
-	}
+	required := []string{globalRule, profileRule, "launch-skills", filepath.Join("skills", "{name}", "SKILL.md"), strings.Join(setupassets.SkillNames(), ", ")}
 	for _, required := range required {
 		if !strings.Contains(developerInstructions[0], required) {
 			t.Fatalf("Codex developer_instructions omitted %q: %s", required, developerInstructions[0])
