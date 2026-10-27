@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 )
 
@@ -38,7 +39,7 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if err := os.MkdirAll(projectRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	skills, err := freezePosseLaunchSkills(home, "shop", projectRoot)
+	skills, err := freezePosseLaunchSkills(home, "shop", projectRoot, config.Config{}, "lead")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if containsString(piSkillPaths, projectSkill) {
 		t.Errorf("Pi launch exposed a Project skill despite preserving only User skills: %#v", piSkillPaths)
 	}
-	for _, name := range setupassets.SkillNames() {
+	for _, name := range setupassets.PlatformSkillNames() {
 		legacy := filepath.Join(userHome, ".agents", "skills", name, "SKILL.md")
 		if containsString(piSkillPaths, legacy) {
 			t.Errorf("Pi launch passed legacy global %s alongside frozen copy: %#v", name, piSkillPaths)
@@ -89,10 +90,10 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 		t.Fatalf("Codex developer_instructions is not a quoted string: %#v", codexArgs)
 	}
 	skillsRoot := filepath.Join(skills.ClaudePluginDir, "skills")
-	if strings.Count(instructions, skillsRoot) != 1 || !strings.Contains(instructions, filepath.Join(skillsRoot, "{name}", "SKILL.md")) || !strings.Contains(instructions, strings.Join(setupassets.SkillNames(), ", ")) {
+	if strings.Count(instructions, skillsRoot) != 1 || !strings.Contains(instructions, filepath.Join(skillsRoot, "{name}", "SKILL.md")) || !strings.Contains(instructions, strings.Join(setupassets.PlatformSkillNames(), ", ")) {
 		t.Fatalf("Codex developer instructions must name the frozen skills directory once and list every skill: %s", instructions)
 	}
-	for _, name := range setupassets.SkillNames() {
+	for _, name := range setupassets.PlatformSkillNames() {
 		want, err := setupassets.Skill(name)
 		if err != nil {
 			t.Fatal(err)
@@ -120,7 +121,7 @@ func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	if err := os.WriteFile(modifiedPath, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := freezePosseLaunchSkills(home, "shop", projectRoot); err == nil || !strings.Contains(err.Error(), "snapshot was modified") {
+	if _, err := freezePosseLaunchSkills(home, "shop", projectRoot, config.Config{}, "lead"); err == nil || !strings.Contains(err.Error(), "snapshot was modified") {
 		t.Fatalf("modified frozen snapshot was silently replaced: %v", err)
 	}
 }
@@ -138,7 +139,7 @@ func TestFreezePosseLaunchSkillsRejectsSnapshotSymlinkIntoProject(t *testing.T) 
 	if err := os.Symlink(projectRoot, filepath.Join(home, "projects", "shop")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := freezePosseLaunchSkills(home, "shop", projectRoot); err == nil || !strings.Contains(err.Error(), "managed directory") {
+	if _, err := freezePosseLaunchSkills(home, "shop", projectRoot, config.Config{}, "lead"); err == nil || !strings.Contains(err.Error(), "managed directory") {
 		t.Fatalf("snapshot symlink into Project was not rejected: %v", err)
 	}
 	if entries, err := os.ReadDir(projectRoot); err != nil || len(entries) != 0 {
@@ -157,7 +158,7 @@ func TestFrozenSkillSnapshotSurvivesInterruptedWrite(t *testing.T) {
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	skills, err := freezePosseLaunchSkills(home, "shop", project)
+	skills, err := freezePosseLaunchSkills(home, "shop", project, config.Config{}, "lead")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +205,7 @@ func TestFrozenSkillSnapshotSurvivesInterruptedWrite(t *testing.T) {
 	_ = command.Wait()
 	finished = true
 
-	if _, err := freezePosseLaunchSkills(home, "shop", project); err != nil {
+	if _, err := freezePosseLaunchSkills(home, "shop", project, config.Config{}, "lead"); err != nil {
 		t.Fatalf("retry after interrupted snapshot write: %v", err)
 	}
 	want, err := setupassets.Skill("posse")

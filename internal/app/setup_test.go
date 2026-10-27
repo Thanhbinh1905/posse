@@ -7,10 +7,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 )
@@ -781,4 +783,62 @@ func containsValue(values []any, want any) bool {
 		}
 	}
 	return false
+}
+
+func TestSetupUpgradeWritesTheRecommendedSkillsOnce(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		manifest setupManifest
+		want     bool
+	}{
+		{name: "existing install", manifest: setupManifest{Version: "v0.30.0"}, want: true},
+		{name: "fresh install", manifest: setupManifest{}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configPath := filepath.Join(home, "config.toml")
+			if err := os.WriteFile(configPath, []byte("# existing config\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pluginPath := filepath.Join(home, "plugin", "herdr-plugin.toml")
+			adapter := herdr.NewFake()
+			adapter.RunOut["plugin link "+pluginPath] = []byte("{}")
+			service := &Service{Herdr: adapter}
+			manifestPath := filepath.Join(home, setupManifestName)
+			dirs := setupDirs{claude: filepath.Join(home, "claude"), codex: filepath.Join(home, "codex"), agents: filepath.Join(home, ".agents", "skills")}
+			plan := service.setupPlan(home, "/opt/posse/bin/posse", "new", dirs, test.manifest, true, setupInspection{})
+			planned := false
+			for _, row := range plan {
+				planned = planned || row["step"] == "recommended_skills"
+			}
+			if planned != test.want {
+				t.Fatalf("setup plan offers recommended skills = %v, want %v: %v", planned, test.want, plan)
+			}
+			changed, err := service.applySetup(context.Background(), home, manifestPath, test.manifest, "/opt/posse/bin/posse", "new", dirs, setupInspection{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(home, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(cfg.Skills.Change) > 0; got != test.want || slices.Contains(changed, any("recommended_skills")) != test.want {
+				t.Fatalf("recommended skills written = %v (changed %v), want %v", cfg.Skills, changed, test.want)
+			}
+			manifest, _, err := readSetupManifest(manifestPath)
+			if err != nil || !manifest.RecommendedSkills {
+				t.Fatalf("manifest did not record the one-time skills decision: %#v err=%v", manifest, err)
+			}
+			if err := os.WriteFile(configPath, []byte("# User removed the block\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.applySetup(context.Background(), home, manifestPath, manifest, "/opt/posse/bin/posse", "newer", dirs, setupInspection{}); err != nil {
+				t.Fatal(err)
+			}
+			if contents, _ := os.ReadFile(configPath); strings.Contains(string(contents), "[skills]") {
+				t.Fatalf("a later setup rewrote the skills block: %s", contents)
+			}
+		})
+	}
 }

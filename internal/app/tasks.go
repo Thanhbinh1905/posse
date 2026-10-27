@@ -2600,7 +2600,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			if err != nil {
 				return failure(admittedPlanFailure(err))
 			}
-			next, err = selectReconfiguredLaunchInputs(next)
+			next, err = selectReconfiguredLaunchInputs(next, cfg)
 			if err != nil {
 				return failure(err)
 			}
@@ -2817,11 +2817,13 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	startArgs = prependAttributionArgs(kind, profile, startArgs)
 	if kind == "claude" || kind == "codex" || kind == "pi" {
-		var inputs []taskplan.Input
+		var skills posseLaunchSkills
+		var skillErr error
 		if plan != nil {
-			inputs = plan.Inputs
+			skills, skillErr = freezePosseLaunchSkillInputs(home, project.Name, project.Root, plan.Inputs)
+		} else {
+			skills, skillErr = freezePosseLaunchSkills(home, project.Name, project.Root, cfg, task.Type)
 		}
-		skills, skillErr := freezePosseLaunchSkillInputs(home, project.Name, project.Root, inputs)
 		if skillErr != nil {
 			return failure(skillErr)
 		}

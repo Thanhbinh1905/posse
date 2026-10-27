@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -23,11 +25,45 @@ type posseLaunchSkills struct {
 	CodexInstructions string
 }
 
-// freezePosseLaunchSkills writes the embedded skills into a content-addressed
-// snapshot under POSSE_HOME. Pi receives these frozen skills plus unrelated
-// User skills from its global filesystem discovery roots.
-func freezePosseLaunchSkills(home, project, projectRoot string) (posseLaunchSkills, error) {
-	return freezePosseLaunchSkillInputs(home, project, projectRoot, nil)
+// freezePosseLaunchSkills writes the platform skills plus the role's
+// configured workflow skills into a content-addressed snapshot under
+// POSSE_HOME. Pi receives these frozen skills plus unrelated User skills from
+// its global filesystem discovery roots.
+func freezePosseLaunchSkills(home, project, projectRoot string, cfg config.Config, role string) (posseLaunchSkills, error) {
+	selected, err := roleSkillInputs(cfg, role)
+	if err != nil {
+		return posseLaunchSkills{}, err
+	}
+	return freezePosseLaunchSkillInputs(home, project, projectRoot, selected)
+}
+
+// roleSkillInputs reads the platform skills and the role's [skills] entries.
+func roleSkillInputs(cfg config.Config, role string) ([]taskplan.Input, error) {
+	var inputs []taskplan.Input
+	for _, name := range setupassets.PlatformSkillNames() {
+		data, err := setupassets.Skill(name)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, taskplan.Select("skill", name, data))
+	}
+	sources, err := cfg.RoleSkills(role)
+	if err != nil {
+		return nil, axi.Failure("config_invalid", "skills."+role+": "+err.Error(), false)
+	}
+	for _, source := range sources {
+		var data []byte
+		if source.Path == "" {
+			data, err = setupassets.Skill(source.Name)
+		} else {
+			data, err = os.ReadFile(filepath.Join(source.Path, "SKILL.md"))
+		}
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, taskplan.Select("skill", source.Name, data))
+	}
+	return inputs, nil
 }
 
 func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []taskplan.Input) (posseLaunchSkills, error) {
@@ -35,30 +71,21 @@ func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []
 		name string
 		data []byte
 	}
-	files := make([]skillFile, 0, len(setupassets.SkillNames()))
+	var files []skillFile
 	var digestInput bytes.Buffer
-	for _, name := range setupassets.SkillNames() {
-		var data []byte
-		if selected == nil {
-			var err error
-			data, err = setupassets.Skill(name)
-			if err != nil {
-				return posseLaunchSkills{}, err
-			}
-		} else {
-			for _, input := range selected {
-				if input.Role == "skill" && input.Source == name {
-					data = input.Bytes
-					break
-				}
-			}
-			if data == nil {
-				return posseLaunchSkills{}, fmt.Errorf("admitted plan has no selected skill %s", name)
-			}
+	for _, input := range selected {
+		if input.Role != "skill" {
+			continue
 		}
-		files = append(files, skillFile{name: name, data: data})
-		fmt.Fprintf(&digestInput, "%s\x00%d\x00", name, len(data))
-		digestInput.Write(data)
+		if !config.IsSkillName(input.Source) {
+			return posseLaunchSkills{}, fmt.Errorf("selected skill name %q cannot name a skill directory", input.Source)
+		}
+		files = append(files, skillFile{name: input.Source, data: input.Bytes})
+		fmt.Fprintf(&digestInput, "%s\x00%d\x00", input.Source, len(input.Bytes))
+		digestInput.Write(input.Bytes)
+	}
+	if len(files) == 0 {
+		return posseLaunchSkills{}, fmt.Errorf("admitted plan selects no Posse skills")
 	}
 	digest := sha256.Sum256(digestInput.Bytes())
 	homePath, err := filepath.Abs(home)

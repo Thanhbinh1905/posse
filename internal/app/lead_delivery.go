@@ -131,7 +131,7 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	instructions := composed.Text
 	var skills posseLaunchSkills
 	if kind == "claude" || kind == "codex" || kind == "pi" {
-		skills, err = freezePosseLaunchSkills(home, project.Name, project.Root)
+		skills, err = freezePosseLaunchSkills(home, project.Name, project.Root, cfg, "lead")
 		if err != nil {
 			return leadLaunch{}, err
 		}

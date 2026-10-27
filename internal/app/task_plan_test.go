@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -293,7 +295,7 @@ func TestAdmittedCodexInstructionsDoNotReadCurrentHarnessConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte("developer_instructions = 'original selected instructions'\napi_key = 'unconsumed credential'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	inputs, err := selectedSkillInputs("codex")
+	inputs, err := selectedSkillInputs(config.Config{}, "change", "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,4 +316,57 @@ func TestAdmittedCodexInstructionsDoNotReadCurrentHarnessConfig(t *testing.T) {
 			t.Fatal("snapshotted unrelated credential")
 		}
 	}
+}
+
+func TestSkillSelectionIsFrozenIntoThePlan(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	cfg := config.Config{Skills: config.Skills{Change: []string{"posse-tdd"}, Review: []string{"posse-review"}}}
+	inputs, err := selectedSkillInputs(cfg, "change", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := skillInputNames(inputs), []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-better-each-day", "posse-tdd"}; !slices.Equal(got, want) {
+		t.Fatalf("Change Worker skills = %v, want %v", got, want)
+	}
+	resolve := func(kind string, inputs []taskplan.Input) taskplan.Plan {
+		t.Helper()
+		root := t.TempDir()
+		plan, err := taskplan.Resolve(taskplan.Request{
+			Brief:     taskplan.Select("brief", "change.md", []byte("---\ntype: change\ntitle: Change\ndone_when: published\n---\n")),
+			Inputs:    inputs,
+			Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
+			Launch:    taskplan.Launch{ProfileName: "worker", Profile: config.Profile{Kind: kind}},
+			Review:    "none", Delivery: "pr", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+			Paths: taskplan.Paths{Scratch: filepath.Join(root, "scratch"), Output: filepath.Join(root, "output")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return plan
+	}
+	edited := config.Config{Skills: config.Skills{Change: []string{"posse-deslop"}}}
+	reconfigured, err := selectReconfiguredLaunchInputs(resolve("codex", inputs), edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := skillInputNames(reconfigured.Inputs); !slices.Equal(got, skillInputNames(inputs)) {
+		t.Fatalf("reconfigured plan skills = %v, want the admitted %v", got, skillInputNames(inputs))
+	}
+	reconfigured, err = selectReconfiguredLaunchInputs(resolve("pi", nil), edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := skillInputNames(reconfigured.Inputs), []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-better-each-day", "posse-deslop"}; !slices.Equal(got, want) {
+		t.Fatalf("plan without frozen skills selected %v, want %v", got, want)
+	}
+}
+
+func skillInputNames(inputs []taskplan.Input) []string {
+	var names []string
+	for _, input := range inputs {
+		if input.Role == "skill" {
+			names = append(names, input.Source)
+		}
+	}
+	return names
 }

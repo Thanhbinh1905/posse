@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
-	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -39,11 +41,23 @@ func TestLaunchSkillsAreInjectedOnlyIntoPosseSessions(t *testing.T) {
 			}
 			capture := filepath.Join(root, "managed-args.log")
 			unrelatedCapture := filepath.Join(root, "unrelated-args.log")
-			skillReads := filepath.Join(root, "read-skills.log")
+			skillReads := filepath.Join(root, "read-skills")
+			if err := os.MkdirAll(skillReads, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			customSkill := filepath.Join(root, "my-skills", "go-style")
+			if err := os.MkdirAll(customSkill, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(customSkill, "SKILL.md"), []byte("---\nname: go-style\ndescription: Go style for this User.\n---\n\nGo style.\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			release := filepath.Join(root, "release-agents")
 			fakeHarness := `#!/bin/sh
 kind=${0##*/}
 printf '%s|%s\n' "$kind" "$*" >> "$POSSE_E2E_CAPTURE_FILE"
+reads="$POSSE_E2E_SKILL_READS"
+[ -d "$reads" ] && reads="$reads/${PWD##*/}"
 case "$kind" in
   claude)
     previous=
@@ -51,7 +65,7 @@ case "$kind" in
       if [ "$previous" = plugin-dir ]; then
         case "$argument" in
           "$POSSE_HOME/projects/"*/launch-skills/*)
-            cat "$argument"/skills/*/SKILL.md >> "$POSSE_E2E_SKILL_READS"
+            cat "$argument"/skills/*/SKILL.md >> "$reads"
             ;;
         esac
         previous=
@@ -65,9 +79,9 @@ case "$kind" in
     for argument in "$@"; do
       if [ "$previous" = skill ]; then
         if [ -d "$argument" ]; then
-          cat "$argument"/*/SKILL.md >> "$POSSE_E2E_SKILL_READS"
+          cat "$argument"/*/SKILL.md >> "$reads"
         else
-          cat "$argument" >> "$POSSE_E2E_SKILL_READS"
+          cat "$argument" >> "$reads"
         fi
         previous=
         continue
@@ -82,7 +96,7 @@ case "$kind" in
           developer_instructions=*)
             POSSE_E2E_SKILL_INSTRUCTIONS=${argument#developer_instructions=}
             export POSSE_E2E_SKILL_INSTRUCTIONS
-            python3 - "$POSSE_E2E_SKILL_READS" <<'PY'
+            python3 - "$reads" <<'PY'
 import json, os, re, sys
 instructions = json.loads(os.environ["POSSE_E2E_SKILL_INSTRUCTIONS"])
 match = re.search(r'(\S+)/\{name\}/SKILL\.md when relevant, where \{name\} is one of: ([a-z, -]+)\.', instructions)
@@ -143,7 +157,8 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			remote := filepath.Join(root, "remote.git")
 			initRepository(t, repo, remote, env)
 			config := "[lead]\nkind = \"" + kind + "\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 2\n\n[pool]\nkeep_idle = 1\n\n[profiles.worker]\nkind = \"" + kind + "\"\n\n[dispatch.default]\nuse = \"worker\"\n"
-			if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config), 0o600); err != nil {
+			skills := "\n[skills]\nlead = [\"posse-whats-next\", \"posse-catch-up\"]\nchange = [\"posse-tdd\", \"" + customSkill + "\"]\nreview = [\"posse-review\"]\nresearch = [\"posse-research\"]\n"
+			if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config+skills), 0o600); err != nil {
 				t.Fatal(err)
 			}
 
@@ -180,32 +195,38 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			leadEnv := setEnv(env, "HERDR_ENV", "1")
 			leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", project.LeadPaneID)
 			leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
-			brief := filepath.Join(root, "change.md")
-			if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Launch skills\ndone_when: injected skills are readable\n---\nVerify launch skill injection.\n"), 0o600); err != nil {
-				t.Fatal(err)
+			startWorker := func(id, name string) store.Task {
+				t.Helper()
+				brief := filepath.Join(root, name+".md")
+				if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Launch skills\ndone_when: injected skills are readable\n---\nVerify launch skill injection.\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command(binary, "start", "--brief", brief, "--name", name)
+				command.Dir, command.Env = repo, leadEnv
+				output, startErr := command.CombinedOutput()
+				if startErr != nil || !strings.Contains(string(output), "working") {
+					snapshot, _ := client.Snapshot(context.Background())
+					reportLog, _ := os.ReadFile(filepath.Join(root, "report-agent.log"))
+					argsLog, _ := os.ReadFile(capture)
+					failedTask, _ := db.Task(context.Background(), project.ID, id)
+					t.Fatalf("start %s Worker: err=%v output=%s task=%#v snapshot=%#v reports=%s args=%s", kind, startErr, output, failedTask, snapshot, reportLog, argsLog)
+				}
+				task, err := db.Task(context.Background(), project.ID, id)
+				if err != nil {
+					t.Fatalf("read launched Worker Task: %v", err)
+				}
+				return task
 			}
-			command := exec.Command(binary, "start", "--brief", brief, "--name", "launch-skills")
-			command.Dir, command.Env = repo, leadEnv
-			output, startErr := command.CombinedOutput()
-			if startErr != nil || !strings.Contains(string(output), "working") {
-				snapshot, _ := client.Snapshot(context.Background())
-				reportLog, _ := os.ReadFile(filepath.Join(root, "report-agent.log"))
-				argsLog, _ := os.ReadFile(capture)
-				failedTask, _ := db.Task(context.Background(), project.ID, "t1")
-				t.Fatalf("start %s Worker: err=%v output=%s task=%#v snapshot=%#v reports=%s args=%s", kind, startErr, output, failedTask, snapshot, reportLog, argsLog)
-			}
-			task, err := db.Task(context.Background(), project.ID, "t1")
-			if err != nil {
-				t.Fatalf("read launched Worker Task: %v", err)
-			}
+			platform := []string{"posse", "posse-setup", "posse-down", "posse-update", "posse-better-each-day"}
+			task := startWorker("t1", "launch-skills")
 			argsContents, err := os.ReadFile(capture)
 			if err != nil {
 				t.Fatal(err)
 			}
 			switch kind {
 			case "codex":
-				if strings.Count(string(argsContents), "developer_instructions=") < 2 || !strings.Contains(string(argsContents), filepath.Join("skills", "{name}", "SKILL.md")) || !strings.Contains(string(argsContents), strings.Join(setupassets.SkillNames(), ", ")) || !strings.Contains(string(argsContents), filepath.Join(root, "posse", "projects", "shop", "launch-skills")) {
-					t.Fatalf("Codex developer_instructions omitted the frozen skills directory or names: %s", argsContents)
+				if strings.Count(string(argsContents), "developer_instructions=") < 2 || !strings.Contains(string(argsContents), filepath.Join("skills", "{name}", "SKILL.md")) || !strings.Contains(string(argsContents), filepath.Join(root, "posse", "projects", "shop", "launch-skills")) {
+					t.Fatalf("Codex developer_instructions omitted the frozen skills directory: %s", argsContents)
 				}
 			case "claude":
 				if strings.Count(string(argsContents), "--plugin-dir") < 2 {
@@ -216,10 +237,14 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 					t.Fatalf("Pi Lead/Worker args omitted the frozen skills directory: %s", argsContents)
 				}
 			}
-			contents, err := os.ReadFile(skillReads)
-			if err != nil || !containsEverySkill(string(contents)) {
-				t.Fatalf("%s fake harness could not read all injected skills: %s err=%v", kind, contents, err)
+			assertReadSkills(t, kind+" Lead", filepath.Join(skillReads, filepath.Base(repo)), append(platform, "posse-whats-next", "posse-catch-up"))
+			assertReadSkills(t, kind+" Change Worker", filepath.Join(skillReads, filepath.Base(task.WorktreePath)), append(platform, "posse-tdd", "go-style"))
+
+			if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(config), 0o600); err != nil {
+				t.Fatal(err)
 			}
+			unconfigured := startWorker("t2", "no-skills-block")
+			assertReadSkills(t, kind+" Worker without a [skills] block", filepath.Join(skillReads, filepath.Base(unconfigured.WorktreePath)), platform)
 			for _, path := range []string{
 				filepath.Join(root, "home", ".agents", "skills"),
 				filepath.Join(repo, ".agents"), filepath.Join(repo, ".claude"), filepath.Join(repo, ".pi"), filepath.Join(repo, ".codex"),
@@ -249,12 +274,25 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 	}
 }
 
-// containsEverySkill reports whether contents holds the frontmatter of every shipped skill.
-func containsEverySkill(contents string) bool {
-	for _, name := range setupassets.SkillNames() {
-		if !strings.Contains(contents, "name: "+name+"\n") {
-			return false
-		}
+// assertReadSkills checks that a fake harness read exactly the named skills.
+func assertReadSkills(t *testing.T, session, path string, want []string) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%s read no injected skills: %v", session, err)
 	}
-	return true
+	read := map[string]bool{}
+	for _, match := range regexp.MustCompile(`(?m)^name: (\S+)$`).FindAllStringSubmatch(string(contents), -1) {
+		read[match[1]] = true
+	}
+	got := make([]string, 0, len(read))
+	for name := range read {
+		got = append(got, name)
+	}
+	sort.Strings(got)
+	want = append([]string(nil), want...)
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s read skills %v, want %v", session, got, want)
+	}
 }
