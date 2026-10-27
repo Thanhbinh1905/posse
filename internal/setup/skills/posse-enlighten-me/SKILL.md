@@ -1,6 +1,6 @@
 ---
 name: posse-enlighten-me
-description: "Explains how code works or why it is shaped that way, from code, docs and history, with each claim labelled seen, inferred or guess. Use when the User asks how X works, why X is like this, where X lives, or which option to pick, before you start reading code to answer."
+description: "Explains how code works or why it is shaped that way, from code, docs and history, with each claim labelled seen, inferred or guess. Use when the User asks how X works, why X is like this, where X lives, or which option to pick, or asks to explain or break down a PR, the architecture or a spec (ELI5, giải thích), before you start reading code to answer."
 ---
 
 # posse enlighten me
@@ -21,3 +21,14 @@ Lead skill. If `posse _context` says you are a Worker, follow your Brief instead
    Done when the User can act on the answer without opening the sources.
 
 Pitch it at a senior engineer meeting the subsystem for the first time, not annotated source. Say what you could not find instead of filling the gap; the newest commit is not automatically the reason.
+
+## Break down
+
+Use this mode when the User asks to explain, break down or ELI5 a PR, the architecture or a spec, or says "giải thích". Read from the conversation why the User asks and what they already know, and answer in the User's language.
+
+- **Sources.** A PR: `posse diff <task>`, the PR body, the Brief and the review findings. The architecture: `CONTEXT.md`, `docs/spec.md` and the ADR index. A spec: the draft or the spec issue.
+- **Layers.** 1: the answer in one sentence. 2: a plain story with one concrete example and no code identifiers. 3: the mechanism. 4: where it lives. Stop after layer 2 and offer the next layer.
+- **A PR** gets four blocks instead: the intent, quoted verbatim from the ticket; the broad strokes; one slice per concern, not per file; then the periphery.
+- When the User says they did not understand, explain it again more simply, with a different example.
+
+A "how does X work" question keeps the senior-engineer pitch above.
