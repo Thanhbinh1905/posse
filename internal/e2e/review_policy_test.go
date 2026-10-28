@@ -18,6 +18,15 @@ import (
 
 func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task, args ...string) string {
 	t.Helper()
+	code, output := signalReviewPolicyTaskAllowFailure(t, f, task, args...)
+	if code != 0 {
+		t.Fatalf("posse signal done: exit %d\n%s", code, output)
+	}
+	return output
+}
+
+func signalReviewPolicyTaskAllowFailure(t *testing.T, f *prLifecycleFixture, task store.Task, args ...string) (int, string) {
+	t.Helper()
 	env := setEnv(f.env, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "POSSE_WORKER_HOME", f.home)
 	// Do not complete a turn before the fake has consumed its launch prompt.
@@ -29,14 +38,22 @@ func signalReviewPolicyTask(t *testing.T, f *prLifecycleFixture, task store.Task
 	}) {
 		t.Fatalf("Review-policy fake did not consume the launch prompt for %s", task.PaneID)
 	}
-	output := runPosse(t, f.binary, task.WorktreePath, env, append([]string{"signal", "done", "Checked"}, args...)...)
+	command := exec.Command(f.binary, append([]string{"signal", "done", "Checked"}, args...)...)
+	command.Dir, command.Env = task.WorktreePath, env
+	output, err := command.CombinedOutput()
+	code := 0
+	if exit, ok := err.(*exec.ExitError); ok {
+		code = exit.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
 	// The identity fixture reports working after its launch prompt and then waits
 	// for input. Complete that fake turn too, so reconciliation does not correctly
 	// interpret its permanently-working pane as resumed work.
 	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", task.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}
-	return output
+	return code, string(output)
 }
 
 func TestSelectedReviewPolicyLocalMerge(t *testing.T) {

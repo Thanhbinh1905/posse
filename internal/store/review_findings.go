@@ -81,6 +81,9 @@ type reviewFindingsResult struct {
 	OutOfScope       int
 	BySeverity       map[string]int
 	Regressed        []string
+	// Reclassified names findings the Reviewer supplied as introduced that
+	// Posse recorded pre_existing because they lie outside the round's scope.
+	Reclassified []string
 }
 
 // ReviewRoundForTask returns the immutable round bindings for a Review Task.
@@ -315,6 +318,9 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 			result.BySeverity[severity]++
 			if !finding.InScope {
 				result.OutOfScope++
+				if pattern.Origin == "introduced" {
+					result.Reclassified = append(result.Reclassified, fmt.Sprintf("%s:%d (%s)", finding.Path, finding.Line, key))
+				}
 			}
 		}
 	}
@@ -421,11 +427,17 @@ func insertReviewRoundNoticesTx(ctx context.Context, tx *writeTx, projectID, cha
 	if len(result.Regressed) > 0 {
 		data["regressed"] = result.Regressed
 	}
+	if len(result.Reclassified) > 0 {
+		data["origin_reclassified"] = result.Reclassified
+	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
 	summary := fmt.Sprintf("%s: Review Round %d recorded %s; %d repeated finding(s) suppressed, %d out-of-scope finding(s)", changeTitle, result.Round, verdict, result.SuppressedRepeat, result.OutOfScope)
+	if len(result.Reclassified) > 0 {
+		summary += "; " + reclassifiedFindingsText(result.Reclassified)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'review_round_done',?,?,?)`, projectID, changeTaskID, summary, string(encoded), time.Now().UnixMilli()); err != nil {
 		return err
 	}
@@ -440,6 +452,10 @@ func insertReviewRoundNoticesTx(ctx context.Context, tx *writeTx, projectID, cha
 		}
 	}
 	return nil
+}
+
+func reclassifiedFindingsText(findings []string) string {
+	return fmt.Sprintf("%d finding(s) supplied as introduced recorded pre_existing because they lie outside this Review Round's scope: %s", len(findings), strings.Join(findings, ", "))
 }
 
 func oneOf(value string, values ...string) bool {
