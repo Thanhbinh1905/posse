@@ -341,6 +341,17 @@ type QuotaExhaustion struct {
 	UpdatedAt  int64
 }
 
+type RemoteBranchCleanup struct {
+	TaskID    int64
+	Repo      string
+	ProjectID int64
+	Branch    string
+	HeadSha   string
+	Cause     string
+	Attempts  int64
+	FailedAt  int64
+}
+
 type RepoFetchFailure struct {
 	ProjectID           int64
 	Repo                string
