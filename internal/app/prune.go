@@ -29,6 +29,7 @@ type pruneItem struct {
 	taskID      int64
 	repoRoot    string
 	sandboxPath string
+	repo        string
 }
 
 func taskScratchPruneItems(ctx context.Context, db *store.DB, home string, project store.Project) ([]pruneItem, error) {

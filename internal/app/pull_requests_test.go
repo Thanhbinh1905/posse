@@ -1076,13 +1076,16 @@ func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds,
 }
 
 func TestDeleteMergedRemoteBranchRequiresCurrentMergedPRHead(t *testing.T) {
-	for _, scenario := range []string{"merged", "advanced", "open", "closed"} {
+	for _, scenario := range []string{"merged", "legacy-gh", "advanced", "open", "closed"} {
 		t.Run(scenario, func(t *testing.T) {
 			fixture := newPRMergeFixture(t, "pr", store.StateDone)
 			fixture.task.PRURL = "https://github.com/acme/shop/pull/17"
 			gitTest(t, fixture.root, "--git-dir", fixture.remote, "symbolic-ref", "HEAD", "refs/heads/main")
 			gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
-			t.Setenv("POSSE_TEST_GH_VIEW_STATE", map[string]string{"merged": "MERGED", "advanced": "MERGED", "open": "OPEN", "closed": "CLOSED"}[scenario])
+			t.Setenv("POSSE_TEST_GH_VIEW_STATE", map[string]string{"merged": "MERGED", "legacy-gh": "MERGED", "advanced": "MERGED", "open": "OPEN", "closed": "CLOSED"}[scenario])
+			if scenario == "legacy-gh" {
+				t.Setenv("POSSE_TEST_GH_LEGACY_REPOSITORY", "1")
+			}
 			if scenario == "advanced" {
 				gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "advance after merge")
 				gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
@@ -1091,7 +1094,7 @@ func TestDeleteMergedRemoteBranchRequiresCurrentMergedPRHead(t *testing.T) {
 			if err != nil {
 				t.Fatalf("deleteMergedRemoteBranch: %v", err)
 			}
-			wantRemoved := scenario == "merged"
+			wantRemoved := scenario == "merged" || scenario == "legacy-gh"
 			if removed != wantRemoved {
 				t.Fatalf("removed = %t, want %t", removed, wantRemoved)
 			}
@@ -1315,14 +1318,19 @@ case "$1 $2" in
     case "$*" in
       *"--json title,body"*) python3 -c 'import json,sys; print(json.dumps({"title":sys.argv[1],"body":sys.argv[2]}))' "E2E Brief title" "${POSSE_TEST_GH_BODY-}" ;;
       *"--json body"*) python3 -c 'import json,sys; print(json.dumps({"body":sys.argv[1]}))' "${POSSE_TEST_GH_BODY-}" ;;
-      *) state=${POSSE_TEST_GH_VIEW_STATE:-}
+      *) if [ -n "${POSSE_TEST_GH_VIEW_FAIL:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_VIEW_FAIL" >&2; exit 1; fi
+         state=${POSSE_TEST_GH_VIEW_STATE:-}
          if [ -z "$state" ]; then
            state=OPEN
            if grep -q '\"state\":\"MERGED\"' "$POSSE_TEST_GH_STATE"; then state=MERGED
            elif grep -q '\"state\":\"CLOSED\"' "$POSSE_TEST_GH_STATE"; then state=CLOSED
            fi
          fi
-         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"}}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "${POSSE_TEST_GH_SOURCE:-acme/shop}" ;;
+         source=${POSSE_TEST_GH_SOURCE:-acme/shop}
+         repository="{\"nameWithOwner\":\"$source\"}"
+         # gh 2.46 omits nameWithOwner and names the owner separately.
+         if [ -n "${POSSE_TEST_GH_LEGACY_REPOSITORY:-}" ]; then repository="{\"name\":\"${source#*/}\"},\"headRepositoryOwner\":{\"login\":\"${source%%/*}\"}"; fi
+         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$repository" ;;
     esac ;;
   "pr merge") printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
@@ -1340,6 +1348,8 @@ esac
 	t.Setenv("POSSE_TEST_GH_BODY", "")
 	t.Setenv("POSSE_TEST_GH_EDIT_BODY", filepath.Join(fixture.root, "gh-edited-body.md"))
 	t.Setenv("POSSE_TEST_GH_FAIL", "")
+	t.Setenv("POSSE_TEST_GH_VIEW_FAIL", "")
+	t.Setenv("POSSE_TEST_GH_LEGACY_REPOSITORY", "")
 	t.Setenv("POSSE_TEST_GH_CANCELLED", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "")

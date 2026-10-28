@@ -100,6 +100,11 @@ func (s *Service) pool(ctx *axi.Context, args []string) error {
 		return err
 	}
 	items = append(items, branches...)
+	remoteBranches, err := mergedRemoteBranchItems(ctx.Context, db, project, cfg, tasks)
+	if err != nil {
+		return err
+	}
+	items = append(items, remoteBranches...)
 	registrations, err := staleOwnedWorktreeItems(ctx.Context, db, project, home, sandboxes)
 	if err != nil {
 		return err
@@ -291,6 +296,8 @@ func (s *Service) applyPruneItem(ctx context.Context, db *store.DB, home string,
 		return removeTaskArtifacts(home, project, item.seq, item.files)
 	case "branch":
 		return s.applyBranchPruneItem(ctx, db, project, item)
+	case "remote-branch":
+		return applyRemoteBranchPruneItem(ctx, db, home, project, item)
 	case "worktree-registration":
 		if item.sandbox.ID != 0 {
 			claimed, err := db.ClaimSandboxPrune(ctx, project.ID, item.sandbox.ID)
