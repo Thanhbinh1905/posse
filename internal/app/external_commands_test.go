@@ -65,6 +65,58 @@ func TestExternalCommandsDisableInteractivePrompts(t *testing.T) {
 	}
 }
 
+// The Project watch the Herdr plugin starts inherits the Herdr server's PATH,
+// which can resolve an older gh than the User's shell (#641). It must run the
+// gh and glab the User's shell resolves, as the User's own commands do.
+func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("POSSE_HOME", filepath.Join(root, "posse"))
+	if err := os.MkdirAll(filepath.Join(root, "posse"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	userBin, serverBin := filepath.Join(root, "user-bin"), filepath.Join(root, "server-bin")
+	for dir, version := range map[string]string{userBin: "2.97.0", serverBin: "2.46.0"} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"gh", "glab"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nprintf '"+version+"'\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	version := func(name string) string {
+		t.Helper()
+		output, err := commandOutputArgs(context.Background(), root, name, "--version")
+		if err != nil {
+			t.Fatalf("%s --version: %v", name, err)
+		}
+		return output
+	}
+	t.Setenv("PATH", userBin+string(os.PathListSeparator)+serverBin)
+	t.Setenv(watchRuntimeTokenEnv, "")
+	t.Setenv("HERDR_PLUGIN_ID", "")
+	if got := version("gh"); got != "2.97.0" {
+		t.Fatalf("User command ran gh %s, want 2.97.0", got)
+	}
+
+	t.Setenv("PATH", serverBin)
+	for _, outside := range []string{watchRuntimeTokenEnv, "HERDR_PLUGIN_ID"} {
+		t.Setenv(outside, "set")
+		for _, name := range []string{"gh", "glab"} {
+			if got := version(name); got != "2.97.0" {
+				t.Fatalf("with %s set, %s resolved to version %s, want the User shell's 2.97.0", outside, name, got)
+			}
+		}
+		t.Setenv(outside, "")
+	}
+
+	// A User command always runs the binary its own shell resolves.
+	if got := version("gh"); got != "2.46.0" {
+		t.Fatalf("User command with only the server PATH ran gh %s, want 2.46.0", got)
+	}
+}
+
 func TestExternalGitHubAndFetchCommandsHaveDeadlines(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")

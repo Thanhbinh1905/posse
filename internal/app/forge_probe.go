@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -311,8 +310,8 @@ func forgeProbeCacheKey(host string, cfg config.Config) (string, string, error) 
 	}
 	cliPaths := map[string]string{}
 	for _, cli := range []string{"glab", "gh"} {
-		path, lookupErr := exec.LookPath(cli)
-		if lookupErr != nil {
+		path := externalCommandPath(cli)
+		if !filepath.IsAbs(path) {
 			path = "<missing>"
 		}
 		cliPaths[cli] = path

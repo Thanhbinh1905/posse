@@ -254,7 +254,7 @@ func readForgeBody(ctx context.Context, forge repositoryForge, prURL string) (st
 		}
 		output, err := commandOutputArgs(ctx, forge.Root, "glab", "api", "--hostname", forge.Host, "projects/"+url.PathEscape(forge.Path)+"/merge_requests/"+strconv.Itoa(number))
 		if err != nil {
-			return "", fmt.Errorf("read merge request body: %w", err)
+			return "", fmt.Errorf("read merge request body: %w: %s", err, strings.TrimSpace(output))
 		}
 		var mr gitlabMergeRequest
 		if err := json.Unmarshal([]byte(output), &mr); err != nil || mr.WebURL != prURL {
@@ -264,7 +264,7 @@ func readForgeBody(ctx context.Context, forge repositoryForge, prURL string) (st
 	}
 	output, err := commandOutputArgs(ctx, forge.Root, "gh", "pr", "view", prURL, "--json", "body")
 	if err != nil {
-		return "", fmt.Errorf("read pull request body: %w", err)
+		return "", fmt.Errorf("read pull request body: %w: %s", err, strings.TrimSpace(output))
 	}
 	var pull struct {
 		Body string `json:"body"`
@@ -281,9 +281,15 @@ func writeForgeBody(ctx context.Context, forge repositoryForge, prURL, body stri
 		if err != nil {
 			return err
 		}
-		_, err = commandOutputArgs(ctx, forge.Root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--raw-field", "description="+body, "projects/"+url.PathEscape(forge.Path)+"/merge_requests/"+strconv.Itoa(number))
-		return err
+		output, err := commandOutputArgs(ctx, forge.Root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--raw-field", "description="+body, "projects/"+url.PathEscape(forge.Path)+"/merge_requests/"+strconv.Itoa(number))
+		if err != nil {
+			return fmt.Errorf("write merge request body: %w: %s", err, strings.TrimSpace(output))
+		}
+		return nil
 	}
-	_, err := commandOutputArgs(ctx, forge.Root, "gh", "pr", "edit", prURL, "--body", body)
-	return err
+	output, err := commandOutputArgs(ctx, forge.Root, "gh", "pr", "edit", prURL, "--body", body)
+	if err != nil {
+		return fmt.Errorf("write pull request body: %w: %s", err, strings.TrimSpace(output))
+	}
+	return nil
 }

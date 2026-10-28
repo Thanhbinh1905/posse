@@ -319,6 +319,7 @@ type ProjectWatchState struct {
 	ReconcileBlockedSince      int64
 	ReconcileBlockCause        string
 	ReconcileBlockNoticeRaised int64
+	PrPollLastError            string
 }
 
 type PublishPrePushHead struct {

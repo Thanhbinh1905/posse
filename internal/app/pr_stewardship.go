@@ -199,8 +199,15 @@ func (s *Service) watchFailureReason(ctx context.Context, db *store.DB, target s
 
 func (s *Service) forgeUnavailable(ctx context.Context, db *store.DB, target stewardTarget, observation store.PRObservation) error {
 	message := "could not read the current PR/MR state from the forge"
+	reasons := make([]string, 0, 2)
+	if reason, err := db.PRPollLastError(ctx, target.project.ID); err == nil && reason != "" {
+		reasons = append(reasons, reason)
+	}
 	if reason := s.watchFailureReason(ctx, db, target); reason != "" {
-		message += ": " + reason
+		reasons = append(reasons, reason)
+	}
+	if len(reasons) > 0 {
+		message += ": " + strings.Join(reasons, "; ")
 	}
 	if observation.ID != 0 {
 		message += fmt.Sprintf("; the last observation is head %s (%s) from %s", observation.HeadSHA, observation.State, time.UnixMilli(observation.ObservedAt).Local().Format(time.RFC3339))
