@@ -35,12 +35,16 @@ func remoteBranchHead(ctx context.Context, root, ref string) (string, error) {
 // publish is the only supported direct delivery path for a normal PR-mode Worker.
 // It never accepts a branch, remote, refspec, or merge option from the caller.
 func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
-	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {repeatable: true}, "proof": {repeatable: true}, "risk": {repeatable: true}, "refresh": {boolean: true}})
+	parsed, err := parseArgs("publish", args, map[string]flagSpec{"repo": {}, "verify": {repeatable: true}, "proof": {repeatable: true}, "risk": {repeatable: true}, "refresh": {boolean: true}, "rewrite": {boolean: true}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
 		return axi.Usage("publish requires a Worker summary")
+	}
+	rewrite, rewriteQuote := parsed.Bool("rewrite"), parsed.Flags["user-approved"]
+	if rewrite != (strings.TrimSpace(rewriteQuote) != "") {
+		return axi.Usage("publish --rewrite requires --user-approved \"<User's words>\", and --user-approved requires --rewrite")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -71,6 +75,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	repoFilter := ""
 	if project.IsWorkspace() {
+		if rewrite {
+			return axi.Failure("publish_refused", "--rewrite supports single-repository Tasks only", false)
+		}
 		if parsed.Flags["repo"] == "" {
 			return axi.Failure("publish_refused", "workspace publishing requires --repo <member>", false)
 		}
@@ -102,6 +109,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("publish_refused", "could not resolve the current directory", false)
 	}
 	if isFullPipelineTask(task, repoFilter) {
+		if rewrite {
+			return axi.Failure("publish_refused", "--rewrite does not support full-pipeline Tasks", false)
+		}
 		return s.publishFullPipeline(out, db, home, project, task, repoFilter, cwd, cfg, parsed)
 	}
 	if !pathWithin(task.WorktreePath, cwd) {
@@ -174,11 +184,35 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return axi.Failure("pr_remote_head_failed", "could not inspect the Task branch on origin before publishing", true, err.Error())
 	}
+	var pushOptions []string
+	if publishRewritesHistory(out.Context, task.WorktreePath, previousRemoteHead, sha) != rewrite {
+		if rewrite {
+			return axi.Failure("rewrite_not_needed", "publishing this head rewrites no published history", false, "Run `posse publish \"<summary>\"` without --rewrite")
+		}
+		return axi.Failure("publish_rewrite_required", "the local Task commit does not descend from the Task branch on origin; publishing would rewrite published history", false,
+			"If the User approved rewriting this Task's published history, run `posse publish --rewrite --user-approved \"<User's words>\" \"<summary>\"`",
+			"Otherwise restore the published commits into the Task branch and publish again")
+	}
+	if rewrite {
+		published, err := db.WasVerifiedTaskHead(out.Context, task.ID, previousRemoteHead)
+		if err != nil {
+			return err
+		}
+		if !published {
+			return axi.Failure("publish_rewrite_refused", "the Task branch on origin is not the head Posse last published for this Task", false, "Ask the Lead to resolve the unknown commits on origin before rewriting")
+		}
+		pushOptions = append(pushOptions, "--force-with-lease="+ref+":"+previousRemoteHead)
+	}
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
 	}
-	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref); err != nil {
+	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
+	}
+	if rewrite {
+		if err := recordBranchRewrite(out.Context, db, project, task, parsed.Flags["repo"], previousRemoteHead, sha, rewriteQuote); err != nil {
+			return err
+		}
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
@@ -211,6 +245,12 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		result = append(result, axi.Field{Key: "repo", Value: member.repo.Repo})
 	}
 	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help}}))
+}
+
+// publishRewritesHistory reports whether pushing head would drop commits
+// already on origin, including a remote head missing locally.
+func publishRewritesHistory(ctx context.Context, worktree, remoteHead, head string) bool {
+	return remoteHead != "" && !gitAncestor(ctx, worktree, remoteHead, head)
 }
 
 // publishFullPipeline is the full-pipeline entry point of publish for one
@@ -385,10 +425,11 @@ func isCredentialPromptFailure(err error) bool {
 	return strings.Contains(message, "could not read Username") || strings.Contains(message, "could not read Password")
 }
 
-func pushWithCredentialRetry(ctx context.Context, worktree, ref string) error {
+func pushWithCredentialRetry(ctx context.Context, worktree, ref string, options ...string) error {
+	args := append(append([]string{"push"}, options...), "origin", ref+":"+ref)
 	var err error
 	for attempt := 0; attempt <= pushCredentialRetries; attempt++ {
-		if _, err = gitOutput(ctx, worktree, "push", "origin", ref+":"+ref); err == nil || !isCredentialPromptFailure(err) {
+		if _, err = gitOutput(ctx, worktree, args...); err == nil || !isCredentialPromptFailure(err) {
 			return err
 		}
 		select {

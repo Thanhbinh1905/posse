@@ -67,3 +67,11 @@ func (db *DB) WasVerifiedPRHead(ctx context.Context, taskID int64, url, sha stri
 	}
 	return false, rows.Err()
 }
+
+// WasVerifiedTaskHead reports whether sha was verified as the head of any of
+// the Task's pull requests.
+func (db *DB) WasVerifiedTaskHead(ctx context.Context, taskID int64, sha string) (bool, error) {
+	var found bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM verified_pr_heads WHERE task_id=? AND head_sha=?)`, taskID, sha).Scan(&found)
+	return found, err
+}

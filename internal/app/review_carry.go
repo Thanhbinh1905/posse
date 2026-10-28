@@ -66,7 +66,11 @@ func ensureReviewCarry(ctx context.Context, db *store.DB, project store.Project,
 			continue
 		}
 		passedHead = verdict.Targets[0].Commit
-		if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", passedHead, target.Commit); err == nil {
+		descends, err := descendsThroughRewrites(ctx, db, root, task.ID, passedHead, target.Commit)
+		if err != nil {
+			return err
+		}
+		if descends {
 			break
 		}
 		passedHead = ""
