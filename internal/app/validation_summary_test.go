@@ -109,6 +109,50 @@ func TestWatchRefreshesValidationBlockWithoutTouchingHumanText(t *testing.T) {
 	}
 }
 
+// gh 2.46 cannot edit a PR body: its pr edit reads the retired Projects
+// (classic) field and exits 1 (#641). The watch failure and the steward's
+// forge_unavailable name that stderr, not only the exit status.
+func TestWatchBodyRefreshFailureCarriesForgeStderrIntoForgeUnavailable(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	defer f.db.Close()
+	ctx := context.Background()
+	f.setGHHead(t, f.headSHA)
+	if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	prURL := "https://github.com/acme/shop/pull/17"
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := f.db.GetPRBodyMarker(ctx, f.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_BODY", managedPublishBody(validationBlockStart+"\n- CI: pending\n"+validationBlockEnd, marker.Token))
+	stderr := "GraphQL: Projects (classic) is being deprecated in favor of the new Projects experience (repository.pullRequest.projectCards)"
+	t.Setenv("POSSE_TEST_GH_EDIT_STDERR", stderr)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
+	if err := f.service.pollProjectPullRequests(ctx, f.db, f.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	failures, err := f.db.PRTaskWatchFailuresForTask(ctx, f.task.ID)
+	if err != nil || len(failures) != 1 || !strings.Contains(failures[0].LastError, stderr) {
+		t.Fatalf("watch failure = %+v, %v; want gh stderr %q", failures, err, stderr)
+	}
+	target, err := f.service.resolveStewardTarget(ctx, f.db, f.project, "t1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unavailable := f.service.forgeUnavailable(ctx, f.db, target, store.PRObservation{}); !strings.Contains(unavailable.Error(), stderr) {
+		t.Fatalf("forge_unavailable = %v; want gh stderr %q", unavailable, stderr)
+	}
+}
+
 func TestReviewAndShowExposeValidationRoundsAndCounts(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	defer f.db.Close()

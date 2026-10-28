@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/atomicfile"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
 )
 
@@ -38,7 +42,7 @@ func commandOutputArgsWithTimeout(ctx context.Context, timeout time.Duration, cw
 		commandContext, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
-	command := execgroup.CommandContext(commandContext, name, args...)
+	command := execgroup.CommandContext(commandContext, externalCommandPath(name), args...)
 	command.Dir = cwd
 	command.Env = externalCommandEnvironment(name)
 	output, err := command.CombinedOutput()
@@ -63,7 +67,7 @@ func commandStdoutArgsWithEnv(ctx context.Context, cwd string, extraEnv []string
 		commandContext, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
-	command := execgroup.CommandContext(commandContext, name, args...)
+	command := execgroup.CommandContext(commandContext, externalCommandPath(name), args...)
 	command.Dir = cwd
 	command.Env = externalCommandEnvironment(name)
 	for _, entry := range extraEnv {
@@ -100,6 +104,69 @@ func timeoutForExternalCommand(name string, args []string) time.Duration {
 		}
 	}
 	return 0
+}
+
+// userShellPathFile holds the PATH of the User's shell. A process started
+// outside it, such as the Project watch the Herdr plugin starts, inherits the
+// Herdr server's PATH, which can resolve an older gh or glab.
+const userShellPathFile = "user-shell-path"
+
+var userShellPathMu sync.Mutex
+var recordedUserShellPath string
+
+// externalCommandPath resolves gh and glab the same way in every posse
+// process: first in the User's shell PATH, then in this process's PATH.
+func externalCommandPath(name string) string {
+	if name != "gh" && name != "glab" {
+		return name
+	}
+	path := os.Getenv("PATH")
+	if os.Getenv(watchRuntimeTokenEnv) == "" && os.Getenv("HERDR_PLUGIN_ID") == "" {
+		recordUserShellPath(path)
+	} else if userPath := readUserShellPath(); userPath != "" {
+		path = userPath + string(os.PathListSeparator) + path
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return name
+}
+
+func recordUserShellPath(path string) {
+	home, err := config.DefaultHome()
+	if err != nil || path == "" {
+		return
+	}
+	file := filepath.Join(home, userShellPathFile)
+	userShellPathMu.Lock()
+	defer userShellPathMu.Unlock()
+	if recordedUserShellPath == file+"\x00"+path {
+		return
+	}
+	if existing, err := os.ReadFile(file); err != nil || string(existing) != path {
+		if atomicfile.Write(file, []byte(path), 0o600) != nil {
+			return
+		}
+	}
+	recordedUserShellPath = file + "\x00" + path
+}
+
+func readUserShellPath() string {
+	home, err := config.DefaultHome()
+	if err != nil {
+		return ""
+	}
+	path, err := os.ReadFile(filepath.Join(home, userShellPathFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(path))
 }
 
 func externalCommandEnvironment(name string) []string {

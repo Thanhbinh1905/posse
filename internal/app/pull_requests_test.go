@@ -1299,6 +1299,7 @@ case "$1 $2" in
     esac ;;
   "pr create") printf '%s\n' "$POSSE_TEST_GH_URL" ;;
   "pr edit")
+    if [ -n "${POSSE_TEST_GH_EDIT_STDERR:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_EDIT_STDERR" >&2; exit 1; fi
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --title)

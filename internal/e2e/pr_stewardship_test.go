@@ -150,10 +150,12 @@ func TestLeadStewardsTrivialCIFailureWithoutWakingWorker(t *testing.T) {
 	// A forge outage is reported as retryable uncertainty, never as current state.
 	marker("gh-outage", true)
 	outage := expectFailure("forge_unavailable", "pr", "inspect", "t1")
-	if !strings.Contains(outage, "true") || !strings.Contains(outage, task.GatedSHA) {
-		t.Fatalf("forge outage did not name the last observation or retryability: %s", outage)
+	if !strings.Contains(outage, "true") || !strings.Contains(outage, task.GatedSHA) || !strings.Contains(outage, "could not connect to api.github.com") {
+		t.Fatalf("forge outage did not name the gh stderr, the last observation or retryability: %s", outage)
 	}
-	expectFailure("forge_unavailable", "pr", "rerun", "t1", "--run", "4242")
+	if outage := expectFailure("forge_unavailable", "pr", "rerun", "t1", "--run", "4242"); !strings.Contains(outage, "could not connect to api.github.com") {
+		t.Fatalf("forge outage did not name the gh stderr: %s", outage)
+	}
 	marker("gh-outage", false)
 	if calls := ghCalls("run rerun"); calls != 2 {
 		t.Fatalf("forge outage issued a rerun: %d reruns", calls)

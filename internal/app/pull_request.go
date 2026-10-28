@@ -1453,7 +1453,7 @@ func graphQLCommandOutput(ctx context.Context, root, query string) (string, stri
 	timeout := externalCommandTimeoutValue()
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	command := execgroup.CommandContext(commandCtx, "gh", "api", "graphql", "-f", "query="+query)
+	command := execgroup.CommandContext(commandCtx, externalCommandPath("gh"), "api", "graphql", "-f", "query="+query)
 	command.Dir = root
 	command.Env = externalCommandEnvironment("gh")
 	var stdout, stderr bytes.Buffer

@@ -375,11 +375,11 @@ func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failu
 		return 0, err
 	}
 	if failureSummary == "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=?, pr_consecutive_failures=0 WHERE project_id=?`, at, projectID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=?, pr_consecutive_failures=0, pr_poll_last_error='' WHERE project_id=?`, at, projectID); err != nil {
 			return 0, err
 		}
 	} else {
-		if _, err := tx.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=?, pr_consecutive_failures=pr_consecutive_failures+1 WHERE project_id=?`, at, projectID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=?, pr_consecutive_failures=pr_consecutive_failures+1, pr_poll_last_error=? WHERE project_id=?`, at, failureSummary, projectID); err != nil {
 			return 0, err
 		}
 	}
@@ -435,6 +435,17 @@ func (db *DB) RecordPRPoll(ctx context.Context, projectID int64, at int64, failu
 		}
 	}
 	return failures, nil
+}
+
+// PRPollLastError is the failure of the Project's latest PR poll, or "" when
+// it succeeded.
+func (db *DB) PRPollLastError(ctx context.Context, projectID int64) (string, error) {
+	var failure string
+	err := db.QueryRowContext(ctx, `SELECT pr_poll_last_error FROM project_watch_state WHERE project_id=?`, projectID).Scan(&failure)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return failure, err
 }
 
 func (db *DB) RecordCheckoutAttempt(ctx context.Context, projectID int64, at int64) error {
