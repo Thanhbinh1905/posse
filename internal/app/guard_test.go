@@ -512,3 +512,82 @@ func TestGuardRefusalsNameTheirRule(t *testing.T) {
 		}
 	}
 }
+
+func TestGuardResolvesRelativeHomesAgainstTheWorkingDirectory(t *testing.T) {
+	scope, dir := guardFixture(t)
+	for command, rule := range map[string]string{
+		"cd $(mktemp -d); POSSE_HOME=../../home/u/.posse " + dir + "/posse-copy list":                        rulePosseBuild,
+		"cd $(mktemp -d); HOME=../../home/u " + dir + "/posse-copy list":                                     rulePosseBuild,
+		"cd /home/u/x; POSSE_HOME=../.posse " + dir + "/posse-copy list":                                     rulePosseBuild,
+		"cd $(mktemp -d); env -u HERDR_SOCKET_PATH HOME=../../home/u herdr workspace close w1":               ruleHerdrUnknownServer,
+		"cd $(mktemp -d); env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=../../home/u/.config herdr pane close w1": ruleHerdrUnknownServer,
+		"cd $(mktemp -d); HERDR_SOCKET_PATH=../../home/u/.config/herdr/herdr.sock herdr workspace close w1":  ruleHerdrUnknownServer,
+		"cd /home/u/x; env -u HERDR_SOCKET_PATH HOME=.. herdr workspace close w1":                            ruleHerdrDefaultSocket,
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || reason.rule != rule {
+			t.Errorf("guard refused %q by rule %q, want %q: %v %#v", command, reason.rule, rule, refused, reason)
+		}
+	}
+	for _, command := range []string{
+		"cd $(mktemp -d); POSSE_HOME=posse " + dir + "/posse-copy list",
+		"cd $(mktemp -d); HERDR_SOCKET_PATH=herdr.sock herdr workspace close w1",
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused %q: %#v", command, reason)
+		}
+	}
+}
+
+func TestGuardDoesNotRunHereDocumentDataOrPythonStringData(t *testing.T) {
+	scope, _ := guardFixture(t)
+	write := "cat > cases.txt <<'EOF'\nsubprocess.run([\"herdr\", \"workspace\", \"close\", \"w1\"])\nherdr workspace close w1\nposse-copy list\nEOF\n"
+	for _, command := range []string{
+		write + "python3 harmless.py",
+		write + "go test ./... 2>&1 | python3 harmless.py",
+		write + "node -e 1",
+		write + "make test",
+		write + "./missing-tool",
+		"python3 - <<'PY'\nfrom pathlib import Path\np = Path('guard_test.go')\ncase = 'subprocess.run([\"herdr\", \"workspace\", \"close\", \"w1\"])'\np.write_text(p.read_text() + '\"herdr workspace close w1\",' + case)\nPY",
+		"python3 - <<'PY'\n# exec herdr workspace close w1 via subprocess\nprint(\"\"\"os.system('herdr pane close w1:p1')\"\"\")\nPY",
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused %q: %#v", command, reason)
+		}
+	}
+	for _, command := range []string{
+		"python3 - <<'PY'\nimport subprocess\ncommand = 'herdr workspace close w1'\nsubprocess.run(command, shell=True)\nPY",
+		"python3 - <<'PY'\n__import__('subprocess').run(['herdr', 'workspace', 'close', 'w1'])\nPY",
+		"python3 - <<'PY'\nexec(\"import os; os.system('herdr workspace close w1')\")\nPY",
+		"python3 - <<'PY'\nimport os\nos.system(f\"{'herdr'} workspace close w1\")\nPY",
+		"cat <<'EOF' | sh\nherdr workspace close w1\nEOF",
+		"printf 'herdr workspace close w1\\n' > run.sh; ./run.sh",
+	} {
+		if refused, _ := guardCommand(command, scope); !refused {
+			t.Errorf("guard allowed %q", command)
+		}
+	}
+}
+
+func TestGuardClassifiesATextPosseScriptByItsContents(t *testing.T) {
+	scope, dir := guardFixture(t)
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		"posse":      "#!/bin/sh\necho stub \"$@\"\n",
+		"posse-wrap": "#!/bin/sh\nexec " + dir + "/posse-copy \"$@\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(contents), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range []string{"bin/posse list", "PATH=" + bin + ":/usr/bin posse list"} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused stub %q: %#v", command, reason)
+		}
+	}
+	if refused, reason := guardCommand("bin/posse-wrap list", scope); !refused || reason.rule != rulePosseBuild {
+		t.Errorf("guard did not refuse a script that runs another posse build: %v %#v", refused, reason)
+	}
+}

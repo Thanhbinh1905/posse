@@ -128,6 +128,9 @@ type guard struct {
 	workerHome string
 	posse      string
 	visited    map[string]bool
+	source     string // the script being checked at the current depth
+	input      string // what the command being checked reads on stdin
+	hereInput  bool   // the command reads its own here-document or here-string
 }
 
 func refuse(rule, command, why string) (bool, guardReason) {
@@ -148,6 +151,9 @@ func (g *guard) check(e *shellEnv, script string, depth int, stdinRedirected boo
 		}
 		return false, guardReason{}
 	}
+	outer := g.source
+	g.source = script
+	defer func() { g.source = outer }()
 	return g.statements(e, script, file.Stmts, depth, stdinRedirected)
 }
 
@@ -199,7 +205,14 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 			return true, reason
 		}
 		right := left.clone()
-		if refused, reason := g.statement(right, script, cmd.Y, depth, stdinRedirected || cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll); refused {
+		piped := cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll
+		input := g.input
+		if piped {
+			g.input = pipeInput(left, script, cmd.X, input)
+		}
+		refused, reason := g.statement(right, script, cmd.Y, depth, stdinRedirected || piped)
+		g.input = input
+		if refused {
 			return true, reason
 		}
 		e.merge(left, right, e)
@@ -335,26 +348,64 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 			return false, guardReason{}
 		}
 	}
-	stdin := ""
+	stdin, fromFile := "", false
 	if stmt != nil {
+		stdin = hereText(e, script, stmt)
 		for _, redirect := range stmt.Redirs {
-			if redirect.Hdoc != nil {
-				stdin += sourceText(script, redirect.Hdoc) + "\n"
-			}
-			if redirect.Op == syntax.WordHdoc && redirect.Word != nil {
-				value, _ := e.word(script, redirect.Word)
-				stdin += value + "\n"
-			}
+			fromFile = fromFile || redirect.Op == syntax.RdrIn || redirect.Op == syntax.RdrInOut
 		}
 	}
-	if stdin == "" {
-		// A program reading a pipe may receive anything the script produces.
+	g.hereInput = stdin != ""
+	switch {
+	case g.hereInput:
+	case fromFile:
+		// posse does not read the file, so anything the script names may arrive.
 		stdin = script
+	default:
+		// Here-document data of other commands goes to those commands only.
+		stdin = g.input
 	}
 	return g.command(child, args, literal, raw, stdin, depth, stdinRedirected || stmt != nil && len(stmt.Redirs) > 0)
 }
 
+// hereText returns the here-documents and here-strings a statement reads.
+func hereText(e *shellEnv, script string, stmt *syntax.Stmt) string {
+	text := ""
+	for _, redirect := range stmt.Redirs {
+		if redirect.Hdoc != nil {
+			text += sourceText(script, redirect.Hdoc) + "\n"
+		}
+		if redirect.Op == syntax.WordHdoc && redirect.Word != nil {
+			value, _ := e.word(script, redirect.Word)
+			text += value + "\n"
+		}
+	}
+	return text
+}
+
+// pipeInput is what the right side of a pipe may read: anything the left side
+// shows, its here-documents and the stdin it passes on.
+func pipeInput(e *shellEnv, script string, left *syntax.Stmt, input string) string {
+	text := sourceText(script, left) + "\n"
+	syntax.Walk(left, func(node syntax.Node) bool {
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			text += hereText(e, script, stmt)
+		}
+		return true
+	})
+	return text + input
+}
+
+// writes reports whether the script being checked may write the named file
+// before it runs it: it redirects output and names the file besides running it.
+func (g *guard) writes(name string) bool {
+	return strings.Contains(g.source, ">") && strings.Count(g.source, filepath.Base(name)) > 1
+}
+
 func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
+	input := g.input
+	g.input = stdin
+	defer func() { g.input = input }()
 	for len(args) > 0 {
 		if !literal[0] || args[0] == "" {
 			if g.mentionsHerdr(raw) {
@@ -403,13 +454,16 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			return refuse(ruleSocketAlias, raw, "it aliases the Worker's Herdr socket")
 		case name == "make" || name == "gmake":
 			code := ""
-			if strings.Contains(stdin, ">") {
-				code = stdin
-			}
 			explicit := false
 			for index := 1; index+1 < len(args); index++ {
 				if args[index] == "-f" && literal[index+1] {
 					explicit = true
+					if args[index+1] == "-" {
+						code += "\n" + stdin
+					}
+					if g.writes(args[index+1]) {
+						code += "\n" + g.source
+					}
 					if contents, ok := g.readFile(e, args[index+1]); ok {
 						code += "\n" + contents
 					}
@@ -417,6 +471,9 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			}
 			if !explicit {
 				for _, file := range []string{"GNUmakefile", "makefile", "Makefile"} {
+					if g.writes(file) {
+						code += "\n" + g.source
+					}
 					if contents, ok := g.readFile(e, file); ok {
 						code += "\n" + contents
 						break
@@ -425,6 +482,13 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			}
 			return g.opaque(e, raw, code)
 		case strings.HasPrefix(name, "posse") && !strings.HasSuffix(name, ".sh"):
+			path := e.lookPath(program)
+			if strings.Contains(program, "/") {
+				path = e.path(program)
+			}
+			if path != "" && textFile(path) {
+				return g.executable(e, path, args, literal, raw, depth, stdinRedirected)
+			}
 			return g.posseBuild(e, program, raw)
 		case name == "go" && len(args) > 2 && args[1] == "run":
 			for _, arg := range args[2:] {
@@ -439,7 +503,7 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			if len(args) < 2 || !literal[1] {
 				return g.opaque(e, raw, raw)
 			}
-			return g.script(e, args[1], raw, stdin, depth, stdinRedirected)
+			return g.script(e, args[1], raw, depth, stdinRedirected)
 		case name == "eval":
 			return g.check(e.clone(), strings.Join(args[1:], " "), depth+1, stdinRedirected)
 		case interpreters.MatchString(name):
@@ -450,7 +514,7 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			if g.isPosseBinary(e, program) {
 				return g.posseBuild(e, program, raw)
 			}
-			return g.executable(e, program, args, literal, raw, stdin, depth, stdinRedirected)
+			return g.executable(e, program, args, literal, raw, depth, stdinRedirected)
 		}
 		if resolved := e.lookPath(program); resolved != "" && g.isPosseBinary(e, resolved) {
 			return g.posseBuild(e, resolved, raw)
@@ -534,19 +598,23 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 			if !literal[index] {
 				return g.opaque(e, raw, raw)
 			}
-			return g.script(e, arg, raw, stdin, depth, stdinRedirected)
+			return g.script(e, arg, raw, depth, stdinRedirected)
 		}
 	}
-	return g.check(e.clone(), stdin, depth+1, stdinRedirected)
+	if refused, reason := g.check(e.clone(), stdin, depth+1, stdinRedirected); refused || g.hereInput {
+		return refused, reason
+	}
+	// Input that is not a here-document is output posse cannot evaluate.
+	return g.opaque(e, raw, stdin)
 }
 
 // script checks a shell script file the command runs.
-func (g *guard) script(e *shellEnv, name, raw, source string, depth int, stdinRedirected bool) (bool, guardReason) {
+func (g *guard) script(e *shellEnv, name, raw string, depth int, stdinRedirected bool) (bool, guardReason) {
 	contents, ok := g.readFile(e, name)
 	if !ok {
 		// A file written earlier in this tool call does not exist yet.
-		if strings.Contains(source, ">") {
-			return g.opaque(e, raw, source)
+		if g.writes(name) {
+			return g.opaque(e, raw, g.source)
 		}
 		return false, guardReason{}
 	}
@@ -615,7 +683,7 @@ func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (boo
 	if g.namesRealSocket(code) {
 		return refuse(ruleNamesSessionSocket, raw, "it names the socket of the Herdr session this Worker runs in")
 	}
-	if !herdrSocketReference.MatchString(code) && !(startsProcess(interpreter, code) && herdrProgram.MatchString(code)) {
+	if !herdrSocketReference.MatchString(code) && !(startsProcess(interpreter, raw, code) && herdrProgram.MatchString(code)) {
 		return false, guardReason{}
 	}
 	if socket, known := e.socket(); known && g.realSocket != "" && !sameSocket(socket, g.realSocket) {
@@ -631,16 +699,27 @@ var (
 	herdrProgram = regexp.MustCompile("(^|[\\s\"'`(\\[,;|&=]|\\$\\()(?:(?:/|~/|\\$\\{?HOME\\}?/|\\./)[^\\s\"'`]*/)?herdr($|[\\s\"'`)\\],;|&])")
 	processStart = regexp.MustCompile(`subprocess|os\.(system|popen|exec|spawn|posix_spawn)|pty\.spawn|popen|child_process|exec(Sync|File)\b|spawnSync|\bspawn\s*\(|\bsystem(\s*\(|\s+["'q])|\bexec(\s*\(|\s+["'])|\bqx\s*[({\[/|!'"]|%x[({\[]|shell_exec|passthru|proc_open|pcntl_exec|os\.execute|Open3|Deno\.(Command|run)|Bun\.spawn|do shell script|\bgetline\b|\|&|(?m)^\s*(exec|spawn)\s`)
 	awkPipe      = regexp.MustCompile(`\|\s*"|"\s*\|`)
+	// pythonDynamicCode imports a module or runs code named by a string.
+	pythonDynamicCode = regexp.MustCompile(`(^|[^\w.])(__import__|import_module|exec|eval|compile|getattr)\s*\(`)
 	// backtickRuns lists interpreters where a backquoted string runs a command.
 	backtickRuns = map[string]bool{"perl": true, "ruby": true, "php": true}
 )
 
-// startsProcess reports whether interpreter code can start another program.
-func startsProcess(interpreter, code string) bool {
+// startsProcess reports whether interpreter code, which starts with the raw
+// command that runs it, can start another program.
+func startsProcess(interpreter, raw, code string) bool {
+	language := strings.TrimRight(interpreter, "0123456789.")
+	if pythonInterpreter(language) {
+		// Text in Python string literals and comments is data, such as test
+		// cases an edit script writes; only code can start a process.
+		code = raw + "\n" + pythonCode(strings.TrimPrefix(code, raw))
+		if pythonDynamicCode.MatchString(code) {
+			return true
+		}
+	}
 	if processStart.MatchString(code) {
 		return true
 	}
-	language := strings.TrimRight(interpreter, "0123456789.")
 	if backtickRuns[language] && strings.Contains(code, "`") {
 		return true
 	}
@@ -648,13 +727,59 @@ func startsProcess(interpreter, code string) bool {
 	return strings.HasSuffix(language, "awk") && awkPipe.MatchString(code)
 }
 
+// pythonCode blanks the contents of Python comments and string literals other
+// than f-strings, whose replacement fields are code.
+func pythonCode(code string) string {
+	var out strings.Builder
+	for index := 0; index < len(code); {
+		switch char := code[index]; char {
+		case '#':
+			end := strings.IndexByte(code[index:], '\n')
+			if end < 0 {
+				return out.String()
+			}
+			index += end
+		case '\'', '"':
+			start := index
+			for start > 0 && strings.ContainsRune("rRbBuUfF", rune(code[start-1])) {
+				start--
+			}
+			quote := code[index : index+1]
+			if strings.HasPrefix(code[index:], strings.Repeat(quote, 3)) {
+				quote = strings.Repeat(quote, 3)
+			}
+			end := index + len(quote)
+			for end < len(code) && !strings.HasPrefix(code[end:], quote) && (len(quote) == 3 || code[end] != '\n') {
+				if code[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if strings.HasPrefix(code[min(end, len(code)):], quote) {
+				end += len(quote)
+			}
+			end = min(end, len(code))
+			if strings.ContainsAny(code[start:index], "fF") {
+				out.WriteString(code[index:end])
+			} else {
+				out.WriteString(quote + quote)
+			}
+			index = end
+		default:
+			out.WriteByte(char)
+			index++
+		}
+	}
+	return out.String()
+}
+
 // executable checks a program named by path: a text script is read and
 // checked by its interpreter; a binary is opaque.
-func (g *guard) executable(e *shellEnv, program string, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
+func (g *guard) executable(e *shellEnv, program string, args []string, literal []bool, raw string, depth int, stdinRedirected bool) (bool, guardReason) {
 	contents, ok := g.readFile(e, program)
 	if !ok {
-		if strings.Contains(stdin, ">") {
-			return g.opaque(e, raw, stdin)
+		if g.writes(program) {
+			return g.opaque(e, raw, g.source)
 		}
 		return false, guardReason{}
 	}
@@ -761,6 +886,19 @@ func (g *guard) isPosseBinary(e *shellEnv, program string) bool {
 	}
 	info, err := buildinfo.ReadFile(path)
 	return err == nil && info.Path == "github.com/thanhbinh1905/posse/cmd/posse"
+}
+
+// textFile reports a regular file that is a script rather than a binary.
+func textFile(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(file, head)
+	head = head[:n]
+	return n > 0 && !bytes.HasPrefix(head, []byte("\x7fELF")) && bytes.IndexByte(head, 0) < 0
 }
 
 // posseBuild refuses a posse executable other than the one running the guard
@@ -1073,7 +1211,12 @@ func (e *shellEnv) path(name string) string {
 	if e.cwd == "" {
 		return ""
 	}
-	return filepath.Join(e.cwd, name)
+	path := filepath.Join(e.cwd, name)
+	// posse does not know where a mktemp path is, so `..` out of it is unknown.
+	if strings.HasPrefix(e.cwd, mktempPath) && path != mktempPath && !strings.HasPrefix(path, mktempPath+"/") {
+		return ""
+	}
+	return path
 }
 
 // lookPath resolves a program name through the tracked PATH.
@@ -1102,13 +1245,16 @@ func (e *shellEnv) posseHome() (string, bool) {
 	if e.unknown["POSSE_HOME"] || e.unknown["HOME"] {
 		return "", false
 	}
-	if home := e.values["POSSE_HOME"]; home != "" && e.exported["POSSE_HOME"] {
-		return filepath.Clean(home), true
+	home := e.values["POSSE_HOME"]
+	if home == "" || !e.exported["POSSE_HOME"] {
+		if e.values["HOME"] == "" {
+			return "", false
+		}
+		home = filepath.Join(e.values["HOME"], ".posse")
 	}
-	if e.values["HOME"] == "" {
-		return "", false
-	}
-	return filepath.Join(e.values["HOME"], ".posse"), true
+	// posse resolves a relative home against the directory it runs in.
+	home = e.path(home)
+	return home, home != ""
 }
 
 // mktempPath stands for the path `$(mktemp ...)` prints. mktemp creates it,
@@ -1225,7 +1371,9 @@ func (e *shellEnv) socket() (string, bool) {
 			env = append(env, name+"="+value)
 		}
 	}
-	return herdr.SocketPath(env), true
+	// herdr resolves a relative socket path against the directory it runs in.
+	socket := e.path(herdr.SocketPath(env))
+	return socket, socket != ""
 }
 
 func sourceText(script string, node syntax.Node) string {
