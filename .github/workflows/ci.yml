@@ -83,14 +83,57 @@ jobs:
           fi
           rm -rf -- "$GOCACHE"
 
+  test-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-test-plan" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
+      - name: Check race shard assignments
+        run: scripts/run-race-shard.sh --self-test
+      - name: Plan race shards
+        id: plan
+        run: echo "shards=$(scripts/run-race-shard.sh --matrix)" >> "$GITHUB_OUTPUT"
+      - name: Clean job-local Go caches
+        if: ${{ always() }}
+        run: |
+          if [ -d "$GOCACHE" ]; then
+            find "$GOCACHE" -type d -exec chmod u+w {} +
+          fi
+          rm -rf -- "$GOCACHE"
+
   test-shard:
     name: test shard ${{ matrix.shard }}
+    needs: [test-plan]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Keep in sync with shard_count in scripts/run-race-shard.sh.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.test-plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -117,9 +160,6 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
-      - name: Check race shard assignments
-        if: ${{ matrix.shard == 1 }}
-        run: scripts/run-race-shard.sh --self-test
       - name: Run race-enabled test shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-test-${{ matrix.shard }}-
