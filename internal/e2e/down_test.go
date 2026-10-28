@@ -169,7 +169,7 @@ func TestGroupCloseHoldsUntilUp(t *testing.T) {
 // TestDownExecuteFromLeadShutsEverythingDown is the Lead path of `/posse-down`:
 // a plan that changes nothing, then one approved execute from the live Lead.
 func TestDownExecuteFromLeadShutsEverythingDown(t *testing.T) {
-	f := newQueuedAdmissionFixture(t)
+	f := queueBehindSlot(t, newWorkerTabsFixture(t))
 	runPosseExpectingFailure(t, f.workerTabsFixture, f.repo, f.leadEnv, "user_only", "down")
 	runPosseExpectingFailure(t, f.workerTabsFixture, f.repo, f.leadEnv, "down_approval_required", "down", "--execute")
 
