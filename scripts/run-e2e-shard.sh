@@ -13,7 +13,7 @@ set -eu
 # stays under about 60% of the timeout. The self-check warns once a shard
 # plans over warn_percent of the budget and fails over the budget. On a
 # warning, add a shard here and to every E2E matrix in .github/workflows/ci.yml.
-shard_count=12
+shard_count=13
 budget_seconds=360
 warn_percent=85
 # default_seconds is about twice the 95th percentile of recorded durations.
