@@ -108,6 +108,8 @@ type Member struct {
 	BaseCommit   string `json:"base_commit,omitempty"`
 	Target       string `json:"target"`
 	Delivery     string `json:"delivery"`
+	// DeleteBranchOnMerge is nil in plans admitted before the setting existed.
+	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
 }
 
 type Execution struct {
@@ -175,26 +177,44 @@ type Plan struct {
 	MergeMethod     string                    `json:"merge_method"`
 	ProseLanguage   string                    `json:"prose_language,omitempty"`
 	Pool            config.Pool               `json:"pool"`
+	// DeleteBranchOnMerge is nil in plans admitted before the setting existed.
+	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
+}
+
+// DeletesBranchOnMerge reports the frozen delete_branch_on_merge of a workspace
+// Member, or of the Project when member is empty. Plans admitted before the
+// setting existed delete, as Posse did then.
+func (p *Plan) DeletesBranchOnMerge(member string) bool {
+	if p == nil {
+		return true
+	}
+	for _, selected := range p.Execution.Members {
+		if member != "" && selected.Name == member && selected.DeleteBranchOnMerge != nil {
+			return *selected.DeleteBranchOnMerge
+		}
+	}
+	return p.DeleteBranchOnMerge == nil || *p.DeleteBranchOnMerge
 }
 
 type Request struct {
-	Brief           Input
-	Inputs          []Input
-	Execution       Execution
-	Launch          Launch
-	Review          string
-	ReviewOf        int64
-	Delivery        string
-	Autonomy        config.Autonomy
-	ConfigSources   []string
-	UserChoice      *UserChoice
-	Paths           Paths
-	WorkflowJobs    bool
-	ValidationLoops *ValidationLoops
-	Workflow        *config.WorkflowSelection
-	MergeMethod     string
-	ProseLanguage   string
-	Pool            config.Pool
+	Brief               Input
+	Inputs              []Input
+	Execution           Execution
+	Launch              Launch
+	Review              string
+	ReviewOf            int64
+	Delivery            string
+	Autonomy            config.Autonomy
+	ConfigSources       []string
+	UserChoice          *UserChoice
+	Paths               Paths
+	WorkflowJobs        bool
+	ValidationLoops     *ValidationLoops
+	Workflow            *config.WorkflowSelection
+	MergeMethod         string
+	ProseLanguage       string
+	Pool                config.Pool
+	DeleteBranchOnMerge bool
 }
 
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
@@ -252,7 +272,8 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool}
+		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool,
+		DeleteBranchOnMerge: &r.DeleteBranchOnMerge}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.MergeMode != "", brief.Review != ""} {
 		if explicit {
@@ -291,17 +312,18 @@ func Resolve(r Request) (Plan, error) {
 	// Snapshot interpreted configuration fields consumed by the contract, not
 	// entire TOML files, other Profiles or unrelated forge content.
 	settings, err := json.Marshal(struct {
-		Execution       Execution                 `json:"execution"`
-		Review          string                    `json:"review"`
-		Delivery        string                    `json:"delivery"`
-		Grants          []Grant                   `json:"grants"`
-		WorkflowJobs    bool                      `json:"workflow_jobs,omitempty"`
-		ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
-		Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
-		MergeMethod     string                    `json:"merge_method"`
-		ProseLanguage   string                    `json:"prose_language"`
-		Pool            config.Pool               `json:"pool"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool})
+		Execution           Execution                 `json:"execution"`
+		Review              string                    `json:"review"`
+		Delivery            string                    `json:"delivery"`
+		Grants              []Grant                   `json:"grants"`
+		WorkflowJobs        bool                      `json:"workflow_jobs,omitempty"`
+		ValidationLoops     *ValidationLoops          `json:"validation_loops,omitempty"`
+		Workflow            *config.WorkflowSelection `json:"workflow,omitempty"`
+		MergeMethod         string                    `json:"merge_method"`
+		ProseLanguage       string                    `json:"prose_language"`
+		Pool                config.Pool               `json:"pool"`
+		DeleteBranchOnMerge *bool                     `json:"delete_branch_on_merge,omitempty"`
+	}{p.Execution, p.Review, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool, p.DeleteBranchOnMerge})
 	if err != nil {
 		return Plan{}, err
 	}

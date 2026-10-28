@@ -437,3 +437,25 @@ func TestReconfigurationExtendsPlanWithoutReconstructingUnknownIdentity(t *testi
 		t.Fatalf("revision or unknown history changed: before=%#v after=%#v", plan, next)
 	}
 }
+
+func TestDeletesBranchOnMergeUsesFrozenValues(t *testing.T) {
+	var legacy *taskplan.Plan
+	if !legacy.DeletesBranchOnMerge("") {
+		t.Fatal("a Task without an admitted plan must keep deleting merged branches")
+	}
+	off := false
+	r := request("change")
+	r.Execution.Scope = "workspace"
+	r.Execution.Members = []taskplan.Member{{Name: "api", Path: "api", Base: "main", Target: "main", Delivery: "pr", DeleteBranchOnMerge: &off}, {Name: "web", Path: "web", Base: "main", Target: "main", Delivery: "pr"}}
+	r.DeleteBranchOnMerge = true
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.DeletesBranchOnMerge("api") || !plan.DeletesBranchOnMerge("web") || !plan.DeletesBranchOnMerge("") {
+		t.Fatalf("api=%v web=%v project=%v", plan.DeletesBranchOnMerge("api"), plan.DeletesBranchOnMerge("web"), plan.DeletesBranchOnMerge(""))
+	}
+	if older := (taskplan.Plan{}); !older.DeletesBranchOnMerge("") {
+		t.Fatal("plans admitted before delete_branch_on_merge existed must delete")
+	}
+}

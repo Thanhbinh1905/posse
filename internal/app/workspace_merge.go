@@ -1114,6 +1114,11 @@ func (s *Service) removeWorkspaceBranches(ctx context.Context, db *store.DB, pro
 				continue
 			}
 		} else {
+			if deletes, err := taskDeletesBranchOnMerge(task, repo.Repo); err != nil {
+				return removed, err
+			} else if !deletes {
+				continue
+			}
 			memberProject := project
 			memberProject.Root, memberProject.DefaultBranch, memberProject.Kind = target.Root, target.DefaultBranch, store.ProjectKindRepo
 			memberTask := task

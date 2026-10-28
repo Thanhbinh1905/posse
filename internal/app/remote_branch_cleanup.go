@@ -61,6 +61,16 @@ func deleteMergedRemoteBranch(ctx context.Context, project store.Project, task s
 	return true, nil
 }
 
+// taskDeletesBranchOnMerge reports the Task's frozen delete_branch_on_merge
+// for a workspace Member, or for the Task when repo is empty.
+func taskDeletesBranchOnMerge(task store.Task, repo string) (bool, error) {
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return false, admittedPlanFailure(err)
+	}
+	return plan.DeletesBranchOnMerge(repo), nil
+}
+
 func remotePRMergedAt(ctx context.Context, forge repositoryForge, task store.Task, headSHA string) (bool, error) {
 	state, head, branch, err := readRemotePRHead(ctx, forge, task.PRURL)
 	if err != nil {
@@ -81,6 +91,12 @@ func remoteBranchAt(ctx context.Context, root, ref, headSHA string) (bool, error
 // deletion is recorded with its cause so a later watch pass or `posse pool
 // prune` retries it; a settled one clears that record.
 func cleanUpMergedRemoteBranch(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo string, cfg config.Config, headSHA string) (bool, string, error) {
+	if deletes, err := taskDeletesBranchOnMerge(task, repo); err != nil || !deletes {
+		if err == nil {
+			err = db.ClearRemoteBranchCleanup(ctx, task.ID, repo)
+		}
+		return false, "", err
+	}
 	removed, cause := deleteMergedRemoteBranch(ctx, project, task, cfg, headSHA)
 	if cause != nil {
 		failure := store.RemoteBranchCleanup{ProjectID: project.ID, TaskID: task.ID, Repo: repo, Branch: task.Branch, HeadSHA: headSHA, Cause: cause.Error()}
@@ -226,6 +242,11 @@ func mergedRemoteBranchItems(ctx context.Context, db *store.DB, project store.Pr
 		}
 		for _, candidate := range candidates {
 			if !strings.HasPrefix(candidate.task.Branch, "posse/") || candidate.task.PRURL == "" {
+				continue
+			}
+			if deletes, err := taskDeletesBranchOnMerge(candidate.task, candidate.repo); err != nil {
+				return nil, err
+			} else if !deletes {
 				continue
 			}
 			item := pruneItem{kind: "remote-branch", label: candidate.task.Branch, path: candidate.project.Root, state: string(task.State), seq: task.Seq, taskID: task.ID, repo: candidate.repo}

@@ -1065,7 +1065,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	} else {
 		if task.Branch != "" {
 			err = s.runIntentStep(ctx, db, intent, "branch.remove", func() error {
-				if keepBranch {
+				if keepBranch || !plan.DeletesBranchOnMerge("") {
 					return nil
 				}
 				// A PR branch advanced after its external merge stays at its
