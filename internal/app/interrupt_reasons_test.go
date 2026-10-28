@@ -127,4 +127,5 @@ func TestKeysReachFocusedBlockedWorker(t *testing.T) {
 	if code := cli.Run([]string{"keys", "t1", "enter"}); code != 0 || fake.CallCount("agent.send_keys") != 1 || !strings.Contains(output.String(), "state: sent") {
 		t.Fatalf("focused keys command: code=%d output=%s calls=%#v", code, output.String(), fake.Calls)
 	}
+	requireInterventions(t, home, project.ID, store.InterventionKeys, "")
 }
