@@ -433,7 +433,7 @@ Wait for the prerequisite.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.refillQueuedTasks(ctx, db, fixture.project, cfg); err != nil {
+	if _, err := fixture.service.refillQueuedTasks(ctx, db, fixture.project, cfg); err != nil {
 		t.Fatal(err)
 	}
 	decisions, err := db.Decisions(ctx, fixture.project.ID, true)

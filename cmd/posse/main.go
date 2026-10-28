@@ -41,6 +41,9 @@ func main() {
 	cli := service.CLI()
 	cli.Name = "posse"
 	cli.Version = version
+	if out, errOut, ok := app.HiddenWatchOutput(os.Args[1:]); ok {
+		cli.Out, cli.ErrOut = out, errOut
+	}
 	code := cli.Run(os.Args[1:])
 	if code == 0 {
 		if err := service.ExecPendingLead(); err != nil {

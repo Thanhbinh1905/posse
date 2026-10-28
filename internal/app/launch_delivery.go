@@ -25,7 +25,7 @@ const launchDeliveryTimeout = 2 * time.Minute
 // retryPendingLaunches runs on focus events and normal Project reconciliation
 // (including watch ticks). Only a finished start intent can be retried here.
 func (s *Service) retryPendingLaunches(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot) error {
-	if err := s.refillQueuedTasks(ctx, db, project, cfg); err != nil {
+	if _, err := s.refillQueuedTasks(ctx, db, project, cfg); err != nil {
 		return err
 	}
 	home, err := s.homePath()
@@ -126,15 +126,18 @@ func queuedTaskBlockerWaitReason(ctx context.Context, db *store.DB, project stor
 	return "", nil
 }
 
-func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
+// refillQueuedTasks admits queued Tasks into free Worker slots. It returns how
+// many left the queue, also when a later admission fails.
+func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (int, error) {
+	admitted := 0
 	home, err := s.homePath()
 	if err != nil {
-		return err
+		return admitted, err
 	}
 	for {
 		tasks, err := db.Tasks(ctx, project.ID, false)
 		if err != nil {
-			return err
+			return admitted, err
 		}
 		launched := false
 		for _, queued := range tasks {
@@ -143,27 +146,27 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 			}
 			plan, err := queued.AdmittedPlan()
 			if err != nil {
-				return admittedPlanFailure(err)
+				return admitted, admittedPlanFailure(err)
 			}
 			if plan == nil {
 				continue
 			}
 			unmet, err := db.UnmetTaskDependencies(ctx, project.ID, plan.Dependencies)
 			if err != nil {
-				return err
+				return admitted, err
 			}
 			if len(unmet) > 0 {
 				for _, dependency := range plan.Dependencies {
 					predecessor, taskErr := db.Task(ctx, project.ID, dependency.TaskID)
 					if taskErr != nil {
-						return taskErr
+						return admitted, taskErr
 					}
 					if predecessor.State != store.StateFailed && predecessor.State != store.StateLost && predecessor.State != store.StateTornDown {
 						continue
 					}
 					ready, readyErr := db.UnmetTaskDependencies(ctx, project.ID, []dispatch.Dependency{dependency})
 					if readyErr != nil {
-						return readyErr
+						return admitted, readyErr
 					}
 					if len(ready) == 0 {
 						continue
@@ -175,23 +178,24 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 						Options:  []string{"cancel", "drop-prerequisite-and-run"},
 					})
 					if decisionErr != nil {
-						return decisionErr
+						return admitted, decisionErr
 					}
 				}
 				continue
 			}
 			launchedTask, err := s.admitQueuedTask(ctx, db, home, project, cfg, queued, plan, false)
 			if err != nil {
-				return err
+				return admitted, err
 			}
 			if !launchedTask {
 				continue
 			}
 			launched = true
+			admitted++
 			break
 		}
 		if !launched {
-			return nil
+			return admitted, nil
 		}
 	}
 }
