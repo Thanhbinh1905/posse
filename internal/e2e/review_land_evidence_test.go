@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -228,5 +229,67 @@ func TestPRHandResolvedTargetMergeAfterPassHasNoCarry(t *testing.T) {
 	}
 	if got := f.mustTask(t, "t1"); got.State != store.StateDone || got.GatedSHA != "" && got.GatedSHA != resolved {
 		t.Fatalf("Task without evidence advanced: %s gated=%s", got.State, got.GatedSHA)
+	}
+}
+
+// acceptCappedHead caps a one-round quick Review Loop on an unreviewed head and
+// applies the User's accept-head answer to its review_cap Decision.
+func acceptCappedHead(t *testing.T, f *prLifecycleFixture) (store.Task, string) {
+	t.Helper()
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.max_rounds", "1")
+	// Merge auto-starts the next Review Round only with an eligible reviewer.
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "dispatch.default.use", "reviewer")
+	change := startQuickLoopChange(t, f, "true")
+	recordPassingReview(t, f, "t1")
+	commitFile(t, f, change, "after-review.txt", "change after the last Review Round")
+	resubmitChange(t, f, change, "Changed after the last Review Round")
+	head := strings.TrimSpace(gitTest(t, f.env, change.WorktreePath, "rev-parse", "HEAD"))
+	requireRefusal(t, f, "review_round_cap", "merge", "t1")
+	if code, output := runReviewIdentityCLI(t, f, "decisions"); code != 0 || !strings.Contains(output, "review_cap") {
+		t.Fatalf("reconcile Review cap Decision: %d %s", code, output)
+	}
+	var decisionID int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.FormatInt(decisionID, 10)
+	if code, output := runReviewIdentityCLI(t, f, "decide", id, "accept-head", "--user-approved", "Accept this head."); code != 0 {
+		t.Fatalf("record accept-head: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", id); code != 0 || !strings.Contains(output, "accepted-head") {
+		t.Fatalf("apply accept-head: %d %s", code, output)
+	}
+	return change, head
+}
+
+func TestReviewCapAcceptHeadLetsMergeProceed(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	change, head := acceptCappedHead(t, f)
+	if code, output := runReviewIdentityCLI(t, f, "merge", "t1"); code != 0 || !strings.Contains(output, "merging") {
+		t.Fatalf("accepted head did not open Merge: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLIWithResourceConflictRetry(t, f, "merge", "t1", "--execute"); code != 0 {
+		t.Fatalf("accepted head did not land: %d %s", code, output)
+	}
+	if got := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")); got != head {
+		t.Fatalf("main=%s, want accepted head %s", got, head)
+	}
+	if rounds := reviewRoundCount(t, f, change); rounds != 1 {
+		t.Fatalf("accepted head started a new Review Round: rounds=%d", rounds)
+	}
+}
+
+func TestReviewCapAcceptHeadDoesNotCoverALaterCommit(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	change, _ := acceptCappedHead(t, f)
+	commitFile(t, f, change, "after-accept.txt", "change after accept-head")
+	resubmitChange(t, f, change, "Changed after accept-head")
+	before := gitTest(t, f.env, f.repo, "rev-parse", "main")
+	requireRefusal(t, f, "review_round_cap", "merge", "t1")
+	if got := gitTest(t, f.env, f.repo, "rev-parse", "main"); got != before {
+		t.Fatal("refused Merge changed main")
+	}
+	if got := f.mustTask(t, "t1"); got.State != store.StateDone {
+		t.Fatalf("unaccepted head left done: %s", got.State)
 	}
 }
