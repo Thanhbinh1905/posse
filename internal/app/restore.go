@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -112,7 +113,7 @@ func (launch leadLaunch) withResume(kind config.Kind, session string) leadLaunch
 }
 
 // restoreAll is `posse up --all`: it brings back the Lead, Workers and watch
-// of every Project that is not down.
+// of every Project that is not down, or only of those up.projects lists.
 func (s *Service) restoreAll(ctx *axi.Context) error {
 	db, home, err := s.openDB()
 	if err != nil {
@@ -129,6 +130,10 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	if err := s.Herdr.CheckProtocol(ctx.Context); err != nil {
 		return herdrError(err)
 	}
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		return configError(err)
+	}
 	projects, err := db.Projects(ctx.Context)
 	if err != nil {
 		return err
@@ -136,10 +141,15 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	restored := []any{}
 	failed := []any{}
 	down := []any{}
+	skipped := []any{}
 	help := []any{}
 	inLeadPane := 0
 	pending := false
 	for _, project := range projects {
+		if cfg.Up.Projects != nil && !slices.Contains(cfg.Up.Projects, project.Name) {
+			skipped = append(skipped, project.Name)
+			continue
+		}
 		if project.IsDown() {
 			down = append(down, project.Name)
 			continue
@@ -181,9 +191,15 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	if len(down) > 0 {
 		help = append(help, "Run `posse up` in a down Project's folder to start it")
 	}
+	if len(skipped) > 0 {
+		help = append(help, "Run `posse up` in a skipped Project's folder to restore it, or add it to up.projects")
+	}
 	result := axi.Object{{Key: "restored", Value: restored}, {Key: "failed_projects", Value: failed}}
 	if len(down) > 0 {
 		result = append(result, axi.Field{Key: "down_projects", Value: down})
+	}
+	if len(skipped) > 0 {
+		result = append(result, axi.Field{Key: "skipped_projects", Value: skipped})
 	}
 	result = append(result, axi.Field{Key: "state", Value: state})
 	if len(help) > 0 {
