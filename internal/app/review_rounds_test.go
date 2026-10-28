@@ -888,6 +888,60 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 	}
 }
 
+func TestReviewRoundCumulativePatchStartsAtMergeBase(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	remote := filepath.Join(root, "remote.git")
+	initRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\ntarget removes this line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "commit", "-am", "branch point")
+	gitTest(t, root, "init", "--bare", remote)
+	gitTest(t, repo, "remote", "add", "origin", remote)
+	gitTest(t, repo, "push", "-u", "origin", "main")
+	branchPoint := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
+
+	gitTest(t, repo, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "change.txt"), []byte("change line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", "change.txt")
+	gitTest(t, repo, "commit", "-m", "change")
+	head := strings.TrimSpace(gitTest(t, repo, "rev-parse", "HEAD"))
+
+	gitTest(t, repo, "switch", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "target-only.txt"), []byte("target line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", ".")
+	gitTest(t, repo, "commit", "-m", "target moves after the branch point")
+	gitTest(t, repo, "push", "origin", "main")
+
+	scope, err := calculateReviewRoundScope(ctx, reviewRoundRepository{
+		name: "shop", root: repo, worktree: repo, targetBranch: "main", head: head,
+	}, store.ReviewRound{}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.Binding.TargetCommitSHA != branchPoint {
+		t.Fatalf("target commit = %s, want merge base %s", scope.Binding.TargetCommitSHA, branchPoint)
+	}
+	want := gitTest(t, repo, "diff", "--binary", "--no-ext-diff", branchPoint, head)
+	if string(scope.Cumulative) != want {
+		t.Fatalf("cumulative.patch is not the merge base to head diff:\n%s\nwant:\n%s", scope.Cumulative, want)
+	}
+	for _, value := range []string{"target removes this line", "target-only.txt", "target line"} {
+		if strings.Contains(string(scope.Cumulative), value) {
+			t.Errorf("cumulative.patch includes target-side %q:\n%s", value, scope.Cumulative)
+		}
+	}
+}
+
 func TestReviewStartIgnoresMaxWorkersAtCapacity(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
