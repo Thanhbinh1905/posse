@@ -1037,17 +1037,28 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	return relaunchFixture{db: db, fake: fake, service: service, home: home, project: project, cfg: cfg, task: task}
 }
 
-func TestRelaunchDoneChangeSuggestsSend(t *testing.T) {
+func TestRelaunchDoneChangeKeepsStateAndWaitsForLead(t *testing.T) {
 	fixture := newRelaunchFixture(t, store.StateDone)
 	t.Chdir(filepath.Join(filepath.Dir(fixture.home), "repo"))
 	var output bytes.Buffer
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"relaunch", "t1"}); code != 1 || !strings.Contains(output.String(), "relaunch_refused") || !strings.Contains(output.String(), "posse send t1 <message>") {
-		t.Fatalf("done Change relaunch did not refuse with a send step: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"relaunch", "t1"}); code != 0 || !strings.Contains(output.String(), "state: done") {
+		t.Fatalf("done Change relaunch: code=%d output=%s", code, output.String())
 	}
-	if len(fixture.fake.Calls) != 0 {
-		t.Fatalf("done Change relaunch contacted Herdr before refusing: %#v", fixture.fake.Calls)
+	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State != store.StateDone || task.Launches != fixture.task.Launches+1 {
+		t.Fatalf("relaunched done Change = state %s launches %d; want done with one more launch", task.State, task.Launches)
+	}
+	relaunch, err := os.ReadFile(filepath.Join(fixture.home, "projects", fixture.project.Name, "tasks", "t1", "relaunch.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(relaunch), "reached state done") || !strings.Contains(string(relaunch), "Wait for Lead instructions") {
+		t.Fatalf("relaunch.md does not tell the Worker to wait: %s", relaunch)
 	}
 }
 

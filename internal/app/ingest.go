@@ -512,6 +512,11 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		if active {
 			continue
 		}
+		if relaunching, err := relaunchInProgress(ctx, db, task.ID); err != nil {
+			return err
+		} else if relaunching {
+			continue
+		}
 		message, err := db.OldestQueuedMessage(ctx, task.ID)
 		if err == store.ErrNotFound {
 			continue
@@ -544,6 +549,20 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 		}
 	}
 	return nil
+}
+
+// relaunchInProgress reports a live relaunch of the Task. Its new agent can
+// look idle before the relaunch prompt is typed, and a message typed then would
+// interleave with that prompt.
+func relaunchInProgress(ctx context.Context, db *store.DB, taskID int64) (bool, error) {
+	intent, err := db.IntentByTask(ctx, taskID)
+	if store.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return intent.Command == "relaunch" && intentProcessAlive(intent), nil
 }
 
 func noticeIDs(notices []store.Notice) []int64 {
