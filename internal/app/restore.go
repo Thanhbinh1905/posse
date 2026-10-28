@@ -56,9 +56,10 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 }
 
 // adoptCurrentGeneration records Herdr's current generation for a held
-// Project whose Lead pane and every recoverable Worker pane already run an
-// agent in it. A recovery that failed after bringing every pane back, or a
-// restore the User did by hand, then ends the hold instead of extending it.
+// Project whose Lead pane and every recoverable Worker pane already run a
+// confirmed agent in it. A recovery that failed after bringing every pane
+// back, or a restore the User did by hand, then ends the hold instead of
+// extending it.
 // A missing Lead or Worker keeps the hold for `posse up` (ADR 0035).
 func adoptCurrentGeneration(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) (bool, error) {
 	recorded, err := db.ProjectServerStartedAt(ctx, project.ID)
@@ -73,10 +74,10 @@ func adoptCurrentGeneration(ctx context.Context, db *store.DB, project store.Pro
 		return false, err
 	}
 	for _, task := range tasks {
-		if task.State == store.StateFailed {
+		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
-		if taskNeedsRestartRecovery(task, snapshot) {
+		if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); !found || !paneAgentRunning(pane) {
 			return false, nil
 		}
 		// A Worker whose relaunch failed may still run an agent that never
@@ -100,7 +101,12 @@ func adoptCurrentGeneration(ctx context.Context, db *store.DB, project store.Pro
 // Herdr can reuse pane ids after a restart, runs an agent.
 func leadPaneLive(project store.Project, snapshot herdr.Snapshot) bool {
 	pane, found := herdr.FindPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
-	return found && pane.Agent != "" && pane.AgentStatus != "" && pane.AgentStatus != "unknown" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped"
+	return found && paneAgentRunning(pane)
+}
+
+// paneAgentRunning reports whether Herdr confirms a running agent in the pane.
+func paneAgentRunning(pane herdr.Pane) bool {
+	return pane.Agent != "" && pane.AgentStatus != "" && pane.AgentStatus != "unknown" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped"
 }
 
 // observeLeadAgent records the agent kind and session running in the Lead

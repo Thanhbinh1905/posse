@@ -309,6 +309,12 @@ func TestWatchKeepsHoldWhenAPaneIsMissing(t *testing.T) {
 		"worker": func(_ *testing.T, _ *store.DB, _ store.Project, fake *herdr.Fake) {
 			fake.SnapshotValue.Panes[1].Agent = ""
 		},
+		"worker status unknown": func(_ *testing.T, _ *store.DB, _ store.Project, fake *herdr.Fake) {
+			fake.SnapshotValue.Panes[1].AgentStatus = "unknown"
+		},
+		"worker status empty": func(_ *testing.T, _ *store.DB, _ store.Project, fake *herdr.Fake) {
+			fake.SnapshotValue.Panes[1].AgentStatus = ""
+		},
 		// A failed relaunch can leave an agent that never started working.
 		"worker retry pending": func(t *testing.T, db *store.DB, project store.Project, _ *herdr.Fake) {
 			ctx := context.Background()
