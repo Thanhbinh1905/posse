@@ -92,6 +92,7 @@ type failedCheck struct {
 
 type checkSnapshot struct {
 	State    string        `json:"state"`
+	Running  bool          `json:"running,omitempty"`
 	Failures []failedCheck `json:"failures"`
 }
 
@@ -1607,6 +1608,7 @@ func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, no
 	if checks.State == "FAILURE" && len(checks.Failures) == 0 {
 		checks.Failures = append(checks.Failures, failedCheck{Name: "required check rollup", URL: ""})
 	}
+	checks.Running = pull.checksRunning()
 	sort.Slice(checks.Failures, func(i, j int) bool {
 		if checks.Failures[i].Name == checks.Failures[j].Name {
 			return checks.Failures[i].URL < checks.Failures[j].URL
@@ -1681,7 +1683,10 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			addNotice("pr_closed", task.Title+": pull request closed without merging", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	case "OPEN":
-		if len(failures) > 0 && (newHead || len(previousChecks.Failures) == 0 || !sameFailures(previousChecks.Failures, failures)) {
+		// One Notice when the first check of a run fails, and one update when the
+		// run settles with a different failure set; failures that pile up while
+		// the run is still going stay quiet.
+		if len(failures) > 0 && (newHead || len(previousChecks.Failures) == 0 || !checks.Running && !sameFailures(previousChecks.Failures, failures)) {
 			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
 		}
 		if current.Review == "CHANGES_REQUESTED" && (newHead || previous.Review != "CHANGES_REQUESTED") {
