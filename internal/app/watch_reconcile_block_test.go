@@ -17,7 +17,8 @@ import (
 )
 
 // heldReconcileFixture records Herdr generation 100:1 for the Project while the
-// fake Herdr server reports 200:2, the state a missed `posse up --all` leaves.
+// fake Herdr server reports 200:2 and the restart stopped the Lead, the state
+// a missed `posse up --all` leaves.
 func heldReconcileFixture(t *testing.T) (startFixture, *store.DB) {
 	t.Helper()
 	fixture := newStartFixture(t)
@@ -30,6 +31,7 @@ func heldReconcileFixture(t *testing.T) (startFixture, *store.DB) {
 		t.Fatal(err)
 	}
 	fixture.fake.SnapshotValue.ServerStartedAt = "200:2"
+	fixture.fake.SnapshotValue.Panes[0].Agent, fixture.fake.SnapshotValue.Panes[0].AgentStatus = "", ""
 	return fixture, db
 }
 
