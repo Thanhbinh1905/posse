@@ -565,6 +565,8 @@ type projectPreparationOptions struct {
 	allowRunningLeadNetworkRecovery bool
 	deliverMessages                 bool
 	watchObservation                bool
+	// admitted is set once the watch pass has admitted queued Tasks.
+	admitted *bool
 }
 
 func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db *store.DB, project store.Project, allowRecovery, pollRepositories, allowRunningLeadNetworkRecovery, deliverMessages bool) (config.Config, error) {
@@ -580,8 +582,15 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 // extension or live Lead watch owns Notice delivery, and admits queued Tasks
 // into free Worker slots. Command boundaries recover interrupted intents. A
 // pass that a held, deferred or unavailable observation skipped returns why.
-func (s *Service) prepareProjectWatchObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
-	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, watchObservation: true})
+// blocked is the error that kept the pass from admitting queued Tasks; a
+// failure after admission is returned only as err.
+func (s *Service) prepareProjectWatchObservation(ctx context.Context, db *store.DB, project store.Project) (cfg config.Config, blocked error, err error) {
+	admitted := false
+	cfg, err = s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, watchObservation: true, admitted: &admitted})
+	if admitted {
+		return cfg, nil, err
+	}
+	return cfg, err, err
 }
 
 type observationWarningWriterKey struct{}
@@ -705,6 +714,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					}
 					if err := s.refillQueuedTasks(ctx, db, project, cfg); err != nil {
 						return cfg, err
+					}
+					if options.admitted != nil {
+						*options.admitted = true
 					}
 				} else if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
 					return cfg, err

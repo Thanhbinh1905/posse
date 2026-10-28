@@ -931,8 +931,8 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		if fresh.IsDown() || fresh.Root != project.Root {
 			return nil
 		}
-		_, err = s.prepareProjectWatchObservation(loopCtx, db, fresh)
-		trackWatchReconcileBlock(ctx, db, fresh, err)
+		_, blocked, err := s.prepareProjectWatchObservation(loopCtx, db, fresh)
+		trackWatchReconcileBlock(ctx, db, fresh, blocked)
 		if err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) && !isHerdrUnavailable(err) {
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}

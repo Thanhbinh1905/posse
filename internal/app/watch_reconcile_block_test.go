@@ -10,6 +10,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -57,7 +58,10 @@ func reconcileBlockedNotices(t *testing.T, db *store.DB, projectID int64) []stor
 
 func TestWatchObservationReportsHeldHerdrGeneration(t *testing.T) {
 	fixture, db := heldReconcileFixture(t)
-	_, err := fixture.service.prepareProjectWatchObservation(context.Background(), db, fixture.project)
+	_, blocked, err := fixture.service.prepareProjectWatchObservation(context.Background(), db, fixture.project)
+	if blocked != err {
+		t.Fatalf("held observation blocked=%v, want its error %v", blocked, err)
+	}
 	if !errors.Is(err, errRecoveryHeld) {
 		t.Fatalf("held Project observation returned %v, want errRecoveryHeld", err)
 	}
@@ -145,5 +149,29 @@ func TestQueuedTaskWaitReasonNamesTheRealBlocker(t *testing.T) {
 	}
 	if got := reason(); got != "waiting for a Worker slot" {
 		t.Fatalf("full wait_reason = %q", got)
+	}
+}
+
+// A pass that admitted queued Tasks and then failed to deliver a Notice did
+// not block admission, so it must not start a reconcile_blocked episode.
+func TestWatchFailureAfterAdmissionRecordsNoReconcileBlock(t *testing.T) {
+	fixture := newStartFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "task_done", Summary: "pending", DataJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.Errors["agent.prompt"] = &herdr.Error{Code: "internal_error", Message: "prompt rejected"}
+
+	if _, blocked, err := fixture.service.prepareProjectWatchObservation(ctx, db, fixture.project); err == nil || blocked != nil {
+		t.Fatalf("Notice delivery failure after admission returned blocked=%v err=%v", blocked, err)
+	}
+	runOneWatchPass(t, fixture, db)
+	if block, err := db.ReconcileBlock(ctx, fixture.project.ID); err != nil || block.Since != 0 {
+		t.Fatalf("a failure after admission recorded block=%+v err=%v", block, err)
 	}
 }
