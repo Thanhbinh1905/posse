@@ -357,7 +357,7 @@ func (db *DB) ReleasePRPoll(ctx context.Context, projectID int64, token string) 
 }
 
 func (db *DB) RecordPRPollAttempt(ctx context.Context, projectID int64, at int64) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO project_watch_state(project_id,pr_polled_at) VALUES (?,?) ON CONFLICT(project_id) DO UPDATE SET pr_polled_at=excluded.pr_polled_at`, projectID, at)
+	_, err := db.ExecContext(ctx, `INSERT INTO project_watch_state(project_id,pr_polled_at) VALUES (?,?) ON CONFLICT(project_id) DO UPDATE SET pr_polled_at=excluded.pr_polled_at, pr_poll_last_error=''`, projectID, at)
 	return err
 }
 
