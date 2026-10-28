@@ -214,6 +214,13 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return configError(err)
 	}
 	s.startWorkerGoCacheTrim(ctx, db, project, home)
+	defer func() {
+		// Detached goroutines stop once ctx is done; wait so none writes under
+		// the posse home after the caller has torn it down.
+		if ctx.Err() != nil {
+			s.waitForWatchMaintenance(4 * time.Second)
+		}
+	}()
 	if project.IsWorkspace() {
 		var failures []error
 		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {

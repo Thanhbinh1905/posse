@@ -90,3 +90,16 @@ func TestMemberPollClaimIsReleasedAfterCallerDeadlineAndStoreContention(t *testi
 		t.Fatal(err)
 	}
 }
+
+func TestMaintainProjectWatchStopsDetachedWorkBeforeReturningOnCanceledContext(t *testing.T) {
+	fixture := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"backend"}, []string{"backend"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project)
+	fixture.service.maintenanceMu.Lock()
+	running := len(fixture.service.maintenance)
+	fixture.service.maintenanceMu.Unlock()
+	if running != 0 {
+		t.Fatalf("%d maintenance goroutines still running after maintainProjectWatch returned on a canceled context", running)
+	}
+}
