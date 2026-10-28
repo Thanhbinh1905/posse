@@ -40,6 +40,7 @@ type discardWorkerPlan struct {
 type discardIntentPayload struct {
 	Discard                  bool               `json:"discard"`
 	UserQuote                string             `json:"user_quote"`
+	KeepPullRequests         bool               `json:"keep_pull_requests,omitempty"`
 	Worker                   *discardWorkerPlan `json:"worker,omitempty"`
 	DiscardApprovalRecorded  bool               `json:"discard_approval_recorded,omitempty"`
 	DiscardApprovalBranchSHA string             `json:"discard_approval_branch_sha,omitempty"`
