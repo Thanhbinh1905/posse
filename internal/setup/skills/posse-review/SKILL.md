@@ -27,6 +27,6 @@ It complements the generated Review Round instructions (findings schema, delta s
 4. **Group.** One pattern per root cause, with every located instance. Keep P3 nits few. A finding outside the delta takes origin `pre_existing`.
    Done when no two patterns share a root cause.
 
-Report the two axes separately. A Standards pass never masks a Spec fail; never merge the axes into one verdict.
+Report the two axes separately in the Report. A Standards pass never masks a Spec fail. The schema carries one verdict: pass the worse of the two axes as `--verdict`.
 
 One Reviewer per round: run no multi-reviewer or adversarial panel.

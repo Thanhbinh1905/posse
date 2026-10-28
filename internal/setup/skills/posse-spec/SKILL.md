@@ -7,7 +7,7 @@ description: "Turns a done lock card into a lean spec the User approves area by 
 
 Lead skill. If `posse _context` says you are a Worker, follow your Brief instead.
 
-The input is a lock card with status `done` in `~/.posse/projects/<project>/drafts/<topic>.md`. Without one, offer the `posse-sharpen` skill and stop. Write the spec into the same draft below the lock card, with its own status line (`in-progress` or `done`).
+The input is a lock card with status `done` in `<drafts>/<topic>.md` (`<drafts>` is the `pending.drafts` path that `posse lead` prints). Without one, offer the `posse-sharpen` skill and stop. Write the spec into the same draft below the lock card, with its own status line (`in-progress` or `done`).
 
 1. **Gate.** If the lock card needs one PR with an obvious approach, say Spec is not needed and offer Build directly.
    Done when the work needs more than one PR or a non-obvious approach.

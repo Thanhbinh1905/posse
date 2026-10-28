@@ -7,7 +7,7 @@ description: "Develops a thin idea as a creative partner, one prompt per turn, t
 
 Lead skill. If `posse _context` says you are a Worker, follow your Brief instead.
 
-Optional. When an idea looks thin, offer this skill in one line; run it only on the User's yes or request. Keep a draft at `~/.posse/projects/<project>/drafts/<topic>.md`: a status line (`in-progress` or `done`), then one line per idea, tagged with who said it. "Continue <topic>" resumes from the draft.
+Optional. When an idea looks thin, offer this skill in one line; run it only on the User's yes or request. Keep a draft at `<drafts>/<topic>.md` (`<drafts>` is the `pending.drafts` path that `posse lead` prints): a status line (`in-progress` or `done`), then one line per idea, tagged with who said it. "Continue <topic>" resumes from the draft.
 
 1. **Diverge, one prompt per turn.** Pick one lens and ask one open prompt. The User answers first; then add 1-2 sparks of your own that differ from theirs, and hand back. Never offer a menu of ideas or lenses.
    - "Let me think" switches you to prompts only, no sparks. Never take over the ideating.

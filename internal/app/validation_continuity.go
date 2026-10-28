@@ -78,7 +78,11 @@ func (s *Service) checkedValidationContinuity(ctx context.Context, db *store.DB,
 		return validation, err
 	}
 	for _, expectedHead := range validation.Heads {
-		if _, err := gitOutput(ctx, worktreePath, "merge-base", "--is-ancestor", expectedHead, actualHead); err != nil {
+		descends, err := descendsThroughRewrites(ctx, db, worktreePath, task.ID, expectedHead, actualHead)
+		if err != nil {
+			return validation, err
+		}
+		if !descends {
 			return validation, recordHeadDiscontinuity(ctx, db, project, task, expectedHead, actualHead)
 		}
 	}

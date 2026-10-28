@@ -8,7 +8,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-const briefWithIntent = "---\ntype: change\ntitle: T\ndone_when: done\n---\nLead assumption text.\n\n## Intent\nUser's words (verbatim): \"ship it\"\n\n## Notes\nLead notes.\n"
+const briefWithIntent = "---\ntype: change\ntitle: T\ndone_when: done\n---\nLead assumption text.\n\n## Intent\nUser's words (verbatim): \"ship it\"\nGoal: ship the change.\nLead assumptions: smallest fix.\n\n## Notes\nLead notes.\n"
 const briefWithoutIntent = "---\ntype: change\ntitle: T\ndone_when: done\n---\nLead assumption text.\n"
 
 func briefPlan(brief string) *taskplan.Plan {
@@ -17,7 +17,7 @@ func briefPlan(brief string) *taskplan.Plan {
 
 func TestBriefFixerSectionPrintsOnlyIntentBlock(t *testing.T) {
 	label, text := briefFixerSection(briefPlan(briefWithIntent))
-	if label != "User intent (verbatim)" || text != "User's words (verbatim): \"ship it\"" {
+	if label != "Intent (User words verbatim; Goal and Lead assumptions are Lead text)" || text != "User's words (verbatim): \"ship it\"\nGoal: ship the change.\nLead assumptions: smallest fix." {
 		t.Fatalf("label=%q text=%q", label, text)
 	}
 }
@@ -31,7 +31,7 @@ func TestBriefFixerSectionFallsBackToWholeBody(t *testing.T) {
 
 func TestGeneratedReviewBriefSeparatesIntentFromLeadText(t *testing.T) {
 	with := string(generatedReviewBrief(store.Task{}, *briefPlan(briefWithIntent), 1, nil, false))
-	intentAt := strings.Index(with, "## User intent (verbatim)\n\nUser's words")
+	intentAt := strings.Index(with, "## Intent (User words verbatim; Goal and Lead assumptions are Lead text)\n\nUser's words")
 	leadAt := strings.Index(with, "## Change Brief (Lead text)\n\n")
 	if intentAt < 0 || leadAt < intentAt || !strings.Contains(with[leadAt:], "done_when: done") || !strings.Contains(with[leadAt:], "Lead assumption text.") || !strings.Contains(with[leadAt:], "Lead notes.") || strings.Contains(with[leadAt:], "ship it") {
 		t.Fatalf("Review Round brief with Intent block: %s", with)

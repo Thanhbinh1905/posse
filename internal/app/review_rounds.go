@@ -577,7 +577,7 @@ func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scop
 			continue
 		}
 		label, text := briefFixerSection(&plan)
-		if label == "User intent (verbatim)" {
+		if label == "Intent (User words verbatim; Goal and Lead assumptions are Lead text)" {
 			fmt.Fprintf(&builder, "## %s\n\n%s\n\n## Change Brief (Lead text)\n\n%s", label, text, withoutBriefSection(string(input.Bytes), "Intent"))
 		} else {
 			fmt.Fprintf(&builder, "## Change Brief (verbatim)\n\n%s", input.Bytes)
