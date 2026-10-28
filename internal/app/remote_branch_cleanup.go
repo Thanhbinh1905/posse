@@ -89,8 +89,6 @@ func cleanUpMergedRemoteBranch(ctx context.Context, db *store.DB, project store.
 	return removed, "", db.ClearRemoteBranchCleanup(ctx, task.ID, repo)
 }
 
-// retryRemoteBranchCleanups retries failed remote branch deletions, waiting
-// longer after each failed attempt.
 func retryRemoteBranchCleanups(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
 	cleanups, err := db.RemoteBranchCleanups(ctx, project.ID)
 	if err != nil {
@@ -132,9 +130,6 @@ func retryRemoteBranchCleanup(ctx context.Context, db *store.DB, project store.P
 }
 
 func remoteBranchCleanupBackoff(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
 	if attempts > 7 {
 		return time.Hour
 	}
@@ -238,7 +233,6 @@ func mergedRemoteBranchItems(ctx context.Context, db *store.DB, project store.Pr
 			if _, listed := remoteHeads[root]; !listed && listErrors[root] == nil {
 				listing, err := gitOutput(ctx, root, "ls-remote", "--heads", "origin", "refs/heads/posse/*")
 				if err != nil {
-					// An unread remote is listed once with its cause and never applied.
 					listErrors[root] = err
 					items = append(items, pruneItem{kind: "remote-branch", label: "posse/*", path: root, state: "unverified", reason: err.Error()})
 				} else {
