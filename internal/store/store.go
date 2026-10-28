@@ -2472,6 +2472,24 @@ func (db *DB) HasPendingTaskInstructions(ctx context.Context, taskID int64) (boo
 	return hasPendingTaskInstructions(ctx, db.DB, taskID)
 }
 
+func (db *DB) PendingTaskInstructions(ctx context.Context, taskID int64) ([]Message, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
+FROM messages WHERE task_id=? AND status IN ('queued', 'claimed', 'interrupting') ORDER BY created_at, id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := []Message{}
+	for rows.Next() {
+		var message Message
+		if err := rows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
 func (db *DB) UndeliveredTaskMessages(ctx context.Context, taskID int64) ([]Message, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
 FROM messages WHERE task_id=? AND status IN ('queued', 'claimed', 'interrupting', 'undeliverable', 'withdrawn') ORDER BY created_at, id`, taskID)

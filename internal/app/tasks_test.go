@@ -1740,3 +1740,48 @@ func TestTearingDownQueuedTaskObsoletesItsOpenDecisions(t *testing.T) {
 		t.Fatalf("dependency Decision was not retired: %#v err=%v", all, err)
 	}
 }
+
+func TestQueuedInstructionsPendingFailureNamesBlockingMessages(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "research", Title: "Investigate", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.QueueMessage(ctx, taskID, "Apply the first change\nsecond line", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.QueueMessage(ctx, taskID, "Nudge", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure *axi.Error
+	if !errors.As(queuedInstructionsPendingFailure(ctx, db, task, time.Now().Add(12*time.Minute)), &failure) {
+		t.Fatal("refusal is not an axi.Error")
+	}
+	text := failure.Error()
+	for _, want := range []string{fmt.Sprintf("message %d, 12m old: Apply the first change", first), fmt.Sprintf("message %d, 12m old: Nudge", second)} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("refusal %q does not contain %q", text, want)
+		}
+	}
+	if len(failure.Help) != 1 || !strings.Contains(failure.Help[0], "after this turn ends") {
+		t.Fatalf("help = %v; want the arrival after this turn ends", failure.Help)
+	}
+	if strings.Contains(text, "second line") {
+		t.Fatalf("refusal %q includes more than the first line", text)
+	}
+}
