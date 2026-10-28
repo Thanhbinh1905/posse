@@ -44,9 +44,6 @@ func main() {
 	if out, errOut, ok := app.HiddenWatchOutput(os.Args[1:]); ok {
 		cli.Out, cli.ErrOut = out, errOut
 	}
-	if len(os.Args) < 2 || os.Args[1] != "watch" {
-		app.MarkUserCommandEntry()
-	}
 	code := cli.Run(os.Args[1:])
 	if code == 0 {
 		if err := service.ExecPendingLead(); err != nil {

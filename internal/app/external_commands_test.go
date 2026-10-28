@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mattn/go-isatty"
 )
 
 func TestExternalCommandTimeoutOverrideRequiresIsolatedHerdr(t *testing.T) {
@@ -96,8 +98,7 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 	t.Setenv("PATH", userBin+string(os.PathListSeparator)+serverBin)
 	t.Setenv(watchRuntimeTokenEnv, "")
 	t.Setenv("HERDR_PLUGIN_ID", "")
-	MarkUserCommandEntry()
-	t.Cleanup(func() { userCommandEntry.Store(false) })
+	t.Setenv("HERDR_PANE_ID", "w1-p1")
 	if got := version("gh"); got != "2.97.0" {
 		t.Fatalf("User command ran gh %s, want 2.97.0", got)
 	}
@@ -115,13 +116,16 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 
 	// A process that is not a User command entry, such as cron or systemd, never
 	// replaces the recorded User shell PATH, even with no watch or plugin marker.
-	userCommandEntry.Store(false)
+	t.Setenv("HERDR_PANE_ID", "")
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		t.Skip("stdin is a terminal, so this process is a User command entry")
+	}
 	for _, name := range []string{"gh", "glab"} {
 		if got := version(name); got != "2.97.0" {
 			t.Fatalf("service-started %s resolved to version %s, want the User shell's 2.97.0", name, got)
 		}
 	}
-	MarkUserCommandEntry()
+	t.Setenv("HERDR_PANE_ID", "w1-p1")
 
 	// A User command always runs the binary its own shell resolves.
 	if got := version("gh"); got != "2.46.0" {

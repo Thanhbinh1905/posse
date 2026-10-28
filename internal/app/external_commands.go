@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
@@ -115,15 +115,15 @@ const userShellPathFile = "user-shell-path"
 var userShellPathMu sync.Mutex
 var recordedUserShellPath string
 
-var userCommandEntry atomic.Bool
-
-// MarkUserCommandEntry declares that this process runs a posse subcommand for
-// the User. Only such a process records the User shell PATH; one started by
-// cron, systemd or another service never calls it.
-func MarkUserCommandEntry() { userCommandEntry.Store(true) }
-
+// isUserCommandEntry reports whether this process can be shown to run from the
+// User's shell: it has a terminal on stdin, or runs in a Herdr pane such as a
+// Lead or Worker agent's, and carries no watch or plugin marker. A process
+// started by cron, systemd or another service has neither.
 func isUserCommandEntry() bool {
-	return userCommandEntry.Load() && os.Getenv(watchRuntimeTokenEnv) == "" && os.Getenv("HERDR_PLUGIN_ID") == ""
+	if os.Getenv(watchRuntimeTokenEnv) != "" || os.Getenv("HERDR_PLUGIN_ID") != "" {
+		return false
+	}
+	return isatty.IsTerminal(os.Stdin.Fd()) || os.Getenv("HERDR_PANE_ID") != ""
 }
 
 // externalCommandPath resolves gh and glab the same way in every posse
