@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -173,5 +175,57 @@ func TestWatchFailureAfterAdmissionRecordsNoReconcileBlock(t *testing.T) {
 	runOneWatchPass(t, fixture, db)
 	if block, err := db.ReconcileBlock(ctx, fixture.project.ID); err != nil || block.Since != 0 {
 		t.Fatalf("a failure after admission recorded block=%+v err=%v", block, err)
+	}
+}
+
+// A refill that admits one queued Task and then fails to start the next did
+// let the queue move, so the watch must not report admission as blocked.
+func TestWatchRefillFailingAfterFirstAdmissionRecordsNoReconcileBlock(t *testing.T) {
+	fixture := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 2\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var active []int64
+	for seq := 1; seq <= 2; seq++ {
+		id, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: seq, Type: "change", Title: "Busy", ShortName: "busy", State: store.StateSpawning})
+		if err != nil {
+			t.Fatal(err)
+		}
+		active = append(active, id)
+	}
+	for _, name := range []string{"first-queued", "second-queued"} {
+		output := &bytes.Buffer{}
+		cli := fixture.service.CLI()
+		cli.Out, cli.ErrOut = output, output
+		if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", name, "--queue"}); code != 0 {
+			t.Fatalf("queue %s exit=%d output=%s", name, code, output.String())
+		}
+	}
+	for _, id := range active {
+		if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", "fixture Worker finished"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.fake.ErrorQueue["tab.create"] = []error{nil, &herdr.Error{Code: "internal_error", Message: "tab rejected"}}
+
+	project, err := db.ProjectByID(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, blocked, err := fixture.service.prepareProjectWatchObservation(ctx, db, project)
+	if err == nil {
+		t.Fatal("the failed second start was not reported")
+	}
+	if first, taskErr := db.Task(ctx, fixture.project.ID, "t3"); taskErr != nil || first.State == store.StateQueued {
+		t.Fatalf("first queued Task was not admitted: task=%+v err=%v", first, taskErr)
+	}
+	if blocked != nil {
+		t.Fatalf("a refill that admitted t3 reported a reconcile block: %v", blocked)
 	}
 }

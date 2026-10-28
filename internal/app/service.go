@@ -565,7 +565,8 @@ type projectPreparationOptions struct {
 	allowRunningLeadNetworkRecovery bool
 	deliverMessages                 bool
 	watchObservation                bool
-	// admitted is set once the watch pass has admitted queued Tasks.
+	// admitted is set once the watch pass finished its queue refill or moved a
+	// queued Task out of the queue.
 	admitted *bool
 }
 
@@ -712,11 +713,12 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 							return cfg, err
 						}
 					}
-					if err := s.refillQueuedTasks(ctx, db, project, cfg); err != nil {
-						return cfg, err
-					}
+					count, err := s.refillQueuedTasks(ctx, db, project, cfg)
 					if options.admitted != nil {
-						*options.admitted = true
+						*options.admitted = err == nil || count > 0
+					}
+					if err != nil {
+						return cfg, err
 					}
 				} else if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
 					return cfg, err
