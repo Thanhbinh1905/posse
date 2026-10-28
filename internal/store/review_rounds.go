@@ -72,15 +72,20 @@ func (db *DB) ReviewRoundsFor(ctx context.Context, changeTaskID int64) ([]Review
 	return rounds, rows.Err()
 }
 
+// ReviewTargetsCovered reports whether every target has a verdict, a proved
+// carry, or an exact-head User disposition, so no further Review Round is due.
 func (db *DB) ReviewTargetsCovered(ctx context.Context, changeTaskID int64, targets []ReviewTarget) (bool, error) {
 	for _, target := range targets {
 		var covered bool
 		if err := db.QueryRowContext(ctx, `SELECT EXISTS(
 SELECT 1 FROM review_rounds WHERE ship_task_id=? AND repository=? AND status='verdict' AND head_sha=?
 UNION ALL
-SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?)`,
+SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
+UNION ALL
+SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`,
 			changeTaskID, target.Repository, target.Commit,
-			changeTaskID, target.Repository, target.Commit).Scan(&covered); err != nil || !covered {
+			changeTaskID, target.Repository, target.Commit,
+			changeTaskID, target.Commit).Scan(&covered); err != nil || !covered {
 			return false, err
 		}
 	}
