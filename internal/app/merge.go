@@ -542,7 +542,8 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		}
 		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released Sandboxes"}}}, result))
 	}
-	if !inPlace && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
+	reviewEnded := task.Type == "review" && (task.State == store.StateFailed || task.State == store.StateLost)
+	if !inPlace && !reviewEnded && store.IsApprovedDiscardSourceState(task.State) && task.State != store.StateReported && task.State != store.StateMerged {
 		work := "a live Worker needs a User-approved cancellation"
 		if task.State == store.StateDone {
 			var err error
@@ -553,7 +554,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if work != "" {
 			return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, work, "Pass `--discard --user-approved \"<User's words>\"`")
 		}
-	} else if !inPlace && task.State != store.StateMerged && task.State != store.StateReported {
+	} else if !inPlace && !reviewEnded && task.State != store.StateMerged && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
 	cfg, err := s.prepareProject(ctx.Context, db, project)
@@ -1165,6 +1166,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		}
 		if inPlace && strings.TrimSpace(quote) != "" && (task.State == store.StateFailed || task.State == store.StateLost) {
 			return db.TransitionInPlacePreserved(ctx, task, task.State, "in-place source preserved after User chose to stop recovery", quote)
+		}
+		if task.Type == "review" && (task.State == store.StateFailed || task.State == store.StateLost) {
+			return db.TransitionEndedReview(ctx, task.ID, task.State, "Review Task Sandbox released after it ended")
 		}
 		if !inPlace && task.State == store.StateDone {
 			work, workErr := s.unmergedWork(ctx, db, project, task)

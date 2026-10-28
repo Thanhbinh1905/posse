@@ -626,6 +626,33 @@ func (db *DB) TransitionWithoutUnmergedWork(ctx context.Context, taskID int64, e
 	return db.PersistTask(ctx, taskID)
 }
 
+// TransitionEndedReview releases a failed or lost Review Task. It holds no
+// branch work, so the move needs no User approval.
+func (db *DB) TransitionEndedReview(ctx context.Context, taskID int64, expected State, note string) error {
+	if expected != StateFailed && expected != StateLost {
+		return ErrInvalidApprovedDiscardTransition
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var taskType string
+	if err := tx.QueryRowContext(ctx, `SELECT type FROM tasks WHERE id=?`, taskID).Scan(&taskType); err != nil {
+		return err
+	}
+	if taskType != "review" {
+		return ErrInvalidApprovedDiscardTransition
+	}
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, StateTornDown, "cli", note); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
 	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
