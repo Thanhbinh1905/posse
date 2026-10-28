@@ -271,18 +271,13 @@ func causeNamesChangedLine(cause, repository string, changed changedLineSet, wor
 	return changed[repository+"\x00"+clean][line], nil
 }
 
-func classifyReviewFindingScope(round int, origin, repository, file string, anchors []anchoredFindingExcerpt, cause string, changed changedLineSet, workspace bool) (bool, error) {
-	inScope := round == 1 && origin == "introduced"
-	for _, anchor := range anchors {
-		for line := anchor.Start; line <= anchor.End; line++ {
-			if changed[repository+"\x00"+file][line] {
-				inScope = true
-				break
-			}
-		}
-		if inScope {
-			break
-		}
+// classifyReviewFindingScope keeps later rounds to the delta, except that an
+// introduced finding at blocking severity on a line the Change adds always
+// counts: an earlier round's pass must not let a real blocker through.
+func classifyReviewFindingScope(round int, origin string, blocking bool, repository, file string, anchors []anchoredFindingExcerpt, cause string, changed, added changedLineSet, workspace bool) (bool, error) {
+	inScope := (round == 1 && origin == "introduced") || anchorsOverlap(anchors, changed[repository+"\x00"+file])
+	if !inScope && origin == "introduced" && blocking {
+		inScope = anchorsOverlap(anchors, added[repository+"\x00"+file])
 	}
 	causeScope, err := causeNamesChangedLine(cause, repository, changed, workspace)
 	if err != nil {
@@ -291,7 +286,23 @@ func classifyReviewFindingScope(round int, origin, repository, file string, anch
 	return inScope || causeScope, nil
 }
 
-func readReviewDeltaInput(task store.Task) ([]byte, error) {
+func anchorsOverlap(anchors []anchoredFindingExcerpt, lines map[int]bool) bool {
+	for _, anchor := range anchors {
+		for line := anchor.Start; line <= anchor.End; line++ {
+			if lines[line] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func blocksAt(severity, blockAt string) bool {
+	rank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+	return severity == "unclassified" || rank[severity] <= rank[blockAt]
+}
+
+func readReviewRoundInput(task store.Task, source string) ([]byte, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return nil, err
@@ -300,11 +311,11 @@ func readReviewDeltaInput(task store.Task) ([]byte, error) {
 		return nil, fmt.Errorf("review task has no admitted plan")
 	}
 	for _, input := range plan.Inputs {
-		if input.Role == "review-round-file" && input.Source == "review/delta.patch" {
+		if input.Role == "review-round-file" && input.Source == source {
 			return append([]byte(nil), input.Bytes...), nil
 		}
 	}
-	return nil, fmt.Errorf("review task has no frozen review/delta.patch")
+	return nil, fmt.Errorf("review task has no frozen %s", source)
 }
 
 func buildReviewFindingsInput(ctx context.Context, db *store.DB, project store.Project, review store.Task, contents []byte, rounds []store.ReviewRound, blockAt string) (*store.ReviewFindingsInput, error) {
@@ -312,7 +323,11 @@ func buildReviewFindingsInput(ctx context.Context, db *store.DB, project store.P
 	if err != nil {
 		return nil, axi.Failure("review_findings_invalid", err.Error(), false)
 	}
-	delta, err := readReviewDeltaInput(review)
+	delta, err := readReviewRoundInput(review, "review/delta.patch")
+	if err != nil {
+		return nil, axi.Failure("review_findings_invalid", err.Error(), false)
+	}
+	cumulative, err := readReviewRoundInput(review, "review/cumulative.patch")
 	if err != nil {
 		return nil, axi.Failure("review_findings_invalid", err.Error(), false)
 	}
@@ -342,6 +357,7 @@ func buildReviewFindingsInput(ctx context.Context, db *store.DB, project store.P
 		return nil, axi.Failure("review_findings_invalid", err.Error(), false)
 	}
 	changedLines := changedLinesFromPatch(delta, repositories, project.IsWorkspace())
+	addedLines := changedLinesFromPatch(cumulative, repositories, project.IsWorkspace())
 	result := &store.ReviewFindingsInput{BlockAt: blockAt}
 	for _, pattern := range *file.Patterns {
 		converted := store.ReviewFindingPatternInput{
@@ -374,7 +390,7 @@ func buildReviewFindingsInput(ctx context.Context, db *store.DB, project store.P
 			if finding.Cause != nil {
 				cause = strings.TrimSpace(*finding.Cause)
 			}
-			inScope, scopeErr := classifyReviewFindingScope(binding.Round, pattern.Origin, finding.Repository, clean, anchors, cause, changedLines, project.IsWorkspace())
+			inScope, scopeErr := classifyReviewFindingScope(binding.Round, pattern.Origin, blocksAt(pattern.Severity, blockAt), finding.Repository, clean, anchors, cause, changedLines, addedLines, project.IsWorkspace())
 			if scopeErr != nil {
 				return nil, axi.Failure("review_findings_invalid", scopeErr.Error(), false)
 			}

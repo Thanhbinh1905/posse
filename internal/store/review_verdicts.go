@@ -225,7 +225,11 @@ func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID in
 			return err
 		}
 		if input.Verdict != ReviewInconclusive && input.Verdict != result.DerivedVerdict {
-			return fmt.Errorf("%w: Reviewer supplied %s, but the Finding Ledger derives %s", ErrReviewVerdictInconsistent, input.Verdict, result.DerivedVerdict)
+			message := fmt.Sprintf("Reviewer supplied %s, but the Finding Ledger derives %s", input.Verdict, result.DerivedVerdict)
+			if len(result.Reclassified) > 0 {
+				message += "; " + reclassifiedFindingsText(result.Reclassified)
+			}
+			return fmt.Errorf("%w: %s", ErrReviewVerdictInconsistent, message)
 		}
 		updated, err := tx.ExecContext(ctx, `UPDATE review_rounds SET status='verdict',verdict=? WHERE review_task_id=? AND status='admitted'`, input.Verdict, taskID)
 		if err != nil {

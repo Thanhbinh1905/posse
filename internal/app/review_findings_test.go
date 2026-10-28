@@ -56,17 +56,27 @@ func TestFindingAnchorsNormalizeWhitespaceAndScopeChangedLines(t *testing.T) {
 		t.Fatal("unparseable cause accepted")
 	}
 	unchangedAnchor := []anchoredFindingExcerpt{{Start: 1, End: 1}}
-	if inScope, err := classifyReviewFindingScope(1, "introduced", "shop", "README.md", unchangedAnchor, "", changed, false); err != nil || !inScope {
+	if inScope, err := classifyReviewFindingScope(1, "introduced", true, "shop", "README.md", unchangedAnchor, "", changed, nil, false); err != nil || !inScope {
 		t.Fatalf("round-one introduced finding scope = %v, %v", inScope, err)
 	}
-	if inScope, err := classifyReviewFindingScope(1, "pre_existing", "shop", "README.md", unchangedAnchor, "", changed, false); err != nil || inScope {
+	if inScope, err := classifyReviewFindingScope(1, "pre_existing", true, "shop", "README.md", unchangedAnchor, "", changed, nil, false); err != nil || inScope {
 		t.Fatalf("round-one pre-existing finding scope = %v, %v", inScope, err)
 	}
-	if inScope, err := classifyReviewFindingScope(2, "introduced", "shop", "README.md", unchangedAnchor, "", changed, false); err != nil || inScope {
+	if inScope, err := classifyReviewFindingScope(2, "introduced", true, "shop", "README.md", unchangedAnchor, "", changed, nil, false); err != nil || inScope {
 		t.Fatalf("later-round unchanged finding scope = %v, %v", inScope, err)
 	}
-	if inScope, err := classifyReviewFindingScope(2, "introduced", "shop", "README.md", unchangedAnchor, "internal/x.go:3", changed, false); err != nil || !inScope {
+	if inScope, err := classifyReviewFindingScope(2, "introduced", true, "shop", "README.md", unchangedAnchor, "internal/x.go:3", changed, nil, false); err != nil || !inScope {
 		t.Fatalf("later-round cause scope = %v, %v", inScope, err)
+	}
+	added := changedLineSet{"shop\x00README.md": {1: true}}
+	if inScope, err := classifyReviewFindingScope(2, "introduced", true, "shop", "README.md", unchangedAnchor, "", changed, added, false); err != nil || !inScope {
+		t.Fatalf("later-round blocking finding on a Change-added line scope = %v, %v", inScope, err)
+	}
+	if inScope, err := classifyReviewFindingScope(2, "introduced", false, "shop", "README.md", unchangedAnchor, "", changed, added, false); err != nil || inScope {
+		t.Fatalf("later-round non-blocking finding outside the delta scope = %v, %v", inScope, err)
+	}
+	if inScope, err := classifyReviewFindingScope(2, "pre_existing", true, "shop", "README.md", unchangedAnchor, "", changed, added, false); err != nil || inScope {
+		t.Fatalf("later-round pre-existing finding outside the delta scope = %v, %v", inScope, err)
 	}
 	workspacePatch := []byte("diff --git a/member-a/internal/x.go b/member-a/internal/x.go\n--- a/member-a/internal/x.go\n+++ b/member-a/internal/x.go\n@@ -1 +1 @@\n-old\n+new\n")
 	workspaceChanges := changedLinesFromPatch(workspacePatch, []string{"member-a", "member-b"}, true)
