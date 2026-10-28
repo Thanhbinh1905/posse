@@ -472,6 +472,16 @@ func (db *DB) Decisions(ctx context.Context, projectID int64, pendingOnly bool) 
 	if err := db.ObsoleteResolvedDecisions(ctx, projectID); err != nil {
 		return nil, err
 	}
+	return db.readDecisions(ctx, projectID, pendingOnly)
+}
+
+// PendingDecisions reads unanswered Decisions without obsoleting resolved
+// ones first, so it also works on a read-only connection.
+func (db *DB) PendingDecisions(ctx context.Context, projectID int64) ([]Decision, error) {
+	return db.readDecisions(ctx, projectID, true)
+}
+
+func (db *DB) readDecisions(ctx context.Context, projectID int64, pendingOnly bool) ([]Decision, error) {
 	query := decisionSelect + ` WHERE project_id=?`
 	if pendingOnly {
 		query += ` AND answered_at=0 AND obsolete_at=0`
