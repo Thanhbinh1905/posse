@@ -122,11 +122,12 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if brief.ReportKind != "" {
 		result = append(result, axi.Field{Key: "report_kind", Value: brief.ReportKind})
 	}
+	warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body)
 	if len(issueReferences(brief))+len(brief.Refs) > 0 {
-		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
-		if len(warnings) > 0 {
-			result = append(result, axi.Field{Key: "warnings", Value: warnings})
-		}
+		warnings = append(warnings, s.checkBriefIssues(ctx.Context, cfg, brief, targets)...)
+	}
+	if len(warnings) > 0 {
+		result = append(result, axi.Field{Key: "warnings", Value: warnings})
 	}
 	return ctx.Print(result)
 }
@@ -533,7 +534,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if len(unmetDependencies) > 0 {
 			waitReason = "Waiting for " + strings.Join(unmetDependencies, ", ")
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}})
+		result := axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}}
+		if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
+			result = append(result, axi.Field{Key: "warnings", Value: warnings})
+		}
+		return ctx.Print(result)
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
@@ -777,6 +782,9 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	}
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
+	}
+	if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
+		result = append(result, axi.Field{Key: "warnings", Value: warnings})
 	}
 	if report {
 		return ctx.Print(result)
@@ -1210,6 +1218,9 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 			}
 			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
 		}
+	}
+	if task.Type == "change" {
+		work += "\n\nScope: this Task's changes hold only what Done when needs, and every hunk traces to a Done when item. Put any bug, cleanup or refactor you notice outside that scope in a `friction:` note or a proposed follow-up issue; never fix it on this branch. Before every publish or `done` Signal, read `git diff <base>...HEAD` and revert any hunk that serves no Done when item, including debug prints, whitespace and docstring churn. Review records such a hunk as a P1 finding."
 	}
 	if task.Type == "change" && !project.IsWorkspace() {
 		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
@@ -2005,6 +2016,15 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		if err := s.regenerateProjects(ctx.Context, db); err != nil {
 			return err
 		}
+		if completedChangeTask(task) {
+			snapshot, err := s.snapshot(ctx.Context)
+			if err != nil {
+				return err
+			}
+			if _, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); !found {
+				return ctx.Print(workerPaneMissingQueued(task, messageID))
+			}
+		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "waiting_for_idle"}, {Key: "help", Value: []any{"The instruction will be delivered after the current Worker turn; run `posse show " + taskIDString(task.Seq) + "` to inspect its queue age"}}})
 	}
 	delivered := false
@@ -2124,6 +2144,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if delivered {
 		state = "delivered"
 	} else {
+		if !paneFound && reason == "agent_not_ready" && completedChangeTask(task) {
+			return ctx.Print(workerPaneMissingQueued(task, messageID))
+		}
 		help := "The message will be delivered when the Worker is ready"
 		if reason == "delivery_in_progress" {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"
@@ -2139,6 +2162,18 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return ctx.Print(result)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}}})
+}
+
+// completedChangeTask reports a Change Task whose Worker finished but still
+// accepts follow-ups. Recovery does not restart its Worker, so a lost pane
+// needs `posse relaunch`.
+func completedChangeTask(task store.Task) bool {
+	return task.Type == "change" && (task.State == store.StateDone || task.State == store.StateMerging)
+}
+
+func workerPaneMissingQueued(task store.Task, messageID int64) axi.Object {
+	id := taskIDString(task.Seq)
+	return axi.Object{{Key: "task", Value: id}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "worker_pane_missing"}, {Key: "help", Value: []any{"The " + string(task.State) + " Task has no live Worker pane; run `posse relaunch " + id + "` to bring its Worker back, then the message is delivered"}}}
 }
 
 // submittingMessageReason reports a message another dispatcher, such as the
@@ -2552,7 +2587,12 @@ func (s *Service) relaunch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "working"}, {Key: "worker", Value: result.Worker}, {Key: "pane", Value: result.Pane}, {Key: "sandbox", Value: task.WorktreePath}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect the relaunched Worker"}}})
+	// A completed Change Task keeps its state until its Worker signals again.
+	state := "working"
+	if completedChangeTask(task) {
+		state = string(task.State)
+	}
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: state}, {Key: "worker", Value: result.Worker}, {Key: "pane", Value: result.Pane}, {Key: "sandbox", Value: task.WorktreePath}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect the relaunched Worker"}}})
 }
 
 type relaunchResult struct {
@@ -2570,12 +2610,11 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 
 func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
-	if !recoverableTaskState(task.State) {
-		var help []string
-		if task.State == store.StateDone && task.Type == "change" {
-			help = append(help, "Send a follow-up with `posse send "+taskIDString(task.Seq)+" <message>`")
-		}
-		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false, help...))
+	// A completed Change Task keeps its state, so only an explicit relaunch
+	// brings its Worker back for follow-ups.
+	completed := completedChangeTask(task) && !automatic
+	if !recoverableTaskState(task.State) && !completed {
+		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false))
 	}
 	if task.Profile == "" {
 		return failure(axi.Failure("config_invalid", "Task has no Profile", false))
@@ -2848,11 +2887,14 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 	}
 	relaunchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "relaunch.md")
+	if err := track("messages.undeliverable", func() error { return db.DeliverUndeliverableMessages(ctx, task.ID) }); err != nil {
+		return failure(err)
+	}
 	messages, err := db.TaskMessagesAfter(ctx, task.ID, task.CreatedAt, maxRelaunchMessages+1)
 	if err != nil {
 		return failure(err)
 	}
-	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructions(gitStateReport, messages)) }); err != nil {
+	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructionsFor(task, gitStateReport, messages)) }); err != nil {
 		return failure(err)
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
@@ -2917,7 +2959,7 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			observation.AgentStatus, observation.AgentStatusSince = "", 0
 			return db.UpdateTaskObservation(ctx, taskID, observation)
 		}
-		if current.State == store.StateWorking {
+		if current.State == store.StateWorking || !automatic && completedChangeTask(current) {
 			return track("task.progress", progress)
 		}
 		if automatic && current.State == store.StateFailed || !recoverableTaskState(current.State) {
@@ -2942,12 +2984,22 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 	}
 }
 
+func relaunchInstructionsFor(task store.Task, gitStateReport string, messages []store.Message) []byte {
+	if completedChangeTask(task) {
+		return relaunchText("Your Worker was restarted after this Task reached state "+string(task.State)+". Re-read `launch.md` and inspect `git status` and `git log`, but do not change the work on your own. Wait for Lead instructions; they arrive as Posse envelopes.\n", gitStateReport, messages)
+	}
+	return relaunchInstructions(gitStateReport, messages)
+}
+
 func relaunchInstructions(gitStateReport string, messageSets ...[]store.Message) []byte {
 	var messages []store.Message
 	if len(messageSets) > 0 {
 		messages = messageSets[0]
 	}
-	text := "You were interrupted. Re-read `launch.md`, inspect `git status` and `git log`, continue the Task, and report with `posse signal`.\n"
+	return relaunchText("You were interrupted. Re-read `launch.md`, inspect `git status` and `git log`, continue the Task, and report with `posse signal`.\n", gitStateReport, messages)
+}
+
+func relaunchText(text, gitStateReport string, messages []store.Message) []byte {
 	if gitStateReport != "" {
 		text += "\n" + gitStateReport + "\n"
 	}

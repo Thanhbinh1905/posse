@@ -895,7 +895,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["undelivered_messages"] = rows
 		switch task.State {
 		case store.StateFailed, store.StateLost:
-			help = append(help, "Relaunch with `posse relaunch "+commandName+"`, then resend each undeliverable instruction with `posse send "+commandName+" <message>`")
+			help = append(help, "Relaunch with `posse relaunch "+commandName+"`; the relaunched Worker receives each undeliverable instruction in its relaunch prompt")
 		case store.StateReported, store.StateMerged, store.StateTornDown:
 			help = append(help, "Create a new Change Task, then resend each undeliverable instruction with `posse send <task> <message>`")
 		default:

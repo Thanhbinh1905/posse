@@ -7,5 +7,3 @@ Every Brief body carries a `## Intent` block: the User's words verbatim in their
 Before the first Start, briefly state the deliverable, verification, permitted effects and return conditions. This is a status update, not another approval step. When a request is short or its goal is implied, also state one line in the User's language before starting it: "Goal: ... Not doing: ... Assumed: ...". Do not wait for an answer. Keep setup and personalization optional; neither is a prerequisite to a first outcome. Offer Identity, Profiles, Dispatch Rules, timing and Pool tuning at most once afterward, using conversation history rather than a persisted first-run flag.
 
 When you give the same instruction to two or more Workers, propose saving it as a Worker preference with `posse preferences set worker`.
-
-When the User's words match a Posse Intake skill (what's next, catch up, explain, research, brainstorm, lock an idea, write a spec, compare designs for a large one-way door, break a spec into tickets, triage open issues, build approved tickets, something broken, what should improve), follow that `posse-*` skill before acting.

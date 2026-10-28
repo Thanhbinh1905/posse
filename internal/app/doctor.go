@@ -13,7 +13,9 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -137,6 +139,11 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		addCheck("config", "ok", detail, "")
 		addCheck(recommendedSkillsCheck(home))
 	}
+	if dirs, err := setupDirectories(); err != nil {
+		addCheck("global skill shadowing", "warn", err.Error(), "Check HOME")
+	} else {
+		addCheck(globalSkillShadowCheck(dirs))
+	}
 	db, _, dbErr := s.openDB()
 	if dbErr != nil {
 		addCheck("database", "fail", dbErr.Error(), "Inspect the Posse database and its permissions")
@@ -197,6 +204,8 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 				} else {
 					addCheck("execution resources "+project.Name, "ok", detail, "")
 				}
+				status, detail, action := s.reviewDispatchCheck(ctx.Context, project, projectCfg)
+				addCheck("review dispatch "+project.Name, status, detail, action)
 				forge, _, err := resolveForgeForRepositoryFresh(ctx.Context, project.Root, projectCfg, "")
 				if err != nil {
 					action := "Set defaults.forge for this Project"
@@ -498,4 +507,48 @@ func recommendedSkillsCheck(home string) (name, status, detail, action string) {
 	}
 	status, _ = row["status"].(string)
 	return name, "ok", status, ""
+}
+
+// reviewDispatchCheck reports whether the Project's Dispatch Rules resolve a
+// usable reviewer Profile, directly or through each `--profile` candidate.
+func (s *Service) reviewDispatchCheck(ctx context.Context, project store.Project, cfg config.Config) (status, detail, action string) {
+	const fix = "Fix the review Dispatch Rules or dispatch.default.use, then rerun `posse doctor`"
+	resolution, err := s.resolveDispatch(ctx, project, cfg, "review", "")
+	if err == nil {
+		return "ok", "review Tasks use " + resolution.Profile + " (" + resolution.Rule + ")", ""
+	}
+	var profileErr *dispatch.ProfileError
+	if !errors.As(err, &profileErr) || profileErr.Code != "profile_required" || len(profileErr.Candidates) == 0 {
+		return "warn", "review Tasks cannot resolve a Profile: " + err.Error(), fix
+	}
+	var candidates, unusable []string
+	for _, candidate := range profileErr.Candidates {
+		candidates = append(candidates, candidate.Profile)
+		if _, err := s.resolveDispatch(ctx, project, cfg, "review", candidate.Profile); err != nil {
+			unusable = append(unusable, err.Error())
+		}
+	}
+	if len(unusable) > 0 {
+		return "warn", "review Dispatch Rule candidates cannot start: " + strings.Join(unusable, "; "), fix
+	}
+	return "ok", "review start chooses among " + strings.Join(candidates, ", "), ""
+}
+
+// globalSkillShadowCheck finds bundled skills installed in the global agent
+// skill directories, which load beside every role snapshot and can shadow it.
+func globalSkillShadowCheck(dirs setupDirs) (name, status, detail, action string) {
+	name = "global skill shadowing"
+	var found []string
+	for _, root := range []string{dirs.agents, filepath.Join(dirs.claude, "skills")} {
+		for _, name := range setupassets.SkillNames() {
+			path := filepath.Join(root, name)
+			if _, err := os.Stat(filepath.Join(path, "SKILL.md")); err == nil {
+				found = append(found, path)
+			}
+		}
+	}
+	if len(found) == 0 {
+		return name, "ok", "no global posse-* skills shadow the role snapshots", ""
+	}
+	return name, "warn", "global posse-* skills load beside every role snapshot and can shadow it: " + strings.Join(found, ", "), "Run `posse setup --remove-global-skills`, then delete the remaining copies; list skills a role needs under [skills]"
 }

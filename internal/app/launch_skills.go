@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -73,6 +74,33 @@ func roleSkillInputs(cfg config.Config, role string) ([]taskplan.Input, error) {
 		}
 	}
 	return inputs, nil
+}
+
+var briefSkillName = regexp.MustCompile(`posse-[a-z0-9-]*[a-z0-9]`)
+
+// briefSkillWarnings names each bundled skill the Brief text cites that the
+// role's skill snapshot will not hold.
+func briefSkillWarnings(cfg config.Config, role, text string) []any {
+	configured, err := cfg.RoleSkills(role)
+	if err != nil {
+		return nil
+	}
+	loaded := map[string]bool{}
+	for _, name := range setupassets.PlatformSkillNames() {
+		loaded[name] = true
+	}
+	for _, source := range configured {
+		loaded[source.Name] = true
+	}
+	var warnings []any
+	for _, name := range briefSkillName.FindAllString(text, -1) {
+		if !setupassets.IsSkill(name) || loaded[name] {
+			continue
+		}
+		loaded[name] = true
+		warnings = append(warnings, fmt.Sprintf("Brief names skill %s, which the %s role does not load; add it to [skills].%s or drop the reference", name, role, role))
+	}
+	return warnings
 }
 
 func freezePosseLaunchSkillInputs(home, project, projectRoot string, selected []taskplan.Input) (posseLaunchSkills, error) {
