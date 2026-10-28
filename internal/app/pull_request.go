@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1354,6 +1355,12 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	for _, observed := range observations {
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
+		// merge_ready tells the Lead to merge, so it waits for the review
+		// gate `posse merge` applies to the same head.
+		mergeReady := func(notice store.Notice) bool { return notice.Kind == "merge_ready" }
+		if slices.ContainsFunc(effect.Notices, mergeReady) && requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA) != nil {
+			effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
+		}
 		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
 			if notice, violated := reviewPolicyViolation(ctx, db, project, cfg, observed.task, observed.current); violated {
 				effect.Notices = append(effect.Notices, notice)
