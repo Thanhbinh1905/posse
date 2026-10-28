@@ -1708,7 +1708,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return err
 		}
 		if pending {
-			return queuedInstructionsPendingFailure(task)
+			return queuedInstructionsPendingFailure(ctx.Context, db, task, time.Now())
 		}
 	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
@@ -1798,7 +1798,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return axi.Failure("review_resolutions_invalid", err.Error(), false)
 		}
 		if errors.Is(err, store.ErrQueuedInstructionsPending) {
-			return queuedInstructionsPendingFailure(task)
+			return queuedInstructionsPendingFailure(ctx.Context, db, task, time.Now())
 		}
 		if errors.Is(err, store.ErrStaleWorkerTurn) {
 			return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Use the --turn token from the current launch file, latest instruction envelope or successful working Signal")
@@ -1857,13 +1857,19 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	return ctx.Print(signalResult)
 }
 
-func queuedInstructionsPendingFailure(task store.Task) error {
+func queuedInstructionsPendingFailure(ctx context.Context, db *store.DB, task store.Task, now time.Time) error {
 	taskID := taskIDString(task.Seq)
+	message := fmt.Sprintf("Task %s has queued instructions that have not been delivered; the done Signal was not recorded", taskID)
+	if blocking, err := db.PendingTaskInstructions(ctx, task.ID); err == nil {
+		for _, instruction := range blocking {
+			message += fmt.Sprintf("\n  message %d, %s old: %s", instruction.ID, compactAge(now.Sub(time.UnixMilli(instruction.CreatedAt))), firstLine(instruction.Body))
+		}
+	}
 	return axi.Failure(
 		"queued_instructions_pending",
-		fmt.Sprintf("Task %s has queued instructions that have not been delivered; the done Signal was not recorded", taskID),
+		message,
 		false,
-		"Let this turn end so Posse can deliver the queued instructions; apply them, then retry `posse signal done`",
+		"Let this turn end so Posse can deliver the queued instructions; they arrive after this turn ends. Apply them, then retry `posse signal done`",
 	)
 }
 
