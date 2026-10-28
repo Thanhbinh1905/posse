@@ -313,15 +313,26 @@ func TestFullJSONHomeCarriesBoardFields(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := fixture.db.AddSignal(ctx, fixture.task.ID, "working", "rebased on main", nil); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	code, output, errOutput := fixture.run("--json", "--full")
 	if code != 0 {
 		t.Fatalf("home exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	var home struct {
+		Pool  map[string]any   `json:"pool"`
 		Tasks []map[string]any `json:"tasks"`
 	}
 	if err := json.Unmarshal([]byte(output), &home); err != nil {
 		t.Fatalf("decode home: %v: %s", err, output)
+	}
+	if home.Pool["used"] != float64(3) || home.Pool["max"] != float64(cfg.Defaults.MaxWorkers) {
+		t.Errorf("pool = %#v, want t1 and its two Review Rounds of max_workers=%d", home.Pool, cfg.Defaults.MaxWorkers)
 	}
 	var row map[string]any
 	for _, task := range home.Tasks {
@@ -340,6 +351,8 @@ func TestFullJSONHomeCarriesBoardFields(t *testing.T) {
 		"review_round": float64(2),
 		"intent":       "User's words: \"one view\"",
 		"pr_state":     "OPEN",
+		"pr_url":       task.PRURL,
+		"last_signal":  "working: rebased on main",
 	}
 	for key, value := range want {
 		if row[key] != value {

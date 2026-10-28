@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>posse board</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f3f5fa;
+  --surface: #ffffff;
+  --surface-2: #e9eef7;
+  --cell: #edf1f8;
+  --line: #d6deec;
+  --text: #14203a;
+  --muted: #5a6a87;
+  --accent: #0f7f73;
+  --accent-soft: rgba(15, 127, 115, .12);
+  --accent-2: #4458c9;
+  --warn: #9a6200;
+  --warn-soft: rgba(196, 128, 0, .14);
+  --danger: #be3434;
+  --danger-soft: rgba(190, 52, 52, .12);
+  --shadow: 0 1px 2px rgba(20, 32, 58, .08);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1729;
+    --surface: #15223c;
+    --surface-2: #1b2b4a;
+    --cell: rgba(255, 255, 255, .03);
+    --line: rgba(255, 255, 255, .09);
+    --text: #eef3ff;
+    --muted: #9fb0cf;
+    --accent: #78e4d3;
+    --accent-soft: rgba(120, 228, 211, .14);
+    --accent-2: #94aafb;
+    --warn: #f3c46f;
+    --warn-soft: rgba(243, 196, 111, .14);
+    --danger: #f59393;
+    --danger-soft: rgba(245, 147, 147, .14);
+    --shadow: none;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+button { font: inherit; color: inherit; }
+a { color: var(--accent-2); }
+.mono { font-family: var(--mono); }
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; white-space: nowrap; }
+.brand svg { flex: none; }
+.brand .project { color: var(--muted); font-weight: 500; }
+.stats { display: flex; gap: 6px; min-width: 0; overflow: hidden; }
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.stat b { color: var(--text); font-weight: 600; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.dot.on { background: var(--accent); }
+.dot.off { background: var(--danger); }
+.stat.red b { color: var(--danger); }
+.spacer { flex: 1; }
+.filter {
+  width: 180px;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.helpkey { color: var(--muted); white-space: nowrap; }
+kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font: 11px/16px var(--mono);
+  text-align: center;
+  color: var(--text);
+}
+
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  min-height: 0;
+}
+.board {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+}
+.grid5 {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(140px, 1fr));
+  gap: 8px;
+  min-width: 760px;
+  padding: 0 14px;
+}
+.colheads { padding-top: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.colhead { display: flex; align-items: center; gap: 6px; font-weight: 650; white-space: nowrap; }
+.colhead .count {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.colhead.needs .count.some { background: var(--warn-soft); color: var(--warn); }
+.colhead .key { margin-left: auto; color: var(--muted); font-weight: 400; }
+.lanes { min-width: 760px; min-height: 0; overflow-y: auto; padding-bottom: 14px; }
+.lane { padding-top: 10px; }
+.lanehead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 14px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.lanehead b { color: var(--text); font-weight: 650; }
+.lanehead .title { overflow: hidden; text-overflow: ellipsis; }
+.progress {
+  flex: none;
+  width: 54px;
+  height: 4px;
+  align-self: center;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.progress i { display: block; height: 100%; background: var(--accent); }
+.cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--cell);
+}
+.cell.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+
+.card {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: left;
+  cursor: pointer;
+}
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow); }
+.card.pending { border-style: dashed; border-color: var(--accent-2); }
+.card .top { display: flex; gap: 6px; align-items: baseline; color: var(--muted); font-size: 11.5px; }
+.card .top .id { color: var(--text); font-family: var(--mono); font-weight: 600; }
+.card .top .age { margin-left: auto; }
+.card .name { margin-top: 2px; overflow-wrap: anywhere; }
+.badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.badge {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+.badge.ok { background: var(--accent-soft); color: var(--accent); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.bad { background: var(--danger-soft); color: var(--danger); }
+.badge.chip { border: 1px solid var(--line); background: transparent; }
+.badge.sent { background: transparent; color: var(--accent-2); }
+.wait { margin-top: 4px; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+
+.peek {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+}
+.peek h2 { margin: 4px 0 10px; font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+.peek .kicker { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+.peek .kicker .id { color: var(--text); font-family: var(--mono); font-weight: 600; }
+.peek h3 { margin: 14px 0 4px; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+.peek .quote {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.peek .body { max-height: 260px; overflow: hidden; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.peek dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.peek dt { color: var(--muted); }
+.peek dd { margin: 0; overflow-wrap: anywhere; }
+.peek .hint { margin-top: 14px; color: var(--muted); }
+.peek .note { margin-top: 10px; padding: 6px 8px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); }
+.empty { padding: 28px 14px; color: var(--muted); }
+
+.activity {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 12px;
+}
+.activity .label { color: var(--text); font-weight: 600; }
+.activity .items { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.activity .items .mine { color: var(--accent-2); }
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(8, 14, 28, .45);
+}
+.overlay[hidden] { display: none; }
+.dialog {
+  width: min(440px, 100%);
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
+}
+.dialog h2 { margin: 0 0 6px; font-size: 16px; }
+.dialog p { margin: 0 0 10px; color: var(--muted); overflow-wrap: anywhere; }
+.dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.dialog .btn { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); cursor: pointer; }
+.dialog .btn.primary { border-color: var(--accent); background: var(--accent); color: var(--bg); font-weight: 600; }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
+.keys dt { white-space: nowrap; }
+.keys dd { margin: 0; color: var(--muted); }
+
+@media (max-width: 1300px) {
+  main { grid-template-columns: minmax(0, 1fr) 280px; }
+}
+@media (max-width: 900px) {
+  main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 40%); }
+  .peek { border-left: 0; border-top: 1px solid var(--line); }
+  .brand span, .stats .wide, .helpkey { display: none; }
+  .filter { width: 90px; }
+}
+</style>
+</head>
+<body>
+<header class="strip">
+  <div class="brand">
+    <svg width="22" height="16" viewBox="0 0 132 110" aria-hidden="true"><path d="M38 55h37m0 0 26-34m-26 34 26 34" stroke="#78e4d3" stroke-width="9" fill="none" stroke-linecap="round"/><circle cx="20" cy="55" r="18" fill="#78e4d3"/><circle cx="110" cy="20" r="15" fill="#94aafb"/><circle cx="110" cy="90" r="15" fill="#94aafb"/></svg>
+    <span>posse board</span><span class="project" id="project"></span>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div class="spacer"></div>
+  <input class="filter" id="filter" type="search" placeholder="/ filter" aria-label="Filter cards" autocomplete="off">
+  <span class="helpkey"><kbd>?</kbd> keys</span>
+</header>
+<main>
+  <section class="board" aria-label="Board">
+    <div class="grid5 colheads" id="colheads"></div>
+    <div class="lanes" id="lanes"></div>
+  </section>
+  <aside class="peek" id="peek" aria-live="polite"></aside>
+</main>
+<footer class="activity"><span class="label">Activity</span><span class="items" id="activity"></span></footer>
+
+<div class="overlay" id="confirm" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-text"></p>
+    <p>The Lead writes a one-ticket Brief with <span class="mono">review: quick</span> and starts it without asking again.</p>
+    <div class="actions">
+      <button class="btn" id="confirm-cancel" type="button">Cancel <kbd>esc</kbd></button>
+      <button class="btn primary" id="confirm-ok" type="button">Start <kbd>enter</kbd></button>
+    </div>
+  </div>
+</div>
+<div class="overlay" id="help" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <h2 id="help-title">Keys</h2>
+    <dl class="keys">
+      <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>next and previous card</dd>
+      <dt><kbd>h</kbd> <kbd>l</kbd></dt><dd>previous and next column</dd>
+      <dt><kbd>s</kbd></dt><dd>start the selected Ready issue, after a confirmation</dd>
+      <dt><kbd>enter</kbd></dt><dd>open the PR, or the issue</dd>
+      <dt><kbd>/</kbd></dt><dd>filter cards; <kbd>esc</kbd> clears</dd>
+      <dt><kbd>g</kbd> <kbd>n</kbd></dt><dd>jump to Needs you</dd>
+      <dt><kbd>?</kbd></dt><dd>this help</dd>
+    </dl>
+    <p style="margin-top:12px">Dragging a Ready card onto Running also asks to start it.</p>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const COLUMNS = [
+    { key: "needs", title: "Needs you", jump: true },
+    { key: "ready", title: "Ready" },
+    { key: "running", title: "Running" },
+    { key: "pr", title: "PR waiting merge" },
+    { key: "merged", title: "Merged" },
+  ];
+  const REFRESH_MS = 3000;
+  const STALE_DAYS = 21;
+  const OFFLINE_LEAD = ["missing", "down", "unknown"];
+
+  const state = {
+    raw: "",
+    model: null,
+    selected: null,
+    filter: "",
+    pending: new Map(),
+    local: [],
+    awaitingG: false,
+    confirming: null,
+    dragging: null,
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  function h(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [name, value] of Object.entries(attrs || {})) {
+      if (value === undefined || value === null || value === false) continue;
+      if (name === "class") node.className = value;
+      else if (name.startsWith("on")) node.addEventListener(name.slice(2), value);
+      else node.setAttribute(name, value === true ? "" : value);
+    }
+    for (const child of children.flat()) {
+      if (child === undefined || child === null || child === false) continue;
+      node.append(child instanceof Node ? child : String(child));
+    }
+    return node;
+  }
+
+  function issueNumber(ref) {
+    const match = /#(\d+)$/.exec(ref || "");
+    return match ? Number(match[1]) : null;
+  }
+
+  function taskIssue(task) {
+    return issueNumber(task.ticket) ?? issueNumber((task.issues || [])[0]);
+  }
+
+  function taskNumber(id) {
+    return Number(String(id).replace(/^t/, "")) || 0;
+  }
+
+  function shortAge(iso, now) {
+    const at = Date.parse(iso || "");
+    if (!at) return "";
+    const minutes = Math.max(0, Math.floor((now - at) / 60000));
+    if (minutes < 60) return minutes + "m";
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return hours + "h";
+    return Math.floor(hours / 24) + "d";
+  }
+
+  function sameLocalDay(iso, now) {
+    const at = new Date(iso || "");
+    const today = new Date(now);
+    return !Number.isNaN(at.getTime()) && at.toDateString() === today.toDateString();
+  }
+
+  function parentSpec(issue) {
+    const match = /parent(?:\s+spec)?\s*:?\**\s*#(\d+)/i.exec(issue.body || "");
+    return match ? Number(match[1]) : null;
+  }
+
+  function blockedBy(issue) {
+    const line = /blocked by\s*:?\**\s*([^\n]*)/i.exec(issue.body || "");
+    if (!line) return [];
+    return [...line[1].matchAll(/#(\d+)/g)].map((match) => Number(match[1]));
+  }
+
+  function taskColumn(task) {
+    switch (task.state) {
+      case "failed": case "lost": case "needs-decision": case "blocked": case "stalled":
+        return "needs";
+      case "queued": case "spawning": case "working":
+        return "running";
+      case "done": case "merging":
+        return task.type === "change" ? "pr" : "merged";
+      case "merged": case "reported":
+        return "merged";
+      default:
+        return null;
+    }
+  }
+
+  function buildModel(posse, issues, now) {
+    const tasks = [...(posse.needs_you || []), ...(posse.tasks || [])].filter((task) => task.type !== "review");
+    const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
+    const parents = new Set(issues.map(parentSpec).filter(Boolean));
+    const isSpec = (issue) => parents.has(issue.number) || /^spec\b/i.test(issue.title || "");
+    const claimed = new Map();
+    for (const task of tasks) {
+      const number = taskIssue(task);
+      if (number) claimed.set(number, task);
+    }
+    const openTasks = new Set(tasks.filter((task) => taskColumn(task) !== "merged").map((task) => task.id));
+    const cards = [];
+    for (const task of tasks) {
+      const column = taskColumn(task);
+      if (!column) continue;
+      const number = taskIssue(task);
+      const issue = number ? byNumber.get(number) : null;
+      cards.push({
+        key: task.id,
+        kind: "task",
+        column,
+        number,
+        lane: issue ? parentSpec(issue) ?? (isSpec(issue) ? issue.number : null) : null,
+        task,
+        issue,
+        sort: taskNumber(task.id),
+        blockers: (task.after || []).map((entry) => entry.split(":")[0]).filter((id) => openTasks.has(id)),
+      });
+    }
+    for (const issue of issues) {
+      if (isSpec(issue) || claimed.has(issue.number)) continue;
+      const open = issue.state === "OPEN";
+      if (!open && !sameLocalDay(issue.closedAt, now)) continue;
+      cards.push({
+        key: "#" + issue.number,
+        kind: "issue",
+        column: open ? "ready" : "merged",
+        number: issue.number,
+        lane: parentSpec(issue),
+        issue,
+        sort: 100000 + issue.number,
+        stale: open && now - Date.parse(issue.createdAt || "") > STALE_DAYS * 86400000,
+        blockers: blockedBy(issue).filter((number) => byNumber.get(number)?.state === "OPEN").map((number) => "#" + number),
+      });
+    }
+
+    const laneIDs = [...new Set(cards.map((card) => card.lane))];
+    laneIDs.sort((a, b) => (a === null) - (b === null) || (b || 0) - (a || 0));
+    const lanes = laneIDs.map((id) => {
+      const tickets = issues.filter((issue) => parentSpec(issue) === id && id !== null);
+      const spec = id === null ? null : byNumber.get(id);
+      return {
+        id,
+        title: spec ? spec.title.replace(/^spec\s*:\s*/i, "") : "",
+        done: tickets.filter((issue) => issue.state !== "OPEN").length,
+        total: tickets.length,
+        cards: cards.filter((card) => card.lane === id).sort((a, b) => a.sort - b.sort),
+      };
+    });
+
+    return {
+      project: posse.project || {},
+      pool: posse.pool || {},
+      lanes,
+      cards,
+      notices: posse.notices || [],
+      mergedToday: cards.filter((card) => card.kind === "issue" && card.column === "merged").length,
+      redCI: tasks.filter((task) => task.ci === "failure").length,
+    };
+  }
+
+  function matches(card) {
+    if (!state.filter) return true;
+    const task = card.task || {};
+    const haystack = [card.key, card.number && "#" + card.number, task.name, task.title, task.profile, task.state, card.issue && card.issue.title]
+      .filter(Boolean).join(" ").toLowerCase();
+    return state.filter.toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
+  }
+
+  function visibleColumns() {
+    const columns = COLUMNS.map(() => []);
+    if (!state.model) return columns;
+    for (const lane of state.model.lanes) {
+      for (const card of lane.cards) {
+        if (!matches(card)) continue;
+        columns[COLUMNS.findIndex((column) => column.key === card.column)].push(card);
+      }
+    }
+    return columns;
+  }
+
+  function findCard(key) {
+    return state.model && state.model.cards.find((card) => card.key === key);
+  }
+
+  function cardBadges(card) {
+    const task = card.task;
+    const badges = [];
+    if (task) {
+      if (task.type !== "change") badges.push(h("span", { class: "badge" }, task.type));
+      if (task.state === "queued") badges.push(h("span", { class: "badge" }, "queued"));
+      else if (card.column === "needs") badges.push(h("span", { class: "badge warn" }, task.state));
+      if (task.profile) badges.push(h("span", { class: "badge" }, task.profile));
+      if (task.ci) {
+        const tone = task.ci === "success" ? "ok" : task.ci === "failure" ? "bad" : "";
+        badges.push(h("span", { class: "badge " + tone }, "CI " + task.ci));
+      }
+      if (task.review_round) badges.push(h("span", { class: "badge" }, "R" + task.review_round));
+      if (task.merge_queue) badges.push(h("span", { class: "badge" }, task.merge_queue));
+    }
+    if (card.stale) badges.push(h("span", { class: "badge warn", title: "Older than " + STALE_DAYS + " days: run posse-triage" }, "stale"));
+    for (const blocker of card.blockers) badges.push(h("span", { class: "badge chip" }, "blocked by " + blocker));
+    if (card.kind === "issue" && state.pending.has(card.number)) badges.push(h("span", { class: "badge sent" }, "sent, waiting for the Lead"));
+    return badges;
+  }
+
+  function renderCard(card, now) {
+    const task = card.task;
+    const title = task ? task.title || task.name : card.issue.title;
+    const ids = task ? [task.id, card.number ? "#" + card.number : null] : ["#" + card.number];
+    const created = task ? task.created_at : card.column === "merged" ? card.issue.closedAt : card.issue.createdAt;
+    const pending = card.kind === "issue" && state.pending.has(card.number);
+    const node = h("div", {
+      class: "card" + (state.selected === card.key ? " selected" : "") + (pending ? " pending" : ""),
+      role: "button",
+      tabindex: "-1",
+      "data-key": card.key,
+      "data-column": card.column,
+      "data-lavish-action": true,
+      draggable: card.column === "ready" ? "true" : null,
+      onclick: () => select(card.key),
+      ondragstart: (event) => { state.dragging = card.key; event.dataTransfer.setData("text/plain", card.key); },
+      ondragend: () => { state.dragging = null; document.querySelectorAll(".cell.drop").forEach((cell) => cell.classList.remove("drop")); },
+    },
+      h("div", { class: "top" }, h("span", { class: "id" }, ids.filter(Boolean).join(" · ")), h("span", { class: "age" }, shortAge(created, now))),
+      h("div", { class: "name" }, title),
+    );
+    const badges = cardBadges(card);
+    if (badges.length) node.append(h("div", { class: "badges" }, badges));
+    if (task && task.wait_reason) node.append(h("div", { class: "wait" }, task.wait_reason));
+    return node;
+  }
+
+  function renderStrip() {
+    const model = state.model;
+    $("project").textContent = model.project.name ? "· " + model.project.name : "";
+    const lead = model.project.lead || "missing";
+    const pool = model.pool.max ? model.pool.used + "/" + model.pool.max : "-";
+    $("stats").replaceChildren(
+      h("span", { class: "stat" }, h("span", { class: "dot " + (OFFLINE_LEAD.includes(lead) ? "off" : "on") }), "Lead ", h("b", null, lead)),
+      h("span", { class: "stat" }, "Pool ", h("b", null, pool)),
+      h("span", { class: "stat wide" }, "Merged today ", h("b", null, model.mergedToday)),
+      h("span", { class: "stat wide" + (model.redCI ? " red" : "") }, "Red CI ", h("b", null, model.redCI)),
+    );
+  }
+
+  function renderBoard(now) {
+    const model = state.model;
+    const columns = visibleColumns();
+    $("colheads").replaceChildren(...COLUMNS.map((column, index) => h("div", { class: "colhead " + column.key },
+      column.title,
+      h("span", { class: "count" + (columns[index].length ? " some" : "") }, columns[index].length),
+      column.jump ? h("span", { class: "key" }, h("kbd", null, "g"), " ", h("kbd", null, "n")) : null,
+    )));
+    const visibleLanes = model.lanes.filter((lane) => lane.cards.some(matches));
+    if (!visibleLanes.length) {
+      $("lanes").replaceChildren(h("div", { class: "empty" }, state.filter ? "No card matches the filter." : "Nothing to show: no open Tasks and no ready-for-agent issues."));
+      return;
+    }
+    $("lanes").replaceChildren(...visibleLanes.map((lane) => h("section", { class: "lane", "data-lane": lane.id === null ? "loose" : String(lane.id) },
+      h("div", { class: "lanehead" },
+        lane.id === null
+          ? h("b", null, "Loose work")
+          : [h("b", null, "Spec #" + lane.id + " " + lane.done + "/" + lane.total),
+            h("span", { class: "progress" }, h("i", { style: "width:" + (lane.total ? Math.round(100 * lane.done / lane.total) : 0) + "%" })),
+            h("span", { class: "title" }, lane.title)],
+      ),
+      h("div", { class: "grid5" }, COLUMNS.map((column) => {
+        const cell = h("div", { class: "cell", "data-column": column.key },
+          lane.cards.filter((card) => card.column === column.key && matches(card)).map((card) => renderCard(card, now)));
+        if (column.key === "running") {
+          cell.addEventListener("dragover", (event) => {
+            if (!state.dragging) return;
+            event.preventDefault();
+            cell.classList.add("drop");
+          });
+          cell.addEventListener("dragleave", () => cell.classList.remove("drop"));
+          cell.addEventListener("drop", (event) => {
+            event.preventDefault();
+            cell.classList.remove("drop");
+            const key = event.dataTransfer.getData("text/plain") || state.dragging;
+            state.dragging = null;
+            select(key);
+            askStart();
+          });
+        }
+        return cell;
+      })),
+    )));
+  }
+
+  function row(label, value) {
+    if (value === undefined || value === null || value === "") return [];
+    return [h("dt", null, label), h("dd", null, value)];
+  }
+
+  function link(url, text) {
+    return url ? h("a", { href: url, target: "_blank", rel: "noopener" }, text || url) : null;
+  }
+
+  function renderPeek(now) {
+    const card = findCard(state.selected);
+    if (!card) {
+      $("peek").replaceChildren(h("div", { class: "hint" }, "Select a card with ", h("kbd", null, "j"), " ", h("kbd", null, "k"), " or a click to see its intent, last Signal and PR."));
+      return;
+    }
+    const task = card.task;
+    const issue = card.issue;
+    const nodes = [];
+    if (task) {
+      nodes.push(
+        h("div", { class: "kicker" }, h("span", { class: "id" }, task.id), h("span", { class: "badge" }, task.state), task.type),
+        h("h2", null, task.title || task.name),
+      );
+      if (task.intent) nodes.push(h("h3", null, "Intent"), h("p", { class: "quote" }, task.intent));
+      if (task.last_signal) nodes.push(h("h3", null, "Last Signal"), h("p", { class: "quote" }, task.last_signal));
+      if (task.reason) nodes.push(h("div", { class: "note" }, task.reason));
+      nodes.push(h("h3", null, "Details"), h("dl", null,
+        row("PR", task.pr_url ? link(task.pr_url, task.pr_state ? task.pr_url.replace(/^.*\//, "#") + " " + task.pr_state.toLowerCase() : null) : null),
+        row("CI", task.ci),
+        row("Review", task.review_round ? "round " + task.review_round : null),
+        row("Ticket", card.number && issue ? link(issue.url, "#" + card.number) : task.ticket),
+        row("Profile", task.profile),
+        row("Age", shortAge(task.created_at, now)),
+        row("Waits", task.wait_reason),
+        row("After", (task.after || []).join(", ")),
+        row("Merge", task.merge_queue),
+        row("Name", task.name),
+      ));
+      nodes.push(h("div", { class: "hint" }, task.pr_url ? [h("kbd", null, "enter"), " opens the PR"] : "No PR yet."));
+    } else {
+      nodes.push(
+        h("div", { class: "kicker" }, h("span", { class: "id" }, "#" + issue.number), h("span", { class: "badge" }, issue.state.toLowerCase()), "issue"),
+        h("h2", null, issue.title),
+      );
+      if (state.pending.has(issue.number)) nodes.push(h("div", { class: "note" }, "Sent, waiting for the Lead to start it."));
+      if (card.stale) nodes.push(h("div", { class: "note" }, "Older than " + STALE_DAYS + " days: ask the Lead to run posse-triage before starting it."));
+      nodes.push(h("h3", null, "Details"), h("dl", null,
+        row("Issue", link(issue.url, "#" + issue.number)),
+        row("Spec", card.lane ? "#" + card.lane : null),
+        row("Blocked by", card.blockers.join(", ")),
+        row("Labels", (issue.labels || []).map((label) => label.name).join(", ")),
+        row("Age", shortAge(issue.createdAt, now)),
+      ));
+      if (issue.body) nodes.push(h("h3", null, "Issue"), h("p", { class: "body" }, issue.body.slice(0, 1200)));
+      nodes.push(h("div", { class: "hint" }, card.column === "ready" ? [h("kbd", null, "s"), " starts it · "] : null, h("kbd", null, "enter"), " opens the issue"));
+    }
+    $("peek").replaceChildren(...nodes);
+  }
+
+  function renderActivity() {
+    const items = [];
+    for (const entry of state.local) items.push(h("span", { class: "mine" }, entry));
+    const notices = [...state.model.notices].sort((a, b) => b.id - a.id).slice(0, 4);
+    for (const notice of notices) items.push((notice.task ? notice.task + " " : "") + notice.kind.replace(/_/g, " ") + ": " + notice.summary);
+    if (!items.length) items.push("No open Notices.");
+    const line = [];
+    items.forEach((item, index) => { if (index) line.push("  ·  "); line.push(item); });
+    $("activity").replaceChildren(...line);
+  }
+
+  function render() {
+    if (!state.model) return;
+    const now = Date.now();
+    renderStrip();
+    renderBoard(now);
+    renderPeek(now);
+    renderActivity();
+    const selected = document.querySelector(".card.selected");
+    if (selected) selected.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  function note(text) {
+    state.local.unshift(text);
+    state.local.length = Math.min(state.local.length, 3);
+  }
+
+  function select(key) {
+    state.selected = key;
+    render();
+  }
+
+  function move(dx, dy) {
+    const columns = visibleColumns();
+    let col = -1;
+    let index = -1;
+    columns.forEach((cards, c) => cards.forEach((card, i) => { if (card.key === state.selected) { col = c; index = i; } }));
+    if (col < 0) {
+      const first = columns.findIndex((cards) => cards.length);
+      if (first >= 0) select(columns[first][0].key);
+      return;
+    }
+    if (dy) {
+      const next = columns[col][index + dy];
+      if (next) select(next.key);
+      return;
+    }
+    for (let c = col + dx; c >= 0 && c < columns.length; c += dx) {
+      if (columns[c].length) {
+        select(columns[c][Math.min(index, columns[c].length - 1)].key);
+        return;
+      }
+    }
+  }
+
+  function askStart() {
+    const card = findCard(state.selected);
+    if (!card || card.column !== "ready") {
+      note("Only a Ready issue can be started.");
+      render();
+      return;
+    }
+    if (state.pending.has(card.number)) {
+      note("#" + card.number + " was already sent to the Lead.");
+      render();
+      return;
+    }
+    state.confirming = card;
+    $("confirm-title").textContent = "Start #" + card.number + "?";
+    const blocked = card.blockers.length ? " It is blocked by " + card.blockers.join(", ") + "; the Lead queues it behind them." : "";
+    $("confirm-text").textContent = card.issue.title + "." + blocked;
+    $("confirm").hidden = false;
+    $("confirm-ok").focus();
+  }
+
+  function closeConfirm() {
+    state.confirming = null;
+    $("confirm").hidden = true;
+  }
+
+  function confirmStart() {
+    const card = state.confirming;
+    closeConfirm();
+    if (!card) return;
+    const lavish = window.lavish;
+    if (!lavish || typeof lavish.queuePrompt !== "function") {
+      note("Not sent: open this board through lavish-axi to start work.");
+      render();
+      return;
+    }
+    lavish.queuePrompt(
+      "posse-board-start #" + card.number + ": the User confirmed on the board to start issue #" + card.number + " \"" + card.issue.title + "\".",
+      { tag: "posse-board-start", text: "Start #" + card.number, queueKey: "posse-board-start-" + card.number, data: { action: "posse-board-start", issue: card.number, title: card.issue.title } },
+    );
+    if (typeof lavish.sendQueuedPrompts === "function") lavish.sendQueuedPrompts();
+    state.pending.set(card.number, Date.now());
+    note("sent start #" + card.number + " to the Lead");
+    render();
+  }
+
+  function openSelected() {
+    const card = findCard(state.selected);
+    if (!card) return;
+    const url = (card.task && card.task.pr_url) || (card.issue && card.issue.url);
+    if (url) window.open(url, "_blank", "noopener");
+  }
+
+  function toggleHelp(show) {
+    $("help").hidden = show === undefined ? !$("help").hidden : !show;
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (state.confirming) {
+      if (event.key === "Enter" || event.key === "y") { event.preventDefault(); confirmStart(); }
+      else if (event.key === "Escape" || event.key === "n") { event.preventDefault(); closeConfirm(); }
+      return;
+    }
+    if (event.target === $("filter")) {
+      if (event.key === "Escape") { $("filter").value = ""; state.filter = ""; $("filter").blur(); render(); }
+      else if (event.key === "Enter") $("filter").blur();
+      return;
+    }
+    if (!$("help").hidden) {
+      if (event.key === "Escape" || event.key === "?") { event.preventDefault(); toggleHelp(false); }
+      return;
+    }
+    if (state.awaitingG) {
+      state.awaitingG = false;
+      if (event.key === "n") {
+        const needs = visibleColumns()[0];
+        if (needs.length) select(needs[0].key);
+        else { note("Nothing needs you."); render(); }
+        return;
+      }
+    }
+    const actions = {
+      j: () => move(0, 1), ArrowDown: () => move(0, 1),
+      k: () => move(0, -1), ArrowUp: () => move(0, -1),
+      h: () => move(-1, 0), ArrowLeft: () => move(-1, 0),
+      l: () => move(1, 0), ArrowRight: () => move(1, 0),
+      s: askStart,
+      Enter: openSelected,
+      "/": () => $("filter").focus(),
+      g: () => { state.awaitingG = true; },
+      "?": () => toggleHelp(true),
+      Escape: () => { if (state.filter) { $("filter").value = ""; state.filter = ""; render(); } },
+    };
+    const action = actions[event.key];
+    if (!action) return;
+    event.preventDefault();
+    action();
+  });
+
+  $("filter").addEventListener("input", () => { state.filter = $("filter").value.trim(); render(); });
+  $("confirm-ok").addEventListener("click", confirmStart);
+  $("confirm-cancel").addEventListener("click", closeConfirm);
+  $("help").addEventListener("click", (event) => { if (event.target === $("help")) toggleHelp(false); });
+
+  // Lavish serves the page in a sandboxed iframe whose null origin blocks
+  // fetch, so the data arrives as scripts that call posseBoardData.
+  const received = {};
+  window.posseBoardData = (name, value) => { received[name] = value; };
+
+  function load(name) {
+    return new Promise((resolve, reject) => {
+      delete received[name];
+      const script = document.createElement("script");
+      script.src = name + ".js?at=" + Date.now();
+      script.onload = () => { script.remove(); name in received ? resolve(received[name]) : reject(new Error(name + ".js did not call posseBoardData")); };
+      script.onerror = () => { script.remove(); reject(new Error(name + ".js failed to load")); };
+      document.head.append(script);
+    });
+  }
+
+  async function refresh() {
+    let posse, issues;
+    try {
+      [posse, issues] = await Promise.all([load("posse"), load("issues")]);
+    } catch {
+      if (!state.model) $("lanes").replaceChildren(h("div", { class: "empty" }, "Waiting for board data: the Lead writes posse.js and issues.js beside this page."));
+      return;
+    }
+    const raw = JSON.stringify([posse, issues]);
+    if (raw === state.raw) return;
+    state.raw = raw;
+    state.model = buildModel(posse, Array.isArray(issues) ? issues : [], Date.now());
+    for (const card of state.model.cards) {
+      if (card.kind === "task" && card.number && state.pending.has(card.number)) {
+        state.pending.delete(card.number);
+        note("started " + card.task.id + " for #" + card.number);
+      }
+    }
+    if (state.selected && !findCard(state.selected)) {
+      const number = Number(String(state.selected).replace(/^#/, ""));
+      const successor = state.model.cards.find((card) => card.kind === "task" && card.number === number);
+      state.selected = successor ? successor.key : null;
+    }
+    if (!state.selected) state.selected = (visibleColumns().find((cards) => cards.length) || [{}])[0].key || null;
+    render();
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+})();
+</script>
+</body>
+</html>

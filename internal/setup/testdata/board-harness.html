@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>body { margin: 0; } iframe { border: 0; display: block; }</style></head>
+<body>
+<iframe id="board"></iframe>
+<pre id="result"></pre>
+<script>
+// Loads the board at the size in the query string, stubs window.lavish,
+// drives it by keyboard and writes what it saw into #result.
+(async () => {
+  const params = new URLSearchParams(location.search);
+  const frame = document.getElementById("board");
+  frame.style.width = params.get("w") + "px";
+  frame.style.height = params.get("h") + "px";
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const loaded = new Promise((resolve) => { frame.onload = resolve; });
+  frame.src = "index.html";
+  await loaded;
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const prompts = [];
+  let sends = 0;
+  win.lavish = { queuePrompt: (text, options) => prompts.push({ text, options }), sendQueuedPrompts: () => { sends++; } };
+  for (let i = 0; i < 50 && !doc.querySelector(".card"); i++) await sleep(100);
+
+  const columns = {};
+  doc.querySelectorAll(".card").forEach((card) => { columns[card.dataset.key] = card.dataset.column; });
+  const lanes = [...doc.querySelectorAll(".lane")].map((lane) => lane.dataset.lane);
+  const root = doc.scrollingElement;
+  const pageScrolls = root.scrollHeight > root.clientHeight || root.scrollWidth > root.clientWidth;
+
+  const key = (name, target) => (target || doc).dispatchEvent(new win.KeyboardEvent("keydown", { key: name, bubbles: true }));
+  const filter = doc.getElementById("filter");
+  key("/");
+  filter.value = params.get("issue");
+  filter.dispatchEvent(new win.Event("input", { bubbles: true }));
+  key("Enter", filter);
+  key("j");
+  const selected = doc.querySelector(".card.selected")?.dataset.key;
+  key("s");
+  const dialog = !doc.getElementById("confirm").hidden;
+  key("Enter");
+  key("s");
+  key("Enter");
+  const activity = doc.getElementById("activity").textContent;
+
+  document.getElementById("result").textContent = JSON.stringify({ columns, lanes, pageScrolls, selected, dialog, prompts, sends, activity });
+})();
+</script>
+</body>
+</html>

@@ -79,6 +79,7 @@ type taskSummary struct {
 	Title         string       `json:"title"`
 	Name          string       `json:"name"`
 	PRState       string       `json:"pr_state,omitempty"`
+	PRURL         string       `json:"pr_url,omitempty"`
 	Queue         string       `json:"merge_queue,omitempty"`
 	Profile       string       `json:"profile,omitempty"`
 	Branch        string       `json:"branch,omitempty"`
@@ -93,6 +94,7 @@ type taskSummary struct {
 	CI            string       `json:"ci,omitempty"`
 	ReviewRound   int          `json:"review_round,omitempty"`
 	Intent        string       `json:"intent,omitempty"`
+	LastSignal    string       `json:"last_signal,omitempty"`
 	Usage         usage.Counts `json:"usage"`
 }
 
@@ -244,6 +246,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 			names = append(names, target.Name)
 		}
 		result = append(result, axi.Field{Key: "repos", Value: names})
+	}
+	if full {
+		used, err := db.ActiveWorkerCount(ctx.Context, project.ID)
+		if err != nil {
+			return err
+		}
+		result = append(result, axi.Field{Key: "pool", Value: axi.Row{{Key: "used", Value: used}, {Key: "max", Value: cfg.Defaults.MaxWorkers}}})
 	}
 	result = append(result, axi.Field{Key: "notices", Value: noticeRows}, axi.Field{Key: "tasks", Value: taskRows}, axi.Field{Key: "needs_you", Value: needsYou})
 	if !ctx.JSON && !full {
@@ -549,6 +558,7 @@ func addTaskDetails(ctx context.Context, db *store.DB, home string, project stor
 		row.Intent = briefSection(brief.Body, "Intent")
 	}
 	if task.PRURL != "" {
+		row.PRURL = task.PRURL
 		observation, err := db.LatestPRObservation(ctx, task.ID)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
@@ -558,6 +568,13 @@ func addTaskDetails(ctx context.Context, db *store.DB, home string, project stor
 		default:
 			row.CI = strings.ToLower(decodeChecks(observation.Checks).State)
 		}
+	}
+	signals, err := db.TaskSignals(ctx, task.ID, 1)
+	if err != nil {
+		return err
+	}
+	if len(signals) == 1 {
+		row.LastSignal = signals[0].Verb + ": " + signals[0].Note
 	}
 	rounds, err := db.ReviewRoundsFor(ctx, task.ID)
 	if err != nil {

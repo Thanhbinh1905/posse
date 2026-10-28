@@ -40,8 +40,8 @@ Without a terminal it needs `--all` or skill names and prints the added skills p
 [skills]
 lead     = ["posse-whats-next", "posse-catch-up", "posse-enlighten-me", "posse-research",
             "posse-brainstorming", "posse-sharpen", "posse-spec", "posse-tickets",
-            "posse-build", "posse-arena", "posse-triage", "posse-diagnose",
-            "posse-technical-writing", "posse-unslop"]
+            "posse-build", "posse-board", "posse-arena", "posse-triage",
+            "posse-diagnose", "posse-technical-writing", "posse-unslop"]
 change   = ["posse-tdd", "posse-deslop", "posse-no-comments",
             "posse-technical-writing", "posse-unslop", "~/my-skills/go-style"]
 review   = ["posse-review", "posse-unslop"]
@@ -74,6 +74,7 @@ Say the plain words in the Lead pane and the matching skill starts.
 | `posse-tickets` | lead | "break it into tickets" |
 | `posse-triage` | lead | "triage these issues" |
 | `posse-build` | lead | "build the tickets" |
+| `posse-board` | lead | "open the board" (needs [Lavish](board.md)) |
 | `posse-diagnose` | lead | "this is broken" |
 | `posse-tdd` | change | Workers implement test-first |
 | `posse-deslop` | change | Workers clean their own diff before publishing |
