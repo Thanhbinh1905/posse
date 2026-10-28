@@ -2344,7 +2344,10 @@ print(next((p["state"] for p in pulls if p.get("url")==sys.argv[2]),""))' "$POSS
         elif grep -q '"state":"CLOSED"' "$POSSE_TEST_GH_STATE"; then state=CLOSED
         fi
         if [ "$state" = OPEN ] && [ -e "$POSSE_TEST_GH_PR_CLOSED" ]; then state=CLOSED; fi
-        printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"acme/shop"}}\n' "$3" "$state" "$head" "$branch" "$base" ;;
+        repository='{"nameWithOwner":"acme/shop"}'
+        # gh 2.46 omits nameWithOwner and names the owner separately.
+        if [ -e "$POSSE_TEST_ROOT/gh-legacy-repository" ]; then repository='{"name":"shop"},"headRepositoryOwner":{"login":"acme"}'; fi
+        printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "$3" "$state" "$head" "$branch" "$base" "$repository" ;;
     esac ;;
   "pr close")
     if [ -e "$POSSE_TEST_GH_CLOSE_FAIL" ]; then printf 'close failed\n' >&2; exit 1; fi

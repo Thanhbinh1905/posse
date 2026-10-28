@@ -1122,11 +1122,14 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				if observationErr != nil {
 					return result, observationErr
 				}
-				removed, removeErr := deleteMergedRemoteBranch(ctx, member.project, member.task, cfg, observation.HeadSHA)
+				removed, cause, removeErr := cleanUpMergedRemoteBranch(ctx, db, member.project, member.task, member.repo.Repo, cfg, observation.HeadSHA)
 				if removeErr != nil {
 					return result, removeErr
 				}
 				result.RemoteBranchRemoved = result.RemoteBranchRemoved || removed
+				if cause != "" {
+					result.RemoteBranchErrors = append(result.RemoteBranchErrors, member.repo.Repo+": "+cause)
+				}
 			}
 		} else if deliveredByPullRequest(task.MergeMode) {
 			observation, observationErr := db.LatestPRObservation(ctx, task.ID)
@@ -1134,11 +1137,14 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				return result, observationErr
 			}
 			if observationErr == nil && observation.State == "MERGED" {
-				removed, removeErr := deleteMergedRemoteBranch(ctx, project, task, cfg, observation.HeadSHA)
+				removed, cause, removeErr := cleanUpMergedRemoteBranch(ctx, db, project, task, "", cfg, observation.HeadSHA)
 				if removeErr != nil {
 					return result, removeErr
 				}
 				result.RemoteBranchRemoved = removed
+				if cause != "" {
+					result.RemoteBranchErrors = append(result.RemoteBranchErrors, cause)
+				}
 			}
 		}
 	}
@@ -1192,6 +1198,9 @@ func withTeardownDetails(fields axi.Object, result teardownResult) axi.Object {
 	}
 	if result.CacheMaintenance != "" {
 		fields = append(fields, axi.Field{Key: "worker_go_cache", Value: result.CacheMaintenance})
+	}
+	if len(result.RemoteBranchErrors) > 0 {
+		fields = append(fields, axi.Field{Key: "remote_branch_errors", Value: result.RemoteBranchErrors})
 	}
 	return fields
 }

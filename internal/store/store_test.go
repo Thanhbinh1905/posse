@@ -614,6 +614,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`DROP TABLE remote_branch_cleanups`,
 		`ALTER TABLE project_runtime DROP COLUMN lead_agent_session`,
 		`ALTER TABLE project_runtime DROP COLUMN lead_agent_kind`,
 		`DROP TABLE quota_exhaustions`,
@@ -756,6 +757,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE remote_branch_cleanups`,
 		`ALTER TABLE project_runtime DROP COLUMN lead_agent_session`,
 		`ALTER TABLE project_runtime DROP COLUMN lead_agent_kind`,
 		`DROP TABLE quota_exhaustions`,
@@ -966,6 +968,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`DROP TABLE remote_branch_cleanups`,
 		`ALTER TABLE project_runtime DROP COLUMN lead_agent_session`,
 		`ALTER TABLE project_runtime DROP COLUMN lead_agent_kind`,
 		`DROP TABLE quota_exhaustions`,
