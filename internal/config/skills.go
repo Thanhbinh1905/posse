@@ -135,7 +135,7 @@ func (c Config) skillIssues(file string) []error {
 	var issues []error
 	for _, role := range SkillRoles {
 		if _, err := c.RoleSkills(role); err != nil {
-			issues = append(issues, &InvalidError{File: file, Key: "skills." + role, Reason: err.Error()})
+			issues = append(issues, &InvalidError{File: c.tableKeyFile("skills", role, file), Key: "skills." + role, Reason: err.Error()})
 		}
 	}
 	return issues
