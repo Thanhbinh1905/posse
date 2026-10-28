@@ -24,7 +24,12 @@ type queuedAdmissionFixture struct {
 
 func newQueuedAdmissionFixture(t *testing.T) queuedAdmissionFixture {
 	t.Helper()
-	f := newWorkerTabsFixtureWithManualWatchOwner(t)
+	return queueBehindSlot(t, newWorkerTabsFixtureWithManualWatchOwner(t))
+}
+
+// queueBehindSlot fills the only Worker slot of f with t1 and queues t2.
+func queueBehindSlot(t *testing.T, f *workerTabsFixture) queuedAdmissionFixture {
+	t.Helper()
 	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 1\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
