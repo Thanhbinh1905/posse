@@ -254,3 +254,108 @@ func TestLeadResumeKeepsCodexOpeningPromptLast(t *testing.T) {
 		t.Fatalf("no session changed argv: %#v", got)
 	}
 }
+
+// adoptionFixture is a held Project shop with working Worker t1, and a Herdr
+// snapshot of the new generation in which the Lead and t1 run an agent.
+func adoptionFixture(t *testing.T) (string, *store.DB, store.Project, *herdr.Fake) {
+	t.Helper()
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", ShortName: "worker", Title: "Worker", MergeMode: "local", PaneID: "w1:p2", PaneLabel: "posse:shop:t1", WorktreePath: project.Root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1"}}, Panes: []herdr.Pane{
+		{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "idle"},
+		{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"},
+	}}
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"working"}}`)
+	if err := testService(home, fake).holdRestore(ctx, db, project, "new-generation"); !errors.Is(err, errRecoveryHeld) {
+		t.Fatal(err)
+	}
+	return home, db, project, fake
+}
+
+func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
+	ctx := context.Background()
+	home, db, project, fake := adoptionFixture(t)
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testService(home, fake).reconcileProject(ctx, db, project, cfg, false); err != nil {
+		t.Fatalf("reconcile with every pane live in the new generation = %v, want adoption", err)
+	}
+	if generation, err := db.ProjectServerStartedAt(ctx, project.ID); err != nil || generation != "new-generation" {
+		t.Fatalf("generation = %q, %v; want new-generation adopted", generation, err)
+	}
+	if pending, err := db.UndeliveredNotices(ctx, project.ID); err != nil || len(pending) != 0 {
+		t.Fatalf("adoption left the restore_needed Notice pending: %#v, %v", pending, err)
+	}
+	if count := fake.CallCount("agent.start") + fake.CallCount("agent.stop"); count != 0 {
+		t.Fatalf("adoption started or stopped %d agents: %#v", count, fake.Calls)
+	}
+}
+
+func TestWatchKeepsHoldWhenAPaneIsMissing(t *testing.T) {
+	for name, hold := range map[string]func(*testing.T, *store.DB, store.Project, *herdr.Fake){
+		"lead": func(_ *testing.T, _ *store.DB, _ store.Project, fake *herdr.Fake) {
+			fake.SnapshotValue.Panes[0].Agent = ""
+		},
+		"worker": func(_ *testing.T, _ *store.DB, _ store.Project, fake *herdr.Fake) {
+			fake.SnapshotValue.Panes[1].Agent = ""
+		},
+		// A failed relaunch can leave an agent that never started working.
+		"worker retry pending": func(t *testing.T, db *store.DB, project store.Project, _ *herdr.Fake) {
+			ctx := context.Background()
+			task, err := db.Task(ctx, project.ID, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if claimed, err := db.ClaimTaskRecovery(ctx, task.ID, "new-generation", 0, 1, 3, 0, 0); err != nil || !claimed {
+				t.Fatalf("claim recovery = %v, %v", claimed, err)
+			}
+			if err := db.FinishTaskRecovery(ctx, task, 1, 3, false, "prompt timed out", 0); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			home, db, project, fake := adoptionFixture(t)
+			hold(t, db, project, fake)
+			cfg, err := config.Load(home, project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := testService(home, fake).reconcileProject(ctx, db, project, cfg, false); !errors.Is(err, errRecoveryHeld) {
+				t.Fatalf("reconcile with %s = %v, want errRecoveryHeld", name, err)
+			}
+			if generation, err := db.ProjectServerStartedAt(ctx, project.ID); err != nil || generation != "old-generation" {
+				t.Fatalf("generation = %q, %v; want the hold kept on old-generation", generation, err)
+			}
+		})
+	}
+}
+
+func TestUpAllKeepsLiveLeadAndAdoptsGeneration(t *testing.T) {
+	ctx := context.Background()
+	home, db, project, fake := adoptionFixture(t)
+	output := &bytes.Buffer{}
+	cli := testService(home, fake).CLI()
+	cli.Out, cli.ErrOut = output, output
+	t.Setenv("HERDR_PANE_ID", "")
+	if code := cli.Run([]string{"up", "--all"}); code != 0 || !strings.Contains(output.String(), "state: restored") {
+		t.Fatalf("up --all = %d: %s", code, output)
+	}
+	if count := fake.CallCount("agent.start") + fake.CallCount("agent.stop"); count != 0 {
+		t.Fatalf("up --all restarted live agents (%d calls): %#v", count, fake.Calls)
+	}
+	if generation, err := db.ProjectServerStartedAt(ctx, project.ID); err != nil || generation != "new-generation" {
+		t.Fatalf("generation = %q, %v; want new-generation adopted", generation, err)
+	}
+}

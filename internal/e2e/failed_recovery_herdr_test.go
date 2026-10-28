@@ -36,13 +36,21 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "fail-recovery-prompts"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The restart stopped the Worker; with its agent live the Project would
+	// adopt the current generation instead of holding.
+	f.exitWorker(t, "t1")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A stale persisted generation reproduces the incident's mismatch without
+	// Stale persisted generations reproduce the incident's mismatch without
 	// starting any unrelated server or depending on Herdr's restore timing.
 	err = db.SetProjectServerStartedAt(context.Background(), f.projectID, "before-restart")
+	if err == nil {
+		observation := f.task(t, "t1").Observation()
+		observation.AgentServerStartedAt = "before-restart"
+		err = db.UpdateTaskObservation(context.Background(), before.ID, observation)
+	}
 	_ = db.Close()
 	if err != nil {
 		t.Fatal(err)

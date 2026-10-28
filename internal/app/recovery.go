@@ -318,6 +318,13 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
+	if serverRestarted && pendingGroupGeneration == "" {
+		adopted, err := adoptCurrentGeneration(ctx, db, current, fresh)
+		if err != nil {
+			return 0, err
+		}
+		serverRestarted = !adopted
+	}
 	groupRecoveryPending = pendingGroupGeneration != ""
 	groupClosed = workerGroupClosed(fresh, current, tasks) && !serverRestarted
 	if !serverRestarted && !groupClosed && !groupRecoveryPending {

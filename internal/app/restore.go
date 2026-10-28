@@ -55,6 +55,54 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 	return errRecoveryHeld
 }
 
+// adoptCurrentGeneration records Herdr's current generation for a held
+// Project whose Lead pane and every recoverable Worker pane already run an
+// agent in it. A recovery that failed after bringing every pane back, or a
+// restore the User did by hand, then ends the hold instead of extending it.
+// A missing Lead or Worker keeps the hold for `posse up` (ADR 0035).
+func adoptCurrentGeneration(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) (bool, error) {
+	recorded, err := db.ProjectServerStartedAt(ctx, project.ID)
+	if err != nil || recorded == "" || snapshot.ServerStartedAt == "" || recorded == snapshot.ServerStartedAt {
+		return false, err
+	}
+	if project.IsDown() || !leadPaneLive(project, snapshot) {
+		return false, nil
+	}
+	tasks, err := db.Tasks(ctx, project.ID, false)
+	if err != nil {
+		return false, err
+	}
+	for _, task := range tasks {
+		if task.State == store.StateFailed {
+			continue
+		}
+		if taskNeedsRestartRecovery(task, snapshot) {
+			return false, nil
+		}
+		// A Worker whose relaunch failed may still run an agent that never
+		// started working; its retry episode keeps the hold.
+		state, err := db.TaskRecovery(ctx, task.ID)
+		if err != nil {
+			return false, err
+		}
+		if state.Status == "pending" || state.Status == "running" {
+			return false, nil
+		}
+	}
+	if err := db.SetProjectServerStartedAt(ctx, project.ID, snapshot.ServerStartedAt); err != nil {
+		return false, err
+	}
+	_, err = db.AckUndeliveredNotices(ctx, project.ID, "restore_needed", currentTime())
+	return err == nil, err
+}
+
+// leadPaneLive reports whether the Lead pane, found by its label first because
+// Herdr can reuse pane ids after a restart, runs an agent.
+func leadPaneLive(project store.Project, snapshot herdr.Snapshot) bool {
+	pane, found := herdr.FindPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
+	return found && pane.Agent != "" && pane.AgentStatus != "" && pane.AgentStatus != "unknown" && pane.AgentStatus != "exited" && pane.AgentStatus != "stopped"
+}
+
 // observeLeadAgent records the agent kind and session running in the Lead
 // pane, so a restore brings back that Lead rather than lead.kind.
 func observeLeadAgent(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
