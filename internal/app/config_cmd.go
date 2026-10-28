@@ -119,6 +119,14 @@ func (s *Service) configSet(ctx *axi.Context, args []string) error {
 		}
 		return configError(err)
 	}
+	if key == "up.projects" {
+		if err := s.requireKnownProjects(ctx.Context, db, value); err != nil {
+			if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("restore previous config: %w", rollbackErr))
+			}
+			return err
+		}
+	}
 	if approvalProjectID != 0 {
 		if err := db.RecordConfigApproval(ctx.Context, approvalProjectID, key, "set", parsed.Positionals[1], parsed.Flags["user-approved"]); err != nil {
 			if rollbackErr := restoreConfigFile(path, original, originalExists, originalMode); rollbackErr != nil {
@@ -189,6 +197,18 @@ func (s *Service) configUnset(ctx *axi.Context, args []string) error {
 		return err
 	}
 	return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "unset", Value: key}, {Key: "help", Value: []any{"Run `posse config show --effective` to inspect merged settings"}}})
+}
+
+// requireKnownProjects refuses an up.projects value naming an unregistered
+// Project.
+func (s *Service) requireKnownProjects(ctx context.Context, db *store.DB, value any) error {
+	names, _ := value.([]any)
+	for _, name := range names {
+		if _, err := s.projectByName(ctx, db, fmt.Sprint(name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // configApprovalProject returns zero when no approval record is needed. Global
