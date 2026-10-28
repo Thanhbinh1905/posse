@@ -31,12 +31,13 @@ type ReviewLedgerEntry struct {
 	PatternSeq  int
 	PatternKey  string
 	State       string
+	Severity    string
 	Fingerprint string
 }
 
 // ReviewLedgerFor returns the Change Task's current finding ledger in stable ID order.
 func (db *DB) ReviewLedgerFor(ctx context.Context, changeTaskID int64) ([]ReviewLedgerEntry, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),CASE WHEN f.inherited_from IS NOT NULL THEN 'inherited' ELSE f.state END,f.fingerprint FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into WHERE f.ship_task_id=? ORDER BY f.seq`, changeTaskID)
+	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),CASE WHEN f.inherited_from IS NOT NULL THEN 'inherited' ELSE f.state END,f.severity,f.fingerprint FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into WHERE f.ship_task_id=? ORDER BY f.seq`, changeTaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +45,7 @@ func (db *DB) ReviewLedgerFor(ctx context.Context, changeTaskID int64) ([]Review
 	var entries []ReviewLedgerEntry
 	for rows.Next() {
 		var entry ReviewLedgerEntry
-		if err := rows.Scan(&entry.FindingSeq, &entry.PatternSeq, &entry.PatternKey, &entry.State, &entry.Fingerprint); err != nil {
+		if err := rows.Scan(&entry.FindingSeq, &entry.PatternSeq, &entry.PatternKey, &entry.State, &entry.Severity, &entry.Fingerprint); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)

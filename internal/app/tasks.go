@@ -688,6 +688,10 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return skillErr
 		}
 	}
+	if generated != nil {
+		briefData = []byte(withReviewDir(string(briefData), taskHome))
+		brief.Body = withReviewDir(brief.Body, taskHome)
+	}
 	briefPath := filepath.Join(taskHome, "brief.md")
 	launchPath := filepath.Join(taskHome, "launch.md")
 	if err := s.runIntentStep(ctx.Context, db, intent, "brief.write", func() error { return writeFile(briefPath, briefData) }); err != nil {

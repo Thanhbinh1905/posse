@@ -449,6 +449,14 @@ func virtualMergeTree(ctx context.Context, root, reviewed, target string) (strin
 	return tree, conflicts, nil
 }
 
+const reviewDirPlaceholder = "{{review_dir}}"
+
+// The Review Task's sequence is unknown until admission, so the generated
+// brief names its files through a placeholder resolved once the Task home exists.
+func withReviewDir(text, taskHome string) string {
+	return strings.ReplaceAll(text, reviewDirPlaceholder, filepath.Join(taskHome, "review"))
+}
+
 func readReviewGuidance(ctx context.Context, root, targetRef, targetBranch string, paths []string) (map[string][]byte, error) {
 	files := make(map[string][]byte, len(paths))
 	for _, name := range paths {
@@ -530,9 +538,9 @@ func reviewLedgerMarkdown(ctx context.Context, db *store.DB, changeTaskID int64)
 	if len(entries) == 0 {
 		builder.WriteString("\nNo findings have been recorded yet.\n")
 	} else {
-		builder.WriteString("\n| Finding | Pattern | State | Fingerprint |\n| --- | --- | --- | --- |\n")
+		builder.WriteString("\n| Finding | Pattern | State | Severity | Fingerprint |\n| --- | --- | --- | --- | --- |\n")
 		for _, entry := range entries {
-			fmt.Fprintf(&builder, "| F-%d | P-%d `%s` | %s | `%s` |\n", entry.FindingSeq, entry.PatternSeq, entry.PatternKey, entry.State, entry.Fingerprint)
+			fmt.Fprintf(&builder, "| F-%d | P-%d `%s` | %s | %s | `%s` |\n", entry.FindingSeq, entry.PatternSeq, entry.PatternKey, entry.State, entry.Severity, entry.Fingerprint)
 		}
 	}
 	builder.WriteString("\n## Patterns claimed fixed since the previous verdict\n")
@@ -561,7 +569,7 @@ func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scop
 		fmt.Fprintf(&builder, "repos: [%s]\n", strings.Join(names, ", "))
 	}
 	builder.WriteString("---\n")
-	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `review/delta.patch`, using `review/cumulative.patch` for context. The immutable bindings are in `review/round.json`; conflicts are listed in `review/conflicts.txt`; the Finding Ledger is in `review/ledger.md`. Repository guidance is copied into `review/guidance/` from the frozen target's origin ref, never from the Change branch. Do not modify the checkout.\n\nFinish by writing a JSON file in this Task's scratch directory using this schema, then signal done with `--report <report-file> --verdict <pass|changes_requested|inconclusive> --findings <findings-file>`. A pass must have no blocking open findings; Posse derives and checks the verdict. Use an empty patterns array for no findings.\n\n```json\n{\n  \"schema\": \"posse.review-findings.v1\",\n  \"patterns\": [{\n    \"key\": \"unchecked-error-return\",\n    \"title\": \"Store write errors are dropped\",\n    \"rule\": \"Every store write error reaches the caller\",\n    \"root_cause\": \"New helpers ignore database errors\",\n    \"fix_guidance\": \"Check every new write call in the affected package\",\n    \"severity\": \"P1\",\n    \"origin\": \"introduced\",\n    \"instances\": [{\n      \"repository\": \"posse\", \"path\": \"internal/app/x.go\", \"line\": 42,\n      \"symbol\": \"saveRound\", \"excerpt\": \"db.Exec(ctx, q)\",\n      \"description\": \"The returned error is ignored\", \"cause\": null,\n      \"matches\": null, \"regresses\": null\n    }]\n  }],\n  \"resolutions\": []\n}\n```\n\nEach excerpt must occur in its repository file at the bound head after whitespace normalization. Use `cause: \"path:line\"` only to cite an added line in `review/delta.patch` that caused an interaction finding. `matches` and `regresses` use existing IDs such as `F-3`. Include one pattern per root cause, with every located instance. Missing or unknown severity is treated as unclassified and blocks. For every ledger finding claimed fixed, include a resolution with status `resolved` or `unresolved`; omitted answers remain unverified.\n\n", round)
+	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `{{review_dir}}/delta.patch`, using `{{review_dir}}/cumulative.patch` for context. The immutable bindings are in `{{review_dir}}/round.json`; conflicts are listed in `{{review_dir}}/conflicts.txt`; the Finding Ledger is in `{{review_dir}}/ledger.md`. Repository guidance is copied into `{{review_dir}}/guidance/` from the frozen target's origin ref, never from the Change branch. Do not modify the checkout.\n\nFinish by writing a JSON file in this Task's scratch directory using this schema, then signal done with `--report <report-file> --verdict <pass|changes_requested|inconclusive> --findings <findings-file>`. A pass must have no blocking open findings; Posse derives and checks the verdict. Use an empty patterns array for no findings.\n\n```json\n{\n  \"schema\": \"posse.review-findings.v1\",\n  \"patterns\": [{\n    \"key\": \"unchecked-error-return\",\n    \"title\": \"Store write errors are dropped\",\n    \"rule\": \"Every store write error reaches the caller\",\n    \"root_cause\": \"New helpers ignore database errors\",\n    \"fix_guidance\": \"Check every new write call in the affected package\",\n    \"severity\": \"P1\",\n    \"origin\": \"introduced\",\n    \"instances\": [{\n      \"repository\": \"posse\", \"path\": \"internal/app/x.go\", \"line\": 42,\n      \"symbol\": \"saveRound\", \"excerpt\": \"db.Exec(ctx, q)\",\n      \"description\": \"The returned error is ignored\", \"cause\": null,\n      \"matches\": null, \"regresses\": null\n    }]\n  }],\n  \"resolutions\": []\n}\n```\n\nEach excerpt must occur in its repository file at the bound head after whitespace normalization. Use `cause: \"path:line\"` only to cite an added line in `{{review_dir}}/delta.patch` that caused an interaction finding. `matches` and `regresses` use existing IDs such as `F-3`. Include one pattern per root cause, with every located instance. Missing or unknown severity is treated as unclassified and blocks. For every ledger finding claimed fixed, include a resolution with status `resolved` or `unresolved`; omitted answers remain unverified.\n\n", round)
 	for _, input := range plan.Inputs {
 		if input.Role != "brief" {
 			continue
@@ -591,6 +599,9 @@ func reviewRoundPlanInputs(files map[string][]byte) []taskplan.Input {
 }
 
 func writeReviewRoundFiles(taskHome string, files map[string][]byte) error {
+	if err := os.MkdirAll(filepath.Join(taskHome, "review", "guidance"), 0o700); err != nil {
+		return err
+	}
 	for name, contents := range files {
 		clean := path.Clean(filepath.ToSlash(name))
 		if clean == "review" || !strings.HasPrefix(clean, "review/") || path.IsAbs(clean) || strings.HasPrefix(clean, "../") {
