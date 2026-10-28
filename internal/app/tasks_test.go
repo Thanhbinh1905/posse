@@ -1617,3 +1617,111 @@ func TestWorkerTabLabelAppendsTaskIDOnce(t *testing.T) {
 		}
 	}
 }
+
+// Regression for #593: the dependency Decision raised while the prerequisite
+// was failed must not break the admission pass once that prerequisite is
+// torn down, and tearing down the queued Task retires its open Decision.
+func TestTornDownFailedPrerequisiteKeepsAdmissionPassWorking(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dependent := filepath.Join(filepath.Dir(fixture.brief), "dependent.md")
+	if err := os.WriteFile(dependent, []byte("---\ntype: change\ntitle: Dependent change\ndone_when: prerequisite is resolved\nafter: t1:landed\n---\nWait for the prerequisite.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		output := &bytes.Buffer{}
+		cli := fixture.service.CLI()
+		cli.Out, cli.ErrOut = output, output
+		if code := cli.Run(args); code != 0 {
+			t.Fatalf("%v exit=%d output=%s", args, code, output.String())
+		}
+		return output.String()
+	}
+	run("start", "--brief", dependent)
+	run("list")
+	run("teardown", "t1", "--discard", "--user-approved", "discard the failed prerequisite")
+	run("list")
+	run("start", "--brief", fixture.brief)
+
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "dependency" || !strings.Contains(decisions[0].Question, "torn-down") {
+		t.Fatalf("dependency Decision after prerequisite teardown=%#v err=%v", decisions, err)
+	}
+	decision, err := db.AnswerDecision(ctx, fixture.project.ID, decisions[0].ID, "cancel", "cancel the dependent Task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run("apply", fmt.Sprint(decision.ID))
+	run("list")
+}
+
+func TestTearingDownQueuedTaskObsoletesItsOpenDecisions(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.brief, []byte("---\ntype: change\ntitle: Dependent change\ndone_when: prerequisite is resolved\nafter: t1:landed\n---\nWait for the prerequisite.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"start", "--brief", fixture.brief}, {"list"}, {"teardown", "t2", "--discard", "--user-approved", "drop the queued Task"}} {
+		output := &bytes.Buffer{}
+		cli := fixture.service.CLI()
+		cli.Out, cli.ErrOut = output, output
+		if code := cli.Run(args); code != 0 {
+			t.Fatalf("%v exit=%d output=%s", args, code, output.String())
+		}
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pending, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("torn-down queued Task kept pending Decisions=%#v err=%v", pending, err)
+	}
+	all, err := db.Decisions(ctx, fixture.project.ID, false)
+	if err != nil || len(all) != 1 || all[0].Kind != "dependency" || all[0].ObsoleteAt == 0 || all[0].ObsoleteReason == "" {
+		t.Fatalf("dependency Decision was not retired: %#v err=%v", all, err)
+	}
+}
