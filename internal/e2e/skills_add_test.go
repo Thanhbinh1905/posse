@@ -82,7 +82,7 @@ func TestSkillsAddNonInteractive(t *testing.T) {
 		t.Fatalf("add --all: %v\n%s", err, output)
 	}
 	got := f.configured(t)
-	if strings.Join(got["change"], ",") != "posse-tdd,posse-deslop,posse-no-comments,posse-technical-writing,posse-unslop" || len(got["lead"]) != 14 || len(got["research"]) != 3 {
+	if strings.Join(got["change"], ",") != "posse-tdd,posse-deslop,posse-no-comments,posse-technical-writing,posse-unslop" || len(got["lead"]) != 15 || len(got["research"]) != 3 {
 		t.Fatalf("configured after --all = %#v", got)
 	}
 	contents, err := os.ReadFile(configPath)
