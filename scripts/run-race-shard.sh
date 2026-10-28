@@ -11,15 +11,14 @@ set -eu
 # check. Refresh the file from CI timing data with
 # scripts/refresh-race-durations.sh.
 #
-# shard_count must match the test-shard matrix in .github/workflows/ci.yml.
-# budget_seconds caps each shard's planned test time at 40% of the 15m go test
-# timeout, leaving room for compilation and runner variance so a shard stays
-# under about 60% of the timeout. The self-check warns once a shard plans over
-# warn_percent of the budget and fails over the budget. On a warning, add a
-# shard here and to the matrix.
-shard_count=8
+# The shard count follows the plan: it is the smallest count whose plan keeps
+# every shard within target_percent of budget_seconds, and --matrix prints it
+# as the CI matrix. budget_seconds caps each shard's planned test time at 40%
+# of the 15m go test timeout, leaving room for compilation and runner variance
+# so a shard stays under about 60% of the timeout.
 budget_seconds=360
-warn_percent=85
+target_percent=85
+target_seconds=$((budget_seconds * target_percent / 100))
 # default_seconds is above the 95th percentile of recorded split tests.
 default_seconds=5
 module=$(go list -m)
@@ -142,9 +141,28 @@ plan() {
     }'
 }
 
+# shards prints the smallest shard count whose plan keeps every shard within
+# the target seconds. It fails when one unit alone exceeds the target.
+shards() {
+  count=$(printf '%s\n' "$1" | awk -v target="$2" '
+    NF == 2 || NF == 3 {
+      if ($1 > target) {
+        key = $2 " " $3
+        sub(/ $/, "", key)
+        printf "Race unit %s plans %ds, over the %ds shard target\n", key, $1, target > "/dev/stderr"
+        exit 1
+      }
+      total += $1
+    }
+    END { print (total == 0 ? 1 : int((total + target - 1) / target)) }') || return 1
+  while [ "$(plan "$1" "$count" | awk '{ total[$1] += $2 } END { for (s in total) if (total[s] > max) max = total[s]; print max + 0 }')" -gt "$2" ]; do
+    count=$((count + 1))
+  done
+  echo "$count"
+}
+
 # check_plan verifies that the plan runs every estimated unit in exactly one
-# shard. It warns when a shard plans over warn_percent of the budget and fails
-# when a shard exceeds the budget.
+# shard and fails when a shard exceeds the target seconds.
 check_plan() {
   estimated=$1
   planned=$(plan "$estimated" "$2")
@@ -154,19 +172,17 @@ check_plan() {
     echo "Race shard plan does not run every unit exactly once." >&2
     return 1
   fi
-  printf '%s\n' "$planned" | awk -v count="$2" -v budget="$3" -v warn="$warn_percent" '
+  printf '%s\n' "$planned" | awk -v count="$2" -v target="$3" '
     { total[$1] += $2 }
     END {
       for (s = 1; s <= count; s++) {
-        printf "Race shard %d/%d plans %ds of %ds budget\n", s, count, total[s], budget
-        if (total[s] > budget) over = 1
-        else if (total[s] * 100 > budget * warn) near = 1
+        printf "Race shard %d/%d plans %ds of %ds target\n", s, count, total[s], target
+        if (total[s] > target) over = 1
       }
       if (over) {
-        print "A race shard exceeds its budget; raise shard_count in scripts/run-race-shard.sh and the test-shard matrix in .github/workflows/ci.yml." > "/dev/stderr"
+        print "A race shard exceeds its target." > "/dev/stderr"
         exit 1
       }
-      if (near) printf "::warning::A race shard plans over %d%% of its budget; raise shard_count in scripts/run-race-shard.sh and the test-shard matrix in .github/workflows/ci.yml before a shard exceeds it.\n", warn
     }'
 }
 
@@ -187,7 +203,8 @@ run_self_check() {
   validate_durations "$durations"
   discovered=$(units "$durations")
   warn_unrecorded "$discovered" "$durations"
-  check_plan "$(estimate "$discovered" "$durations")" "$shard_count" "$budget_seconds"
+  estimated=$(estimate "$discovered" "$durations")
+  check_plan "$estimated" "$(shards "$estimated" "$target_seconds")" "$target_seconds"
 
   if validate_durations '1 pkg/a
 2 pkg/a TestA' >/dev/null 2>&1; then
@@ -247,15 +264,30 @@ pkg/new' '2 pkg/a TestA
   fi
   if check_plan '3 pkg/a
 3 pkg/b' 1 5 >/dev/null 2>&1; then
-    echo "self-check failed: a shard over budget was accepted" >&2
+    echo "self-check failed: a shard over its target was accepted" >&2
     return 1
   fi
-  if ! near=$(check_plan '9 pkg/a' 1 10) || [ "${near#*::warning::}" = "$near" ]; then
-    echo "self-check failed: a shard near its budget did not warn" >&2
+  if [ "$(check_plan '5 pkg/a' 1 5)" != 'Race shard 1/1 plans 5s of 5s target' ]; then
+    echo "self-check failed: a shard at its target was rejected" >&2
     return 1
   fi
-  if [ "$(check_plan '8 pkg/a' 1 10)" != 'Race shard 1/1 plans 8s of 10s budget' ]; then
-    echo "self-check failed: a shard within the warning threshold warned" >&2
+  if [ "$(shards "200 pkg/a
+$((100 - default_seconds)) pkg/b TestB
+$default_seconds pkg/b TestC" 300)" != 1 ] || [ "$(shards "200 pkg/a
+$((100 - default_seconds)) pkg/b TestB
+$default_seconds pkg/b TestC
+$default_seconds pkg/b TestNew" 300)" != 2 ]; then
+    echo "self-check failed: the shard count does not grow with an unrecorded unit" >&2
+    return 1
+  fi
+  if [ "$(shards '4 pkg/a
+4 pkg/b
+4 pkg/c TestC' 6)" != 3 ]; then
+    echo "self-check failed: the shard count does not cover a plan the total alone underestimates" >&2
+    return 1
+  fi
+  if shards '7 pkg/a TestA' 6 >/dev/null 2>&1; then
+    echo "self-check failed: a unit over the shard target was accepted" >&2
     return 1
   fi
   printf 'Race shard assignment self-check passed.\n'
@@ -265,19 +297,27 @@ if [ "$#" -eq 1 ] && [ "$1" = --self-test ]; then
   run_self_check
   exit 0
 fi
-if [ "$#" -eq 1 ] && [ "$1" = --plan ]; then
+if [ "$#" -eq 1 ] && { [ "$1" = --plan ] || [ "$1" = --matrix ]; }; then
   validate_durations "$durations"
-  discovered=$(units "$durations")
-  plan "$(estimate "$discovered" "$durations")" "$shard_count"
+  estimated=$(estimate "$(units "$durations")" "$durations")
+  shard_count=$(shards "$estimated" "$target_seconds")
+  if [ "$1" = --matrix ]; then
+    seq "$shard_count" | paste -sd, | sed 's/.*/[&]/'
+  else
+    plan "$estimated" "$shard_count"
+  fi
   exit 0
 fi
 if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <shard> <shard-total>|--self-test|--plan" >&2
+  echo "usage: $0 <shard> <shard-total>|--self-test|--plan|--matrix" >&2
   exit 2
 fi
 shard=$1
+validate_durations "$durations"
+estimated=$(estimate "$(units "$durations")" "$durations")
+shard_count=$(shards "$estimated" "$target_seconds")
 if [ "$2" != "$shard_count" ]; then
-  echo "race shard total $2 does not match shard_count $shard_count in $0; update the CI matrix or shard_count" >&2
+  echo "race shard total $2 does not match the planned $shard_count shards; build the CI matrix from $0 --matrix" >&2
   exit 2
 fi
 case "$shard" in
@@ -288,9 +328,7 @@ if [ "$shard" -gt "$shard_count" ]; then
   exit 2
 fi
 
-validate_durations "$durations"
-discovered=$(units "$durations")
-shard_plan=$(plan "$(estimate "$discovered" "$durations")" "$shard_count" | awk -v shard="$shard" '$1 == shard')
+shard_plan=$(plan "$estimated" "$shard_count" | awk -v shard="$shard" '$1 == shard')
 printf 'Running race shard %s/%s\n' "$shard" "$shard_count"
 started=$(date +%s)
 
