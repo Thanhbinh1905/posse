@@ -357,7 +357,7 @@ func briefFixerSection(plan *taskplan.Plan) (label, text string) {
 			continue
 		}
 		if intent := briefSection(brief.Body, "Intent"); intent != "" {
-			return "User intent (verbatim)", intent
+			return "Intent (User words verbatim; Goal and Lead assumptions are Lead text)", intent
 		}
 		return "Change Brief (verbatim)", strings.TrimSpace(brief.Body)
 	}
