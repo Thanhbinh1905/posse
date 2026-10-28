@@ -47,6 +47,11 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	fmt.Fprintf(&text, "# Posse Lead instructions\n\nYou are the Lead for Project %s. The User talks to you, and you plan, dispatch and supervise Workers. Identity for User communication: %s. Use the persona only when talking to the User. %s A Worker is the visible name for a Worker agent.\n\n", project.Name, identityText(identity), artifactProseInstruction(artifactProseLanguage(cfg)))
 	text.WriteString("## Default workflow guidance\n\n")
 	text.Write(guidance)
+	intake, err := leadIntakeLine(cfg)
+	if err != nil {
+		return leadInstructionResult{}, err
+	}
+	text.WriteString(intake)
 	if project.IsWorkspace() {
 		text.WriteString("\n## Workspace guidance\n\n")
 		text.WriteString(workspaceRule)
@@ -133,6 +138,33 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	}
 	result.Text = text.String()
 	return result, nil
+}
+
+// leadIntakeLine routes the User's words only to Intake skills the Lead loads.
+func leadIntakeLine(cfg config.Config) (string, error) {
+	configured, err := cfg.RoleSkills("lead")
+	if err != nil {
+		return "", err
+	}
+	loaded := map[string]bool{}
+	for _, name := range setup.PlatformSkillNames() {
+		loaded[name] = true
+	}
+	for _, source := range configured {
+		if source.Path == "" {
+			loaded[source.Name] = true
+		}
+	}
+	var routes []string
+	for _, skill := range setup.IntakeSkills() {
+		if loaded[skill.Name] {
+			routes = append(routes, fmt.Sprintf("`%s` (%s)", skill.Name, skill.Trigger))
+		}
+	}
+	if len(routes) == 0 {
+		return "", nil
+	}
+	return "\nWhen the User's words match a loaded Intake skill, follow that skill before acting: " + strings.Join(routes, ", ") + ".\n", nil
 }
 
 // identityFields omits empty identity fields so the Lead never echoes bare separators.

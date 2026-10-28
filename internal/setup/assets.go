@@ -56,6 +56,34 @@ func PlatformSkillNames() []string {
 	return append([]string(nil), platformSkillNames...)
 }
 
+// IntakeSkill is a Lead skill the User's plain words trigger.
+type IntakeSkill struct {
+	Name    string
+	Trigger string
+}
+
+var intakeSkills = []IntakeSkill{
+	{"posse-whats-next", "what's next"},
+	{"posse-catch-up", "catch up"},
+	{"posse-enlighten-me", "explain"},
+	{"posse-research", "research"},
+	{"posse-brainstorming", "brainstorm"},
+	{"posse-sharpen", "lock an idea"},
+	{"posse-spec", "write a spec"},
+	{"posse-arena", "compare designs for a large one-way door"},
+	{"posse-tickets", "break a spec into tickets"},
+	{"posse-triage", "triage open issues"},
+	{"posse-build", "build approved tickets"},
+	{"posse-board", "open the board"},
+	{"posse-diagnose", "something broken"},
+	{"posse-better-each-day", "what should improve"},
+}
+
+// IntakeSkills lists the embedded Intake skills in routing order.
+func IntakeSkills() []IntakeSkill {
+	return append([]IntakeSkill(nil), intakeSkills...)
+}
+
 // RecommendedSkills is the embedded workflow skill set for each [skills] role.
 func RecommendedSkills() map[string][]string {
 	return map[string][]string{

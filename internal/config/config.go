@@ -925,6 +925,11 @@ func (c Config) fallbackIssue(name string) string {
 }
 
 func (c Config) profileFile(name, fallback string) string {
+	return c.tableKeyFile("profiles", name, fallback)
+}
+
+// tableKeyFile names the last config file that sets table.key.
+func (c Config) tableKeyFile(table, key, fallback string) string {
 	for i := len(c.Files) - 1; i >= 0; i-- {
 		contents, err := os.ReadFile(c.Files[i])
 		if err != nil {
@@ -934,8 +939,8 @@ func (c Config) profileFile(name, fallback string) string {
 		if _, err := toml.Decode(string(contents), &values); err != nil {
 			continue
 		}
-		if profiles, ok := values["profiles"].(map[string]any); ok {
-			if _, found := profiles[name]; found {
+		if entries, ok := values[table].(map[string]any); ok {
+			if _, found := entries[key]; found {
 				return c.Files[i]
 			}
 		}

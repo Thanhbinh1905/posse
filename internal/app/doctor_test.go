@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -330,5 +331,56 @@ func TestDoctorRecommendsRemovingProjectsWithStaleRoots(t *testing.T) {
 		if !helpFound {
 			t.Errorf("doctor omitted project removal hint for %s: %s", name, output.String())
 		}
+	}
+}
+
+func TestDoctorWarnsOnUnresolvableReviewDispatchRules(t *testing.T) {
+	for _, test := range []struct {
+		name, config, status, detail string
+	}{
+		{name: "typed rule", config: "[profiles.deep]\nkind = \"claude\"\n[[dispatch]]\ntype = \"review\"\nuse = \"deep\"\n", status: "ok", detail: "deep"},
+		{name: "no rule matches review", config: "[profiles.deep]\nkind = \"claude\"\n[[dispatch]]\ntype = \"change\"\nuse = \"deep\"\n", status: "warn", detail: "no Dispatch Rule matches"},
+		{name: "disabled kind", config: "[kinds.pi]\ndisabled = true\n[profiles.deep]\nkind = \"pi\"\n[[dispatch]]\ntype = \"review\"\nuse = \"deep\"\n", status: "warn", detail: "disabled"},
+		{name: "one candidate unusable", config: "[kinds.pi]\ndisabled = true\n[profiles.deep]\nkind = \"pi\"\n[profiles.quick]\nkind = \"claude\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"small\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"large\"\nuse = \"quick\"\n", status: "warn", detail: "deep"},
+		{name: "candidates all usable", config: "[profiles.deep]\nkind = \"claude\"\n[profiles.quick]\nkind = \"codex\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"small\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"large\"\nuse = \"quick\"\n", status: "ok", detail: "deep, quick"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(home, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, detail, action := testService(home, nil).reviewDispatchCheck(context.Background(), store.Project{Name: "shop"}, cfg)
+			if status != test.status || !strings.Contains(detail, test.detail) || (status == "warn") != (action != "") {
+				t.Fatalf("review dispatch check = %s %q %q, want %s naming %q", status, detail, action, test.status, test.detail)
+			}
+		})
+	}
+}
+
+func TestDoctorWarnsOnGlobalPosseSkillsShadowingRoleSnapshots(t *testing.T) {
+	root := t.TempDir()
+	dirs := setupDirs{claude: filepath.Join(root, "claude"), agents: filepath.Join(root, "agents", "skills")}
+	if _, status, _, _ := globalSkillShadowCheck(dirs); status != "ok" {
+		t.Fatalf("empty global skill dirs = %s", status)
+	}
+	for _, path := range []string{
+		filepath.Join(dirs.agents, "posse-tdd", "SKILL.md"),
+		filepath.Join(dirs.claude, "skills", "posse-review", "SKILL.md"),
+		filepath.Join(dirs.claude, "skills", "my-skill", "SKILL.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("---\nname: x\n---\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, status, detail, action := globalSkillShadowCheck(dirs)
+	if status != "warn" || action == "" || !strings.Contains(detail, filepath.Join(dirs.agents, "posse-tdd")) || !strings.Contains(detail, filepath.Join(dirs.claude, "skills", "posse-review")) || strings.Contains(detail, "my-skill") {
+		t.Fatalf("global skill shadow check = %s %q %q", status, detail, action)
 	}
 }

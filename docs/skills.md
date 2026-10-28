@@ -48,7 +48,7 @@ review   = ["posse-review", "posse-unslop"]
 research = ["posse-research", "posse-technical-writing", "posse-unslop"]
 ```
 
-Each entry is a bundled skill name or an absolute or `~/` path to a directory holding `SKILL.md`. A bad entry fails config load with an error naming it. A Project list replaces the global list for that role. A Task's skills are frozen when it starts, so edits affect new Tasks and Leads only. Edit the block to remove skills or add your own.
+Each entry is a bundled skill name or an absolute or `~/` path to a directory holding `SKILL.md`. A bad entry fails config load with an error naming it and the file that holds it. A Project list replaces the global list for that role. A Task's skills are frozen when it starts, so edits affect new Tasks and Leads only. `posse dispatch` and `posse start` warn for each bundled skill the Brief names that the Task's role does not load. The Lead prompt routes the User's words only to the Intake skills the Lead loads. `posse doctor` warns about bundled skills installed globally under `~/.agents/skills` or `~/.claude/skills`, which load beside every role's frozen set. Edit the block to remove skills or add your own.
 
 | Key | Loaded into | Purpose |
 |---|---|---|
