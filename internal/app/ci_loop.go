@@ -226,7 +226,7 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	digest := sha256.Sum256([]byte(checkSet))
 	checkSetKey := hex.EncodeToString(digest[:])
 	dedupeKey := "ci:" + observation.HeadSHA + ":" + checkSetKey
-	instruction := renderCIFixInstruction(task, plan, observation, prURL, member, checks, tails)
+	instruction := renderCIFixInstruction(task, plan, observation, forge, prURL, member, checks, tails)
 	var result store.QueueValidationFixResult
 	var err error
 	if fullPipelineSelected(task, member) {
@@ -274,7 +274,7 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	return err
 }
 
-func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation store.PRObservation, prURL, member string, checks []failedCheck, tails map[string]string) string {
+func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation store.PRObservation, forge repositoryForge, prURL, member string, checks []failedCheck, tails map[string]string) string {
 	var body strings.Builder
 	memberContext := ""
 	if member != "" {
@@ -290,7 +290,7 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 		if name == "" {
 			name = "unnamed required check"
 		}
-		fmt.Fprintf(&body, "- Check: %s\n  Log URL: %s\n  Failed-log tail (up to 200 lines):\n```text\n%s\n```\n", name, defaultValue(check.URL, "not supplied"), strings.TrimSpace(tails[name]))
+		fmt.Fprintf(&body, "- Check: %s\n%s  Log URL: %s\n  Failed-log tail (up to 200 lines):\n```text\n%s\n```\n", name, ciCheckIdentity(forge, prURL, check), defaultValue(check.URL, "not supplied"), strings.TrimSpace(tails[name]))
 	}
 	if label, text := briefFixerSection(plan); text != "" {
 		fmt.Fprintf(&body, "\n%s:\n%s\n", label, text)
@@ -309,6 +309,41 @@ func renderCIFixInstruction(task store.Task, plan *taskplan.Plan, observation st
 	return strings.TrimSpace(body.String())
 }
 
+func ciCheckIdentity(forge repositoryForge, prURL string, check failedCheck) string {
+	var out strings.Builder
+	if check.RunID != "" {
+		fmt.Fprintf(&out, "  Run: %s\n", check.RunID)
+	}
+	if check.JobID != "" {
+		fmt.Fprintf(&out, "  Job: %s\n", check.JobID)
+	}
+	if command := ciLogCommand(forge, prURL, check); command != "" {
+		fmt.Fprintf(&out, "  Log command: `%s`\n", command)
+	}
+	return out.String()
+}
+
+func ciLogCommand(forge repositoryForge, prURL string, check failedCheck) string {
+	if forge.Kind == "gitlab" {
+		if check.JobID == "" {
+			return ""
+		}
+		return "glab ci trace " + check.JobID
+	}
+	ref, err := pullRequestReferenceFromURL(prURL)
+	if err != nil {
+		return ""
+	}
+	repo := githubRepositorySelector(ref)
+	switch {
+	case check.JobID != "":
+		return "gh run view --job " + check.JobID + " --log-failed --repo " + repo
+	case check.RunID != "":
+		return "gh run view " + check.RunID + " --log-failed --repo " + repo
+	}
+	return ""
+}
+
 func briefFixerSection(plan *taskplan.Plan) (label, text string) {
 	if plan == nil {
 		return "", ""
@@ -322,7 +357,7 @@ func briefFixerSection(plan *taskplan.Plan) (label, text string) {
 			continue
 		}
 		if intent := briefSection(brief.Body, "Intent"); intent != "" {
-			return "User intent (verbatim)", intent
+			return "Intent (User words verbatim; Goal and Lead assumptions are Lead text)", intent
 		}
 		return "Change Brief (verbatim)", strings.TrimSpace(brief.Body)
 	}

@@ -119,7 +119,8 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		return err
 	}
 	defer db.Close()
-	if s.configCaller(ctx.Context, db).role == "worker" {
+	actor := s.configCaller(ctx.Context, db)
+	if actor.role == "worker" {
 		return axi.Failure("lead_only", "posse up --all cannot run from a Worker pane", false, "Run `posse up --all` from a User or Lead shell")
 	}
 	if s.Herdr == nil {
@@ -135,6 +136,8 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	restored := []any{}
 	failed := []any{}
 	down := []any{}
+	help := []any{}
+	inLeadPane := 0
 	pending := false
 	for _, project := range projects {
 		if project.IsDown() {
@@ -149,6 +152,15 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 			pending = true
 			err = nil
 		}
+		// Herdr cannot start an agent in the pane running this command;
+		// `posse up` there replaces the shell with the Lead instead.
+		var failure *axi.Error
+		if errors.As(err, &failure) && failure.Code == "agent_pane_busy" && actor.role == "lead" && actor.projectID == project.ID && actor.paneID == project.LeadPaneID {
+			failed = append(failed, map[string]any{"project": project.Name, "error": "posse up --all runs in the Lead pane " + project.LeadPaneID + ", so Herdr cannot start the Lead there"})
+			help = append(help, "Run `posse up` in the Lead pane of "+project.Name+" to start its Lead, or run `posse up --all` from another pane")
+			inLeadPane++
+			continue
+		}
 		if err != nil {
 			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
 			continue
@@ -156,13 +168,14 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		restored = append(restored, map[string]any{"project": project.Name, "workers": workers})
 	}
 	state := "restored"
-	help := []any{}
 	if pending {
 		state = "partial"
 		help = append(help, "Some Workers wait for their relaunch backoff; run `posse up --all` again shortly")
 	}
 	if len(failed) > 0 {
 		state = "partial"
+	}
+	if len(failed) > inLeadPane {
 		help = append(help, "Fix the failed Projects and run `posse up --all` again")
 	}
 	if len(down) > 0 {

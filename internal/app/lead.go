@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -109,15 +110,54 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	pending, err := leadPending(ctx.Context, db, home, project)
+	if err != nil {
+		return err
+	}
 	result := axi.Object{
 		{Key: "instructions", Value: composed.Text},
 		{Key: "lowkey", Value: composed.Lowkey},
 		{Key: "reporting_rule", Value: composed.ReportingRule},
 		{Key: "identity", Value: composed.Identity},
 		{Key: "language_rule", Value: composed.LanguageRule},
+		{Key: "pending", Value: pending},
 		{Key: "help", Value: []any{"Continue the Lead conversation with the User. For code changes, follow the runtime obligations in these instructions and use `posse start`."}},
 	}
 	return ctx.Print(withReadiness(result, gaps))
+}
+
+// leadPending is what a restarted Lead must pick up: pending Decision IDs,
+// needs-decision Tasks, the unacked Notice count and the drafts folder.
+func leadPending(ctx context.Context, db *store.DB, home string, project store.Project) (axi.Object, error) {
+	decisions, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil {
+		return nil, err
+	}
+	decisionIDs := make([]int64, 0, len(decisions))
+	for _, decision := range decisions {
+		decisionIDs = append(decisionIDs, decision.ID)
+	}
+	tasks, err := db.Tasks(ctx, project.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	waiting := []string{}
+	for _, task := range tasks {
+		if task.State == store.StateNeedsDecision {
+			waiting = append(waiting, taskIDString(task.Seq))
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, true)
+	if err != nil {
+		return nil, err
+	}
+	return axi.Object{
+		{Key: "decisions", Value: decisionIDs},
+		{Key: "needs_decision", Value: waiting},
+		{Key: "unacked_notices", Value: len(notices)},
+		{Key: "drafts", Value: filepath.Join(home, "projects", project.Name, "drafts")},
+		{Key: "catch_up", Value: "Follow the `posse-catch-up` skill for details"},
+	}, nil
 }
 
 func (s *Service) currentLeadKind(ctx context.Context, project store.Project, cfg config.Config, fallback string) string {

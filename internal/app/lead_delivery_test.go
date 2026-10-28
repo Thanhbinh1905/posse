@@ -891,3 +891,44 @@ func TestLeadInstructionsAndChecksFailedNoticeAgreeOnFixOwner(t *testing.T) {
 		t.Errorf("pr_checks_failed summary does not state the fix owner: %s", summary)
 	}
 }
+
+func TestLeadIntakeLineListsOnlyLoadedLeadSkills(t *testing.T) {
+	for _, test := range []struct {
+		name, skills string
+		listed       []string
+		omitted      []string
+	}{
+		{name: "empty lead role", skills: "[skills]\nlead = []\n", listed: []string{"`posse-better-each-day` (what should improve)"}, omitted: []string{"posse-whats-next", "posse-tdd", "something broken"}},
+		{name: "configured lead role", skills: "[skills]\nlead = [\"posse-diagnose\", \"posse-catch-up\"]\n", listed: []string{"`posse-catch-up` (catch up)", "`posse-diagnose` (something broken)", "`posse-better-each-day`"}, omitted: []string{"posse-whats-next", "posse-spec"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(test.skills), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(home, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			composed, err := composeLeadInstructions(home, store.Project{Name: "shop"}, cfg, "codex", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, line, found := strings.Cut(composed.Text, "When the User's words match a loaded Intake skill")
+			if !found {
+				t.Fatalf("Lead instructions have no intake line: %s", composed.Text)
+			}
+			line, _, _ = strings.Cut(line, "\n")
+			for _, want := range test.listed {
+				if !strings.Contains(line, want) {
+					t.Errorf("intake line %q omits %q", line, want)
+				}
+			}
+			for _, unwanted := range test.omitted {
+				if strings.Contains(line, unwanted) {
+					t.Errorf("intake line %q names unloaded %q", line, unwanted)
+				}
+			}
+		})
+	}
+}

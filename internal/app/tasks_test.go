@@ -372,17 +372,18 @@ Implement after the prerequisite.
 	if code := cli.Run([]string{"--json", "--full"}); code != 0 {
 		t.Fatalf("home exit=%d output=%s", code, output.String())
 	}
+	// The lost predecessor raised a dependency Decision, so t2 waits on the User.
 	var home struct {
-		Tasks []struct {
+		NeedsYou []struct {
 			ID         string   `json:"id"`
 			After      []string `json:"after"`
 			WaitReason string   `json:"wait_reason"`
-		} `json:"tasks"`
+		} `json:"needs_you"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &home); err != nil {
 		t.Fatalf("decode home: %v: %s", err, output.String())
 	}
-	if len(home.Tasks) != 1 || home.Tasks[0].ID != "t2" || strings.Join(home.Tasks[0].After, ",") != "t1:landed" || !strings.HasPrefix(home.Tasks[0].WaitReason, "waiting for t1:landed") {
+	if len(home.NeedsYou) != 2 || home.NeedsYou[1].ID != "t2" || strings.Join(home.NeedsYou[1].After, ",") != "t1:landed" || !strings.HasPrefix(home.NeedsYou[1].WaitReason, "waiting for t1:landed") {
 		t.Fatalf("home omitted the prerequisite or its wait reason: %s", output.String())
 	}
 }

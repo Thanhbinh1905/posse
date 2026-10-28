@@ -153,14 +153,57 @@ jobs:
           fi
           echo "All race-enabled test shards passed."
 
+  e2e-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use job-local Go caches
+        run: |
+          echo "GOCACHE=$RUNNER_TEMP/posse-${{ github.repository_id }}-go-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-e2e-plan" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$RUNNER_TEMP/posse-go-mod" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ runner.temp }}/posse-go-mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            go mod download && exit 0
+            echo "go mod download failed (attempt $attempt)" >&2
+            sleep $((attempt * 5))
+          done
+          exit 1
+      - name: Check E2E shard assignments
+        run: scripts/run-e2e-shard.sh --self-test
+      - name: Plan E2E shards
+        id: plan
+        run: echo "shards=$(scripts/run-e2e-shard.sh --matrix)" >> "$GITHUB_OUTPUT"
+      - name: Clean job-local Go caches
+        if: ${{ always() }}
+        run: |
+          if [ -d "$GOCACHE" ]; then
+            find "$GOCACHE" -type d -exec chmod u+w {} +
+          fi
+          rm -rf -- "$GOCACHE"
+
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}
+    needs: [e2e-plan]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Keep in sync with shard_count in scripts/run-e2e-shard.sh.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        shard: ${{ fromJSON(needs.e2e-plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -201,9 +244,6 @@ jobs:
           chmod 755 "$herdr"
           echo "$tool_dir" >> "$GITHUB_PATH"
           "$herdr" --version
-      - name: Check E2E shard assignments
-        if: ${{ matrix.shard == 1 }}
-        run: scripts/run-e2e-shard.sh --self-test
       - name: Run first isolated Herdr end-to-end shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-
@@ -259,13 +299,13 @@ jobs:
   e2e-main-duplicate:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     name: e2e main duplicate shard ${{ matrix.shard }}
+    needs: [e2e-plan]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        # Keep in sync with shard_count in scripts/run-e2e-shard.sh.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        shard: ${{ fromJSON(needs.e2e-plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

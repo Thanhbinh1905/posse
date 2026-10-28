@@ -122,11 +122,12 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if brief.ReportKind != "" {
 		result = append(result, axi.Field{Key: "report_kind", Value: brief.ReportKind})
 	}
+	warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body)
 	if len(issueReferences(brief))+len(brief.Refs) > 0 {
-		warnings := s.checkBriefIssues(ctx.Context, cfg, brief, targets)
-		if len(warnings) > 0 {
-			result = append(result, axi.Field{Key: "warnings", Value: warnings})
-		}
+		warnings = append(warnings, s.checkBriefIssues(ctx.Context, cfg, brief, targets)...)
+	}
+	if len(warnings) > 0 {
+		result = append(result, axi.Field{Key: "warnings", Value: warnings})
 	}
 	return ctx.Print(result)
 }
@@ -533,7 +534,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if len(unmetDependencies) > 0 {
 			waitReason = "Waiting for " + strings.Join(unmetDependencies, ", ")
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}})
+		result := axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}}
+		if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
+			result = append(result, axi.Field{Key: "warnings", Value: warnings})
+		}
+		return ctx.Print(result)
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
@@ -777,6 +782,9 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	}
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
+	}
+	if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
+		result = append(result, axi.Field{Key: "warnings", Value: warnings})
 	}
 	if report {
 		return ctx.Print(result)

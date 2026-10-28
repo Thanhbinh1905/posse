@@ -322,7 +322,7 @@ func TestFullPipelineRepairsReturnThroughPrivateCandidateValidation(t *testing.T
 	}
 	observation := store.PRObservation{HeadSHA: fixture.headSHA}
 	check := failedCheck{Name: "unit", URL: "https://example.test/check/1"}
-	ci := renderCIFixInstruction(fixture.task, plan, observation, "https://example.test/pr/1", "", []failedCheck{check}, map[string]string{"unit": "failed"})
+	ci := renderCIFixInstruction(fixture.task, plan, observation, repositoryForge{}, "https://example.test/pr/1", "", []failedCheck{check}, map[string]string{"unit": "failed"})
 	for _, required := range []string{"submit a private candidate", "Review -> test -> docs -> lint", "do not push the fix directly", "from that candidate checkout to promote it"} {
 		if !strings.Contains(strings.ToLower(ci), strings.ToLower(required)) {
 			t.Errorf("full-pipeline CI instruction omitted %q: %s", required, ci)
@@ -768,5 +768,17 @@ func TestMixedWorkspaceQuickMemberKeepsReviewAfterFullPipelineMembersMerge(t *te
 	err = requireSelectedReview(ctx, f.db, f.project, cfg, task)
 	if err == nil || !strings.Contains(err.Error(), "review_required") && !strings.Contains(err.Error(), "no passing Review") {
 		t.Fatalf("quick Member merged without its own review: %v", err)
+	}
+}
+
+func TestCIFixInstructionNamesRunJobAndLogCommand(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	observation := store.PRObservation{HeadSHA: fixture.headSHA}
+	check := failedCheck{Name: "unit", URL: "https://github.com/acme/app/actions/runs/11/job/22", RunID: "11", JobID: "22"}
+	ci := renderCIFixInstruction(fixture.task, nil, observation, repositoryForge{Kind: "github"}, "https://github.com/acme/app/pull/1", "", []failedCheck{check}, map[string]string{"unit": "failed"})
+	for _, required := range []string{"Run: 11", "Job: 22", "`gh run view --job 22 --log-failed --repo acme/app`"} {
+		if !strings.Contains(ci, required) {
+			t.Errorf("CI fix instruction omitted %q: %s", required, ci)
+		}
 	}
 }

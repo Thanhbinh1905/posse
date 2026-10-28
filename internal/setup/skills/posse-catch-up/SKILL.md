@@ -11,7 +11,7 @@ Read-only: change nothing, start nothing, post nothing.
 
 1. **Fix the window.** It runs from the User's last message, or, in a fresh session, from the last time a Lead ran in this Project. State the window in one line.
    Done when the reply opens with the window.
-2. **Gather.** Run `posse --full`; read each Task, Decision and Notice in the window and check the current state of every PR it touched. List unfinished drafts under `~/.posse/projects/<project>/drafts/` (status line `in-progress`). Label each fact seen, inferred or guess.
+2. **Gather.** Run `posse --full`; read each Task, Decision and Notice in the window and check the current state of every PR it touched. List unfinished drafts (status line `in-progress`) under `<drafts>/`, the `pending.drafts` path that `posse lead` prints. Label each fact seen, inferred or guess.
    Done when every item that could need the User has a current state.
 3. **Write the reply in this order:**
    1. One sentence on what waits on the User, or that nothing does.

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -81,6 +82,25 @@ func TestSkillsBadEntryFailsLoadNamingIt(t *testing.T) {
 	writeConfig(t, filepath.Join(home, "config.toml"), "[skills]\nworker = [\"posse-tdd\"]\n")
 	if _, err := Load(home, ""); err == nil || !strings.Contains(err.Error(), "skills.worker") {
 		t.Fatalf("unknown role error = %v", err)
+	}
+}
+
+func TestSkillsBadEntryErrorNamesTheFileThatHoldsTheKey(t *testing.T) {
+	home := t.TempDir()
+	globalPath := filepath.Join(home, "config.toml")
+	projectPath := filepath.Join(home, "projects", "shop", "config.toml")
+	writeConfig(t, globalPath, "[skills]\nchange = [\"posse-nope\"]\n")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var invalid *InvalidError
+	if _, err := Load(home, "shop"); !errors.As(err, &invalid) || invalid.File != globalPath || invalid.Key != "skills.change" {
+		t.Fatalf("global key error = %#v, want file %s", err, globalPath)
+	}
+	writeConfig(t, globalPath, "[skills]\nchange = [\"posse-tdd\"]\n")
+	writeConfig(t, projectPath, "[skills]\nreview = [\"posse-nope\"]\n")
+	if _, err := Load(home, "shop"); !errors.As(err, &invalid) || invalid.File != projectPath || invalid.Key != "skills.review" {
+		t.Fatalf("project key error = %#v, want file %s", err, projectPath)
 	}
 }
 

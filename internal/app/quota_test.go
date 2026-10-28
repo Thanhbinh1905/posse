@@ -44,6 +44,13 @@ func TestClassifyQuotaExhaustionRecognizesEachHarness(t *testing.T) {
 			resets: "7pm (Asia/Bangkok)",
 		},
 		{
+			name:   "claude auto-continue usage limit screen from #574",
+			kind:   "claude",
+			output: "  ⎿  You've hit your session limit · resets 1:30pm (Asia/Bangkok)\n● Usage limit reached · continuing automatically at 1:30pm · esc to cancel\n\n  ⚠ Usage limit reached · limit resets 1:30pm\n    Continuing shortly · esc to cancel\n" + claudePromptFooter,
+			line:   "Usage limit reached · limit resets 1:30pm",
+			resets: "1:30pm",
+		},
+		{
 			name:   "claude legacy epoch",
 			kind:   "claude",
 			output: "⏺ Claude AI usage limit reached|1792731600" + claudePromptFooter,

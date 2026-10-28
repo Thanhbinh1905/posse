@@ -455,6 +455,32 @@ func TestFirstOutcomeDispatchOmitsProfileArguments(t *testing.T) {
 	}
 }
 
+func TestFirstOutcomeDispatchAndStartWarnOnBriefSkillsTheRoleDoesNotLoad(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
+	outcomeCLI(t, f.service, 0, "config", "set", "skills.change", `["posse-deslop"]`)
+	if err := os.WriteFile(f.brief, []byte("---\ntype: change\ntitle: First outcome\ndone_when: verified\n---\nFollow the `posse-tdd` skill, then `posse-deslop`, `posse-better-each-day` and `posse-launch-skills`. Repeat: posse-tdd.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	const warning = "Brief names skill posse-tdd, which the change role does not load"
+	for _, command := range []string{"dispatch", "start"} {
+		output := outcomeCLI(t, f.service, 0, command, "--brief", f.brief, "--name", "skill-warning")
+		if strings.Count(output, warning) != 1 {
+			t.Fatalf("%s output lacks one warning %q:\n%s", command, warning, output)
+		}
+		for _, loaded := range []string{"skill posse-deslop", "skill posse-better-each-day", "skill posse-launch-skills"} {
+			if strings.Contains(output, loaded) {
+				t.Fatalf("%s warned about %s:\n%s", command, loaded, output)
+			}
+		}
+	}
+}
+
 func TestFirstOutcomeImplicitStartRelaunchAndRecovery(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	// This fixture has no origin, so Change delivery must be local.

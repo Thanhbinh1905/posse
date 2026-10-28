@@ -1043,7 +1043,7 @@ func freezeCILoop(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCanc
 
 func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCancelled int, review string) {
 	t.Helper()
-	brief := []byte("---\ntype: change\ntitle: CI loop test\ndone_when: checks are resolved\n---\nUser intent (verbatim): Retain this exact request.\n")
+	brief := []byte("---\ntype: change\ntitle: CI loop test\ndone_when: checks are resolved\n---\n## Intent\nUser words (verbatim): \"Retain this exact request.\"\nGoal: keep the request.\nLead assumptions: none.\n")
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief:     taskplan.Select("brief", "change.md", brief),
 		Execution: taskplan.Execution{Scope: "repo", Base: "main", Target: "main"},
