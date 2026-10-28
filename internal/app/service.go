@@ -577,8 +577,9 @@ func (s *Service) prepareProjectModeWithMessageDelivery(ctx context.Context, db 
 }
 
 // The detached watch may deliver queued instructions and Notices when no
-// extension or live Lead watch owns Notice delivery. Command boundaries
-// recover interrupted intents.
+// extension or live Lead watch owns Notice delivery, and admits queued Tasks
+// into free Worker slots. Command boundaries recover interrupted intents. A
+// pass that a held, deferred or unavailable observation skipped returns why.
 func (s *Service) prepareProjectWatchObservation(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
 	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{deliverMessages: true, watchObservation: true})
 }
@@ -640,12 +641,14 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 		return cfg, err
 	}
 	herdrReady := false
+	var skipped error
 	allowNetworkRecovery := options.allowRecovery
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {
 			if !isHerdrUnavailable(err) {
 				return cfg, herdrError(err)
 			}
+			skipped = err
 		} else {
 			var result runtime.RunResult
 			var runErr error
@@ -657,11 +660,11 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					return cfg, err
 				}
 				if claim.OwnerPID != 0 && processAlive(claim.OwnerPID) {
-					runErr = errRecoveryDeferred
+					runErr = fmt.Errorf("%w: process %d is recovering the Project", errRecoveryDeferred, claim.OwnerPID)
 				} else {
 					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 					if runErr == nil && result.GenerationMismatch {
-						runErr = errRecoveryDeferred
+						runErr = heldGenerationError(ctx, db, project, result.Snapshot)
 					}
 					if runErr == nil {
 						runErr = observeLeadAgent(ctx, db, project, result.Snapshot)
@@ -687,6 +690,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				if !store.IsOnlyBusy(runErr) && !isHerdrUnavailable(runErr) && !errors.Is(runErr, errRecoveryHeld) && !errors.Is(runErr, errRecoveryDeferred) {
 					return cfg, herdrError(runErr)
 				}
+				skipped = runErr
 			} else {
 				herdrReady = true
 				allowNetworkRecovery = allowNetworkRecovery || options.allowRunningLeadNetworkRecovery && leadAgentStarted(project, result.Snapshot)
@@ -698,6 +702,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 						if err := s.reconcileWatchIntents(ctx, db, project); err != nil {
 							return cfg, err
 						}
+					}
+					if err := s.refillQueuedTasks(ctx, db, project, cfg); err != nil {
+						return cfg, err
 					}
 				} else if err := s.reconcileIntentsMode(ctx, db, project, cfg, result.Snapshot, options.allowRecovery, allowNetworkRecovery); err != nil {
 					return cfg, err
@@ -752,7 +759,20 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 			return cfg, err
 		}
 	}
+	if options.watchObservation {
+		return cfg, skipped
+	}
 	return cfg, nil
+}
+
+// heldGenerationError names the Herdr restart that holds a Project until
+// `posse up --all` advances its recorded generation.
+func heldGenerationError(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
+	recorded, err := db.ProjectServerStartedAt(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: Herdr server %s replaced the recorded %s; run `posse up --all` to restore Project %s", errRecoveryHeld, snapshot.ServerStartedAt, recorded, project.Name)
 }
 
 func (s *Service) requireLead(ctx context.Context, db *store.DB, project store.Project) error {

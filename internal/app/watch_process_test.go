@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"os"
@@ -352,5 +353,26 @@ func TestSystemWatchProcessesSkipsEnvironmentOfNonWatchProcesses(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("discovery read the environment of a non-Watch process")
+	}
+}
+
+func TestWatchLogLinesCarryTimestamps(t *testing.T) {
+	var log bytes.Buffer
+	writer := &timestampedLines{out: &log}
+	for _, chunk := range []string{"first\nsec", "ond\n", "project: shop\nstate: stopped\n"} {
+		if n, err := writer.Write([]byte(chunk)); err != nil || n != len(chunk) {
+			t.Fatalf("Write(%q) = %d, %v", chunk, n, err)
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(log.String(), "\n"), "\n")
+	want := []string{"first", "second", "project: shop", "state: stopped"}
+	if len(lines) != len(want) {
+		t.Fatalf("watch log lines = %q", lines)
+	}
+	for i, line := range lines {
+		stamp, text, ok := strings.Cut(line, " ")
+		if _, err := time.Parse(time.RFC3339, stamp); !ok || err != nil || text != want[i] {
+			t.Fatalf("watch log line %d = %q, want an RFC 3339 time then %q", i, line, want[i])
+		}
 	}
 }

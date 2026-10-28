@@ -16,14 +16,15 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// queuedAdmissionFixture holds t1 in the only Worker slot and queues t2 behind it.
+// queuedAdmissionFixture holds t1 in the only Worker slot and queues t2 behind
+// it. No hidden Project watch runs, so only the test's commands admit t2.
 type queuedAdmissionFixture struct {
 	*workerTabsFixture
 }
 
 func newQueuedAdmissionFixture(t *testing.T) queuedAdmissionFixture {
 	t.Helper()
-	f := newWorkerTabsFixture(t)
+	f := newWorkerTabsFixtureWithManualWatchOwner(t)
 	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 1\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -84,6 +85,18 @@ func TestQueuedTaskAdmittedAtFreedSlotStarts(t *testing.T) {
 	if task := f.task(t, "t2"); task.Launches != 1 || task.PaneID == "" {
 		t.Fatalf("admitted Task did not launch its Worker: %#v", task)
 	}
+}
+
+// TestQueuedTaskAdmittedByOneWatchPoll frees the slot and runs no reconciling
+// command; a single Project watch poll must admit and start the queued Task.
+func TestQueuedTaskAdmittedByOneWatchPoll(t *testing.T) {
+	f := newQueuedAdmissionFixture(t)
+	f.freeSlot(t)
+	runPosse(t, f.binary, f.repo, setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", ""), "watch", "--poll-only", "--timeout", "1")
+	if task := f.task(t, "t2"); task.State == store.StateQueued {
+		t.Fatalf("one watch poll left t2 queued with a free Worker slot: %#v", task.State)
+	}
+	f.waitState(t, "t2", store.StateWorking)
 }
 
 // TestQueuedTaskStartSurvivesKilledCaller kills the foreground command that

@@ -300,13 +300,16 @@ type ProjectWatchRuntime struct {
 }
 
 type ProjectWatchState struct {
-	ProjectID             int64
-	PrPolledAt            int64
-	PrConsecutiveFailures int64
-	CheckoutCheckedAt     int64
-	RootBehindHead        string
-	PrPollClaimUntil      int64
-	PrPollClaimToken      string
+	ProjectID                  int64
+	PrPolledAt                 int64
+	PrConsecutiveFailures      int64
+	CheckoutCheckedAt          int64
+	RootBehindHead             string
+	PrPollClaimUntil           int64
+	PrPollClaimToken           string
+	ReconcileBlockedSince      int64
+	ReconcileBlockCause        string
+	ReconcileBlockNoticeRaised int64
 }
 
 type PublishPrePushHead struct {

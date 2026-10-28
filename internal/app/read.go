@@ -527,7 +527,21 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 	if blockerReason != "" {
 		return "waiting for " + blockerReason, nil
 	}
-	return "waiting for a Worker slot", nil
+	active, err := db.ActiveWorkerCount(ctx, project.ID)
+	if err != nil {
+		return "", err
+	}
+	if active >= cfg.Defaults.MaxWorkers {
+		return "waiting for a Worker slot", nil
+	}
+	block, err := db.ReconcileBlock(ctx, project.ID)
+	if err != nil {
+		return "", err
+	}
+	if block.Since != 0 {
+		return "waiting for Project reconciliation, blocked since " + time.UnixMilli(block.Since).UTC().Format(time.RFC3339) + ": " + block.Cause, nil
+	}
+	return "waiting for admission: " + strconv.Itoa(cfg.Defaults.MaxWorkers-active) + " of " + strconv.Itoa(cfg.Defaults.MaxWorkers) + " Worker slots are free", nil
 }
 
 func addTaskDetails(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, now time.Time, row *taskSummary) error {

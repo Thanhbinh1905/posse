@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -130,6 +131,43 @@ func (writer *watchRuntimeLogWriter) Write(data []byte) (int, error) {
 		}
 	}
 	return written, nil
+}
+
+// timestampedLines starts each line with the local time, so watch.log shows
+// when each failure happened.
+type timestampedLines struct {
+	mu      sync.Mutex
+	out     io.Writer
+	midLine bool
+}
+
+func (writer *timestampedLines) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	var stamped bytes.Buffer
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		if !writer.midLine {
+			stamped.WriteString(time.Now().Format(time.RFC3339) + " ")
+		}
+		stamped.Write(line)
+		writer.midLine = line[len(line)-1] != '\n'
+	}
+	if _, err := writer.out.Write(stamped.Bytes()); err != nil {
+		return 0, err
+	}
+	return len(data), nil
+}
+
+// HiddenWatchOutput timestamps what a hidden Project watch prints before it
+// opens watch.log itself; its stdout and stderr are that log.
+func HiddenWatchOutput(args []string) (io.Writer, io.Writer, bool) {
+	if os.Getenv(watchRuntimeTokenEnv) == "" || os.Getenv(watchRuntimeProjectEnv) == "" || len(args) == 0 || args[0] != "watch" || !containsArgument(args, "--poll-only") {
+		return nil, nil, false
+	}
+	return &timestampedLines{out: os.Stdout}, &timestampedLines{out: os.Stderr}, true
 }
 
 func (writer *watchRuntimeLogWriter) Close() error {
@@ -833,7 +871,8 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 		return fmt.Errorf("open Project Watch log: %w", err)
 	}
 	defer log.Close()
-	ctx.Out, ctx.ErrOut = log, log
+	stamped := &timestampedLines{out: log}
+	ctx.Out, ctx.ErrOut = stamped, stamped
 	watch := store.WatchRuntime{PID: os.Getpid(), Token: token, StartedAt: startedAt, HeartbeatAt: currentTime(), ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode}
 	if err := db.SetWatchRuntime(ctx.Context, project.ID, watch); err != nil {
 		return err
@@ -892,7 +931,9 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		if fresh.IsDown() || fresh.Root != project.Root {
 			return nil
 		}
-		if _, err := s.prepareProjectWatchObservation(loopCtx, db, fresh); err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) {
+		_, err = s.prepareProjectWatchObservation(loopCtx, db, fresh)
+		trackWatchReconcileBlock(ctx, db, fresh, err)
+		if err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) && !isHerdrUnavailable(err) {
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
