@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -64,14 +65,34 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	if !refused {
 		return 0
 	}
-	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.why)
+	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker by guard rule %s: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.rule, reason.why)
 	return guardExitBlocked
 }
 
 type guardReason struct {
+	rule    string
 	command string
 	why     string
 }
+
+// Guard rules name the check that refused a command.
+const (
+	ruleTooDeep             = "too-deep"
+	ruleUnparsedHerdr       = "unparsed-herdr"
+	ruleDynamicProgramHerdr = "dynamic-program-herdr"
+	ruleGitPush             = "git-push"
+	ruleSocketAlias         = "socket-alias"
+	ruleNamesSessionSocket  = "names-session-socket"
+	ruleInterpreterHerdr    = "interpreter-herdr"
+	ruleOpaqueHerdr         = "opaque-herdr"
+	rulePosseBuild          = "posse-build-worker-home"
+	ruleCurlUnknownSocket   = "curl-unknown-socket"
+	ruleCurlSessionSocket   = "curl-session-socket"
+	ruleHerdrDynamicArgs    = "herdr-dynamic-args"
+	ruleHerdrUnknownServer  = "herdr-unknown-server"
+	ruleHerdrDefaultSocket  = "herdr-default-socket"
+	ruleHerdrSessionChange  = "herdr-session-change"
+)
 
 // guardScope is what a guarded command runs against.
 type guardScope struct {
@@ -109,21 +130,21 @@ type guard struct {
 	visited    map[string]bool
 }
 
-func refuse(command, why string) (bool, guardReason) {
-	return true, guardReason{command: "`" + firstLine(command) + "`", why: why}
+func refuse(rule, command, why string) (bool, guardReason) {
+	return true, guardReason{rule: rule, command: "`" + firstLine(command) + "`", why: why}
 }
 
 func (g *guard) check(e *shellEnv, script string, depth int, stdinRedirected bool) (bool, guardReason) {
 	if depth > guardMaxDepth {
 		if g.mentionsHerdr(script) {
-			return refuse(script, "it nests commands too deeply for posse to check")
+			return refuse(ruleTooDeep, script, "it nests commands too deeply for posse to check")
 		}
 		return false, guardReason{}
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(script), "")
 	if err != nil {
 		if g.mentionsHerdr(script) {
-			return refuse(script, "posse could not parse this command, and it mentions Herdr")
+			return refuse(ruleUnparsedHerdr, script, "posse could not parse this command, and it mentions Herdr")
 		}
 		return false, guardReason{}
 	}
@@ -337,7 +358,7 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 	for len(args) > 0 {
 		if !literal[0] || args[0] == "" {
 			if g.mentionsHerdr(raw) {
-				return refuse(raw, "posse cannot tell which program this runs, and it mentions Herdr")
+				return refuse(ruleDynamicProgramHerdr, raw, "posse cannot tell which program this runs, and it mentions Herdr")
 			}
 			return false, guardReason{}
 		}
@@ -375,11 +396,11 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			return g.curl(e, args, literal, raw)
 		case name == "git" && g.workerHome != "":
 			if gitRemoteWrite(e, args[1:], literal[1:]) {
-				return refuse(raw, "Workers must push their Task branch through `posse publish`, not `git push`")
+				return refuse(ruleGitPush, raw, "Workers must push their Task branch through `posse publish`, not `git push`")
 			}
 			return false, guardReason{}
 		case name == "ln" && len(args) >= 3 && sameSocket(args[len(args)-2], g.realSocket):
-			return refuse(raw, "it aliases the Worker's Herdr socket")
+			return refuse(ruleSocketAlias, raw, "it aliases the Worker's Herdr socket")
 		case name == "make" || name == "gmake":
 			code := ""
 			if strings.Contains(stdin, ">") {
@@ -592,7 +613,7 @@ func pythonRunsUnseenCode(e *shellEnv, args []string) bool {
 func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (bool, guardReason) {
 	code = strings.NewReplacer(`\t`, "\t", `\n`, "\n").Replace(code)
 	if g.namesRealSocket(code) {
-		return refuse(raw, "it names the socket of the Herdr session this Worker runs in")
+		return refuse(ruleNamesSessionSocket, raw, "it names the socket of the Herdr session this Worker runs in")
 	}
 	if !herdrSocketReference.MatchString(code) && !(startsProcess(interpreter, code) && herdrProgram.MatchString(code)) {
 		return false, guardReason{}
@@ -600,7 +621,7 @@ func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (boo
 	if socket, known := e.socket(); known && g.realSocket != "" && !sameSocket(socket, g.realSocket) {
 		return false, guardReason{}
 	}
-	return refuse(raw, "it can run herdr or open its socket in a way posse cannot check, and its environment still points at the Worker's Herdr session")
+	return refuse(ruleInterpreterHerdr, raw, "it can run herdr or open its socket in a way posse cannot check, and its environment still points at the Worker's Herdr session")
 }
 
 var (
@@ -688,12 +709,12 @@ func (g *guard) opaque(e *shellEnv, raw, code string) (bool, guardReason) {
 		return false, guardReason{}
 	}
 	if g.namesRealSocket(code) {
-		return refuse(raw, "it names the socket of the Herdr session this Worker runs in")
+		return refuse(ruleNamesSessionSocket, raw, "it names the socket of the Herdr session this Worker runs in")
 	}
 	if socket, known := e.socket(); known && g.realSocket != "" && !sameSocket(socket, g.realSocket) {
 		return false, guardReason{}
 	}
-	return refuse(raw, "it reaches Herdr in a way posse cannot check, and its environment still points at the Worker's Herdr session")
+	return refuse(ruleOpaqueHerdr, raw, "it reaches Herdr in a way posse cannot check, and its environment still points at the Worker's Herdr session")
 }
 
 var herdrReference = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])herdr($|[^A-Za-z0-9_-])|herdr\.sock|HERDR_SOCKET_PATH|HERDR_BIN_PATH`)
@@ -764,7 +785,7 @@ func (g *guard) posseBuild(e *shellEnv, program, raw string) (bool, guardReason)
 	if known && !samePath(home, g.workerHome) {
 		return false, guardReason{}
 	}
-	return refuse(raw, "it runs a posse build other than the installed one against the Worker's posse home")
+	return refuse(rulePosseBuild, raw, "it runs a posse build other than the installed one against the Worker's posse home")
 }
 
 func (g *guard) curl(e *shellEnv, args []string, literal []bool, raw string) (bool, guardReason) {
@@ -784,7 +805,7 @@ func (g *guard) curl(e *shellEnv, args []string, literal []bool, raw string) (bo
 		case arg == "--unix-socket":
 			index++
 			if index >= len(args) || !literal[index] || args[index] == "" {
-				return refuse(raw, "posse cannot tell which Herdr server curl reaches")
+				return refuse(ruleCurlUnknownSocket, raw, "posse cannot tell which Herdr server curl reaches")
 			}
 			socket = args[index]
 		case strings.HasPrefix(arg, "--unix-socket="):
@@ -795,10 +816,10 @@ func (g *guard) curl(e *shellEnv, args []string, literal []bool, raw string) (bo
 		}
 		socket = e.path(socket)
 		if socket == "" || g.realSocket == "" {
-			return refuse(raw, "posse cannot tell which Herdr server curl reaches")
+			return refuse(ruleCurlUnknownSocket, raw, "posse cannot tell which Herdr server curl reaches")
 		}
 		if sameSocket(socket, g.realSocket) {
-			return refuse(raw, "it targets the Herdr session this Worker runs in")
+			return refuse(ruleCurlSessionSocket, raw, "it targets the Herdr session this Worker runs in")
 		}
 	}
 	return false, guardReason{}
@@ -808,7 +829,7 @@ func (g *guard) herdr(e *shellEnv, args []string, literal []bool) (bool, guardRe
 	display := strings.Join(args, " ")
 	for index := range args {
 		if !literal[index] {
-			return refuse(display, "posse cannot tell what this herdr command does")
+			return refuse(ruleHerdrDynamicArgs, display, "posse cannot tell what this herdr command does")
 		}
 	}
 	positionals := []string{}
@@ -838,13 +859,13 @@ func (g *guard) herdr(e *shellEnv, args []string, literal []bool) (bool, guardRe
 	}
 	socket, known := e.socket()
 	if !known || !targetKnown {
-		return refuse(display, "posse cannot tell which Herdr server it reaches")
+		return refuse(ruleHerdrUnknownServer, display, "posse cannot tell which Herdr server it reaches")
 	}
 	if g.realSocket == "" || sameSocket(socket, g.realSocket) {
 		if g.realSocket != "" && e.values["HERDR_SOCKET_PATH"] == "" {
-			return refuse(display, "the default socket reaches the User's Herdr server")
+			return refuse(ruleHerdrDefaultSocket, display, "the default socket reaches the User's Herdr server")
 		}
-		return refuse(display, "it changes the Herdr session this Worker runs in")
+		return refuse(ruleHerdrSessionChange, display, "it changes the Herdr session this Worker runs in")
 	}
 	return false, guardReason{}
 }
@@ -1090,8 +1111,14 @@ func (e *shellEnv) posseHome() (string, bool) {
 	return filepath.Join(e.values["HOME"], ".posse"), true
 }
 
-// word returns a word's value when it is literal, quoted text or a plain
-// $NAME / ${NAME} of a known variable.
+// mktempPath stands for the path `$(mktemp ...)` prints. mktemp creates it,
+// so neither it nor a path below it is an existing posse home or Herdr socket.
+// The NUL byte keeps it from naming a real file.
+const mktempPath = "/\x00mktemp"
+
+// word returns a word's value when it is literal, quoted text, a plain
+// $NAME / ${NAME} of a known variable, or a path that starts at mktempPath,
+// alone or after NAME=, and stays below it.
 func (e *shellEnv) word(script string, word *syntax.Word) (string, bool) {
 	var builder strings.Builder
 	for _, part := range word.Parts {
@@ -1101,7 +1128,14 @@ func (e *shellEnv) word(script string, word *syntax.Word) (string, bool) {
 		}
 		builder.WriteString(value)
 	}
-	return builder.String(), true
+	value := builder.String()
+	if index := strings.Index(value, mktempPath); index >= 0 {
+		below := value[index+len(mktempPath):]
+		if index > 0 && value[index-1] != '=' || below != "" && !strings.HasPrefix(below, "/") || slices.Contains(strings.Split(below, "/"), "..") {
+			return "", false
+		}
+	}
+	return value, true
 }
 
 func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
@@ -1124,6 +1158,9 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 		if sourceText(script, part) == "$(pwd)" && e.cwd != "" {
 			return e.cwd, true
 		}
+		if mktempCall(part) {
+			return mktempPath, true
+		}
 		return "", false
 	case *syntax.ParamExp:
 		match := simpleVar.FindStringSubmatch(sourceText(script, part))
@@ -1137,6 +1174,28 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 		return e.values[name], true
 	}
 	return "", false
+}
+
+// mktempCall reports a command substitution that only runs mktemp and prints
+// the path it creates.
+func mktempCall(subst *syntax.CmdSubst) bool {
+	if len(subst.Stmts) != 1 {
+		return false
+	}
+	stmt := subst.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Coprocess || len(stmt.Redirs) > 0 || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return false
+	}
+	if name := call.Args[0].Lit(); name != "mktemp" && name != "/usr/bin/mktemp" && name != "/bin/mktemp" {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		if value := arg.Lit(); value == "--help" || value == "--version" {
+			return false
+		}
+	}
+	return true
 }
 
 // socket resolves the Herdr socket a herdr command reaches with this

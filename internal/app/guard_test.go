@@ -56,7 +56,7 @@ func TestGuardRefusesHerdrChangesToTheWorkerSession(t *testing.T) {
 		"eval herdr workspace close w1",
 		"echo $(herdr workspace close w1)",
 		"herdr $SUBCOMMAND w1",
-		"HERDR_SOCKET_PATH=$(mktemp) herdr workspace close w1",
+		"HERDR_SOCKET_PATH=$(printf %s /tmp/iso.sock) herdr workspace close w1",
 		"herdr --session other workspace close w1",
 		"command herdr pane close w1:p1",
 		"command -v herdr workspace close w1",
@@ -91,6 +91,7 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 		"R=/tmp/posse-e2e-x; env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=$R/xdg herdr server stop",
 		`export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; herdr workspace close w1`,
 		"HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock herdr pane close w1:p1",
+		"HERDR_SOCKET_PATH=$(mktemp) herdr workspace close w1",
 		"env -i HOME=/tmp/posse-e2e-x/home herdr server",
 		"env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server",
 		"if true; then export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; else export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; fi; herdr workspace close w1",
@@ -328,7 +329,7 @@ func TestRunGuardBlocksOnlyWorkers(t *testing.T) {
 
 	t.Setenv(workerHomeEnv, home)
 	stderr.Reset()
-	if code := service.RunGuard(strings.NewReader(input), &stderr); code != guardExitBlocked || !strings.Contains(stderr.String(), "isolated Herdr server") {
+	if code := service.RunGuard(strings.NewReader(input), &stderr); code != guardExitBlocked || !strings.Contains(stderr.String(), "isolated Herdr server") || !strings.Contains(stderr.String(), "by guard rule "+ruleHerdrSessionChange+":") {
 		t.Fatalf("guard let a Worker close workspaces: code=%d stderr=%s", code, stderr.String())
 	}
 	stderr.Reset()
@@ -441,6 +442,73 @@ func TestGuardAllowsIndirectionThatStaysIsolated(t *testing.T) {
 	} {
 		if refused, reason := guardCommand(command, scope); refused {
 			t.Errorf("guard refused %q: %#v", command, reason)
+		}
+	}
+}
+
+func TestGuardAllowsScratchPosseAgainstAFreshTempHome(t *testing.T) {
+	scope, dir := guardFixture(t)
+	lab := "LAB=$(mktemp -d -p \"$TMPDIR\" posse-lab.XXXXXX)\nexport POSSE_HOME=\"$LAB/posse\"\n./posse-copy list\n"
+	if err := os.WriteFile(filepath.Join(dir, "lab.sh"), []byte(lab), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"R=$(mktemp -d); POSSE_HOME=$R/posse ./posse-copy list",
+		`LAB="$(mktemp -d)"; env -i HOME="$LAB/home" XDG_CONFIG_HOME="$LAB/xdg" POSSE_HOME="$LAB/posse" PATH=/usr/bin:/bin "` + dir + `/posse-copy" list`,
+		"P=./posse-copy; export POSSE_HOME=$(mktemp -d); $P list",
+		"env -i HOME=$(mktemp -d) ./posse-copy list",
+		"bash lab.sh",
+		"LAB=$(mktemp -d); env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=$LAB/xdg herdr server",
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused %q: %#v", command, reason)
+		}
+	}
+}
+
+func TestGuardRefusesScratchPosseAgainstTheWorkerHome(t *testing.T) {
+	scope, dir := guardFixture(t)
+	if err := os.WriteFile(filepath.Join(dir, "real.sh"), []byte("export POSSE_HOME=$HOME/.posse\n./posse-copy list\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"R=$(mktemp -d); ./posse-copy list",
+		"R=$(mktemp -d); POSSE_HOME=/home/u/.posse ./posse-copy list",
+		"POSSE_HOME=$(mktemp -d)/../.. ./posse-copy list",
+		"POSSE_HOME=/home/u/.posse$(mktemp -u) ./posse-copy list",
+		"POSSE_HOME=$(mktemp -d)x ./posse-copy list",
+		"POSSE_HOME=$(mktemp -d | head -1) ./posse-copy list",
+		"POSSE_HOME=$(mktemp -d >/dev/null) ./posse-copy list",
+		"POSSE_HOME=$(mktemp --version) ./posse-copy list",
+		"bash real.sh",
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || reason.rule != rulePosseBuild {
+			t.Errorf("guard did not refuse %q by %s: %v %#v", command, rulePosseBuild, refused, reason)
+		}
+	}
+}
+
+func TestGuardRefusalsNameTheirRule(t *testing.T) {
+	scope, _ := guardFixture(t)
+	for rule, command := range map[string]string{
+		ruleTooDeep:             "eval eval eval eval eval eval eval eval herdr workspace close w1",
+		ruleUnparsedHerdr:       "herdr workspace close 'w1",
+		ruleDynamicProgramHerdr: "$(which herdr) workspace close w1",
+		ruleGitPush:             "git push origin HEAD",
+		ruleSocketAlias:         "ln -s /home/u/.config/herdr/herdr.sock ./alias.sock",
+		ruleNamesSessionSocket:  "python3 literal.py",
+		ruleInterpreterHerdr:    "python3 raw.py",
+		ruleOpaqueHerdr:         "socat - UNIX-CONNECT:herdr.sock",
+		rulePosseBuild:          "./posse-copy list",
+		ruleCurlUnknownSocket:   "curl --unix-socket",
+		ruleCurlSessionSocket:   "curl --unix-socket /home/u/.config/herdr/herdr.sock http://x/",
+		ruleHerdrDynamicArgs:    "herdr $(echo workspace) close w1",
+		ruleHerdrUnknownServer:  "herdr --session other workspace close w1",
+		ruleHerdrDefaultSocket:  "env -u HERDR_SOCKET_PATH herdr workspace close w1",
+		ruleHerdrSessionChange:  "herdr workspace close w1",
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || reason.rule != rule {
+			t.Errorf("guard refused %q by rule %q, want %q: %v %#v", command, reason.rule, rule, refused, reason)
 		}
 	}
 }
