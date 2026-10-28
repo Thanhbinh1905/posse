@@ -547,6 +547,8 @@ func TestGuardDoesNotRunHereDocumentDataOrPythonStringData(t *testing.T) {
 		write + "node -e 1",
 		write + "make test",
 		write + "./missing-tool",
+		write + "echo done > out.txt 2>&1; ./missing-tool",
+		"cat > cases.txt <<'EOF'\nprintf 'herdr workspace close w1' > t.sh\nEOF\nsh t.sh",
 		"python3 - <<'PY'\nfrom pathlib import Path\np = Path('guard_test.go')\ncase = 'subprocess.run([\"herdr\", \"workspace\", \"close\", \"w1\"])'\np.write_text(p.read_text() + '\"herdr workspace close w1\",' + case)\nPY",
 		"python3 - <<'PY'\n# exec herdr workspace close w1 via subprocess\nprint(\"\"\"os.system('herdr pane close w1:p1')\"\"\")\nPY",
 	} {
@@ -561,6 +563,11 @@ func TestGuardDoesNotRunHereDocumentDataOrPythonStringData(t *testing.T) {
 		"python3 - <<'PY'\nimport os\nos.system(f\"{'herdr'} workspace close w1\")\nPY",
 		"cat <<'EOF' | sh\nherdr workspace close w1\nEOF",
 		"printf 'herdr workspace close w1\\n' > run.sh; ./run.sh",
+		"printf 'herdr workspace close w1\\n' > run-it; ./run-*",
+		"printf 'herdr workspace close w1\\n' > a; mv a tool; ./tool",
+		"sh -c \"printf 'herdr workspace close w1' > t.sh\"; ./t.sh",
+		"{ echo 'herdr workspace close w1'; cat <<< 'cat <<< hi'; } | sh",
+		"cat <<'EOF' | sh\nprintf 'herdr workspace close w1' > t.sh\nEOF\n./t.sh",
 	} {
 		if refused, _ := guardCommand(command, scope); !refused {
 			t.Errorf("guard allowed %q", command)

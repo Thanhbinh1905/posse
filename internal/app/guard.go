@@ -128,9 +128,10 @@ type guard struct {
 	workerHome string
 	posse      string
 	visited    map[string]bool
-	source     string // the script being checked at the current depth
-	input      string // what the command being checked reads on stdin
-	hereInput  bool   // the command reads its own here-document or here-string
+	source     string          // the script being checked at the current depth
+	written    map[string]bool // files source writes by name; nil when unknown
+	input      string          // what the command being checked reads on stdin
+	hereInput  bool            // the command reads its own here-document or here-string
 }
 
 func refuse(rule, command, why string) (bool, guardReason) {
@@ -151,10 +152,59 @@ func (g *guard) check(e *shellEnv, script string, depth int, stdinRedirected boo
 		}
 		return false, guardReason{}
 	}
-	outer := g.source
-	g.source = script
-	defer func() { g.source = outer }()
+	outer, outerWritten := g.source, g.written
+	g.source, g.written = script, writtenFiles(script, file)
+	defer func() { g.source, g.written = outer, outerWritten }()
 	return g.statements(e, script, file.Stmts, depth, stdinRedirected)
+}
+
+// writtenFiles returns the base names of the files a script visibly writes
+// by redirection, or nil when it may write files posse cannot name: a dynamic
+// or copying target, or a `>` that is not a parsed redirection. The `>` in the
+// here-document data `cat` writes to a file is not one.
+func writtenFiles(script string, file *syntax.File) map[string]bool {
+	names := map[string]bool{}
+	text, known := script, true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Stmt:
+			call, ok := node.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			switch filepath.Base(call.Args[0].Lit()) {
+			case "cat":
+				toFile := slices.ContainsFunc(node.Redirs, func(redirect *syntax.Redirect) bool {
+					return redirect.Op == syntax.RdrOut || redirect.Op == syntax.AppOut || redirect.Op == syntax.RdrClob
+				})
+				for _, redirect := range node.Redirs {
+					if toFile && redirect.Hdoc != nil {
+						text = strings.Replace(text, sourceText(script, redirect.Hdoc), "", 1)
+					}
+				}
+			case "cp", "mv", "ln", "install", "tee", "dd", "rsync", "tar", "unzip", "patch", "git", "go", "curl", "wget":
+				known = false
+			}
+		case *syntax.Redirect:
+			if !strings.Contains(node.Op.String(), ">") {
+				return true
+			}
+			text = strings.Replace(text, node.Op.String(), "", 1)
+			target := node.Word.Lit()
+			switch {
+			case node.Op == syntax.DplOut && (target == "-" || strings.Trim(target, "0123456789") == ""):
+			case target == "" || strings.ContainsAny(target, "*?["):
+				known = false
+			default:
+				names[filepath.Base(target)] = true
+			}
+		}
+		return true
+	})
+	if !known || strings.Contains(text, ">") {
+		return nil
+	}
+	return names
 }
 
 func (g *guard) statements(e *shellEnv, script string, stmts []*syntax.Stmt, depth int, stdinRedirected bool) (bool, guardReason) {
@@ -397,9 +447,12 @@ func pipeInput(e *shellEnv, script string, left *syntax.Stmt, input string) stri
 }
 
 // writes reports whether the script being checked may write the named file
-// before it runs it: it redirects output and names the file besides running it.
+// before it runs it.
 func (g *guard) writes(name string) bool {
-	return strings.Contains(g.source, ">") && strings.Count(g.source, filepath.Base(name)) > 1
+	if !strings.Contains(g.source, ">") {
+		return false
+	}
+	return g.written == nil || g.written[filepath.Base(name)] || strings.ContainsAny(name, "*?[")
 }
 
 func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
@@ -576,6 +629,8 @@ var (
 )
 
 func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin string, depth int, stdinRedirected bool) (bool, guardReason) {
+	// Nested checks set hereInput for their own commands.
+	here := g.hereInput
 	start := 1
 	if filepath.Base(args[0]) == "busybox" {
 		if len(args) < 2 || !shells[args[1]] {
@@ -601,7 +656,7 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 			return g.script(e, arg, raw, depth, stdinRedirected)
 		}
 	}
-	if refused, reason := g.check(e.clone(), stdin, depth+1, stdinRedirected); refused || g.hereInput {
+	if refused, reason := g.check(e.clone(), stdin, depth+1, stdinRedirected); refused || here {
 		return refused, reason
 	}
 	// Input that is not a here-document is output posse cannot evaluate.
