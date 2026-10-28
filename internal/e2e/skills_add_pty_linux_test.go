@@ -131,7 +131,7 @@ func TestSkillsAddPickerQuitWritesNothing(t *testing.T) {
 	command.Dir, command.Env = f.home, f.env
 	session := startPty(t, command, 40, 100)
 	session.send("0 selected", "a")
-	session.send("25 selected", "q")
+	session.send("27 selected", "q")
 	if err := session.wait(); err != nil {
 		t.Fatalf("picker exited with %v:\n%q", err, session.text())
 	}
