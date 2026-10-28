@@ -1067,7 +1067,7 @@ func taskWaitsOnUser(task store.Task, decisions map[int64][]int64) bool {
 
 // pendingDecisionsByTask maps each Task ID to its pending Decision IDs.
 func pendingDecisionsByTask(ctx context.Context, db *store.DB, projectID int64) (map[int64][]int64, error) {
-	decisions, err := db.Decisions(ctx, projectID, true)
+	decisions, err := db.PendingDecisions(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

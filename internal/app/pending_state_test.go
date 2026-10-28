@@ -110,6 +110,12 @@ func TestLeadPrintsPendingBlock(t *testing.T) {
 	if text, _ := json.Marshal(pending); strings.Contains(string(text), "Spec or code?") || strings.Contains(string(text), "Which schema wins?") {
 		t.Fatalf("pending block carries bodies: %s", text)
 	}
+	var output bytes.Buffer
+	cli := testService(home, nil).CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"lead"}); code != 0 || !strings.Contains(output.String(), "needs_decision[1]: t1") {
+		t.Fatalf("lead TOON pending block = %d: %s", code, output.String())
+	}
 }
 
 func TestUpAllFromLeadPaneNamesCauseAndFix(t *testing.T) {

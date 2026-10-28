@@ -128,8 +128,8 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 
 // leadPending is what a restarted Lead must pick up: pending Decision IDs,
 // needs-decision Tasks, the unacked Notice count and the drafts folder.
-func leadPending(ctx context.Context, db *store.DB, home string, project store.Project) (axi.Row, error) {
-	decisions, err := db.Decisions(ctx, project.ID, true)
+func leadPending(ctx context.Context, db *store.DB, home string, project store.Project) (axi.Object, error) {
+	decisions, err := db.PendingDecisions(ctx, project.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func leadPending(ctx context.Context, db *store.DB, home string, project store.P
 	if err != nil {
 		return nil, err
 	}
-	return axi.Row{
+	return axi.Object{
 		{Key: "decisions", Value: decisionIDs},
 		{Key: "needs_decision", Value: waiting},
 		{Key: "unacked_notices", Value: len(notices)},
