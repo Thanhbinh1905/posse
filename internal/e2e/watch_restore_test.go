@@ -31,6 +31,11 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The recorded Lead pane did not come back, so the Project stays held
+	// rather than adopting the current generation.
+	if err := f.db.SetProjectLead(context.Background(), f.project.ID, f.project.HerdrWorkspaceID, "stale-lead-pane", "posse:shop:stale-lead"); err != nil {
+		t.Fatal(err)
+	}
 	beforeProject, err := f.db.ProjectByID(context.Background(), f.project.ID)
 	if err != nil {
 		t.Fatal(err)

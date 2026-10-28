@@ -112,6 +112,10 @@ func TestQueuedTaskAdmittedByOneWatchPoll(t *testing.T) {
 func TestHeldProjectWatchPollNamesTheGenerationBlocker(t *testing.T) {
 	f := newQueuedAdmissionFixture(t)
 	f.freeSlot(t)
+	// A Herdr restart stops the Lead, so the Project stays held rather than
+	// adopting the current generation.
+	killServer(t, f.server)
+	f.server = startServer(t, f.client)
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)

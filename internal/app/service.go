@@ -443,20 +443,26 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	}
 	deferredRecovery := false
 	if current.ServerStartedAt != "" && recorded != "" && current.ServerStartedAt != recorded {
-		if !userStart {
-			return result, s.holdRestore(ctx, db, project, current.ServerStartedAt)
-		}
-		home, err := s.homePath()
+		adopted, err := adoptCurrentGeneration(ctx, db, project, current)
 		if err != nil {
 			return result, err
 		}
-		if _, err := s.recoverProject(ctx, db, home, project); err != nil {
-			if !userStart || !errors.Is(err, errRecoveryDeferred) {
-				return result, fmt.Errorf("recover Project %s after Herdr restart: %w", project.Name, err)
+		if !adopted {
+			if !userStart {
+				return result, s.holdRestore(ctx, db, project, current.ServerStartedAt)
 			}
-			// Start the Lead while the interrupted Worker waits for its retry
-			// backoff. Up settles explicit relaunch intents after reconciliation.
-			deferredRecovery = true
+			home, err := s.homePath()
+			if err != nil {
+				return result, err
+			}
+			if _, err := s.recoverProject(ctx, db, home, project); err != nil {
+				if !errors.Is(err, errRecoveryDeferred) {
+					return result, fmt.Errorf("recover Project %s after Herdr restart: %w", project.Name, err)
+				}
+				// Start the Lead while the interrupted Worker waits for its retry
+				// backoff. Up settles explicit relaunch intents after reconciliation.
+				deferredRecovery = true
+			}
 		}
 	}
 	result, err = run()
@@ -673,6 +679,15 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					runErr = fmt.Errorf("%w: process %d is recovering the Project", errRecoveryDeferred, claim.OwnerPID)
 				} else {
 					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+					if runErr == nil && result.GenerationMismatch {
+						adopted, err := adoptCurrentGeneration(ctx, db, project, result.Snapshot)
+						if err != nil {
+							return cfg, err
+						}
+						if adopted {
+							result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+						}
+					}
 					if runErr == nil && result.GenerationMismatch {
 						runErr = heldGenerationError(ctx, db, project, result.Snapshot)
 					}
