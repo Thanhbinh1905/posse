@@ -119,6 +119,9 @@ func TestLeadPrintsPendingBlock(t *testing.T) {
 }
 
 func TestUpAllFromLeadPaneNamesCauseAndFix(t *testing.T) {
+	startWait, startDelay := agentStartBusyWait, agentStartRetryDelay
+	agentStartBusyWait, agentStartRetryDelay = 0, 0
+	t.Cleanup(func() { agentStartBusyWait, agentStartRetryDelay = startWait, startDelay })
 	home, _, project := restoreFixture(t)
 	fake := herdr.NewFake()
 	fake.SnapshotValue = restartedSnapshot(project)
@@ -129,11 +132,8 @@ func TestUpAllFromLeadPaneNamesCauseAndFix(t *testing.T) {
 	cli.Out, cli.ErrOut = output, output
 	cli.Run([]string{"up", "--all"})
 	text := output.String()
-	if !strings.Contains(text, "runs in the Lead pane "+project.LeadPaneID) || !strings.Contains(text, "Run `posse up` in the Lead pane of shop") {
+	if !strings.Contains(text, "runs in the Lead pane "+project.LeadPaneID) || !strings.Contains(text, "Run `posse up` in the Lead pane of shop") || strings.Contains(text, "Fix the failed Projects") {
 		t.Fatalf("up --all from the Lead pane did not name the cause and fix: %s", text)
-	}
-	if count := fake.CallCount("agent.start"); count != 0 {
-		t.Fatalf("up --all tried to start the Lead in its own pane %d times", count)
 	}
 }
 

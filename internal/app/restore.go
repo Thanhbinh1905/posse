@@ -147,20 +147,19 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		if project.HerdrWorkspaceID == "" && project.LeadPaneID == "" {
 			continue // Never started; `posse up` in its folder starts it.
 		}
-		blocked, err := s.leadPaneRunsRestore(ctx.Context, actor, project)
-		if err != nil {
-			return err
-		}
-		if blocked {
-			failed = append(failed, map[string]any{"project": project.Name, "error": "posse up --all runs in the Lead pane " + project.LeadPaneID + ", so Herdr cannot start the Lead there"})
-			help = append(help, "Run `posse up` in the Lead pane of "+project.Name+" to restore its Lead and Workers, or run `posse up --all` from another pane")
-			inLeadPane++
-			continue
-		}
 		workers, err := s.restoreProject(ctx.Context, db, home, project)
 		if errors.Is(err, errRecoveryDeferred) {
 			pending = true
 			err = nil
+		}
+		// Herdr cannot start an agent in the pane running this command;
+		// `posse up` there replaces the shell with the Lead instead.
+		var failure *axi.Error
+		if errors.As(err, &failure) && failure.Code == "agent_pane_busy" && actor.role == "lead" && actor.projectID == project.ID && actor.paneID == project.LeadPaneID {
+			failed = append(failed, map[string]any{"project": project.Name, "error": "posse up --all runs in the Lead pane " + project.LeadPaneID + ", so Herdr cannot start the Lead there"})
+			help = append(help, "Run `posse up` in the Lead pane of "+project.Name+" to start its Lead, or run `posse up --all` from another pane")
+			inLeadPane++
+			continue
 		}
 		if err != nil {
 			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
@@ -191,20 +190,6 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		result = append(result, axi.Field{Key: "help", Value: help})
 	}
 	return ctx.Print(result)
-}
-
-// leadPaneRunsRestore reports whether `posse up --all` runs in the shell of
-// project's stopped Lead pane. Herdr cannot start an agent in the pane running
-// this command; `posse up` there replaces the shell with the Lead instead.
-func (s *Service) leadPaneRunsRestore(ctx context.Context, actor caller, project store.Project) (bool, error) {
-	if actor.role != "lead" || actor.projectID != project.ID || actor.paneID != project.LeadPaneID {
-		return false, nil
-	}
-	snapshot, err := s.snapshot(ctx)
-	if err != nil {
-		return false, err
-	}
-	return !leadAgentStarted(project, snapshot), nil
 }
 
 // restoreProject restores Workers stopped by a Herdr restart or group close,
