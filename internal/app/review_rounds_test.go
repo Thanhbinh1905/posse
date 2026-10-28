@@ -333,6 +333,96 @@ auto_start = true
 	}
 }
 
+func TestAutoStartReviewRoundIgnoresMaxWorkersAtCapacity(t *testing.T) {
+	f := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
+max_workers = 1
+merge_mode = "local"
+review = "quick"
+
+[profiles.author]
+kind = "claude"
+model = "model-a"
+
+[profiles.reviewer]
+kind = "claude"
+model = "model-b"
+
+[[dispatch]]
+type = "change"
+use = "author"
+
+[[dispatch]]
+type = "review"
+use = "reviewer"
+
+[dispatch.default]
+use = "author"
+
+[review_loop]
+enabled = true
+max_rounds = 1
+auto_start = true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, change.WorktreePath, "add", "change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "candidate change")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	queued := store.Task{Type: "change", Title: "queued", ShortName: "queued", State: store.StateQueued, MergeMode: "local"}
+	if _, _, err := db.CreateTaskWithSequence(ctx, change.ProjectID, f.project.Name, queued, func(int) (bool, error) { return false, nil }); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	merge := func() (int, string) {
+		t.Helper()
+		var output bytes.Buffer
+		cli := f.service.CLI()
+		cli.Out, cli.ErrOut = &output, &output
+		code := cli.Run([]string{"merge", fmt.Sprintf("t%d", change.Seq)})
+		return code, output.String()
+	}
+	mergeCode, mergeOutput := merge()
+	if mergeCode != 0 {
+		t.Fatalf("auto-start merge exit=%d output=%s", mergeCode, mergeOutput)
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 || rounds[0].Round != 1 || rounds[0].Status != "admitted" {
+		current, _ := db.TaskByID(ctx, change.ProjectID, change.ID)
+		frozen, _ := current.AdmittedPlan()
+		t.Fatalf("auto-start rounds = %#v, err=%v, output=%s, state=%s loops=%#v", rounds, err, mergeOutput, current.State, frozen.ValidationLoops)
+	}
+	review, err := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
+	if err != nil || review.Profile != "reviewer" {
+		t.Fatalf("auto-start Review Task = %#v, %v", review, err)
+	}
+	current, err := db.TaskByID(ctx, change.ProjectID, change.ID)
+	if err != nil || current.State != store.StateDone {
+		t.Fatalf("auto-start moved Change Task before review: %#v, %v", current, err)
+	}
+}
+
 func TestAutoStartSkipsUnavailableReviewerWithoutBlockingMerge(t *testing.T) {
 	for _, test := range []struct {
 		name         string
@@ -684,5 +774,70 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 				t.Fatalf("target commit = %s, want latest frozen target commit %s", scope.Binding.TargetCommitSHA, targetTip)
 			}
 		})
+	}
+}
+
+func TestReviewStartIgnoresMaxWorkersAtCapacity(t *testing.T) {
+	f := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
+max_workers = 1
+merge_mode = "local"
+
+[profiles.author]
+kind = "claude"
+model = "model-a"
+
+[profiles.reviewer]
+kind = "claude"
+model = "model-b"
+
+[dispatch.default]
+use = "author"
+
+[review_loop]
+enabled = true
+max_rounds = 1
+auto_start = false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("review me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, change.WorktreePath, "add", "change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "candidate change")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	queued := store.Task{Type: "change", Title: "queued", ShortName: "queued", State: store.StateQueued, MergeMode: "local"}
+	if _, _, err := db.CreateTaskWithSequence(ctx, change.ProjectID, f.project.Name, queued, func(int) (bool, error) { return false, nil }); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq), "--profile", "reviewer"}); code != 0 {
+		t.Fatalf("review start at max_workers exit=%d output=%s", code, output.String())
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 || rounds[0].Status != "admitted" {
+		t.Fatalf("rounds = %#v, %v", rounds, err)
 	}
 }

@@ -217,7 +217,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return err
 	}
-	atCapacity := count >= cfg.Defaults.MaxWorkers
+	// Review Rounds are exempt from max_workers: done Change Tasks hold slots
+	// until merge, so gating the rounds that unblock those merges deadlocks.
+	atCapacity := count >= cfg.Defaults.MaxWorkers && generated == nil
 	if atCapacity && !parsed.Bool("queue") && len(unmetDependencies) == 0 {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
 	}
@@ -496,7 +498,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if queued {
 		taskID, sequence, err = createTaskWithSequence(ctx.Context, db, project, home, task)
 	} else if generated != nil {
-		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission, cfg.Defaults.MaxWorkers)
+		taskID, sequence, intent, err = createReviewRoundTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, generated.Admission)
 	} else {
 		taskID, sequence, intent, err = createTaskWithSequenceAndIntent(ctx.Context, db, project, home, task, cfg.Defaults.MaxWorkers)
 	}
@@ -568,7 +570,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	if err != nil {
 		return err
 	}
-	if workerCount > cfg.Defaults.MaxWorkers {
+	if workerCount > cfg.Defaults.MaxWorkers && generated == nil {
 		_ = db.Transition(ctx.Context, taskID, store.StateSpawning, store.StateFailed, "cli", "Worker limit changed during spawn")
 		return axi.Failure("worker_limit", "Worker limit was reached during spawn", false)
 	}
@@ -952,8 +954,8 @@ func createTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project 
 	return createTaskWithIntent(ctx, db, project, home, task, nil, maxWorkers)
 }
 
-func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission, maxWorkers int) (int64, int, store.Intent, error) {
-	return createTaskWithIntent(ctx, db, project, home, task, &admission, maxWorkers)
+func createReviewRoundTaskWithSequenceAndIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission store.ReviewRoundAdmission) (int64, int, store.Intent, error) {
+	return createTaskWithIntent(ctx, db, project, home, task, &admission, 0)
 }
 
 func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Project, home string, task store.Task, admission *store.ReviewRoundAdmission, maxWorkers int) (int64, int, store.Intent, error) {
@@ -965,7 +967,7 @@ func createTaskWithIntent(ctx context.Context, db *store.DB, project store.Proje
 		if admission == nil {
 			taskID, sequence, err = db.CreateTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, task, "start", os.Getpid(), maxWorkers, taskSequenceOccupied(ctx, db, project, home))
 		} else {
-			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, task, "start", os.Getpid(), maxWorkers, *admission, taskSequenceOccupied(ctx, db, project, home))
+			taskID, sequence, err = db.CreateReviewRoundTaskWithSequenceAndIntent(ctx, project.ID, project.Name, task, "start", os.Getpid(), *admission, taskSequenceOccupied(ctx, db, project, home))
 		}
 		if err != nil {
 			return err

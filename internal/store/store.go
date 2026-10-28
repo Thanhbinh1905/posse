@@ -906,16 +906,6 @@ func (db *DB) CreateReviewRoundTaskWithSequenceAndIntent(ctx context.Context, pr
 	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission, 0)
 }
 
-func (db *DB) CreateReviewRoundTaskWithSequenceAndIntentWithinLimit(ctx context.Context, projectID int64, projectName string, task Task, command string, processID, maxWorkers int, admission ReviewRoundAdmission, occupied func(int) (bool, error)) (int64, int, error) {
-	if command == "" || processID < 1 || maxWorkers < 1 {
-		return 0, 0, fmt.Errorf("intent command, process id and worker limit are required")
-	}
-	if task.Type != "review" || task.ReviewsTaskID != admission.ChangeTaskID {
-		return 0, 0, fmt.Errorf("review round task does not target its admitted Change Task")
-	}
-	return db.createTaskWithSequence(ctx, projectID, projectName, task, command, processID, occupied, &admission, maxWorkers)
-}
-
 var ErrTaskBranchExists = errors.New("Task branch already used")
 var ErrTaskBranchSequenceMismatch = errors.New("Task branch does not match allocated Task sequence")
 var ErrWorkerLimit = errors.New("worker limit reached during admission")
