@@ -820,3 +820,35 @@ func TestFullPipelineWorkspaceWholePatternFixBindsEveryMemberCandidate(t *testin
 		t.Fatalf("fixed findings=%d err=%v, want 2", fixed, err)
 	}
 }
+
+func TestReviewRoundLaunchNamesRealReviewDirWithoutGuidanceFiles(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, _, changeSeq := startPrivateReviewChange(t, f, "3")
+	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start Review Round: %d %s", code, output)
+	}
+	taskHome := filepath.Join(f.home, "projects", "shop", "tasks", "t2")
+	launch, err := os.ReadFile(filepath.Join(taskHome, "launch.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDir := filepath.Join(taskHome, "review")
+	if !strings.Contains(string(launch), "`"+reviewDir+"/delta.patch`") {
+		t.Fatalf("launch text does not name the real review directory %s:\n%s", reviewDir, launch)
+	}
+	if strings.Contains(string(launch), "{{review_dir}}") {
+		t.Fatalf("launch text left the review_dir placeholder unresolved")
+	}
+	if !strings.Contains(string(launch), reviewDir+"/guidance/") {
+		t.Fatalf("launch text does not mention review/guidance/")
+	}
+	for _, name := range []string{"delta.patch", "cumulative.patch", "round.json", "ledger.md", "conflicts.txt"} {
+		if _, err := os.Stat(filepath.Join(reviewDir, name)); err != nil {
+			t.Fatalf("review file %s named by the launch text is missing: %v", name, err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(reviewDir, "guidance"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("review/guidance must exist when the launch text mentions it: info=%v err=%v", info, err)
+	}
+}
