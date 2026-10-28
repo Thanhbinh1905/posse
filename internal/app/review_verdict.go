@@ -221,7 +221,11 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 	if commit != "" {
 		revision = "candidate " + shortSHA(commit)
 	}
-	return axi.Failure("review_required", "Task "+id+" has no passing Review, proved carry, or exact-head User disposition for "+revision, false, "Dispatch a Review Task for "+id+" with `review_of: "+id+"` and wait for a `pass` verdict; only an explicit User choice may select lighter review")
+	help := "Dispatch a Review Task for " + id + " with `review_of: " + id + "` and wait for a `pass` verdict; only an explicit User choice may select lighter review"
+	if plan, err := change.AdmittedPlan(); err == nil && requireFrozenReviewLoop(plan) == nil {
+		help = "Run `posse review start " + id + " --profile <profile>` with a Profile independent of every author launch and wait for a `pass` verdict; only an explicit User choice may select lighter review"
+	}
+	return axi.Failure("review_required", "Task "+id+" has no passing Review, proved carry, or exact-head User disposition for "+revision, false, help)
 }
 
 // requireSelectedReview keeps evidence separate from disposition and merge

@@ -2720,12 +2720,6 @@ func (db *DB) UndeliveredNotices(ctx context.Context, projectID int64) ([]Notice
 	return notices, nil
 }
 
-func (db *DB) HasNotice(ctx context.Context, projectID, taskID int64, kind string) (bool, error) {
-	var found int
-	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind=?)`, projectID, taskID, kind).Scan(&found)
-	return found != 0, err
-}
-
 // HasWorkerIdleNotice reports whether the idle episode that began at idleSince
 // in this launch already raised its worker_idle Notice.
 func (db *DB) HasWorkerIdleNotice(ctx context.Context, projectID, taskID int64, launch int, idleSince int64) (bool, error) {

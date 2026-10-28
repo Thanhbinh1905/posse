@@ -403,6 +403,133 @@ auto_start = true
 
 func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitCode string, passedHead bool) {
 	t.Helper()
+	f, db, change := newAutoStartReviewFixture(t, configText)
+	ctx := context.Background()
+	if passedHead {
+		if _, err := db.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at)
+VALUES(?,1,?,?,'delta',?,?,?,?,?,'[]','verdict','pass',0)`, change.ID, change.ID, f.project.Name, change.GatedSHA, change.GatedSHA, change.GatedSHA, change.GatedSHA, strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+		autoStartReviewExpectSkip(t, f, db, change)
+		if notices := reviewAutoStartSkippedNotices(t, db, change); len(notices) != 0 {
+			t.Fatalf("passed head raised %#v", notices)
+		}
+		return
+	}
+	autoStartReviewExpectSkip(t, f, db, change)
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 0 {
+		t.Fatalf("unavailable auto-start admitted Review Rounds: %#v, %v", rounds, err)
+	}
+	assertReviewAutoStartReadinessNotices(t, db, change, 1)
+	autoStartReviewExpectSkip(t, f, db, change)
+	assertReviewAutoStartReadinessNotices(t, db, change, 1)
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), explicitCode) {
+		t.Fatalf("explicit review start should fail with %s: code=%d output=%s", explicitCode, code, output.String())
+	}
+}
+
+func TestAutoStartPicksFirstIndependentReviewRuleCandidate(t *testing.T) {
+	f, db, change := newAutoStartReviewFixture(t, `[defaults]
+merge_mode = "local"
+review = "quick"
+
+[profiles.sonnet]
+kind = "claude"
+model = "model-a"
+
+[profiles.opus]
+kind = "claude"
+model = "model-b"
+
+[[dispatch]]
+type = "change"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "opus"
+
+[review_loop]
+enabled = true
+auto_start = true
+`)
+	ctx := context.Background()
+	started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, change)
+	if err != nil || !started {
+		t.Fatalf("auto-start result = started %v, err %v; notices=%#v", started, err, reviewAutoStartSkippedNotices(t, db, change))
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("auto-start rounds = %#v, %v", rounds, err)
+	}
+	review, err := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
+	if err != nil || review.Profile != "opus" {
+		t.Fatalf("auto-start Review Task = %#v, %v", review, err)
+	}
+}
+
+func TestAutoStartNamesIneligibleReviewRuleCandidatesPerHead(t *testing.T) {
+	f, db, change := newAutoStartReviewFixture(t, `[defaults]
+merge_mode = "local"
+review = "quick"
+
+[profiles.sonnet]
+kind = "claude"
+model = "model-a"
+
+[profiles.sonnet-twin]
+kind = "claude"
+model = "model-a"
+
+[[dispatch]]
+type = "change"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "sonnet-twin"
+
+[review_loop]
+enabled = true
+auto_start = true
+`)
+	autoStartReviewExpectSkip(t, f, db, change)
+	notices := assertReviewAutoStartReadinessNotices(t, db, change, 1)
+	for _, want := range []string{"sonnet (Profile matches author launch 1; configured model matches author launch 1)", "sonnet-twin (configured model matches author launch 1)", fmt.Sprintf("posse review start t%d --profile <profile>", change.Seq)} {
+		if !strings.Contains(notices[0].Summary, want) {
+			t.Fatalf("auto-start readiness notice lacks %q: %s", want, notices[0].Summary)
+		}
+	}
+	if strings.Contains(notices[0].Summary, "no eligible reviewer Profile is configured") {
+		t.Fatalf("auto-start readiness notice hides the real reason: %s", notices[0].Summary)
+	}
+	autoStartReviewExpectSkip(t, f, db, change)
+	assertReviewAutoStartReadinessNotices(t, db, change, 1)
+	change = commitAutoStartCandidate(t, db, change, "second.txt")
+	autoStartReviewExpectSkip(t, f, db, change)
+	assertReviewAutoStartReadinessNotices(t, db, change, 2)
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"merge", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), "review_required") || !strings.Contains(output.String(), fmt.Sprintf("posse review start t%d --profile <profile>", change.Seq)) {
+		t.Fatalf("merge without an eligible reviewer: code=%d output=%s", code, output.String())
+	}
+}
+
+func newAutoStartReviewFixture(t *testing.T, configText string) (startFixture, *store.DB, store.Task) {
+	t.Helper()
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
@@ -415,63 +542,68 @@ func assertAutoStartSkipsUnavailableReviewer(t *testing.T, configText, explicitC
 		t.Fatalf("start code=%d %s", code, output)
 	}
 	change, _ := f.onlyTask(t)
-	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitTest(t, change.WorktreePath, "add", "change.txt")
-	gitTest(t, change.WorktreePath, "commit", "-m", "candidate change")
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 	ctx := context.Background()
 	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
 	change.State = store.StateDone
-	change.GatedSHA = strings.TrimSpace(gitTest(t, change.WorktreePath, "rev-parse", "HEAD"))
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=?`, change.GatedSHA, change.ID); err != nil {
+	return f, db, commitAutoStartCandidate(t, db, change, "change.txt")
+}
+
+func commitAutoStartCandidate(t *testing.T, db *store.DB, change store.Task, name string) store.Task {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, name), []byte("candidate\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	start := func() {
-		t.Helper()
-		started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, change)
-		if err != nil || started {
-			t.Fatalf("auto-start result = started %v, err %v", started, err)
+	gitTest(t, change.WorktreePath, "add", name)
+	gitTest(t, change.WorktreePath, "commit", "-m", "candidate "+name)
+	change.GatedSHA = strings.TrimSpace(gitTest(t, change.WorktreePath, "rev-parse", "HEAD"))
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET gated_sha=? WHERE id=?`, change.GatedSHA, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	return change
+}
+
+func autoStartReviewExpectSkip(t *testing.T, f startFixture, db *store.DB, change store.Task) {
+	t.Helper()
+	started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}, db, f.home, f.project, change)
+	if err != nil || started {
+		t.Fatalf("auto-start result = started %v, err %v", started, err)
+	}
+}
+
+func reviewAutoStartSkippedNotices(t *testing.T, db *store.DB, change store.Task) []store.Notice {
+	t.Helper()
+	notices, err := db.Notices(context.Background(), change.ProjectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipped []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "review_auto_start_skipped" {
+			skipped = append(skipped, notice)
 		}
 	}
-	if passedHead {
-		if _, err := db.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at)
-VALUES(?,1,?,?,'delta',?,?,?,?,?,'[]','verdict','pass',0)`, change.ID, change.ID, f.project.Name, change.GatedSHA, change.GatedSHA, change.GatedSHA, change.GatedSHA, strings.Repeat("0", 64)); err != nil {
-			t.Fatal(err)
+	return skipped
+}
+
+func assertReviewAutoStartReadinessNotices(t *testing.T, db *store.DB, change store.Task, want int) []store.Notice {
+	t.Helper()
+	skipped := reviewAutoStartSkippedNotices(t, db, change)
+	for _, notice := range skipped {
+		if !strings.Contains(notice.Summary, "eligible reviewer") || !strings.Contains(notice.Summary, "posse review start") {
+			t.Fatalf("auto-start readiness notice = %#v", notice)
 		}
-		start()
-		notices, err := db.Notices(ctx, change.ProjectID, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, notice := range notices {
-			if notice.Kind == "review_auto_start_skipped" {
-				t.Fatalf("passed head raised %#v", notice)
-			}
-		}
-		return
 	}
-	start()
-	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
-	if err != nil || len(rounds) != 0 {
-		t.Fatalf("unavailable auto-start admitted Review Rounds: %#v, %v", rounds, err)
+	if len(skipped) != want {
+		t.Fatalf("auto-start readiness notices = %d, want %d; notices=%#v", len(skipped), want, skipped)
 	}
-	assertOneReviewAutoStartReadinessNotice(t, db, ctx, change)
-	start()
-	assertOneReviewAutoStartReadinessNotice(t, db, ctx, change)
-	var output bytes.Buffer
-	cli := f.service.CLI()
-	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), explicitCode) {
-		t.Fatalf("explicit review start should fail with %s: code=%d output=%s", explicitCode, code, output.String())
-	}
+	return skipped
 }
 
 func TestAutoStartReviewerUnavailableOnlySkipsProfileResolutionFailures(t *testing.T) {
@@ -495,27 +627,6 @@ func TestAutoStartReviewerUnavailableOnlySkipsProfileResolutionFailures(t *testi
 				t.Fatalf("matched failure code = %q, want %q", failure.Code, test.code)
 			}
 		})
-	}
-}
-
-func assertOneReviewAutoStartReadinessNotice(t *testing.T, db *store.DB, ctx context.Context, change store.Task) {
-	t.Helper()
-	notices, err := db.Notices(ctx, change.ProjectID, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	skipped := 0
-	for _, notice := range notices {
-		if notice.Kind != "review_auto_start_skipped" {
-			continue
-		}
-		skipped++
-		if !strings.Contains(notice.Summary, "eligible reviewer") || !strings.Contains(notice.Summary, "posse review start") {
-			t.Fatalf("auto-start readiness notice = %#v", notice)
-		}
-	}
-	if skipped != 1 {
-		t.Fatalf("auto-start readiness notices = %d, want exactly one; all notices=%#v", skipped, notices)
 	}
 }
 
