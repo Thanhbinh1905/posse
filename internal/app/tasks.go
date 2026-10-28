@@ -1910,7 +1910,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			returnErr = axi.Failure("store_error", "the message store could not read or update this instruction", false, "Run `posse doctor` to inspect the local store")
 		}
 	}()
-	parsed, err := parseArgs("send", args, map[string]flagSpec{"queue": {boolean: true}, "interrupt": {}})
+	parsed, err := parseArgs("send", args, map[string]flagSpec{"queue": {boolean: true}, "interrupt": {}, "reason": {}})
 	if err != nil {
 		return err
 	}
@@ -2003,7 +2003,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	body := strings.Join(parsed.Positionals[1:], " ")
 	if interrupting {
-		return s.sendInterrupt(ctx, db, task, interruptMessage, cfg)
+		return s.sendInterrupt(ctx, db, project, task, interruptMessage, parsed.Flags["reason"], cfg)
 	}
 	messageID, err := db.QueueMessage(ctx.Context, task.ID, body, parsed.Bool("queue"))
 	if errors.Is(err, store.ErrStateRace) {
@@ -2012,6 +2012,8 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	// The instruction is already queued, so a failed record must not fail the send.
+	_ = db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionSend, parsed.Flags["reason"])
 	if parsed.Bool("queue") {
 		if err := s.regenerateProjects(ctx.Context, db); err != nil {
 			return err
@@ -2318,6 +2320,9 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, ""); err != nil {
+		return err
+	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "keys", Value: args[1:]}, {Key: "state", Value: "sent"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the pane"}}})
 }
 
@@ -2440,7 +2445,7 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	}
 }
 
-func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task, body string, cfg config.Config) (returnErr error) {
+func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, project store.Project, task store.Task, body, sendReason string, cfg config.Config) (returnErr error) {
 	token, err := newDeliveryClaimToken()
 	if err != nil {
 		return err
@@ -2456,6 +2461,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, task store.Task,
 	if err != nil {
 		return err
 	}
+	_ = db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionInterrupt, sendReason)
 	reservationCtx, stopReservation := keepMessageDeliveryClaimsAlive(ctx.Context, db, task.ID, messageID, token)
 	reservationStopped := false
 	defer func() {
@@ -2593,6 +2599,17 @@ func (s *Service) relaunch(ctx *axi.Context, args []string) error {
 		state = string(task.State)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: state}, {Key: "worker", Value: result.Worker}, {Key: "pane", Value: result.Pane}, {Key: "sandbox", Value: task.WorktreePath}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect the relaunched Worker"}}})
+}
+
+func relaunchReason(automatic bool, requestedProfile string) string {
+	switch {
+	case !automatic:
+		return "lead"
+	case requestedProfile != "":
+		return "quota_fallback"
+	default:
+		return "recovery"
+	}
 }
 
 type relaunchResult struct {
@@ -2923,6 +2940,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 
 	if err := s.markRelaunchedWorking(ctx, db, project.ID, task.ID, automatic, snapshot.ServerStartedAt, track); err != nil {
+		return failure(err)
+	}
+	if err := db.RecordIntervention(ctx, project.ID, task.ID, store.InterventionRelaunch, relaunchReason(automatic, requestedProfile)); err != nil {
 		return failure(err)
 	}
 	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {

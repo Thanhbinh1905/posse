@@ -1405,6 +1405,11 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 					return noticeErr
 				}
 			}
+			if err := s.raiseSpecReadyToDeliver(ctx, db, project, observed.task, forge); err != nil {
+				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
+					return noticeErr
+				}
+			}
 		}
 	}
 	for _, observed := range observations {
