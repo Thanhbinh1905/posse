@@ -96,11 +96,8 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 	t.Setenv("PATH", userBin+string(os.PathListSeparator)+serverBin)
 	t.Setenv(watchRuntimeTokenEnv, "")
 	t.Setenv("HERDR_PLUGIN_ID", "")
-	previousEntry := isUserCommandEntry
-	isUserCommandEntry = func() bool {
-		return os.Getenv(watchRuntimeTokenEnv) == "" && os.Getenv("HERDR_PLUGIN_ID") == ""
-	}
-	t.Cleanup(func() { isUserCommandEntry = previousEntry })
+	MarkUserCommandEntry()
+	t.Cleanup(func() { userCommandEntry.Store(false) })
 	if got := version("gh"); got != "2.97.0" {
 		t.Fatalf("User command ran gh %s, want 2.97.0", got)
 	}
@@ -116,15 +113,15 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 		t.Setenv(outside, "")
 	}
 
-	// A process without a User terminal, such as cron or systemd, never
+	// A process that is not a User command entry, such as cron or systemd, never
 	// replaces the recorded User shell PATH, even with no watch or plugin marker.
-	isUserCommandEntry = func() bool { return false }
+	userCommandEntry.Store(false)
 	for _, name := range []string{"gh", "glab"} {
 		if got := version(name); got != "2.97.0" {
 			t.Fatalf("service-started %s resolved to version %s, want the User shell's 2.97.0", name, got)
 		}
 	}
-	isUserCommandEntry = func() bool { return true }
+	MarkUserCommandEntry()
 
 	// A User command always runs the binary its own shell resolves.
 	if got := version("gh"); got != "2.46.0" {

@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/mattn/go-isatty"
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
@@ -115,12 +115,15 @@ const userShellPathFile = "user-shell-path"
 var userShellPathMu sync.Mutex
 var recordedUserShellPath string
 
-// isUserCommandEntry reports whether this process was started from the User's
-// terminal. A process started by cron, systemd or another service has no
-// terminal on stdin and must not replace the recorded User shell PATH.
-var isUserCommandEntry = func() bool {
-	return os.Getenv(watchRuntimeTokenEnv) == "" && os.Getenv("HERDR_PLUGIN_ID") == "" &&
-		isatty.IsTerminal(os.Stdin.Fd())
+var userCommandEntry atomic.Bool
+
+// MarkUserCommandEntry declares that this process runs a posse subcommand for
+// the User. Only such a process records the User shell PATH; one started by
+// cron, systemd or another service never calls it.
+func MarkUserCommandEntry() { userCommandEntry.Store(true) }
+
+func isUserCommandEntry() bool {
+	return userCommandEntry.Load() && os.Getenv(watchRuntimeTokenEnv) == "" && os.Getenv("HERDR_PLUGIN_ID") == ""
 }
 
 // externalCommandPath resolves gh and glab the same way in every posse
