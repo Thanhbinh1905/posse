@@ -230,12 +230,14 @@ func TestPRWatchRaisesOneChecksFailedNoticePerRunAndHead(t *testing.T) {
 		}
 	}
 
-	writeRun(shards, false)
+	// The last job passes, so the settled list equals the last quiet poll's
+	// list while the first Notice named only one shard.
+	writeRun(shards-1, false)
 	poll()
 	if got := noticeCount(); got != 2 {
 		t.Fatalf("pr_checks_failed Notices after the run completed = %d, want the first plus one update", got)
 	}
-	writeRun(shards, false)
+	writeRun(shards-1, false)
 	poll()
 	if got := noticeCount(); got != 2 {
 		t.Fatalf("pr_checks_failed Notices after an unchanged poll = %d, want 2", got)
