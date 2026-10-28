@@ -99,6 +99,52 @@ func TestQueuedTaskAdmittedByOneWatchPoll(t *testing.T) {
 	f.waitState(t, "t2", store.StateWorking)
 }
 
+// TestHeldProjectWatchPollNamesTheGenerationBlocker records a Herdr generation
+// the live server no longer has, as a missed `posse up --all` leaves it, with a
+// block episode already three minutes old. The held Project stays inert per
+// ADR 0035, but one watch poll raises one Notice naming the cause, and the
+// queued Task's wait_reason shows it.
+func TestHeldProjectWatchPollNamesTheGenerationBlocker(t *testing.T) {
+	f := newQueuedAdmissionFixture(t)
+	f.freeSlot(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.SetProjectServerStartedAt(ctx, f.projectID, "1:1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordReconcileBlock(ctx, f.projectID, "earlier pass", time.Now().Add(-3*time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	watchEnv := setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", "")
+	for range 2 {
+		runPosse(t, f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "1")
+	}
+	if task := f.task(t, "t2"); task.State != store.StateQueued {
+		t.Fatalf("a held Project admitted t2: %#v", task.State)
+	}
+	notices, err := db.Notices(ctx, f.projectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked []string
+	for _, notice := range notices {
+		if notice.Kind == "reconcile_blocked" {
+			blocked = append(blocked, notice.Summary)
+		}
+	}
+	if len(blocked) != 1 || !strings.Contains(blocked[0], "replaced the recorded 1:1; run `posse up --all`") {
+		t.Fatalf("held watch polls raised reconcile_blocked Notices %q, want one naming the generation", blocked)
+	}
+	show := runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t2")
+	if !strings.Contains(show, "waiting for Project reconciliation") || !strings.Contains(show, "posse up --all") {
+		t.Fatalf("held wait_reason does not name the blocker: %s", show)
+	}
+}
+
 // TestQueuedTaskStartSurvivesKilledCaller kills the foreground command that
 // admitted t2 while the start is under way. The start runs detached, so t2
 // still reaches working.
