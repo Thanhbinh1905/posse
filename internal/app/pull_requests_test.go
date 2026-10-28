@@ -1290,6 +1290,13 @@ case "$1 $2" in
       13) printf 'issue not found\n' >&2; exit 1 ;;
       *) printf '{"state":"OPEN"}\n' ;;
     esac ;;
+  "api --hostname")
+    for last; do :; done
+    case "$last" in
+      repos/acme/shop/issues/12/parent) printf '{"number":10,"state":"open"}\n' ;;
+      repos/acme/shop/issues/10/sub_issues*) cat "${POSSE_TEST_GH_SUB_ISSUES:-/dev/null}" ;;
+      *) printf 'Not Found (HTTP 404)\n' >&2; exit 1 ;;
+    esac ;;
   "pr create") printf '%s\n' "$POSSE_TEST_GH_URL" ;;
   "pr edit")
     while [ "$#" -gt 0 ]; do

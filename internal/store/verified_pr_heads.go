@@ -75,3 +75,27 @@ func (db *DB) WasVerifiedTaskHead(ctx context.Context, taskID int64, sha string)
 	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM verified_pr_heads WHERE task_id=? AND head_sha=?)`, taskID, sha).Scan(&found)
 	return found, err
 }
+
+// CreateSpecReadyNoticeOnce raises the spec_ready_to_deliver Notice for a spec
+// unless one already exists for it.
+func (db *DB) CreateSpecReadyNoticeOnce(ctx context.Context, projectID, taskID int64, spec int, summary string) (bool, error) {
+	dataJSON, err := json.Marshal(map[string]int{"spec": spec})
+	if err != nil {
+		return false, err
+	}
+	result, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
+		SELECT ?, ?, 'spec_ready_to_deliver', ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM notices
+			WHERE project_id=? AND kind='spec_ready_to_deliver' AND json_valid(data_json)
+			AND json_extract(data_json, '$.spec')=?
+		)`, projectID, taskID, summary, string(dataJSON), time.Now().UnixMilli(), projectID, spec)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows == 0 {
+		return rows > 0, err
+	}
+	return true, db.PersistProject(ctx, projectID)
+}

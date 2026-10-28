@@ -1525,6 +1525,9 @@ func (db *DB) NextLeadLaunch(ctx context.Context, projectID int64) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	if err := db.RecordIntervention(ctx, projectID, 0, InterventionLeadLaunch, ""); err != nil {
+		return 0, err
+	}
 	return launches, db.PersistProject(ctx, projectID)
 }
 

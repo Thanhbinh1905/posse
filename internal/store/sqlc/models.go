@@ -106,6 +106,15 @@ type Intent struct {
 	ProcessStartTime string
 }
 
+type Intervention struct {
+	ID        int64
+	ProjectID int64
+	TaskID    sql.NullInt64
+	Kind      string
+	Reason    string
+	At        int64
+}
+
 type LeadStartClaim struct {
 	ProjectID int64
 	ClaimedAt int64
