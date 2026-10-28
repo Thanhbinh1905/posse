@@ -84,6 +84,7 @@ type taskSummary struct {
 	Profile       string       `json:"profile,omitempty"`
 	Branch        string       `json:"branch,omitempty"`
 	Reason        string       `json:"reason,omitempty"`
+	Decisions     []int64      `json:"decisions,omitempty"`
 	Issues        []string     `json:"issues,omitempty"`
 	Refs          []string     `json:"refs,omitempty"`
 	CreatedAt     string       `json:"created_at,omitempty"`
@@ -200,6 +201,10 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	if err != nil {
 		return err
 	}
+	decisions, err := pendingDecisionsByTask(ctx.Context, db, project.ID)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
@@ -217,11 +222,12 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 				return err
 			}
 		}
-		if taskNeedsUser(task) {
+		if taskWaitsOnUser(task, decisions) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
 				return err
 			}
+			row.Decisions = decisions[task.ID]
 			needsYou = append(needsYou, row)
 		} else {
 			taskRows = append(taskRows, row)
@@ -259,12 +265,12 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		active := make([]activeTaskSummary, 0, len(tasks))
 		attention := make([]taskSummary, 0)
 		for _, task := range tasks {
-			if taskNeedsUser(task) {
+			if taskWaitsOnUser(task, decisions) {
 				reason, reasonErr := taskFailureReason(ctx.Context, db, task)
 				if reasonErr != nil {
 					return reasonErr
 				}
-				row := taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason}
+				row := taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason, Decisions: decisions[task.ID]}
 				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 				attention = append(attention, row)
 			} else {
@@ -527,7 +533,21 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 	if blockerReason != "" {
 		return "waiting for " + blockerReason, nil
 	}
-	return "waiting for a Worker slot", nil
+	active, err := db.ActiveWorkerCount(ctx, project.ID)
+	if err != nil {
+		return "", err
+	}
+	if active >= cfg.Defaults.MaxWorkers {
+		return "waiting for a Worker slot", nil
+	}
+	block, err := db.ReconcileBlock(ctx, project.ID)
+	if err != nil {
+		return "", err
+	}
+	if block.Since != 0 {
+		return "waiting for Project reconciliation, blocked since " + time.UnixMilli(block.Since).UTC().Format(time.RFC3339) + ": " + block.Cause, nil
+	}
+	return "waiting for admission: " + strconv.Itoa(cfg.Defaults.MaxWorkers-active) + " of " + strconv.Itoa(cfg.Defaults.MaxWorkers) + " Worker slots are free", nil
 }
 
 func addTaskDetails(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, now time.Time, row *taskSummary) error {
@@ -1051,6 +1071,25 @@ func planWithTextInputs(plan *taskplan.Plan) (any, error) {
 
 func taskNeedsUser(task store.Task) bool {
 	return task.State == store.StateFailed || task.State == store.StateLost
+}
+
+// taskWaitsOnUser reports whether needs_you lists the Task: it failed, was
+// lost, asked a question, or has a pending Decision.
+func taskWaitsOnUser(task store.Task, decisions map[int64][]int64) bool {
+	return taskNeedsUser(task) || task.State == store.StateNeedsDecision || len(decisions[task.ID]) > 0
+}
+
+// pendingDecisionsByTask maps each Task ID to its pending Decision IDs.
+func pendingDecisionsByTask(ctx context.Context, db *store.DB, projectID int64) (map[int64][]int64, error) {
+	decisions, err := db.PendingDecisions(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	byTask := map[int64][]int64{}
+	for _, decision := range decisions {
+		byTask[decision.TaskID] = append(byTask[decision.TaskID], decision.ID)
+	}
+	return byTask, nil
 }
 
 func taskFailureReason(ctx context.Context, db *store.DB, task store.Task) (string, error) {

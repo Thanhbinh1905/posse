@@ -165,3 +165,97 @@ func TestGroupCloseHoldsUntilUp(t *testing.T) {
 		t.Fatalf("recovery used workspace %s, not the new Lead's %s", project.HerdrWorkspaceID, workspace.Workspace.WorkspaceID)
 	}
 }
+
+// TestDownExecuteFromLeadShutsEverythingDown is the Lead path of `/posse-down`:
+// a plan that changes nothing, then one approved execute from the live Lead.
+func TestDownExecuteFromLeadShutsEverythingDown(t *testing.T) {
+	f := queueBehindSlot(t, newWorkerTabsFixture(t))
+	runPosseExpectingFailure(t, f.workerTabsFixture, f.repo, f.leadEnv, "user_only", "down")
+	runPosseExpectingFailure(t, f.workerTabsFixture, f.repo, f.leadEnv, "down_approval_required", "down", "--execute")
+
+	plan := runPosse(t, f.binary, f.repo, f.leadEnv, "down", "--plan")
+	for _, want := range []string{"t1,working,Holds the slot", "t2,queued,Queued worker", "work_lost", "kept_decisions", "--execute --user-approved"} {
+		if !strings.Contains(plan, want) {
+			t.Fatalf("down --plan did not show %q: %s", want, plan)
+		}
+	}
+	if project := f.project(t); project.IsDown() {
+		t.Fatal("down --plan marked the Project down")
+	}
+	if first, second := f.task(t, "t1"), f.task(t, "t2"); first.State != store.StateWorking || second.State != store.StateQueued {
+		t.Fatalf("down --plan changed Task states: t1=%s t2=%s", first.State, second.State)
+	}
+	if _, found := findLeadInSnapshot(f.snapshot(t)); !found || len(watchPIDs(f.root)) == 0 {
+		t.Fatal("down --plan stopped the Lead or the Watch")
+	}
+
+	quote := "ok, shut posse down"
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "down", "--execute", "--user-approved", quote)
+	if !strings.Contains(output, "state: down") {
+		t.Fatalf("down --execute did not report the Project down: %s", output)
+	}
+	if project := f.project(t); !project.IsDown() || project.LeadPaneID != "" {
+		t.Fatalf("down --execute did not record the Project down: %#v", project)
+	}
+	for _, id := range []string{"t1", "t2"} {
+		if task := f.task(t, id); task.State != store.StateTornDown {
+			t.Fatalf("down --execute left %s in %s", id, task.State)
+		}
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := db.LatestApprovalQuote(context.Background(), f.task(t, "t1").ID, "discard")
+	_ = db.Close()
+	if err != nil || recorded != quote {
+		t.Fatalf("discard approval quote = %q, %v; want %q", recorded, err, quote)
+	}
+	if pids := watchPIDs(f.root); len(pids) != 0 {
+		t.Fatalf("down --execute left Watch processes running: %v", pids)
+	}
+	snapshot := f.snapshot(t)
+	f.assertGone(t, snapshot, f.leadPaneID)
+	f.assertAlive(t, snapshot, f.userTab.RootPane.PaneID, f.userBefore.RootPane.PaneID)
+	f.assertLeadStaysGone(t, "after down --execute")
+
+	f.upInNewWorkspace(t)
+	if project := f.project(t); project.IsDown() {
+		t.Fatalf("posse up left the Project down: %#v", project)
+	}
+}
+
+func TestDownExecuteRefusesMergingTaskAndWorkers(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	task := f.start(t, "t1", "Merging worker", "merging-worker")
+	for _, args := range [][]string{{"down", "--plan"}, {"down", "--execute", "--user-approved", "ok"}} {
+		runPosseExpectingFailure(t, f, f.repo, workerSignalEnv(f, task), "worker_forbidden", args...)
+	}
+
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}} {
+		if err := db.Transition(context.Background(), task.ID, step.from, step.to, step.source, "fixture merging"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	if plan := runPosse(t, f.binary, f.repo, f.leadEnv, "down", "--plan"); !strings.Contains(plan, "refuses while t1 is merging") {
+		t.Fatalf("down --plan did not warn about the merging Task: %s", plan)
+	}
+	runPosseExpectingFailure(t, f, f.repo, f.leadEnv, "tasks_merging", "down", "--execute", "--user-approved", "ok")
+	if project := f.project(t); project.IsDown() {
+		t.Fatal("a refused down --execute marked the Project down")
+	}
+	if current := f.task(t, "t1"); current.State != store.StateMerging {
+		t.Fatalf("a refused down --execute changed t1 to %s", current.State)
+	}
+	if _, found := findLeadInSnapshot(f.snapshot(t)); !found {
+		t.Fatal("a refused down --execute stopped the Lead")
+	}
+}

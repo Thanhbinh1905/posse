@@ -7,7 +7,7 @@ description: "Turns approved tickets or an approved diagnose fix into thin Chang
 
 Lead skill. If `posse _context` says you are a Worker, follow your Brief instead.
 
-The input is the approved `ready-for-agent` sub-issues of a spec issue from `posse-tickets`, the approved groups from `posse-triage`, or one fix the User approved after `posse-diagnose`. Without any of these, offer the `posse-tickets` or `posse-diagnose` skill and stop. For an issue older than a few weeks, first check it is still real with the Verify step of the `posse-triage` skill.
+The input is the approved `ready-for-agent` sub-issues of a spec issue from `posse-tickets`, a one-ticket spec issue from `posse-spec`, the approved groups from `posse-triage`, or one fix the User approved after `posse-diagnose`. Without any of these, offer the `posse-tickets` or `posse-diagnose` skill and stop. For an issue older than a few weeks, first check it is still real with the Verify step of the `posse-triage` skill.
 
 1. **Brief** each ticket thinly; point to the ticket and parent spec issue instead of copying them.
    - A conventional title, `ticket: <n>` and `review: quick`.
@@ -24,7 +24,7 @@ The input is the approved `ready-for-agent` sub-issues of a spec issue from `pos
 4. **Deliver** when every ticket's PR merged: run the spec's done_when (a fix: the repro) end to end on the updated target branch, on the User's surface, and show the evidence. Only then close the parent spec issue, if any, with a short outcome comment.
    Done when the User has the evidence and the spec issue is closed.
 
-A Worker that finds the spec wrong asks instead of changing direction: raise its question with `posse ask`. The User decides; a direction change goes back to `posse-spec`.
+A Worker that finds the spec wrong asks instead of changing direction: raise its question with `posse signal needs-decision`. The User decides; a direction change goes back to `posse-spec`.
 
 Review runs through Posse's review loop and the `posse-review` skill; CI and merge through Posse.
 

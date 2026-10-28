@@ -16,14 +16,20 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// queuedAdmissionFixture holds t1 in the only Worker slot and queues t2 behind it.
+// queuedAdmissionFixture holds t1 in the only Worker slot and queues t2 behind
+// it. No hidden Project watch runs, so only the test's commands admit t2.
 type queuedAdmissionFixture struct {
 	*workerTabsFixture
 }
 
 func newQueuedAdmissionFixture(t *testing.T) queuedAdmissionFixture {
 	t.Helper()
-	f := newWorkerTabsFixture(t)
+	return queueBehindSlot(t, newWorkerTabsFixtureWithManualWatchOwner(t))
+}
+
+// queueBehindSlot fills the only Worker slot of f with t1 and queues t2.
+func queueBehindSlot(t *testing.T, f *workerTabsFixture) queuedAdmissionFixture {
+	t.Helper()
 	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 1\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -83,6 +89,64 @@ func TestQueuedTaskAdmittedAtFreedSlotStarts(t *testing.T) {
 	f.waitState(t, "t2", store.StateWorking)
 	if task := f.task(t, "t2"); task.Launches != 1 || task.PaneID == "" {
 		t.Fatalf("admitted Task did not launch its Worker: %#v", task)
+	}
+}
+
+// TestQueuedTaskAdmittedByOneWatchPoll frees the slot and runs no reconciling
+// command; a single Project watch poll must admit and start the queued Task.
+func TestQueuedTaskAdmittedByOneWatchPoll(t *testing.T) {
+	f := newQueuedAdmissionFixture(t)
+	f.freeSlot(t)
+	runPosse(t, f.binary, f.repo, setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", ""), "watch", "--poll-only", "--timeout", "1")
+	if task := f.task(t, "t2"); task.State == store.StateQueued {
+		t.Fatalf("one watch poll left t2 queued with a free Worker slot: %#v", task.State)
+	}
+	f.waitState(t, "t2", store.StateWorking)
+}
+
+// TestHeldProjectWatchPollNamesTheGenerationBlocker records a Herdr generation
+// the live server no longer has, as a missed `posse up --all` leaves it, with a
+// block episode already three minutes old. The held Project stays inert per
+// ADR 0035, but one watch poll raises one Notice naming the cause, and the
+// queued Task's wait_reason shows it.
+func TestHeldProjectWatchPollNamesTheGenerationBlocker(t *testing.T) {
+	f := newQueuedAdmissionFixture(t)
+	f.freeSlot(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.SetProjectServerStartedAt(ctx, f.projectID, "1:1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordReconcileBlock(ctx, f.projectID, "earlier pass", time.Now().Add(-3*time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	watchEnv := setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", "")
+	for range 2 {
+		runPosse(t, f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "1")
+	}
+	if task := f.task(t, "t2"); task.State != store.StateQueued {
+		t.Fatalf("a held Project admitted t2: %#v", task.State)
+	}
+	notices, err := db.Notices(ctx, f.projectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked []string
+	for _, notice := range notices {
+		if notice.Kind == "reconcile_blocked" {
+			blocked = append(blocked, notice.Summary)
+		}
+	}
+	if len(blocked) != 1 || !strings.Contains(blocked[0], "replaced the recorded 1:1; run `posse up --all`") {
+		t.Fatalf("held watch polls raised reconcile_blocked Notices %q, want one naming the generation", blocked)
+	}
+	show := runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t2")
+	if !strings.Contains(show, "waiting for Project reconciliation") || !strings.Contains(show, "posse up --all") {
+		t.Fatalf("held wait_reason does not name the blocker: %s", show)
 	}
 }
 

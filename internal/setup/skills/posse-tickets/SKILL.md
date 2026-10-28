@@ -7,7 +7,7 @@ description: "Groups a locked spec into the fewest tickets, one Worker per patte
 
 Lead skill. If `posse _context` says you are a Worker, follow your Brief instead.
 
-The input is a locked parent spec issue from `posse-spec`, read with all its comments. Without one, offer the `posse-spec` skill and stop. Write the breakdown into the spec's draft `~/.posse/projects/<project>/drafts/<topic>.md` below the spec, with its own status line (`in-progress` or `done`).
+The input is a locked parent spec issue from `posse-spec`, read with all its comments. Without one, offer the `posse-spec` skill and stop. Write the breakdown into the spec's draft `<drafts>/<topic>.md` (`<drafts>` is the `pending.drafts` path that `posse lead` prints) below the spec, with its own status line (`in-progress` or `done`).
 
 1. **Gate.** If the spec yields one ticket, say Tickets is not needed and offer a Brief directly.
    Done when the spec needs more than one Worker.

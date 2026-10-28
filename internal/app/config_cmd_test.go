@@ -710,3 +710,52 @@ func TestRecoverRebuildIsUserOnlyAndFindsOrphanedSandboxes(t *testing.T) {
 		t.Fatalf("orphaned Sandbox was not recovered: %#v, %v", orphan, err)
 	}
 }
+
+func TestConfigSetUpProjectsIsUserOnlyAndNamesRegisteredProjects(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(context.Background(), "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateProject(context.Background(), "cafe", filepath.Join(root, "cafe"), "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, herdr.NewFake())
+	t.Chdir(repo)
+	globalPath := filepath.Join(home, "config.toml")
+
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	if code, output := runCLI(t, service, "config", "set", "up.projects", `["shop"]`); code != 1 || !strings.Contains(output, "user_only") {
+		t.Fatalf("Lead set up.projects without the User's approval: code=%d output=%s", code, output)
+	}
+	t.Setenv("HERDR_PANE_ID", "")
+	if code, output := runCLI(t, service, "config", "set", "up.projects", `["shop", "ghost"]`); code != 1 || !strings.Contains(output, "project_unknown") || !strings.Contains(output, "ghost") {
+		t.Fatalf("up.projects accepted an unknown Project: code=%d output=%s", code, output)
+	}
+	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+		t.Fatalf("refused up.projects left config behind: %v", err)
+	}
+	if code, output := runCLI(t, service, "config", "set", "up.projects", `["shop"]`, "--project", "shop"); code != 1 || !strings.Contains(output, "up is valid only in the User config") {
+		t.Fatalf("a Project config accepted up.projects: code=%d output=%s", code, output)
+	}
+	if code, output := runCLI(t, service, "config", "set", "up.projects", `["shop", "cafe"]`); code != 0 {
+		t.Fatalf("User could not set up.projects: code=%d output=%s", code, output)
+	}
+	cfg, err := config.Load(home, "")
+	if err != nil || !equalStrings(cfg.Up.Projects, []string{"shop", "cafe"}) {
+		t.Fatalf("up.projects = %#v, %v", cfg.Up.Projects, err)
+	}
+}

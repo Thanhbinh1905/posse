@@ -128,7 +128,7 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 							err = s.requireNoLiveTaskAgent(ctx, project, task)
 						}
 						if err == nil {
-							_, err = s.teardownTask(ctx, db, project, cfg, task, true, quote)
+							_, err = s.teardownTask(ctx, db, project, cfg, task, true, quote, teardownOptions{keepPullRequests: payload.KeepPullRequests})
 						}
 					}
 				} else if task.State != store.StateMerged && task.State != store.StateReported {

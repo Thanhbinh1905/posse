@@ -43,6 +43,9 @@ type teardownResult struct {
 	EscapedProcesses []taskProcessDetail
 	CacheMaintenance string
 	AlreadyTornDown  bool
+	// RemoteBranchErrors name why a merged branch stayed on origin; a later
+	// watch pass or `posse pool prune` retries it.
+	RemoteBranchErrors []string
 }
 
 type paneProcessInfo struct {

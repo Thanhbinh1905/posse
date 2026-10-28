@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -112,14 +113,15 @@ func (launch leadLaunch) withResume(kind config.Kind, session string) leadLaunch
 }
 
 // restoreAll is `posse up --all`: it brings back the Lead, Workers and watch
-// of every Project that is not down.
+// of every Project that is not down, or only of those up.projects lists.
 func (s *Service) restoreAll(ctx *axi.Context) error {
 	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	if s.configCaller(ctx.Context, db).role == "worker" {
+	actor := s.configCaller(ctx.Context, db)
+	if actor.role == "worker" {
 		return axi.Failure("lead_only", "posse up --all cannot run from a Worker pane", false, "Run `posse up --all` from a User or Lead shell")
 	}
 	if s.Herdr == nil {
@@ -128,6 +130,10 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	if err := s.Herdr.CheckProtocol(ctx.Context); err != nil {
 		return herdrError(err)
 	}
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		return configError(err)
+	}
 	projects, err := db.Projects(ctx.Context)
 	if err != nil {
 		return err
@@ -135,8 +141,15 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	restored := []any{}
 	failed := []any{}
 	down := []any{}
+	skipped := []any{}
+	help := []any{}
+	inLeadPane := 0
 	pending := false
 	for _, project := range projects {
+		if cfg.Up.Projects != nil && !slices.Contains(cfg.Up.Projects, project.Name) {
+			skipped = append(skipped, project.Name)
+			continue
+		}
 		if project.IsDown() {
 			down = append(down, project.Name)
 			continue
@@ -149,6 +162,15 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 			pending = true
 			err = nil
 		}
+		// Herdr cannot start an agent in the pane running this command;
+		// `posse up` there replaces the shell with the Lead instead.
+		var failure *axi.Error
+		if errors.As(err, &failure) && failure.Code == "agent_pane_busy" && actor.role == "lead" && actor.projectID == project.ID && actor.paneID == project.LeadPaneID {
+			failed = append(failed, map[string]any{"project": project.Name, "error": "posse up --all runs in the Lead pane " + project.LeadPaneID + ", so Herdr cannot start the Lead there"})
+			help = append(help, "Run `posse up` in the Lead pane of "+project.Name+" to start its Lead, or run `posse up --all` from another pane")
+			inLeadPane++
+			continue
+		}
 		if err != nil {
 			failed = append(failed, map[string]any{"project": project.Name, "error": err.Error()})
 			continue
@@ -156,21 +178,28 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		restored = append(restored, map[string]any{"project": project.Name, "workers": workers})
 	}
 	state := "restored"
-	help := []any{}
 	if pending {
 		state = "partial"
 		help = append(help, "Some Workers wait for their relaunch backoff; run `posse up --all` again shortly")
 	}
 	if len(failed) > 0 {
 		state = "partial"
+	}
+	if len(failed) > inLeadPane {
 		help = append(help, "Fix the failed Projects and run `posse up --all` again")
 	}
 	if len(down) > 0 {
 		help = append(help, "Run `posse up` in a down Project's folder to start it")
 	}
+	if len(skipped) > 0 {
+		help = append(help, "Run `posse up` in a skipped Project's folder to restore it, or add it to up.projects")
+	}
 	result := axi.Object{{Key: "restored", Value: restored}, {Key: "failed_projects", Value: failed}}
 	if len(down) > 0 {
 		result = append(result, axi.Field{Key: "down_projects", Value: down})
+	}
+	if len(skipped) > 0 {
+		result = append(result, axi.Field{Key: "skipped_projects", Value: skipped})
 	}
 	result = append(result, axi.Field{Key: "state", Value: state})
 	if len(help) > 0 {

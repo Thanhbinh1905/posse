@@ -176,6 +176,53 @@ func TestUpAllSkipsDownProjects(t *testing.T) {
 	}
 }
 
+// upAllWithUpProjects runs `posse up --all` for the restorable Project shop
+// beside the never-started Project cafe, with up.projects set to upProjects
+// unless it is empty.
+func upAllWithUpProjects(t *testing.T, upProjects string) (string, *herdr.Fake) {
+	t.Helper()
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	if _, err := db.CreateProject(ctx, "cafe", filepath.Join(t.TempDir(), "cafe"), "main"); err != nil {
+		t.Fatal(err)
+	}
+	if upProjects != "" {
+		if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[lead]\nkind = \"pi\"\n\n[up]\nprojects = "+upProjects+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = restartedSnapshot(project)
+	fake.Results["agent.get"] = []byte(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
+	fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fake.SnapshotValue.Panes[0].Agent, fake.SnapshotValue.Panes[0].AgentStatus = "pi", "idle"
+		}
+	}
+	output := &bytes.Buffer{}
+	cli := testService(home, fake).CLI()
+	cli.Out, cli.ErrOut = output, output
+	t.Setenv("HERDR_PANE_ID", "")
+	if code := cli.Run([]string{"up", "--all"}); code != 0 {
+		t.Fatalf("up --all = %d: %s", code, output)
+	}
+	return output.String(), fake
+}
+
+func TestUpAllWithoutUpProjectsRestoresEveryProject(t *testing.T) {
+	output, fake := upAllWithUpProjects(t, "")
+	if fake.CallCount("agent.start") != 1 || !strings.Contains(output, "restored[1]") || strings.Contains(output, "skipped_projects") {
+		t.Fatalf("up --all without up.projects did not restore every Project: agent.start=%d %s", fake.CallCount("agent.start"), output)
+	}
+}
+
+func TestUpAllSkipsProjectsMissingFromUpProjects(t *testing.T) {
+	output, fake := upAllWithUpProjects(t, `["cafe"]`)
+	if fake.CallCount("agent.start") != 0 || !strings.Contains(output, "skipped_projects[1]: shop") {
+		t.Fatalf("up --all restored a Project missing from up.projects: agent.start=%d %s", fake.CallCount("agent.start"), output)
+	}
+}
+
 func TestUpRefusalNamesTheRunningLeadAgent(t *testing.T) {
 	home, _, project := restoreFixture(t)
 	t.Setenv("HERDR_ENV", "1")

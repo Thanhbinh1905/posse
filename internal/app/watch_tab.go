@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
@@ -30,6 +31,56 @@ func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFai
 	if summary != lastFailures[phase] {
 		_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: summary, DataJSON: `{}`})
 		lastFailures[phase] = summary
+	}
+}
+
+// watchReconcileBlockNoticeAfter is how long the watch's reconcile pass may
+// keep not completing before the User is told why. Queue refill and stall
+// detection run only inside a completed pass.
+var watchReconcileBlockNoticeAfter = 2 * time.Minute
+
+// trackWatchReconcileBlock records why the reconcile pass did not complete and
+// raises one reconcile_blocked Notice per episode; a completed pass ends it.
+func trackWatchReconcileBlock(ctx *axi.Context, db *store.DB, project store.Project, err error) {
+	if err == nil {
+		block, readErr := db.ReconcileBlock(ctx.Context, project.ID)
+		if readErr == nil && block.Since != 0 {
+			readErr = db.ClearReconcileBlock(ctx.Context, project.ID)
+		}
+		if readErr != nil && !store.IsOnlyBusy(readErr) {
+			fmt.Fprintf(ctx.ErrOut, "Watch could not clear the reconcile block for %s: %v\n", project.Name, readErr)
+		}
+		return
+	}
+	visible := store.WithoutBusy(err)
+	if visible == nil {
+		visible = err
+	}
+	cause := truncate(visible.Error(), 240)
+	if store.IsOnlyBusy(err) {
+		cause = "database contention: " + cause
+	}
+	now := currentTime()
+	block, recordErr := db.RecordReconcileBlock(ctx.Context, project.ID, cause, now)
+	if recordErr != nil {
+		if !store.IsOnlyBusy(recordErr) {
+			fmt.Fprintf(ctx.ErrOut, "Watch could not record the reconcile block for %s: %v\n", project.Name, recordErr)
+		}
+		return
+	}
+	blockedFor := time.Duration(now-block.Since) * time.Millisecond
+	if block.NoticeRaised || blockedFor < watchReconcileBlockNoticeAfter {
+		return
+	}
+	claimed, claimErr := db.ClaimReconcileBlockNotice(ctx.Context, project.ID)
+	if claimErr != nil || !claimed {
+		return
+	}
+	summary := fmt.Sprintf("Project reconciliation has not completed for %s, so queued Tasks are not admitted: %s", blockedFor.Round(time.Second), cause)
+	data := marshalJSON(map[string]any{"since": block.Since, "cause": cause})
+	if _, createErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, Kind: "reconcile_blocked", Summary: summary, DataJSON: data}); createErr != nil {
+		_ = db.ReleaseReconcileBlockNotice(ctx.Context, project.ID)
+		fmt.Fprintf(ctx.ErrOut, "Watch could not raise the reconcile_blocked Notice for %s: %v\n", project.Name, createErr)
 	}
 }
 

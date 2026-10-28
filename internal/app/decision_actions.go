@@ -74,7 +74,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err := db.ReviseTaskPlan(out.Context, task, revised); err != nil {
 				return err
 			}
-			if err := s.refillQueuedTasks(out.Context, db, project, cfg); err != nil {
+			if _, err := s.refillQueuedTasks(out.Context, db, project, cfg); err != nil {
 				return err
 			}
 			updated, err := db.TaskByID(out.Context, project.ID, task.ID)

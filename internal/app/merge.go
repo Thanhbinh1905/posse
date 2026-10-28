@@ -536,7 +536,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return configError(err)
 		}
-		result, err := s.teardownTask(ctx.Context, db, project, cfg, task, true, quote, parsed.Bool("keep-branch"))
+		result, err := s.teardownTask(ctx.Context, db, project, cfg, task, true, quote, teardownOptions{keepBranch: parsed.Bool("keep-branch")})
 		if err != nil {
 			return err
 		}
@@ -564,15 +564,24 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if inPlace && (task.State == store.StateFailed || task.State == store.StateLost) {
 		preserveQuote = quote
 	}
-	result, err := s.teardownTask(ctx.Context, db, project, cfg, task, false, preserveQuote, parsed.Bool("keep-branch"))
+	result, err := s.teardownTask(ctx.Context, db, project, cfg, task, false, preserveQuote, teardownOptions{keepBranch: parsed.Bool("keep-branch")})
 	if err != nil {
 		return err
 	}
 	return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}}, result))
 }
 
-func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, keepBranchOption ...bool) (result teardownResult, returnErr error) {
-	keepBranch := len(keepBranchOption) > 0 && keepBranchOption[0]
+type teardownOptions struct {
+	keepBranch       bool
+	keepPullRequests bool
+}
+
+func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, discardable bool, quote string, options ...teardownOptions) (result teardownResult, returnErr error) {
+	var option teardownOptions
+	if len(options) > 0 {
+		option = options[0]
+	}
+	keepBranch := option.keepBranch
 	if discardable {
 		if strings.TrimSpace(quote) == "" {
 			return result, axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -581,7 +590,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 		}
 	}
-	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch}))
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests}))
 	if err != nil {
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
@@ -665,8 +674,10 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			return result, err
 		}
 		defer workerPlan.Close()
-		if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
-			return result, s.teardownDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
+		if !option.keepPullRequests {
+			if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
+				return result, s.teardownDiscardIncomplete(ctx, db, project, task, "recorded pull request closure", err)
+			}
 		}
 		// The User quote and exact instance bindings are already durable in
 		// the intent. Stop before recording the branch tip: interruption can
@@ -1122,11 +1133,14 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				if observationErr != nil {
 					return result, observationErr
 				}
-				removed, removeErr := deleteMergedRemoteBranch(ctx, member.project, member.task, cfg, observation.HeadSHA)
+				removed, cause, removeErr := cleanUpMergedRemoteBranch(ctx, db, member.project, member.task, member.repo.Repo, cfg, observation.HeadSHA)
 				if removeErr != nil {
 					return result, removeErr
 				}
 				result.RemoteBranchRemoved = result.RemoteBranchRemoved || removed
+				if cause != "" {
+					result.RemoteBranchErrors = append(result.RemoteBranchErrors, member.repo.Repo+": "+cause)
+				}
 			}
 		} else if deliveredByPullRequest(task.MergeMode) {
 			observation, observationErr := db.LatestPRObservation(ctx, task.ID)
@@ -1134,11 +1148,14 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				return result, observationErr
 			}
 			if observationErr == nil && observation.State == "MERGED" {
-				removed, removeErr := deleteMergedRemoteBranch(ctx, project, task, cfg, observation.HeadSHA)
+				removed, cause, removeErr := cleanUpMergedRemoteBranch(ctx, db, project, task, "", cfg, observation.HeadSHA)
 				if removeErr != nil {
 					return result, removeErr
 				}
 				result.RemoteBranchRemoved = removed
+				if cause != "" {
+					result.RemoteBranchErrors = append(result.RemoteBranchErrors, cause)
+				}
 			}
 		}
 	}
@@ -1192,6 +1209,9 @@ func withTeardownDetails(fields axi.Object, result teardownResult) axi.Object {
 	}
 	if result.CacheMaintenance != "" {
 		fields = append(fields, axi.Field{Key: "worker_go_cache", Value: result.CacheMaintenance})
+	}
+	if len(result.RemoteBranchErrors) > 0 {
+		fields = append(fields, axi.Field{Key: "remote_branch_errors", Value: result.RemoteBranchErrors})
 	}
 	return fields
 }

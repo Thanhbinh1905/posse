@@ -92,7 +92,7 @@ func RecommendedSkills() map[string][]string {
 			"posse-build", "posse-board", "posse-arena", "posse-triage", "posse-diagnose",
 			"posse-technical-writing", "posse-unslop"},
 		"change":   {"posse-tdd", "posse-deslop", "posse-no-comments", "posse-technical-writing", "posse-unslop"},
-		"review":   {"posse-review", "posse-unslop"},
+		"review":   {"posse-review", "posse-tdd", "posse-technical-writing", "posse-unslop"},
 		"research": {"posse-research", "posse-technical-writing", "posse-unslop"},
 	}
 }
