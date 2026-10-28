@@ -148,7 +148,11 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	}
 	briefPath := filepath.Join(plan.Paths.Output, "brief.md")
 	if _, err := os.Stat(briefPath); os.IsNotExist(err) {
-		if err := writeFile(briefPath, plan.Inputs[0].Bytes); err != nil {
+		briefBytes := plan.Inputs[0].Bytes
+		if len(roundFiles) > 0 {
+			briefBytes = []byte(withReviewDir(string(briefBytes), plan.Paths.Output))
+		}
+		if err := writeFile(briefPath, briefBytes); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -160,7 +164,11 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	brief, err := dispatch.ParseHistoricalBriefText(string(plan.Inputs[0].Bytes))
+	briefText := string(plan.Inputs[0].Bytes)
+	if len(roundFiles) > 0 {
+		briefText = withReviewDir(briefText, plan.Paths.Output)
+	}
+	brief, err := dispatch.ParseHistoricalBriefText(briefText)
 	if err != nil {
 		return err
 	}

@@ -153,6 +153,15 @@ guidance = ["docs/review.md"]
 	if err != nil || !strings.Contains(string(launch), "## Review Round 1") || !strings.Contains(string(launch), "review/delta.patch") {
 		t.Fatalf("launch instructions omit Review Round files: %s err=%v", launch, err)
 	}
+	for _, name := range []string{"delta.patch", "cumulative.patch", "round.json", "conflicts.txt", "ledger.md", "guidance"} {
+		want := filepath.Join(plan.Paths.Output, "review", name)
+		if !strings.Contains(string(launch), want) {
+			t.Fatalf("launch does not name %s from the Reviewer's working directory %s:\n%s", want, review.WorktreePath, launch)
+		}
+		if _, err := os.Stat(want); err != nil {
+			t.Fatalf("named review path is missing: %v", err)
+		}
+	}
 	if err := os.Remove(filepath.Join(plan.Paths.Output, "review", "delta.patch")); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +175,7 @@ guidance = ["docs/review.md"]
 		t.Fatalf("restored delta patch differs from the admitted input: %s", restored)
 	}
 	restoredLaunch, err := os.ReadFile(launchPath)
-	if err != nil || !strings.Contains(string(restoredLaunch), "## Review Round 1") {
+	if err != nil || !strings.Contains(string(restoredLaunch), filepath.Join(plan.Paths.Output, "review", "delta.patch")) {
 		t.Fatalf("restored launch omits Review Round instructions: %s err=%v", restoredLaunch, err)
 	}
 	beforeTabs := f.fake.CallCount("tab.create")
@@ -189,6 +198,44 @@ guidance = ["docs/review.md"]
 	gitTest(t, change.WorktreePath, "commit", "-m", "later change")
 	if code, output := start(); code != 1 || !strings.Contains(output, "review_round_cap") {
 		t.Fatalf("round cap refusal code=%d: %s", code, output)
+	}
+}
+
+func TestReviewLedgerShowsFindingSeverity(t *testing.T) {
+	f := newStartFixture(t)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(1,?,1,'dropped-error','t','r','c','g',1)`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,1,?,1,'shop','x.go','f','e',1,?,'P1','introduced',1,'open')`, change.ID, strings.Repeat("a", 64), strings.Repeat("b", 40)); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := reviewLedgerMarkdown(ctx, db, change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ledger, "| F-1 | P-1 `dropped-error` | open | P1 |") {
+		t.Fatalf("ledger omits the finding severity:\n%s", ledger)
+	}
+}
+
+func TestWriteReviewRoundFilesCreatesEmptyGuidanceDirectory(t *testing.T) {
+	home := t.TempDir()
+	if err := writeReviewRoundFiles(home, map[string][]byte{"review/ledger.md": []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(home, "review", "guidance"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("review/guidance is missing for a target without guidance files: %v", err)
 	}
 }
 
