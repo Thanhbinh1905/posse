@@ -43,7 +43,7 @@ type quotaPattern struct {
 var quotaPatterns = []quotaPattern{
 	// Claude Code: "You've hit your session limit · resets 7pm (Asia/Bangkok)".
 	{kinds: []string{"claude"}, phrase: regexp.MustCompile(`(?i)^you've hit your (?:[a-z0-9-]+ ){0,2}limit\b`)},
-	{kinds: []string{"claude"}, phrase: regexp.MustCompile(`(?i)^(?:claude (?:ai )?usage|(?:5-hour|session|weekly|opus weekly|sonnet weekly)) limit reached\b`)},
+	{kinds: []string{"claude"}, phrase: regexp.MustCompile(`(?i)^(?:claude (?:ai )?usage|(?:5-hour|session|weekly|opus weekly|sonnet weekly|usage)) limit reached\b`)},
 	// Codex: "You've hit your usage limit. ... try again in 2 hours 13 minutes."
 	{kinds: []string{"codex", "opencode"}, phrase: regexp.MustCompile(`(?i)^you've hit your usage limit\b`)},
 	{kinds: []string{"codex", "opencode"}, phrase: regexp.MustCompile(`(?i)^quota exceeded\. check your plan and billing details\b`)},
@@ -57,7 +57,7 @@ var quotaPatterns = []quotaPattern{
 var (
 	quotaResetPattern = regexp.MustCompile(`(?i)(?:\bresets?|\breset at|\bwill reset at|\btry again)\s+((?:in|at)\s+)?(.+?)\.?$`)
 	// Bullets and error prefixes the harnesses put before a message line.
-	quotaLinePrefix   = regexp.MustCompile(`^(?:[⏺●⎿■•✗✘×│┃▌>]\s*)+`)
+	quotaLinePrefix   = regexp.MustCompile(`^(?:[⏺●⎿■•✗✘×│┃▌>⚠]\s*)+`)
 	quotaErrorPrefix  = regexp.MustCompile(`(?i)^(?:api error:\s*|error:\s*|\[\w+\]\s*)?(?:\d{3}\s+)?`)
 	quotaJSONMessage  = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
 	quotaEpochSuffix  = regexp.MustCompile(`\|(\d{9,})$`)
