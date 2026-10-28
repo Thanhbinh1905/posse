@@ -794,7 +794,10 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse signal") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") {
 		t.Fatalf("relaunch instructions were not written: %q, %v", relaunchText, err)
 	}
-	if strings.Index(string(relaunchText), "first instruction") > strings.Index(string(relaunchText), "later instruction supersedes the first") || strings.Contains(string(relaunchText), "before the Brief") || strings.Contains(string(relaunchText), "queued instruction") || !strings.Contains(string(relaunchText), "Later messages supersede earlier ones") {
+	// The queued instruction became undeliverable when the Task was lost, so
+	// the relaunch hands it to the new Worker in order.
+	first, queued, later := strings.Index(string(relaunchText), "first instruction"), strings.Index(string(relaunchText), "queued instruction"), strings.Index(string(relaunchText), "later instruction supersedes the first")
+	if first > queued || queued > later || strings.Contains(string(relaunchText), "before the Brief") || !strings.Contains(string(relaunchText), "Later messages supersede earlier ones") {
 		t.Fatalf("relaunch Lead messages were not ordered and filtered correctly: %q", relaunchText)
 	}
 	observer, err := store.Open(home)
