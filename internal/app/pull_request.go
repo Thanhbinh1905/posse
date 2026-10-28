@@ -92,7 +92,10 @@ type failedCheck struct {
 
 type checkSnapshot struct {
 	State    string        `json:"state"`
+	Running  bool          `json:"running,omitempty"`
 	Failures []failedCheck `json:"failures"`
+	// Noticed is the failure list the last pr_checks_failed Notice for this head named.
+	Noticed []failedCheck `json:"noticed,omitempty"`
 }
 
 const (
@@ -1375,6 +1378,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				effect.Notices = append(effect.Notices, store.Notice{ProjectID: project.ID, TaskID: observed.task.ID, Kind: "pr_merged", Summary: observed.task.Title + ": pull request merged", DataJSON: marshalJSON(map[string]any{"url": observed.current.PRURL, "head_sha": observed.current.HeadSHA, "merge_commit": observed.current.MergeCommit}), CreatedAt: observed.current.ObservedAt})
 			}
 		}
+		observed.current.Checks = stampNoticedFailures(observed.current, observed.previous, observed.hasBefore, observed.failures, effect)
 		recorded, err := db.RecordPRObservation(ctx, observed.current, effect, observed.task)
 		if err != nil {
 			return err
@@ -1607,6 +1611,7 @@ func makePRObservation(projectID int64, task store.Task, pull *ghPullRequest, no
 	if checks.State == "FAILURE" && len(checks.Failures) == 0 {
 		checks.Failures = append(checks.Failures, failedCheck{Name: "required check rollup", URL: ""})
 	}
+	checks.Running = pull.checksRunning()
 	sort.Slice(checks.Failures, func(i, j int) bool {
 		if checks.Failures[i].Name == checks.Failures[j].Name {
 			return checks.Failures[i].URL < checks.Failures[j].URL
@@ -1681,7 +1686,14 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			addNotice("pr_closed", task.Title+": pull request closed without merging", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	case "OPEN":
-		if len(failures) > 0 && (newHead || len(previousChecks.Failures) == 0 || !sameFailures(previousChecks.Failures, failures)) {
+		// One Notice when the first check of a run fails, and one update when the
+		// run settles with a failure set the last Notice did not name; failures
+		// that pile up while the run is still going stay quiet.
+		noticed := previousChecks.Noticed
+		if newHead {
+			noticed = nil
+		}
+		if len(failures) > 0 && (len(noticed) == 0 || !checks.Running && !sameFailures(noticed, failures)) {
 			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
 		}
 		if current.Review == "CHANGES_REQUESTED" && (newHead || previous.Review != "CHANGES_REQUESTED") {
@@ -1696,6 +1708,20 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 		}
 	}
 	return effect
+}
+
+// stampNoticedFailures records which failures the latest pr_checks_failed
+// Notice of this head named, so the settle update compares against the Notice
+// and not against a quiet mid-run observation.
+func stampNoticedFailures(current store.PRObservation, previous store.PRObservation, hasPrevious bool, failures []failedCheck, effect store.PRObservationEffect) string {
+	checks := decodeChecks(current.Checks)
+	switch {
+	case slices.ContainsFunc(effect.Notices, func(notice store.Notice) bool { return notice.Kind == "pr_checks_failed" }):
+		checks.Noticed = failures
+	case hasPrevious && previous.HeadSHA == current.HeadSHA:
+		checks.Noticed = decodeChecks(previous.Checks).Noticed
+	}
+	return marshalJSON(checks)
 }
 
 func sameFailures(left, right []failedCheck) bool {

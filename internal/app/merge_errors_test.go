@@ -173,3 +173,73 @@ func TestPRWatchCIFixWaitsForRunAndNamesEveryFailedShard(t *testing.T) {
 		t.Fatalf("ci_fix_queued summary = %q, %v", summary, err)
 	}
 }
+
+func TestPRWatchRaisesOneChecksFailedNoticePerRunAndHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoop(t, fixture, 3, 0)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const shards = 4
+	writeRun := func(failed int, running bool) {
+		t.Helper()
+		nodes := []map[string]any{}
+		for n := 1; n <= shards; n++ {
+			status, conclusion := "COMPLETED", "SUCCESS"
+			switch {
+			case n <= failed:
+				conclusion = "FAILURE"
+			case running:
+				status, conclusion = "IN_PROGRESS", ""
+			}
+			nodes = append(nodes, map[string]any{"__typename": "CheckRun", "name": fmt.Sprintf("e2e shard %d", n), "status": status, "conclusion": conclusion, "detailsUrl": fmt.Sprintf("https://checks.example/shard-%d", n)})
+		}
+		response := map[string]any{"data": map[string]any{"repo1": map[string]any{"pr1": map[string]any{
+			"url": "https://github.com/acme/shop/pull/17", "state": "OPEN", "headRefOid": fixture.headSHA, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED",
+			"mergeCommit": map[string]any{"oid": ""}, "statusCheckRollup": map[string]any{"state": "FAILURE", "contexts": map[string]any{"nodes": nodes}},
+		}}}}
+		if err := os.WriteFile(fixture.ghState, []byte(marshalJSON(response)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll := func() {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noticeCount := func() int {
+		t.Helper()
+		notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return countNoticeKind(notices, "pr_checks_failed")
+	}
+
+	for failed := 1; failed < shards; failed++ {
+		writeRun(failed, true)
+		poll()
+		if got := noticeCount(); got != 1 {
+			t.Fatalf("pr_checks_failed Notices with %d of %d jobs failed and the run still going = %d, want 1", failed, shards, got)
+		}
+	}
+
+	// The last job passes, so the settled list equals the last quiet poll's
+	// list while the first Notice named only one shard.
+	writeRun(shards-1, false)
+	poll()
+	if got := noticeCount(); got != 2 {
+		t.Fatalf("pr_checks_failed Notices after the run completed = %d, want the first plus one update", got)
+	}
+	writeRun(shards-1, false)
+	poll()
+	if got := noticeCount(); got != 2 {
+		t.Fatalf("pr_checks_failed Notices after an unchanged poll = %d, want 2", got)
+	}
+}
