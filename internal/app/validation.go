@@ -256,7 +256,7 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 			}
 			return reviewCapExhausted(ctx, db, project, task, head, used, max)
 		}
-		help := "Run `posse review start " + taskIDString(task.Seq) + "` and wait for a pass on this exact candidate"
+		help := "Run `posse review start " + taskIDString(task.Seq) + " --profile <profile>` and wait for a pass on this exact candidate"
 		return axi.Failure("validation_review_required", "the current private candidate "+shortSHA(candidate.CandidateSHA)+" has no passing Review, proved Review carry, or exact-head User disposition", false, help)
 	}
 	return nil

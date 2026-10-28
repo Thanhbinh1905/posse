@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -650,14 +652,80 @@ func autoStartReviewerUnavailable(err error) (*axi.Error, bool) {
 	}
 }
 
-func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project store.Project, change store.Task, failure *axi.Error) error {
-	found, err := db.HasNotice(ctx, project.ID, change.ID, "review_auto_start_skipped")
-	if err != nil || found {
+// autoStartReviewProfile returns the Profile auto-start passes to `posse
+// review start`: empty when one Dispatch Rule resolves an independent
+// reviewer, otherwise the first candidate in config order whose identity
+// differs from every author launch. The Review spawn rechecks identity.
+func (s *Service) autoStartReviewProfile(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task) (string, error) {
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return "", err
+	}
+	resolution, resolveErr := s.resolveDispatch(ctx, project, cfg, "review", "")
+	var profileErr *dispatch.ProfileError
+	if resolveErr != nil && (!errors.As(resolveErr, &profileErr) || profileErr.Code != "profile_required" || len(profileErr.Candidates) == 0) {
+		return "", profileError(resolveErr)
+	}
+	authorLaunches, err := db.TaskLaunchIdentities(ctx, change.ID)
+	if err != nil {
+		return "", err
+	}
+	authorKnown := change.Launches > 0 && launchHistoryComplete(change, authorLaunches)
+	ineligible := func(resolution dispatch.Resolution) string {
+		kind, found := cfg.Kinds[resolution.Resolved.Kind]
+		if !found {
+			return "unknown agent kind " + resolution.Resolved.Kind
+		}
+		args := workerAgentArgs(resolution.Resolved, kind, "")
+		var reasons []string
+		if check := compareReviewIdentity(authorLaunches, authorKnown, configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kind, args)); !check.Eligible {
+			reasons = append(reasons, check.Reason)
+		}
+		if refusal := reviewSessionOverrideReason(resolution.Resolved.Kind, args); refusal != "" {
+			reasons = append(reasons, refusal)
+		}
+		return strings.Join(reasons, "; ")
+	}
+	var rejected []string
+	if resolveErr == nil {
+		if reason := ineligible(resolution); reason != "" {
+			rejected = append(rejected, fmt.Sprintf("%s (%s)", resolution.Profile, reason))
+		}
+	} else {
+		for _, candidate := range profileErr.Candidates {
+			reason := ""
+			if candidateResolution, err := s.resolveDispatch(ctx, project, cfg, "review", candidate.Profile); err != nil {
+				reason = err.Error()
+			} else {
+				reason = ineligible(candidateResolution)
+			}
+			if reason == "" {
+				return candidate.Profile, nil
+			}
+			rejected = append(rejected, fmt.Sprintf("%s (%s)", candidate.Profile, reason))
+		}
+	}
+	if len(rejected) > 0 {
+		return "", axi.Failure("review_identity_ineligible", "no reviewer candidate is independent of every author launch: "+strings.Join(rejected, ", "), false)
+	}
+	return "", nil
+}
+
+// recordAutoStartReviewerReadiness raises one Notice per reviewed head, so a
+// new head that is still skipped reaches the Lead again.
+func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project store.Project, change store.Task, targets []store.ReviewTarget, failure *axi.Error) error {
+	heads := make([]string, len(targets))
+	for i, target := range targets {
+		heads[i] = target.Repository + "@" + shortSHA(target.Commit)
+	}
+	head := strings.Join(heads, ", ")
+	var found bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE project_id=? AND task_id=? AND kind='review_auto_start_skipped' AND json_valid(data_json) AND json_extract(data_json,'$.head')=?)`, project.ID, change.ID, head).Scan(&found); err != nil || found {
 		return err
 	}
-	summary := fmt.Sprintf("%s: Review auto-start skipped because no eligible reviewer Profile is configured. Configure a distinct Profile with a known model, then run `posse review start %s --profile <profile>`.", change.Title, taskIDString(change.Seq))
-	data := marshalJSON(map[string]any{"reason_code": failure.Code, "reason": failure.Message, "help": failure.Help})
-	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: change.ID, Kind: "review_auto_start_skipped", Summary: summary, DataJSON: data})
+	summary := fmt.Sprintf("%s: Review auto-start skipped at %s because no eligible reviewer is available: %s. Configure an independent reviewer Profile, then run `posse review start %s --profile <profile>`.", change.Title, head, failure.Message, taskIDString(change.Seq))
+	data := marshalJSON(map[string]any{"head": head, "reason_code": failure.Code, "reason": failure.Message, "help": failure.Help})
+	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: change.ID, Kind: "review_auto_start_skipped", Summary: summary, DataJSON: data})
 	return err
 }
 
@@ -693,9 +761,12 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 	if covered, err := db.ReviewTargetsCovered(ctx.Context, change.ID, targets); err != nil || covered {
 		return false, err
 	}
-	err = s.startReviewRound(ctx, db, home, project, change, "", "")
+	profile, err := s.autoStartReviewProfile(ctx.Context, db, home, project, change)
+	if err == nil {
+		err = s.startReviewRound(ctx, db, home, project, change, profile, "")
+	}
 	if failure, unavailable := autoStartReviewerUnavailable(err); unavailable {
-		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, change, failure); noticeErr != nil {
+		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, change, targets, failure); noticeErr != nil {
 			return false, noticeErr
 		}
 		return false, nil

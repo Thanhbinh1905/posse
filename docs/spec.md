@@ -1150,7 +1150,7 @@ Review mode is orthogonal to delivery: `merge_mode = "local"` is still local Git
 
 #### none and quick flow
 
-After a loop-enabled Change signals done, preserve the existing path: freshness -> selected review -> pinned Merge, with PR-watch CI allowed in parallel with review on the published head. Missing reviewer resolution produces a readiness Notice, but never satisfies required `quick` evidence; explicit start reports the identity/Profile error. `none` does not acquire a fictitious review pass. Known blocking findings remain blocking under either mode.
+After a loop-enabled Change signals done, preserve the existing path: freshness -> selected review -> pinned Merge, with PR-watch CI allowed in parallel with review on the published head. When several Dispatch Rules match `type = "review"`, auto-start uses the first candidate in config order whose identity is independent of every author launch. Missing reviewer resolution produces one readiness Notice per head naming each candidate and why it was rejected, but never satisfies required `quick` evidence; explicit start reports the identity/Profile error. `none` does not acquire a fictitious review pass. Known blocking findings remain blocking under either mode.
 
 #### full-pipeline flow
 
