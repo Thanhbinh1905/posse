@@ -52,6 +52,7 @@ type Defaults struct {
 	Forge                string `toml:"forge" json:"forge"`
 	PRPoll               string `toml:"pr_poll" json:"pr_poll"`
 	Review               string `toml:"review" json:"review"`
+	DeleteBranchOnMerge  bool   `toml:"delete_branch_on_merge" json:"delete_branch_on_merge"`
 }
 
 type ReviewLoop struct {
@@ -179,6 +180,17 @@ type Repository struct {
 	MergeMode    string `toml:"merge_mode" json:"merge_mode"`
 	TargetBranch string `toml:"target_branch" json:"target_branch"`
 	Forge        string `toml:"forge" json:"forge"`
+	// DeleteBranchOnMerge is nil when the Member inherits the Project value.
+	DeleteBranchOnMerge *bool `toml:"delete_branch_on_merge" json:"delete_branch_on_merge,omitempty"`
+}
+
+// MemberDeleteBranchOnMerge reports whether Posse deletes a merged Task branch
+// of this workspace Member.
+func (c Config) MemberDeleteBranchOnMerge(name string) bool {
+	if value := c.Repositories[name].DeleteBranchOnMerge; value != nil {
+		return *value
+	}
+	return c.Defaults.DeleteBranchOnMerge
 }
 
 type Lowkey struct {
@@ -677,6 +689,7 @@ func defaultMap() map[string]any {
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
+			"delete_branch_on_merge": true,
 		},
 		"kinds": map[string]any{
 			"claude":   map[string]any{"disabled": false, "auto_approve_args": []string{"--dangerously-skip-permissions"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "effort_args": []string{"--effort", "{effort}"}, "resume_args": []string{"--resume", "{session}"}, "system_prompt_args": []string{"--append-system-prompt-file", "{file}"}, "prepare": "claude-trust", "notice_delivery": NoticeDeliveryWatch, "background_commands": true, "steer": true, "interrupt_keys": []string{"ctrl+c"}},

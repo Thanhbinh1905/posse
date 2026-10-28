@@ -60,6 +60,8 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
 	{Key: "defaults.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline"}, Default: "none", Meaning: "Review evidence required to Merge a Change Task. full-pipeline validates a private candidate through review, test, docs and lint before every publication.", UserOnly: true},
 	{Key: "repositories.<member>.review", Type: TypeString, Allowed: []string{"none", "quick", "full-pipeline"}, Meaning: "Override defaults.review for this workspace Member.", UserOnly: true},
+	{Key: "defaults.delete_branch_on_merge", Type: TypeBoolean, Default: true, Meaning: "Delete a merged Task branch locally and, for PR/MR delivery, on origin at the exact merged head; false keeps both. Frozen at admission."},
+	{Key: "repositories.<member>.delete_branch_on_merge", Type: TypeBoolean, Meaning: "Override defaults.delete_branch_on_merge for this workspace Member."},
 	{Key: "review_loop.enabled", Type: TypeBoolean, Default: true, Meaning: "Enable built-in Review Rounds for Change Tasks.", UserOnly: true},
 	{Key: "review_loop.max_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum Review Rounds per Change Task; may be lowered to 1 or 2.", UserOnly: true},
 	{Key: "review_loop.block_at", Type: TypeString, Allowed: []string{"P0", "P1", "P2"}, Default: "P1", Meaning: "Finding severity at or above which introduced findings block Merge.", UserOnly: true},

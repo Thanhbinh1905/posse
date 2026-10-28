@@ -43,4 +43,37 @@ func TestMergedPRTeardownDeletesRemoteBranch(t *testing.T) {
 		_ = f.db.QueryRow(`SELECT cause FROM remote_branch_cleanups WHERE task_id=?`, candidate.ID).Scan(&cause)
 		t.Fatalf("Teardown kept the merged remote branch %s (recorded cause %q)", remote, cause)
 	}
+	if local := strings.TrimSpace(gitTest(t, f.env, f.repo, "for-each-ref", "refs/heads/"+candidate.Branch)); local != "" {
+		t.Fatalf("Teardown kept the merged local branch %s", local)
+	}
+}
+
+func TestMergedPRTeardownKeepsBranchesWhenDeleteBranchOnMergeIsOff(t *testing.T) {
+	f := newPRLifecycleFixture(t)
+	defer f.db.Close()
+	gitTest(t, f.env, f.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.delete_branch_on_merge", "false")
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nMake a PR change.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.startAndComplete(t, brief, "t1")
+	// The value frozen at admission wins over a later config change.
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.delete_branch_on_merge", "true")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1")
+	candidate := f.mustTask(t, "t1")
+	merge := f.mergeOnLocalOrigin(t, candidate, "t1")
+	f.writeGraphQL(t, "pr1", "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, candidate.GatedSHA)
+	showAfterActiveTeardown(t, f, "t1")
+	if task := f.mustTask(t, "t1"); task.State != store.StateTornDown {
+		t.Fatalf("merged PR did not tear down: %#v", task)
+	}
+	runPosse(t, f.binary, f.repo, f.leadEnv, "pool", "prune", "--yes")
+	ref := "refs/heads/" + candidate.Branch
+	if remote := strings.TrimSpace(gitTest(t, f.env, f.remote, "rev-parse", "--verify", ref)); remote != candidate.GatedSHA {
+		t.Fatalf("remote Task branch=%q, want kept at %s", remote, candidate.GatedSHA)
+	}
+	if local := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "--verify", ref)); local != candidate.GatedSHA {
+		t.Fatalf("local Task branch=%q, want kept at %s", local, candidate.GatedSHA)
+	}
 }

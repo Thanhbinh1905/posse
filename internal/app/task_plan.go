@@ -74,6 +74,8 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	}
 	for _, member := range members {
 		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
+		deleteBranch := cfg.MemberDeleteBranchOnMerge(member.Name)
+		selected.DeleteBranchOnMerge = &deleteBranch
 		if cfg.Repositories[member.Name].Review != "" {
 			selected.ReviewSource = "repositories." + member.Name + ".review"
 		}
@@ -129,7 +131,8 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Paths:           taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
 		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop},
-		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup}})
+		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup},
+		DeleteBranchOnMerge: cfg.Defaults.DeleteBranchOnMerge})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from

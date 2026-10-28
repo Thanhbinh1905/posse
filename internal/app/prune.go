@@ -352,7 +352,9 @@ func mergedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 			if captured {
 				eligible, reason = true, "approved discard tip is captured"
 			}
-		} else {
+		} else if deletes, err := taskDeletesBranchOnMerge(task, ""); err != nil {
+			return nil, err
+		} else if deletes {
 			if targetErr == nil {
 				if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", branchRef, targetRef); err == nil {
 					eligible, reason = true, "Task branch is merged"
@@ -517,7 +519,9 @@ func workspaceBranchPruneItems(ctx context.Context, db *store.DB, home string, p
 				continue
 			}
 			eligible, reason = true, "approved discard tip is captured"
-		} else if repo.State == store.TaskRepoMerged && repo.MergedRef != "" && repo.GatedSHA == sha {
+		} else if deletes, err := taskDeletesBranchOnMerge(task, repo.Repo); err != nil {
+			return nil, err
+		} else if deletes && repo.State == store.TaskRepoMerged && repo.MergedRef != "" && repo.GatedSHA == sha {
 			if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", sha, repo.MergedRef); err == nil || deliveredByPullRequest(repo.MergeMode) {
 				eligible, reason = true, "Task branch is merged"
 			}
