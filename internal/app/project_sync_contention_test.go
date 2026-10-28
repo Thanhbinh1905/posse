@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -322,5 +323,20 @@ func TestWatchFailureInBothPhasesRaisesOneNoticePerPhase(t *testing.T) {
 	}
 	if got := countNoticeKind(notices, "pr_watch_failing"); got != 2 {
 		t.Fatalf("alternating Watch phase failures raised %d Notices, want 2: %#v", got, notices)
+	}
+}
+
+func TestPoolExplainsBrokenSandboxAndItsRepair(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	ctx := context.Background()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state) VALUES(?,41,?,'broken')`, fixture.project.ID, filepath.Join(fixture.root, "sandbox-41")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "sandbox_broken", Summary: "sandbox-41: checkout could not be reset: index.lock exists. Repair it with `posse pool repair sandbox-41`, or remove it with `posse pool prune --yes`"}); err != nil {
+		t.Fatal(err)
+	}
+	code, output, errOutput := fixture.run("pool")
+	if code != 0 || !strings.Contains(output, "checkout could not be reset: index.lock exists") || !strings.Contains(output, "posse pool repair sandbox-41") {
+		t.Fatalf("Pool broken Sandbox = %d, %s, %s; want its reason and repair command", code, output, errOutput)
 	}
 }

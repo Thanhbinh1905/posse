@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,6 +60,36 @@ func TestStopTaskCgroupStopsZombieLeaderWithLiveThread(t *testing.T) {
 	}
 	if _, err := os.Stat(task.ContainmentPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("emptied Task cgroup was not removed: %v", err)
+	}
+}
+
+// A Task process that is mid-exit when inspected has no executable image yet
+// is still listed in the cgroup; the next pass sees it gone or stops it.
+func TestStopTaskCgroupRetriesProcessThatExitsBeforeInspection(t *testing.T) {
+	task, cgroupFD := createTestTaskCgroup(t)
+	command := exec.Command("sleep", "60")
+	command.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
+	pid := command.Process.Pid
+	failed := false
+	original := openCgroupProcessHandle
+	openCgroupProcessHandle = func(candidate int) (*sandboxProcessHandle, error) {
+		if candidate == pid && !failed {
+			failed = true
+			return nil, fmt.Errorf("inspect executable image for PID %d: %w", pid, &os.PathError{Op: "stat", Path: "/proc/exe", Err: syscall.ENOENT})
+		}
+		return original(candidate)
+	}
+	t.Cleanup(func() { openCgroupProcessHandle = original })
+
+	if err := stopTaskCgroupWithGuard(context.Background(), task, nil, nil, 0); err != nil {
+		t.Fatalf("stop Task cgroup with a process that vanished before inspection: %v", err)
+	}
+	if !failed {
+		t.Fatal("the inspection failure was never injected")
 	}
 }
 

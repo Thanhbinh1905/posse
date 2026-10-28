@@ -429,6 +429,17 @@ func (s *Service) listSandboxes(ctx *axi.Context) error {
 	if err != nil {
 		return err
 	}
+	brokenReasons := map[int]string{}
+	for _, sandbox := range sandboxes {
+		if sandbox.State == "broken" {
+			notices, err := db.Notices(ctx.Context, project.ID, false)
+			if err != nil {
+				return err
+			}
+			brokenReasons = latestSandboxBrokenSummaries(notices)
+			break
+		}
+	}
 	rows := make([]any, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		task := ""
@@ -437,7 +448,15 @@ func (s *Service) listSandboxes(ctx *axi.Context) error {
 				task = taskIDString(taskRow.Seq)
 			}
 		}
-		rows = append(rows, map[string]any{"sandbox": fmt.Sprintf("sandbox-%d", sandbox.Number), "state": sandbox.State, "task": task, "path": sandbox.Path})
+		row := map[string]any{"sandbox": fmt.Sprintf("sandbox-%d", sandbox.Number), "state": sandbox.State, "task": task, "path": sandbox.Path}
+		if sandbox.State == "broken" {
+			why := brokenReasons[sandbox.Number]
+			if why == "" {
+				why = fmt.Sprintf("sandbox-%d: no recorded reason", sandbox.Number) + sandboxBrokenRemedy(project, sandbox)
+			}
+			row["why"] = why
+		}
+		rows = append(rows, row)
 	}
 	leases, err := db.AllResourceLeases(ctx.Context)
 	if err != nil {
@@ -1048,10 +1067,34 @@ func sandboxBrokenSummary(project store.Project, sandbox store.Sandbox, reason s
 	if cause != nil {
 		summary += ": " + truncate(strings.TrimSpace(cause.Error()), 400)
 	}
+	return summary + sandboxBrokenRemedy(project, sandbox)
+}
+
+func sandboxBrokenRemedy(project store.Project, sandbox store.Sandbox) string {
 	if project.IsWorkspace() {
-		return summary + ". Remove it with `posse pool prune --yes` once its work is saved"
+		return ". Remove it with `posse pool prune --yes` once its work is saved"
 	}
-	return summary + fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`, or remove it with `posse pool prune --yes`", sandbox.Number)
+	return fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`, or remove it with `posse pool prune --yes`", sandbox.Number)
+}
+
+// latestSandboxBrokenSummaries maps each Sandbox number to the summary of its
+// most recent sandbox_broken Notice, acknowledged or not.
+func latestSandboxBrokenSummaries(notices []store.Notice) map[int]string {
+	latest := map[int]string{}
+	newest := map[int]int64{}
+	for _, notice := range notices {
+		var number int
+		if notice.Kind != "sandbox_broken" {
+			continue
+		}
+		if _, err := fmt.Sscanf(notice.Summary, "sandbox-%d:", &number); err != nil {
+			continue
+		}
+		if notice.ID > newest[number] {
+			newest[number], latest[number] = notice.ID, notice.Summary
+		}
+	}
+	return latest
 }
 
 func skippedPruneBranch(item pruneItem, reason string) error {

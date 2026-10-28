@@ -307,6 +307,8 @@ func stopTaskCgroup(ctx context.Context, task store.Task) error {
 	return nil
 }
 
+var openCgroupProcessHandle = openSandboxProcessHandle
+
 func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard taskProcessSignalGuard, excluded map[int]bool, paneShellPID int) error {
 	if task.ContainmentPath == "" {
 		return nil
@@ -358,10 +360,10 @@ func stopTaskCgroupWithGuard(_ context.Context, task store.Task, signalGuard tas
 				delete(handles, pid)
 				delete(terminated, pid)
 			}
-			handle, err := openSandboxProcessHandle(pid)
+			handle, err := openCgroupProcessHandle(pid)
 			if err != nil {
-				if !processInCgroup(pid, task.ContainmentPath) {
-					continue
+				if processGone(err) || !processInCgroup(pid, task.ContainmentPath) {
+					continue // Exited after the listing; the next pass rescans.
 				}
 				return fmt.Errorf("cannot safely stop Task cgroup process %d: %w", pid, err)
 			}
