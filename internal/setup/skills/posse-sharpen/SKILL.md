@@ -7,7 +7,7 @@ description: "Locks an idea or a raw issue into a lean lock card with a Cut list
 
 Lead skill. If `posse _context` says you are a Worker, follow your Brief instead.
 
-The output is a lock card for the Spec stage, not a Worker Brief. Keep it in the draft `~/.posse/projects/<project>/drafts/<topic>.md`: a status line (`in-progress`, `done` or `dropped`), then one line per decision. "Continue <topic>" resumes from the draft.
+The output is a lock card for the Spec stage, not a Worker Brief. Keep it in the draft `<drafts>/<topic>.md` (`<drafts>` is the `pending.drafts` path that `posse lead` prints): a status line (`in-progress`, `done` or `dropped`), then one line per decision. "Continue <topic>" resumes from the draft.
 
 1. **Gate.** Read the input: the chat, or an issue with all its comments (an owner comment may defer it). A complete ready-for-agent spec ticket needs no sharpening; say so and stop. Look up every fact yourself and prototype what is observable; ask the User only for decisions.
    Done when you know which lock card fields are still open.

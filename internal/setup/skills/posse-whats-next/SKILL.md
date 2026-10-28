@@ -9,7 +9,7 @@ Lead skill. If `posse _context` says you are a Worker, follow your Brief instead
 
 Facts are your job; decisions are the User's. Label each claim seen, inferred or guess.
 
-1. **Read state.** Run `posse`, then list unfinished drafts: files under `~/.posse/projects/<project>/drafts/` whose status line says `in-progress`.
+1. **Read state.** Run `posse`, then list unfinished drafts: files under `<drafts>/` (`<drafts>` is the `pending.drafts` path that `posse lead` prints) whose status line says `in-progress`.
    Done when you know what waits on the User, what is running and which drafts are open.
 2. **Locate the User.** Infer where they are from state and the chat. Ask one question only when two next steps remain equally likely.
    Done when one stage fits, or the User answered.

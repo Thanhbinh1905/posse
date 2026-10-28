@@ -10,7 +10,7 @@ Lead skill, except the capture line below. A Worker follows its Brief and adds t
 ## Capture (cheap, immediately)
 
 - **Worker:** when Posse or a skill got in the way, end the done Signal note with one `friction: <what happened, what you expected>` line. When a skill caused it, write `friction: [skill <name>] <what happened, what you expected>`.
-- **Lead:** append one dated line to the draft `~/.posse/projects/<project>/drafts/better-each-day.md` (status line `in-progress`):
+- **Lead:** append one dated line to the draft `<drafts>/better-each-day.md`, with status line `in-progress` (`<drafts>` is the `pending.drafts` path that `posse lead` prints):
   - when the User corrects you: the correction in the User's words and what you did before it;
   - when a skill misfires: the skill, and whether it triggered when it should not have or did not trigger when it should have.
 
