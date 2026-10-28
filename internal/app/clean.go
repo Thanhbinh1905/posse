@@ -210,7 +210,7 @@ func (s *Service) cleanTornDownTask(ctx context.Context, db *store.DB, home stri
 			if err != nil {
 				return err
 			}
-			if _, err := deleteMergedRemoteBranch(ctx, member.project, member.task, cfg, observation.HeadSHA); err != nil {
+			if _, _, err := cleanUpMergedRemoteBranch(ctx, db, member.project, member.task, member.repo.Repo, cfg, observation.HeadSHA); err != nil {
 				return err
 			}
 		}
@@ -224,7 +224,7 @@ func (s *Service) cleanTornDownTask(ctx context.Context, db *store.DB, home stri
 			return err
 		}
 		if err == nil && observation.State == "MERGED" {
-			if _, err := deleteMergedRemoteBranch(ctx, project, task, cfg, observation.HeadSHA); err != nil {
+			if _, _, err := cleanUpMergedRemoteBranch(ctx, db, project, task, "", cfg, observation.HeadSHA); err != nil {
 				return err
 			}
 		}

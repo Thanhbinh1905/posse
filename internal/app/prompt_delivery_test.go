@@ -422,6 +422,7 @@ func TestFailedAgentStartCanRelaunchOnSameSandbox(t *testing.T) {
 	if err != nil || after.State != store.StateWorking || after.SandboxID != before.SandboxID || after.WorktreePath != before.WorktreePath || result.Pane == "" {
 		t.Fatalf("relaunch did not keep the Task Sandbox: before=%#v after=%#v result=%#v err=%v", before, after, result, err)
 	}
+	requireInterventions(t, fixture.home, fixture.project.ID, store.InterventionRelaunch, "lead")
 }
 
 func TestStartWaitsForNewSandboxShellBeforeStartingAgent(t *testing.T) {

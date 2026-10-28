@@ -100,6 +100,12 @@ type Retention struct {
 	TaskArtifacts string `toml:"task_artifacts" json:"task_artifacts"`
 }
 
+// Up selects the Projects `posse up --all` restores; nil Projects restores
+// every Project that is not down.
+type Up struct {
+	Projects []string `toml:"projects" json:"projects"`
+}
+
 // WorkerGoCache bounds the Posse-owned Go build cache shared by every Worker.
 // It is valid only in the User config because the cache spans Projects.
 type WorkerGoCache struct {
@@ -202,6 +208,7 @@ type Config struct {
 	Retention           Retention                  `toml:"retention" json:"retention"`
 	Research            Research                   `toml:"research" json:"research"`
 	WorkerGoCache       WorkerGoCache              `toml:"worker_go_cache" json:"worker_go_cache"`
+	Up                  Up                         `toml:"up" json:"up"`
 	Kinds               map[string]Kind            `toml:"kinds" json:"kinds"`
 	Profiles            map[string]Profile         `toml:"profiles" json:"profiles"`
 	Workflows           map[string]WorkflowProfile `toml:"workflows" json:"workflows"`
@@ -328,8 +335,10 @@ func ValidationIssues(home, projectName string) []error {
 			project = map[string]any{}
 		}
 		removeLegacyGateSettings(projectPath, project)
-		if _, found := project["worker_go_cache"]; found {
-			issues = append(issues, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")})
+		for _, table := range userConfigOnlyTables {
+			if _, found := project[table]; found {
+				issues = append(issues, &InvalidError{File: projectPath, Key: table, Reason: userConfigOnlyReason(table)})
+			}
 		}
 		issues = append(issues, SchemaValidationErrors(projectPath, project, true)...)
 	}
@@ -390,8 +399,10 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 			return Config{}, err
 		}
 		warnings = append(warnings, removeLegacyGateSettings(projectPath, project)...)
-		if _, found := project["worker_go_cache"]; found {
-			return Config{}, &InvalidError{File: projectPath, Key: "worker_go_cache", Reason: userConfigOnlyReason("worker_go_cache")}
+		for _, table := range userConfigOnlyTables {
+			if _, found := project[table]; found {
+				return Config{}, &InvalidError{File: projectPath, Key: table, Reason: userConfigOnlyReason(table)}
+			}
 		}
 		if err := ValidateSchemaMap(projectPath, project, true); err != nil {
 			return Config{}, err

@@ -106,6 +106,15 @@ type Intent struct {
 	ProcessStartTime string
 }
 
+type Intervention struct {
+	ID        int64
+	ProjectID int64
+	TaskID    sql.NullInt64
+	Kind      string
+	Reason    string
+	At        int64
+}
+
 type LeadStartClaim struct {
 	ProjectID int64
 	ClaimedAt int64
@@ -333,6 +342,17 @@ type QuotaExhaustion struct {
 	OwnerPid   int64
 	ObservedAt int64
 	UpdatedAt  int64
+}
+
+type RemoteBranchCleanup struct {
+	TaskID    int64
+	Repo      string
+	ProjectID int64
+	Branch    string
+	HeadSha   string
+	Cause     string
+	Attempts  int64
+	FailedAt  int64
 }
 
 type RepoFetchFailure struct {

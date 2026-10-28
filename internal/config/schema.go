@@ -83,6 +83,7 @@ var keySpecs = []KeySpec{
 	{Key: "worker_go_cache.max_size", Type: TypeString, Default: "8GiB", Meaning: "Size of the shared Posse Worker GOCACHE at which Posse trims least-recently-used entries; accepts bytes or a KiB, MiB, GiB or TiB suffix. User config only."},
 	{Key: "worker_go_cache.min_age", Type: TypeDuration, Default: "6h", Meaning: "Worker GOCACHE entries used more recently are never trimmed, so active Workers keep their builds; at least 2h. User config only."},
 	{Key: "worker_go_cache.interval", Type: TypeDuration, Default: "1h", Meaning: "Minimum time between Worker GOCACHE trims run by Project watches and Teardown. User config only."},
+	{Key: "up.projects", Type: TypeStringArray, Meaning: "Projects `posse up --all` restores; the others are left as they are and listed under skipped_projects. Unset restores every Project that is not down; an empty list restores none. `posse up` in a Project's folder restores that Project either way. User config only.", UserOnly: true},
 	{Key: "kinds.<kind>.disabled", Type: TypeBoolean, Default: false, Meaning: "Disable this kind for new Worker dispatch without removing its historical or frozen launch settings."},
 	{Key: "kinds.<kind>.auto_approve_args", Type: TypeStringArray, Default: []string{}, Meaning: "Arguments that enable automatic approvals for this agent kind; Leads also get them by default when lead_auto_approve is true.", UserOnly: true},
 	{Key: "kinds.<kind>.lead_auto_approve", Type: TypeBoolean, Default: map[string]bool{"claude": true, "codex": true, "opencode": true}, Meaning: "Whether Leads of this kind also get auto_approve_args; set false to keep the harness's approval prompts. User-only. Pi has no permission system.", UserOnly: true},
@@ -140,11 +141,16 @@ func IsUserOnly(key string) bool {
 	return found && spec.UserOnly
 }
 
+// userConfigOnlyTables are the config tables a Project config may not set.
+var userConfigOnlyTables = []string{"worker_go_cache", "up"}
+
 // userConfigOnlyReason explains why a Project config may not set key, or
 // returns "" when it may.
 func userConfigOnlyReason(key string) string {
-	if key == "worker_go_cache" || strings.HasPrefix(key, "worker_go_cache.") {
-		return "worker_go_cache is valid only in the User config"
+	for _, table := range userConfigOnlyTables {
+		if key == table || strings.HasPrefix(key, table+".") {
+			return table + " is valid only in the User config"
+		}
 	}
 	return ""
 }

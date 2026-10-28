@@ -226,6 +226,9 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
 			failures = append(failures, fmt.Errorf("merged Task Teardown: %w", err))
 		}
+		if err := retryRemoteBranchCleanups(ctx, db, project, cfg); err != nil {
+			failures = append(failures, fmt.Errorf("remote branch cleanup: %w", err))
+		}
 		if err := s.startWorkspacePRPolls(ctx, db, project, cfg); err != nil {
 			failures = append(failures, fmt.Errorf("PR polling: %w", err))
 		}
@@ -283,6 +286,9 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 	case <-mergedTasks:
 		runTeardown()
 	default:
+	}
+	if err := retryRemoteBranchCleanups(ctx, db, project, cfg); err != nil {
+		failures = append(failures, fmt.Errorf("remote branch cleanup: %w", err))
 	}
 	if s.Herdr != nil {
 		// A Teardown still running after the bounded wait is routine after a
