@@ -240,3 +240,119 @@ block_at = "P1"
 		t.Fatalf("persisted finding = key %q state %q severity %q in_scope %d", key, state, severity, inScope)
 	}
 }
+
+func TestReviewRoundRecordsUnrelatedHunkAsP1E2E(t *testing.T) {
+	f := newStartFixture(t)
+	configText := `[defaults]
+merge_mode = "local"
+
+[profiles.author]
+kind = "claude"
+model = "model-a"
+
+[profiles.reviewer]
+kind = "claude"
+model = "model-b"
+
+[dispatch.default]
+use = "author"
+
+[review_loop]
+enabled = true
+max_rounds = 1
+auto_start = false
+block_at = "P1"
+`
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "committed.txt"), []byte("the Worker acts\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "cleanup.go"), []byte("package app\n\nfunc unrelatedRefactor() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, change.WorktreePath, "add", "committed.txt", "cleanup.go")
+	gitTest(t, change.WorktreePath, "commit", "-m", "add committed file and an unrelated refactor")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", "t1", "--profile", "reviewer"}); code != 0 {
+		t.Fatalf("review start code=%d %s", code, output.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("review rounds = %#v, %v", rounds, err)
+	}
+	review, err := db.TaskByID(ctx, f.project.ID, rounds[0].ReviewTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := review.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("review plan = %#v, %v", plan, err)
+	}
+	launch, err := os.ReadFile(filepath.Join(plan.Paths.Output, "launch.md"))
+	if err != nil || !strings.Contains(string(launch), "Scope check: every hunk in") || !strings.Contains(string(launch), "with key `out-of-scope-hunk`, severity `P1` and origin `introduced`") || !strings.Contains(string(launch), "done_when: the Worker acts") {
+		t.Fatalf("Review Round launch omits the scope check: %s err=%v", launch, err)
+	}
+	reportPath := filepath.Join(review.WorktreePath, "report.md")
+	findingsPath := filepath.Join(review.WorktreePath, "findings.json")
+	if err := os.WriteFile(reportPath, []byte("cleanup.go traces to no done_when item\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"schema":"posse.review-findings.v1","patterns":[{"key":"out-of-scope-hunk","title":"Unrelated refactor","rule":"Every hunk traces to a done_when item","root_cause":"The Change adds a refactor no done_when item needs","fix_guidance":"Revert the hunk and propose a follow-up issue","severity":"P1","origin":"introduced","instances":[{"repository":"shop","path":"cleanup.go","line":3,"symbol":"unrelatedRefactor","excerpt":"func unrelatedRefactor() {}","description":"The hunk serves no done_when item"}]}],"resolutions":[]}`
+	if err := os.WriteFile(findingsPath, []byte(findings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_PANE_ID", review.PaneID)
+	t.Setenv(workerHomeEnv, f.home)
+	signal := func(verdict string) (int, string) {
+		var output bytes.Buffer
+		cli := f.service.CLI()
+		cli.Out, cli.ErrOut = &output, &output
+		return cli.Run([]string{"signal", "done", "Reviewed", "--report", reportPath, "--findings", findingsPath, "--verdict", verdict}), output.String()
+	}
+	if code, message := signal("pass"); code == 0 || !strings.Contains(message, "review_verdict_inconsistent") {
+		t.Fatalf("pass with an out-of-scope hunk accepted: %d %s", code, message)
+	}
+	if code, message := signal("changes_requested"); code != 0 {
+		t.Fatalf("changes_requested with an out-of-scope hunk failed: %d %s", code, message)
+	}
+	var key, state, severity, path string
+	var inScope int
+	if err := db.QueryRowContext(ctx, `SELECT p.key,f.state,f.severity,f.in_scope,f.path FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id WHERE f.ship_task_id=?`, change.ID).
+		Scan(&key, &state, &severity, &inScope, &path); err != nil {
+		t.Fatal(err)
+	}
+	if key != "out-of-scope-hunk" || state != "open" || severity != "P1" || inScope != 1 || path != "cleanup.go" {
+		t.Fatalf("persisted finding = key %q state %q severity %q in_scope %d path %q", key, state, severity, inScope, path)
+	}
+}

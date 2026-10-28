@@ -743,3 +743,22 @@ func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 		t.Fatalf("legacy no-mistakes Worker protocol has incorrect delivery rules: %s", noMistakes)
 	}
 }
+
+func TestWorkerProtocolCarriesScopeRule(t *testing.T) {
+	brief := dispatch.Brief{Type: "change", DoneWhen: "tests pass"}
+	rule := "Scope: this Task's changes hold only what Done when needs, and every hunk traces to a Done when item."
+	for _, task := range []store.Task{{Seq: 1, Type: "change", MergeMode: "local"}, {Seq: 2, Type: "change", MergeMode: "pr"}} {
+		protocol := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, task, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
+		if !strings.Contains(protocol, rule) || !strings.Contains(protocol, "`friction:` note or a proposed follow-up issue") || !strings.Contains(protocol, "read `git diff <base>...HEAD` and revert any hunk that serves no Done when item") {
+			t.Fatalf("%s Worker protocol omits the scope rule: %s", task.MergeMode, protocol)
+		}
+	}
+	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 3, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t3", "none", "English")
+	if !strings.Contains(workspace, rule) {
+		t.Fatalf("workspace Worker protocol omits the scope rule: %s", workspace)
+	}
+	research := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 4, Type: "research"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t4", "none", "English")
+	if strings.Contains(research, "Scope:") {
+		t.Fatalf("Research Worker protocol carries the Change scope rule: %s", research)
+	}
+}

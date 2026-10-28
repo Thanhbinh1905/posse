@@ -1211,6 +1211,9 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
 		}
 	}
+	if task.Type == "change" {
+		work += "\n\nScope: this Task's changes hold only what Done when needs, and every hunk traces to a Done when item. Put any bug, cleanup or refactor you notice outside that scope in a `friction:` note or a proposed follow-up issue; never fix it on this branch. Before every publish or `done` Signal, read `git diff <base>...HEAD` and revert any hunk that serves no Done when item, including debug prints, whitespace and docstring churn. Review records such a hunk as a P1 finding."
+	}
 	if task.Type == "change" && !project.IsWorkspace() {
 		work += fmt.Sprintf("\n\nBranch plan: start from `%s`; PR/MR target `%s`.", task.BaseRef, taskTargetBranch(project, task))
 	}
