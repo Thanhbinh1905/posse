@@ -105,3 +105,42 @@ func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 		}
 	}
 }
+
+func TestDependencyDecisionQuestionFollowsPrerequisiteStateUntilAnswered(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "B", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := DecisionRequest{ProjectID: project.ID, TaskID: id, Origin: "dependency:t2:t1:landed", Kind: "dependency", Question: "Prerequisite t1 is failed.", Options: []string{"cancel", "drop-prerequisite-and-run"}}
+	raised, err := db.RaiseDecision(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Question = "Prerequisite t1 is torn-down."
+	updated, err := db.RaiseDecision(ctx, request)
+	if err != nil || updated.ID != raised.ID || updated.Question != request.Question {
+		t.Fatalf("open dependency Decision not updated: %#v %v", updated, err)
+	}
+	if _, err := db.AnswerDecision(ctx, project.ID, raised.ID, "cancel", "cancel it"); err != nil {
+		t.Fatal(err)
+	}
+	request.Question = "Prerequisite t1 is lost."
+	answered, err := db.RaiseDecision(ctx, request)
+	if err != nil || answered.Question != "Prerequisite t1 is torn-down." || answered.Answer != "cancel" {
+		t.Fatalf("answered dependency Decision changed: %#v %v", answered, err)
+	}
+	request.Options = []string{"cancel"}
+	if _, err := db.RaiseDecision(ctx, request); err == nil {
+		t.Fatal("dependency origin reused with different options")
+	}
+}

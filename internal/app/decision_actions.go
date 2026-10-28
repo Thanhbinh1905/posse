@@ -54,7 +54,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		}
 		switch decision.Answer {
 		case "cancel":
-			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			if err := db.Transition(out.Context, task.ID, store.StateQueued, store.StateTornDown, "cli", "Canceled before Worker dispatch"); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})

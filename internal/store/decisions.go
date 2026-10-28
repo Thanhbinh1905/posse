@@ -64,6 +64,24 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	}
 	defer tx.Rollback()
 	if original, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND origin=?`, request.ProjectID, request.Origin)); err == nil {
+		// A dependency question names the prerequisite's current state, which
+		// may move (failed, then torn-down) under the same origin.
+		if original.Kind == "dependency" && request.Kind == "dependency" && original.TaskID == request.TaskID && original.Question != request.Question && slices.Equal(original.Options, request.Options) {
+			if original.AnsweredAt != 0 || original.ObsoleteAt != 0 {
+				return original, nil
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE decisions SET question=? WHERE id=?`, request.Question, original.ID); err != nil {
+				return Decision{}, err
+			}
+			if err := tx.Commit(); err != nil {
+				return Decision{}, err
+			}
+			if err := db.PersistProject(ctx, request.ProjectID); err != nil {
+				return Decision{}, err
+			}
+			original.Question = request.Question
+			return original, nil
+		}
 		if original.TaskID != request.TaskID || original.Kind != request.Kind || original.Question != request.Question || !slices.Equal(original.Options, request.Options) {
 			return Decision{}, fmt.Errorf("decision origin %q already belongs to another question", request.Origin)
 		}
@@ -378,12 +396,14 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
 		WHEN 'orphan' THEN 'Unrecoverable Orphan resolved during Teardown'
 		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
+		WHEN 'dependency' THEN 'Task is no longer queued'
 		ELSE 'Task no longer failed or lost' END
-		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota')
+		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','dependency')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
 		((kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode='pr' AND NOT EXISTS(SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url) AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS' AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'))))
 		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
 		OR (kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>decisions.task_launches))
+		OR (kind='dependency' AND t.state<>'queued')
 		OR (kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>decisions.task_launches))
 		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (kind='orphan' AND decisions.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
