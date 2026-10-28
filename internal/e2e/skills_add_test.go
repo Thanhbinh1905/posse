@@ -70,12 +70,12 @@ func TestSkillsAddNonInteractive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add names: %v\n%s", err, output)
 	}
-	for _, want := range []string{"role: change", "role: review", "skills[1]: posse-tdd", "skills[1]: posse-review"} {
+	for _, want := range []string{"role: change", "role: review", "skills[1]: posse-tdd", "skills[2]: posse-review,posse-tdd"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("result lacks %q:\n%s", want, output)
 		}
 	}
-	if got := f.configured(t); strings.Join(got["change"], ",") != "posse-tdd" || strings.Join(got["review"], ",") != "posse-review" || len(got["lead"]) != 0 {
+	if got := f.configured(t); strings.Join(got["change"], ",") != "posse-tdd" || strings.Join(got["review"], ",") != "posse-review,posse-tdd" || len(got["lead"]) != 0 {
 		t.Fatalf("configured after names = %#v", got)
 	}
 	if output, err := f.run(t, "skills", "add", "--all"); err != nil || !strings.Contains(output, "role: lead") {

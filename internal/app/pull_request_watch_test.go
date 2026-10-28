@@ -677,7 +677,7 @@ func TestPRWatchRerunsCancelledCheckOnceThenQueuesOneCIFixRound(t *testing.T) {
 	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"unit", "https://github.com/acme/shop/actions/runs/123/job/456", "unit failed log", "User intent (verbatim)"} {
+	for _, required := range []string{"unit", "https://github.com/acme/shop/actions/runs/123/job/456", "unit failed log", "Intent (User words verbatim; Goal and Lead assumptions are Lead text)"} {
 		if !strings.Contains(body, required) {
 			t.Errorf("CI fix instruction omitted %q: %s", required, body)
 		}
