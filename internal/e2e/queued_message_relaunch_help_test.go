@@ -15,7 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestRelaunchedShowExplainsMixedMessageStatuses(t *testing.T) {
+func TestRelaunchHandsUndeliverableMessagesToReplacementWorker(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 
@@ -84,32 +84,29 @@ esac
 	queuedMessageID := queueRelaunchHelpMessage(t, fixture, task.ID, queuedBody)
 	show := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 	for _, expected := range []string{
-		fmt.Sprintf("id: %d", oldMessageID),
-		"instruction: " + undeliverableBody,
-		"status: undeliverable",
-		"history: true",
-		"blocks_sends: false",
-		fmt.Sprintf("id: %d", queuedMessageID),
-		"instruction: " + queuedBody,
-		"status: queued",
-		"Undeliverable instructions are not retried automatically; resend each with `posse send t1 <message>`",
+		fmt.Sprintf("%d,%s,", queuedMessageID, queuedBody),
 		"Queued instructions will be delivered when the Worker is ready and unfocused",
 	} {
 		if !strings.Contains(show, expected) {
 			t.Fatalf("posse show omitted %q: %s", expected, show)
 		}
 	}
-	researchLog, err := os.ReadFile(filepath.Join(fixture.root, "research.log"))
+	if strings.Contains(show, undeliverableBody) {
+		t.Fatalf("posse show still lists the instruction handed to the relaunched Worker: %s", show)
+	}
+	// The relaunch prompt hands the replacement Worker the instruction its
+	// failed predecessor never received.
+	relaunchPrompt, err := os.ReadFile(filepath.Join(fixture.home, "projects", fixture.project.Name, "tasks", "t1", "relaunch.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(researchLog), undeliverableBody) {
-		t.Fatalf("replacement Research received the old undeliverable instruction: %s", researchLog)
+	if !strings.Contains(string(relaunchPrompt), undeliverableBody) {
+		t.Fatalf("relaunch prompt omitted the undeliverable instruction: %s", relaunchPrompt)
 	}
 	for _, message := range []struct {
 		id     int64
 		status string
-	}{{oldMessageID, "undeliverable"}, {queuedMessageID, "queued"}} {
+	}{{oldMessageID, "delivered"}, {queuedMessageID, "queued"}} {
 		stored, err := fixture.db.MessageByID(context.Background(), message.id)
 		if err != nil || stored.Status != message.status {
 			t.Errorf("message #%d status = %#v, %v; want %q", message.id, stored, err, message.status)

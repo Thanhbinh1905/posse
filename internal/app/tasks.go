@@ -2005,6 +2005,15 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		if err := s.regenerateProjects(ctx.Context, db); err != nil {
 			return err
 		}
+		if completedChangeTask(task) {
+			snapshot, err := s.snapshot(ctx.Context)
+			if err != nil {
+				return err
+			}
+			if _, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); !found {
+				return ctx.Print(workerPaneMissingQueued(task, messageID))
+			}
+		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "waiting_for_idle"}, {Key: "help", Value: []any{"The instruction will be delivered after the current Worker turn; run `posse show " + taskIDString(task.Seq) + "` to inspect its queue age"}}})
 	}
 	delivered := false
@@ -2124,6 +2133,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	if delivered {
 		state = "delivered"
 	} else {
+		if !paneFound && reason == "agent_not_ready" && completedChangeTask(task) {
+			return ctx.Print(workerPaneMissingQueued(task, messageID))
+		}
 		help := "The message will be delivered when the Worker is ready"
 		if reason == "delivery_in_progress" {
 			help = "This message is already being delivered; run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"
@@ -2139,6 +2151,18 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		return ctx.Print(result)
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}}})
+}
+
+// completedChangeTask reports a Change Task whose Worker finished but still
+// accepts follow-ups. Recovery does not restart its Worker, so a lost pane
+// needs `posse relaunch`.
+func completedChangeTask(task store.Task) bool {
+	return task.Type == "change" && (task.State == store.StateDone || task.State == store.StateMerging)
+}
+
+func workerPaneMissingQueued(task store.Task, messageID int64) axi.Object {
+	id := taskIDString(task.Seq)
+	return axi.Object{{Key: "task", Value: id}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "worker_pane_missing"}, {Key: "help", Value: []any{"The " + string(task.State) + " Task has no live Worker pane; run `posse relaunch " + id + "` to bring its Worker back, then the message is delivered"}}}
 }
 
 // submittingMessageReason reports a message another dispatcher, such as the
@@ -2552,7 +2576,12 @@ func (s *Service) relaunch(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "working"}, {Key: "worker", Value: result.Worker}, {Key: "pane", Value: result.Pane}, {Key: "sandbox", Value: task.WorktreePath}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect the relaunched Worker"}}})
+	// A completed Change Task keeps its state until its Worker signals again.
+	state := "working"
+	if completedChangeTask(task) {
+		state = string(task.State)
+	}
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: state}, {Key: "worker", Value: result.Worker}, {Key: "pane", Value: result.Pane}, {Key: "sandbox", Value: task.WorktreePath}, {Key: "help", Value: []any{"Run `posse show " + taskIDString(task.Seq) + "` to inspect the relaunched Worker"}}})
 }
 
 type relaunchResult struct {
@@ -2570,12 +2599,11 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 
 func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
-	if !recoverableTaskState(task.State) {
-		var help []string
-		if task.State == store.StateDone && task.Type == "change" {
-			help = append(help, "Send a follow-up with `posse send "+taskIDString(task.Seq)+" <message>`")
-		}
-		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false, help...))
+	// A completed Change Task keeps its state, so only an explicit relaunch
+	// brings its Worker back for follow-ups.
+	completed := completedChangeTask(task) && !automatic
+	if !recoverableTaskState(task.State) && !completed {
+		return failure(axi.Failure("relaunch_refused", "Task in state "+string(task.State)+" cannot be relaunched", false))
 	}
 	if task.Profile == "" {
 		return failure(axi.Failure("config_invalid", "Task has no Profile", false))
@@ -2848,11 +2876,14 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 	}
 	relaunchPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "relaunch.md")
+	if err := track("messages.undeliverable", func() error { return db.DeliverUndeliverableMessages(ctx, task.ID) }); err != nil {
+		return failure(err)
+	}
 	messages, err := db.TaskMessagesAfter(ctx, task.ID, task.CreatedAt, maxRelaunchMessages+1)
 	if err != nil {
 		return failure(err)
 	}
-	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructions(gitStateReport, messages)) }); err != nil {
+	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructionsFor(task, gitStateReport, messages)) }); err != nil {
 		return failure(err)
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
@@ -2917,7 +2948,7 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 			observation.AgentStatus, observation.AgentStatusSince = "", 0
 			return db.UpdateTaskObservation(ctx, taskID, observation)
 		}
-		if current.State == store.StateWorking {
+		if current.State == store.StateWorking || !automatic && completedChangeTask(current) {
 			return track("task.progress", progress)
 		}
 		if automatic && current.State == store.StateFailed || !recoverableTaskState(current.State) {
@@ -2942,12 +2973,22 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 	}
 }
 
+func relaunchInstructionsFor(task store.Task, gitStateReport string, messages []store.Message) []byte {
+	if completedChangeTask(task) {
+		return relaunchText("Your Worker was restarted after this Task reached state "+string(task.State)+". Re-read `launch.md` and inspect `git status` and `git log`, but do not change the work on your own. Wait for Lead instructions; they arrive as Posse envelopes.\n", gitStateReport, messages)
+	}
+	return relaunchInstructions(gitStateReport, messages)
+}
+
 func relaunchInstructions(gitStateReport string, messageSets ...[]store.Message) []byte {
 	var messages []store.Message
 	if len(messageSets) > 0 {
 		messages = messageSets[0]
 	}
-	text := "You were interrupted. Re-read `launch.md`, inspect `git status` and `git log`, continue the Task, and report with `posse signal`.\n"
+	return relaunchText("You were interrupted. Re-read `launch.md`, inspect `git status` and `git log`, continue the Task, and report with `posse signal`.\n", gitStateReport, messages)
+}
+
+func relaunchText(text, gitStateReport string, messages []store.Message) []byte {
 	if gitStateReport != "" {
 		text += "\n" + gitStateReport + "\n"
 	}

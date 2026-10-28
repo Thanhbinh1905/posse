@@ -2385,6 +2385,14 @@ func (db *DB) WithdrawQueuedMessage(ctx context.Context, messageID int64) (Messa
 	return message, count == 1, err
 }
 
+// DeliverUndeliverableMessages marks the messages a failed or lost Worker never
+// received as delivered, because a relaunch hands them to its replacement in
+// the relaunch prompt.
+func (db *DB) DeliverUndeliverableMessages(ctx context.Context, taskID int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE messages SET status='delivered', delivered_at=? WHERE task_id=? AND status='undeliverable'`, time.Now().UnixMilli(), taskID)
+	return err
+}
+
 func (db *DB) WithdrawInterruptMessage(ctx context.Context, messageID int64, token string) error {
 	_, err := db.ExecContext(ctx, `UPDATE messages SET status='withdrawn',claim_token='',claimed_at=0 WHERE id=? AND status='interrupting' AND claim_token=?`, messageID, token)
 	return err
