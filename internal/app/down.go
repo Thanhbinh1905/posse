@@ -15,13 +15,28 @@ import (
 
 // down stops the Project's Lead and Watch. The Project stays registered,
 // but nothing restarts it until the User runs `posse up` in its folder.
+// --plan previews a full shutdown; --execute tears every Task down first and
+// may run from the live Lead, whose tab it closes last.
 func (s *Service) down(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("down", args, map[string]flagSpec{})
+	parsed, err := parseArgs("down", args, map[string]flagSpec{"plan": {boolean: true}, "execute": {boolean: true}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("down takes no arguments; run it in the Project folder")
+	}
+	execute, quote := parsed.Bool("execute"), parsed.Flags["user-approved"]
+	if parsed.Bool("plan") {
+		if execute || quote != "" {
+			return axi.Usage("down --plan takes no other flags")
+		}
+		return s.downPlan(ctx)
+	}
+	if !execute && quote != "" {
+		return axi.Usage("--user-approved requires --execute")
+	}
+	if execute && strings.TrimSpace(quote) == "" {
+		return axi.Failure("down_approval_required", "posse down --execute discards unmerged work and needs User approval", false, "Show `posse down --plan` to the User, then pass `--user-approved \"<User's words>\"`")
 	}
 	dir, err := currentDir()
 	if err != nil {
@@ -36,7 +51,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		if readErr != nil {
 			return errors.Join(err, readErr)
 		}
-		project, _, validationErr := s.validateDownRequest(ctx.Context, readDB)
+		request, validationErr := s.validateDownRequest(ctx.Context, readDB, execute)
 		closeErr := readDB.Close()
 		if validationErr != nil {
 			return validationErr
@@ -44,7 +59,7 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		if closeErr != nil {
 			return closeErr
 		}
-		if stopErr := stopProjectPollerAfterContention(ctx.Context, home, project); stopErr != nil {
+		if stopErr := stopProjectPollerAfterContention(ctx.Context, home, request.project); stopErr != nil {
 			return errors.Join(err, stopErr)
 		}
 		// Retry opening the database only after the read-only validation above
@@ -55,9 +70,16 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		}
 	}
 	defer db.Close()
-	project, callerPaneID, err := s.validateDownRequest(ctx.Context, db)
+	request, err := s.validateDownRequest(ctx.Context, db, execute)
 	if err != nil {
 		return err
+	}
+	project, callerPaneID := request.project, request.callerPaneID
+	var tornDown []any
+	if execute {
+		if tornDown, err = s.teardownTasksForDown(ctx.Context, db, project, quote); err != nil {
+			return err
+		}
 	}
 	// If the Watch is wedged while holding SQLite's writer lock, stop that
 	// exact Project process and retry the state change once its connection closes.
@@ -83,9 +105,15 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		leadLabel = "posse:" + project.Name + ":lead"
 	}
 	var closed, kept []string
+	var callerLead *herdr.Pane
 	for _, pane := range snapshot.Panes {
 		isLead := pane.Label == leadLabel || project.LeadPaneID != "" && pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID
 		if !isLead && pane.Label != watchTabLabel(project) {
+			continue
+		}
+		if request.liveLead && pane.PaneID == callerPaneID {
+			// This command runs inside the Lead; closing its tab ends it.
+			callerLead = &pane
 			continue
 		}
 		if isLead && pane.Agent != "" {
@@ -161,10 +189,19 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
+	if callerLead != nil {
+		if err := s.closeOwnPane(ctx.Context, snapshot, *callerLead); err != nil {
+			return err
+		}
+		closed = append(closed, callerLead.PaneID)
+	}
 	result := axi.Object{
 		{Key: "project", Value: project.Name},
 		{Key: "state", Value: "down"},
 		{Key: "closed_panes", Value: stringsToAny(closed)},
+	}
+	if execute {
+		result = append(result, axi.Field{Key: "torn_down", Value: tornDown})
 	}
 	if len(kept) > 0 {
 		result = append(result, axi.Field{Key: "kept_panes", Value: stringsToAny(kept)})
@@ -172,60 +209,209 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse up` here to start the Lead again"}}))
 }
 
-func (s *Service) validateDownRequest(ctx context.Context, db *store.DB) (store.Project, string, error) {
+type downRequest struct {
+	project      store.Project
+	callerPaneID string
+	liveLead     bool
+}
+
+func (s *Service) downTarget(ctx context.Context, db *store.DB) (store.Project, caller, error) {
 	dir, err := currentDir()
 	if err != nil {
-		return store.Project{}, "", err
+		return store.Project{}, caller{}, err
 	}
 	actor := s.configCaller(ctx, db)
 	if actor.role == "worker" || actor.role == "agent" {
-		return store.Project{}, "", axi.Failure("user_only", "posse down cannot run from a Worker or agent context", false, "Run `posse down` from a User shell in the Project folder")
+		return store.Project{}, caller{}, axi.Failure("user_only", "posse down cannot run from a Worker or agent context", false, "Run `posse down` from a User shell in the Project folder")
 	}
 	if task, taskErr := taskForPath(ctx, db, dir); taskErr == nil {
 		plan, planErr := task.AdmittedPlan()
 		if planErr != nil {
-			return store.Project{}, "", admittedPlanFailure(planErr)
+			return store.Project{}, caller{}, admittedPlanFailure(planErr)
 		}
 		if plan == nil || plan.Execution.Mode != "in-place" {
-			return store.Project{}, "", axi.Failure("user_only", "posse down cannot run inside a Worker Sandbox", false, "Run `posse down` in the Project folder")
+			return store.Project{}, caller{}, axi.Failure("user_only", "posse down cannot run inside a Worker Sandbox", false, "Run `posse down` in the Project folder")
 		}
 	} else if !store.IsNotFound(taskErr) {
-		return store.Project{}, "", taskErr
+		return store.Project{}, caller{}, taskErr
 	}
 	project, registered, err := registeredProjectFor(ctx, db, dir)
 	if err != nil {
-		return store.Project{}, "", err
+		return store.Project{}, caller{}, err
 	}
 	if !registered {
-		return store.Project{}, "", axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse down` in a registered Project folder; `posse` lists them")
+		return store.Project{}, caller{}, axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse down` in a registered Project folder; `posse` lists them")
 	}
-	callerPaneID := actor.paneID
-	if callerPaneID == "" {
-		callerPaneID = os.Getenv("HERDR_PANE_ID")
+	if actor.paneID == "" {
+		actor.paneID = os.Getenv("HERDR_PANE_ID")
 	}
-	switch actor.role {
-	case "worker", "agent":
-		return store.Project{}, "", axi.Failure("user_only", "posse down can only be run by the User", false)
-	case "lead":
-		if s.recordedLeadIsLive(ctx, callerPaneID) {
-			return store.Project{}, "", axi.Failure("user_only", "posse down can only be run by the User", false, "Exit the Lead agent, or run `posse down` from another shell in the Project folder")
+	return project, actor, nil
+}
+
+func (s *Service) validateDownRequest(ctx context.Context, db *store.DB, execute bool) (downRequest, error) {
+	project, actor, err := s.downTarget(ctx, db)
+	if err != nil {
+		return downRequest{}, err
+	}
+	request := downRequest{project: project, callerPaneID: actor.paneID}
+	if actor.role == "lead" && s.recordedLeadIsLive(ctx, actor.paneID) {
+		if !execute {
+			return downRequest{}, axi.Failure("user_only", "posse down can only be run by the User", false, "Exit the Lead agent, or run `posse down` from another shell in the Project folder")
 		}
+		if actor.projectID != project.ID {
+			return downRequest{}, axi.Failure("user_only", "a Lead can only stop its own Project", false)
+		}
+		request.liveLead = true
 	}
 	tasks, err := db.LiveTasks(ctx, project.ID)
 	if err != nil {
-		return store.Project{}, "", err
+		return downRequest{}, err
 	}
-	if len(tasks) > 0 {
-		names := make([]string, 0, len(tasks))
-		for _, task := range tasks {
-			names = append(names, taskIDString(task.Seq)+" ("+string(task.State)+")")
+	var blocking []string
+	for _, task := range tasks {
+		if !execute || task.State == store.StateMerging {
+			blocking = append(blocking, taskIDString(task.Seq)+" ("+string(task.State)+")")
 		}
-		return store.Project{}, "", axi.Failure("tasks_open", fmt.Sprintf("Project %s still has running Tasks: %s", project.Name, strings.Join(names, ", ")), false, "Finish or teardown them first; `posse list` shows them")
+	}
+	if len(blocking) > 0 && execute {
+		return downRequest{}, axi.Failure("tasks_merging", fmt.Sprintf("Project %s has Tasks merging: %s", project.Name, strings.Join(blocking, ", ")), false, "Wait for the merge to finish, then run `posse down --plan` again")
+	}
+	if len(blocking) > 0 {
+		return downRequest{}, axi.Failure("tasks_open", fmt.Sprintf("Project %s still has running Tasks: %s", project.Name, strings.Join(blocking, ", ")), false, "Finish or teardown them first; `posse list` shows them")
 	}
 	if s.Herdr == nil {
-		return store.Project{}, "", axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
+		return downRequest{}, axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
 	}
-	return project, callerPaneID, nil
+	return request, nil
+}
+
+// teardownTasksForDown cancels queued Tasks first, so none is admitted into a
+// slot freed below, then tears down the rest. Unmerged work is discarded under
+// the User's quote; recorded pull requests and pushed branches stay.
+func (s *Service) teardownTasksForDown(ctx context.Context, db *store.DB, project store.Project, quote string) ([]any, error) {
+	tasks, err := db.Tasks(ctx, project.ID, true)
+	if err != nil {
+		return nil, err
+	}
+	var tornDown []any
+	for _, task := range tasks {
+		if task.State != store.StateQueued {
+			continue
+		}
+		if err := db.Transition(ctx, task.ID, store.StateQueued, store.StateTornDown, "cli", "Canceled by posse down"); err != nil {
+			return nil, err
+		}
+		tornDown = append(tornDown, taskIDString(task.Seq))
+	}
+	cfg, err := s.prepareProject(ctx, db, project)
+	if err != nil {
+		return nil, err
+	}
+	for _, listed := range tasks {
+		task, err := db.TaskByID(ctx, project.ID, listed.ID)
+		if err != nil {
+			return nil, err
+		}
+		if task.State == store.StateTornDown || listed.State == store.StateQueued {
+			continue
+		}
+		if task.State == store.StateMerging {
+			return nil, axi.Failure("tasks_merging", "Task "+taskIDString(task.Seq)+" started merging during posse down", false, "Wait for the merge to finish, then run `posse down --plan` again")
+		}
+		plan, planErr := task.AdmittedPlan()
+		if planErr != nil {
+			return nil, admittedPlanFailure(planErr)
+		}
+		inPlace := plan != nil && plan.Execution.Mode == "in-place"
+		discard := !inPlace && task.State != store.StateMerged && task.State != store.StateReported
+		taskQuote := ""
+		if discard || inPlace && (task.State == store.StateFailed || task.State == store.StateLost) {
+			taskQuote = quote
+		}
+		if _, err := s.teardownTask(ctx, db, project, cfg, task, discard, taskQuote, teardownOptions{keepPullRequests: true}); err != nil {
+			return nil, err
+		}
+		tornDown = append(tornDown, taskIDString(task.Seq))
+	}
+	return tornDown, nil
+}
+
+// downPlan prints what `posse down --execute` would do and changes nothing.
+func (s *Service) downPlan(ctx *axi.Context) error {
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	project, _, err := s.downTarget(ctx.Context, db)
+	if err != nil {
+		return err
+	}
+	tasks, err := db.Tasks(ctx.Context, project.ID, true)
+	if err != nil {
+		return err
+	}
+	taskRows, lost, kept, merging := []any{}, []any{}, []any{}, []string{}
+	for _, task := range tasks {
+		if task.State == store.StateTornDown {
+			continue
+		}
+		id := taskIDString(task.Seq)
+		taskRows = append(taskRows, axi.Object{{Key: "task", Value: id}, {Key: "state", Value: string(task.State)}, {Key: "title", Value: task.Title}})
+		if task.State == store.StateMerging {
+			merging = append(merging, id)
+		}
+		if task.PRURL != "" {
+			kept = append(kept, axi.Object{{Key: "task", Value: id}, {Key: "branch", Value: task.Branch}, {Key: "pr", Value: task.PRURL}})
+		}
+		plan, planErr := task.AdmittedPlan()
+		if planErr != nil {
+			return admittedPlanFailure(planErr)
+		}
+		if task.State == store.StateQueued || task.State == store.StateMerged || task.State == store.StateReported || plan != nil && plan.Execution.Mode == "in-place" {
+			continue
+		}
+		work, err := s.unmergedWork(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		if work != "" {
+			lost = append(lost, axi.Object{{Key: "task", Value: id}, {Key: "work", Value: work}})
+		}
+	}
+	decisions, err := db.PendingDecisions(ctx.Context, project.ID)
+	if err != nil {
+		return err
+	}
+	decisionRows := []any{}
+	for _, decision := range decisions {
+		decisionRows = append(decisionRows, axi.Object{{Key: "id", Value: decision.ID}, {Key: "question", Value: decision.Question}})
+	}
+	notices, err := db.Notices(ctx.Context, project.ID, true)
+	if err != nil {
+		return err
+	}
+	noticeRows := []any{}
+	for _, notice := range notices {
+		noticeRows = append(noticeRows, axi.Object{{Key: "id", Value: notice.ID}, {Key: "kind", Value: notice.Kind}, {Key: "summary", Value: notice.Summary}})
+	}
+	help := "After the User approves this plan, run `posse down --execute --user-approved \"<User's words>\"`"
+	if len(merging) > 0 {
+		help = "posse down --execute refuses while " + strings.Join(merging, ", ") + " is merging; wait for the merge to finish"
+	}
+	return ctx.Print(axi.Object{
+		{Key: "project", Value: project.Name},
+		{Key: "tasks", Value: taskRows},
+		{Key: "work_lost", Value: lost},
+		{Key: "kept_prs", Value: kept},
+		{Key: "kept_decisions", Value: decisionRows},
+		{Key: "kept_notices", Value: noticeRows},
+		{Key: "help", Value: []any{help}},
+	})
 }
 
 func storeBusyOpenFailure(err error) bool {

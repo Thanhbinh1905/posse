@@ -1,0 +1,231 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+// heldReconcileFixture records Herdr generation 100:1 for the Project while the
+// fake Herdr server reports 200:2, the state a missed `posse up --all` leaves.
+func heldReconcileFixture(t *testing.T) (startFixture, *store.DB) {
+	t.Helper()
+	fixture := newStartFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.SetProjectServerStartedAt(context.Background(), fixture.project.ID, "100:1"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.SnapshotValue.ServerStartedAt = "200:2"
+	return fixture, db
+}
+
+func runOneWatchPass(t *testing.T, fixture startFixture, db *store.DB) string {
+	t.Helper()
+	output := &bytes.Buffer{}
+	ctx := &axi.Context{Context: context.Background(), Out: output, ErrOut: output}
+	if err := fixture.service.runWatchLoop(ctx, db, fixture.project, time.Millisecond, nil, nil); err != nil {
+		t.Fatalf("watch pass: %v\n%s", err, output.String())
+	}
+	return output.String()
+}
+
+func reconcileBlockedNotices(t *testing.T, db *store.DB, projectID int64) []store.Notice {
+	t.Helper()
+	notices, err := db.Notices(context.Background(), projectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocked []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "reconcile_blocked" {
+			blocked = append(blocked, notice)
+		}
+	}
+	return blocked
+}
+
+func TestWatchObservationReportsHeldHerdrGeneration(t *testing.T) {
+	fixture, db := heldReconcileFixture(t)
+	_, blocked, err := fixture.service.prepareProjectWatchObservation(context.Background(), db, fixture.project)
+	if blocked != err {
+		t.Fatalf("held observation blocked=%v, want its error %v", blocked, err)
+	}
+	if !errors.Is(err, errRecoveryHeld) {
+		t.Fatalf("held Project observation returned %v, want errRecoveryHeld", err)
+	}
+	for _, want := range []string{"200:2", "100:1", "posse up --all"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("held cause %q omits %q", err.Error(), want)
+		}
+	}
+}
+
+func TestWatchRaisesOneReconcileBlockedNoticePerEpisode(t *testing.T) {
+	fixture, db := heldReconcileFixture(t)
+	previous := watchReconcileBlockNoticeAfter
+	watchReconcileBlockNoticeAfter = time.Hour
+	t.Cleanup(func() { watchReconcileBlockNoticeAfter = previous })
+
+	runOneWatchPass(t, fixture, db)
+	if notices := reconcileBlockedNotices(t, db, fixture.project.ID); len(notices) != 0 {
+		t.Fatalf("a short block raised a Notice: %+v", notices)
+	}
+	block, err := db.ReconcileBlock(context.Background(), fixture.project.ID)
+	if err != nil || block.Since == 0 || !strings.Contains(block.Cause, "posse up --all") {
+		t.Fatalf("held pass recorded block=%+v err=%v", block, err)
+	}
+
+	watchReconcileBlockNoticeAfter = 0
+	runOneWatchPass(t, fixture, db)
+	runOneWatchPass(t, fixture, db)
+	notices := reconcileBlockedNotices(t, db, fixture.project.ID)
+	if len(notices) != 1 || !strings.Contains(notices[0].Summary, "queued Tasks are not admitted") || !strings.Contains(notices[0].Summary, "Herdr server 200:2 replaced the recorded 100:1") {
+		t.Fatalf("persistent block raised Notices %+v, want one naming the cause", notices)
+	}
+
+	fixture.fake.SnapshotValue.ServerStartedAt = "100:1"
+	runOneWatchPass(t, fixture, db)
+	if block, err := db.ReconcileBlock(context.Background(), fixture.project.ID); err != nil || block.Since != 0 {
+		t.Fatalf("a completed pass left block=%+v err=%v", block, err)
+	}
+
+	fixture.fake.SnapshotValue.ServerStartedAt = "300:3"
+	runOneWatchPass(t, fixture, db)
+	if notices := reconcileBlockedNotices(t, db, fixture.project.ID); len(notices) != 2 {
+		t.Fatalf("a new block episode raised %d Notices, want 2", len(notices))
+	}
+}
+
+func TestQueuedTaskWaitReasonNamesTheRealBlocker(t *testing.T) {
+	fixture, db := heldReconcileFixture(t)
+	ctx := context.Background()
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Defaults.MaxWorkers = 2
+	queuedID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Queued", ShortName: "queued", State: store.StateQueued})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := db.TaskByID(ctx, fixture.project.ID, queuedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := func() string {
+		t.Helper()
+		reason, err := queuedTaskWaitReason(ctx, db, fixture.project, queued, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reason
+	}
+
+	if got := reason(); got != "waiting for admission: 2 of 2 Worker slots are free" {
+		t.Fatalf("unblocked free-slot wait_reason = %q", got)
+	}
+	if _, err := db.RecordReconcileBlock(ctx, fixture.project.ID, "restore is held until posse up: run `posse up --all`", time.Date(2026, 10, 28, 4, 0, 0, 0, time.UTC).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if got := reason(); got != "waiting for Project reconciliation, blocked since 2026-10-28T04:00:00Z: restore is held until posse up: run `posse up --all`" {
+		t.Fatalf("held free-slot wait_reason = %q", got)
+	}
+	for seq := 3; seq <= 4; seq++ {
+		if _, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: seq, Type: "change", Title: "Busy", ShortName: "busy", State: store.StateSpawning}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := reason(); got != "waiting for a Worker slot" {
+		t.Fatalf("full wait_reason = %q", got)
+	}
+}
+
+// A pass that admitted queued Tasks and then failed to deliver a Notice did
+// not block admission, so it must not start a reconcile_blocked episode.
+func TestWatchFailureAfterAdmissionRecordsNoReconcileBlock(t *testing.T) {
+	fixture := newStartFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "task_done", Summary: "pending", DataJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.Errors["agent.prompt"] = &herdr.Error{Code: "internal_error", Message: "prompt rejected"}
+
+	if _, blocked, err := fixture.service.prepareProjectWatchObservation(ctx, db, fixture.project); err == nil || blocked != nil {
+		t.Fatalf("Notice delivery failure after admission returned blocked=%v err=%v", blocked, err)
+	}
+	runOneWatchPass(t, fixture, db)
+	if block, err := db.ReconcileBlock(ctx, fixture.project.ID); err != nil || block.Since != 0 {
+		t.Fatalf("a failure after admission recorded block=%+v err=%v", block, err)
+	}
+}
+
+// A refill that admits one queued Task and then fails to start the next did
+// let the queue move, so the watch must not report admission as blocked.
+func TestWatchRefillFailingAfterFirstAdmissionRecordsNoReconcileBlock(t *testing.T) {
+	fixture := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 2\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var active []int64
+	for seq := 1; seq <= 2; seq++ {
+		id, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: seq, Type: "change", Title: "Busy", ShortName: "busy", State: store.StateSpawning})
+		if err != nil {
+			t.Fatal(err)
+		}
+		active = append(active, id)
+	}
+	for _, name := range []string{"first-queued", "second-queued"} {
+		output := &bytes.Buffer{}
+		cli := fixture.service.CLI()
+		cli.Out, cli.ErrOut = output, output
+		if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", name, "--queue"}); code != 0 {
+			t.Fatalf("queue %s exit=%d output=%s", name, code, output.String())
+		}
+	}
+	for _, id := range active {
+		if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", "fixture Worker finished"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.fake.ErrorQueue["tab.create"] = []error{nil, &herdr.Error{Code: "internal_error", Message: "tab rejected"}}
+
+	project, err := db.ProjectByID(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, blocked, err := fixture.service.prepareProjectWatchObservation(ctx, db, project)
+	if err == nil {
+		t.Fatal("the failed second start was not reported")
+	}
+	if first, taskErr := db.Task(ctx, fixture.project.ID, "t3"); taskErr != nil || first.State == store.StateQueued {
+		t.Fatalf("first queued Task was not admitted: task=%+v err=%v", first, taskErr)
+	}
+	if blocked != nil {
+		t.Fatalf("a refill that admitted t3 reported a reconcile block: %v", blocked)
+	}
+}

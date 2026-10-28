@@ -1,17 +1,20 @@
 ---
 name: posse-down
-description: "Safely stop a Posse Project Lead and Watch."
+description: "Shut a Posse Project down from the Lead chat: preview the plan, get the User's ok, then tear down every Task, stop the Watch and close the Lead."
 disable-model-invocation: true
 ---
 
 # posse down
 
-The CLI is the source of truth. Check `posse --help` and follow the actual command output; do not infer shutdown success from pane state alone. `posse down` is refused from a Worker, an agent pane, or a live Lead pane.
+The CLI is the source of truth. Follow its actual output.
 
-Inspect `posse --full` from the Project folder. Review Project state, Tasks, `needs_you`, undelivered Notices, and Watch state. Stop if any live Task exists in `spawning`, `working`, `needs-decision`, `blocked`, `stalled`, `done` or `merging`. Ask the User to finish, merge, accept or teardown those Tasks first.
+1. **Plan.** Run `posse down --plan` in the Project folder. It changes nothing. Show the User every Task with its state, the Tasks whose work will be lost, the PRs that stay open, and the pending Decisions and Notices that stay.
+   Done when the User has seen the whole plan.
+2. **Wait for the User's ok.** Stop here until the User approves this plan in their own words. Anything other than a clear ok means no shutdown. If the plan says a Task is merging, `--execute` refuses; tell the User and stop.
+   Done when the User approved, or the shutdown is called off.
+3. **Execute.** Run `posse down --execute --user-approved "<User's words>"` with the User's approval quoted exactly. It tears down every Task, cancels queued ones, discards unmerged work under that quote, stops the Watch, marks the Project down and closes this Lead's tab last, so its result may never reach you.
+   Done when the command returns `state: down` or this session ends.
 
-`posse down` has no force flag. Do not imitate it with Signals, pane closes or database edits. Shutdown does not delete the registered Project, Tasks, branches, Sandboxes, Decisions or Notices. Failed or lost Tasks, pending Decisions and undelivered Notices remain, but no Lead acts on them until `posse up`.
+If `--execute` returns an error, report it to the User and stop. Do not imitate shutdown with Signals, pane closes or database edits, and never add a force flag. Decisions, Notices, pushed branches and open PRs are kept.
 
-The User must run exactly `posse down` from a User shell in this Project folder. They can open a Herdr shell pane with no agent, or exit the Lead agent so its pane becomes a shell. Never run the command yourself. Expect `state=down`, closed panes, and guidance to ``Run `posse up` here to start the Lead again``.
-
-To restart, the User runs `posse up` from a User shell in the same folder. Hand off now and wait for the User to run the command. Do not claim the Project is down before then.
+To restart, the User runs `posse up` in the same folder.

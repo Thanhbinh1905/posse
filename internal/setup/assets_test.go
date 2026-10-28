@@ -21,11 +21,15 @@ func TestLifecycleSkillsAreEmbeddedAndUserInvoked(t *testing.T) {
 				t.Errorf("%s does not contain %q", name, required)
 			}
 		}
-		if !strings.Contains(content, "Never run the command yourself") && !strings.Contains(content, "never run them yourself") {
-			t.Errorf("%s must reserve command execution for the User", name)
+		if name == "posse-down" {
+			for _, required := range []string{"`posse down --plan`", "Wait for the User's ok", "`posse down --execute --user-approved \"<User's words>\"`"} {
+				if !strings.Contains(content, required) {
+					t.Errorf("%s must preview, wait for the User's ok and execute with their words; missing %q", name, required)
+				}
+			}
 		}
-		if name == "posse-down" && (!strings.Contains(content, "`posse down`") || strings.Contains(content, "run `posse down` yourself")) {
-			t.Errorf("%s must name the exact command and reserve execution for the User", name)
+		if name == "posse-update" && !strings.Contains(content, "Never run the command yourself") && !strings.Contains(content, "never run them yourself") {
+			t.Errorf("%s must reserve command execution for the User", name)
 		}
 		if name == "posse-update" && (!strings.Contains(content, "`posse update`") || strings.Contains(content, "run `posse update` yourself")) {
 			t.Errorf("%s must name the exact command and reserve execution for the User", name)
