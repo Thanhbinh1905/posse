@@ -309,8 +309,8 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 
 // A workspace Signal must account for every changed PR-mode member, not just
 // one URL in the Task row. Local and unchanged members need no PR. A
-// full-pipeline Member answering a Review fix from its private candidate has
-// not been published yet.
+// full-pipeline Member answering a Review fix or requesting Review from its
+// private candidate has not been published yet.
 func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config, candidateFix bool) error {
 	members, err := workspaceMembers(ctx, db, project, task)
 	if err != nil {

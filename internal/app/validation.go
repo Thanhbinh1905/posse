@@ -298,6 +298,58 @@ func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane
 	return nil
 }
 
+// workspaceCandidateReviewRequest reports whether a workspace done Signal
+// requests Review of unpromoted private candidates, as a single-repository
+// done Signal from an active candidate does. Candidates a Review already
+// covers are past the request and face the publication barrier instead.
+// Every changed lane then needs a submitted candidate, and each active one a
+// clean checkout.
+func (s *Service) workspaceCandidateReviewRequest(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, lanes []candidateLane) (bool, error) {
+	request := false
+	for _, lane := range lanes {
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
+		if err != nil && !store.IsNotFound(err) {
+			return false, err
+		}
+		if err == nil && candidate.State == store.ValidationCandidateActive {
+			request = true
+		}
+	}
+	if !request {
+		return false, nil
+	}
+	targets, err := changeCandidateTargets(ctx, db, project, task)
+	if err != nil {
+		return false, err
+	}
+	if evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets); err != nil || evidence.Complete {
+		return false, err
+	}
+	for _, lane := range lanes {
+		if lane.member.State == store.TaskRepoMerged {
+			continue
+		}
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
+		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+			return false, axi.Failure("candidate_missing", lane.memberLabel("submit a private candidate before requesting Review"), false, "Run `posse publish --repo "+lane.repo+" \"<summary>\"` from the Task Sandbox")
+		}
+		if candidate.State != store.ValidationCandidateActive {
+			continue
+		}
+		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
+			return false, err
+		}
+		status, err := gitStatusOutput(ctx, candidate.WorktreePath, "--porcelain", "--untracked-files=all")
+		if err != nil {
+			return false, err
+		}
+		if status != "" {
+			return false, axi.Failure("candidate_dirty", lane.memberLabel("commit candidate changes before signalling done"), false, candidate.WorktreePath)
+		}
+	}
+	return true, nil
+}
+
 // requireFullPipelineValidationAt is the publication barrier of Merge and the
 // done Signal: every changed full-pipeline lane needs a promoted candidate
 // that is its exact delivered head, against its current frozen target, with

@@ -106,7 +106,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	candidateReview := plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan))
 	if candidateReview {
 		if change.State != store.StateWorking && change.State != store.StateStalled && change.State != store.StateDone && change.State != store.StateMerging {
-			return axi.Failure("review_target_incomplete", "Change Task must be active before its private candidate can be reviewed", false)
+			return axi.Failure("review_target_incomplete", "Change Task must be active before its private candidate can be reviewed", false, "Answer the Worker with `posse send "+taskIDString(change.Seq)+"`; a full-pipeline Worker requests Review with `posse signal done` after submitting its private candidates")
 		}
 		if err := s.prepareReviewCandidateCheckouts(ctx.Context, db, home, project, change, plan); err != nil {
 			return err

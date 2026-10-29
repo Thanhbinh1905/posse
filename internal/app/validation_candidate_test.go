@@ -639,13 +639,13 @@ func TestWorkerProtocolGuidesFullPipelineLanes(t *testing.T) {
 	}
 	brief := dispatch.Brief{Type: "change", DoneWhen: "candidate is promoted"}
 	local := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 1, Type: "change", MergeMode: "local", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
-	for _, want := range []string{"Full-pipeline validation", "`posse publish \"<summary>\" --verify", "`posse validate test --verify", "local delivery only fast-forwards the Task branch"} {
+	for _, want := range []string{"Full-pipeline validation", "`posse publish \"<summary>\" --verify", "`posse validate test --verify", "local delivery only fast-forwards the Task branch", "To request a Review Round, run `posse signal done", "Never use needs-decision to ask for Review"} {
 		if !strings.Contains(local, want) {
 			t.Fatalf("local full-pipeline protocol lacks %q: %s", want, local)
 		}
 	}
 	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 2, Type: "change", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t2", "none", "English")
-	if !strings.Contains(workspace, "`posse validate lint --repo <member>") || !strings.Contains(workspace, "`posse publish --repo <member> \"<summary>\"` to promote") {
+	if !strings.Contains(workspace, "`posse validate lint --repo <member>") || !strings.Contains(workspace, "`posse publish --repo <member> \"<summary>\"` to promote") || !strings.Contains(workspace, "after submitting every changed Member and end the turn") {
 		t.Fatalf("workspace full-pipeline protocol lacks per-Member commands: %s", workspace)
 	}
 	quick := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
