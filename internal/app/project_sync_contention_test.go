@@ -340,3 +340,24 @@ func TestPoolExplainsBrokenSandboxAndItsRepair(t *testing.T) {
 		t.Fatalf("Pool broken Sandbox = %d, %s, %s; want its reason and repair command", code, output, errOutput)
 	}
 }
+
+func TestWatchContentionLineNamesItsCause(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "file lock", err: fmt.Errorf("ensure Sandbox locks: %w", &fileLockWaitError{path: "/home/posse/posse.db.mount-lock"}), want: "timed out waiting for posse.db.mount-lock"},
+		{name: "sqlite busy", err: fmt.Errorf("write Task observation: %w: database is locked (5) (SQLITE_BUSY)", store.ErrBusy), want: "SQLite busy"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var diagnostics bytes.Buffer
+			ctx := &axi.Context{Context: context.Background(), ErrOut: &diagnostics}
+			recordWatchFailure(ctx, fixture.db, fixture.project.ID, map[string]string{}, "reconcile", test.err)
+			if line := diagnostics.String(); !strings.Contains(line, "deferred due to transient store contention") || !strings.Contains(line, test.want) {
+				t.Fatalf("Watch contention line %q does not name %q", line, test.want)
+			}
+		})
+	}
+}
