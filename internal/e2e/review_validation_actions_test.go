@@ -239,6 +239,7 @@ func TestFullPipelineReviewCarryIsReviewOnlyAtPublication(t *testing.T) {
 	changePath, candidatePath, changeSeq := startPrivateReviewChange(t, f, "3")
 	recordPassingReview(t, f, changeSeq)
 	change := f.mustTask(t, changeSeq)
+	deliverReviewPassNextStep(t, f, f.leadEnv, f.repo, change)
 	passed, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
 	if err != nil {
 		t.Fatal(err)
@@ -790,9 +791,7 @@ func TestFullPipelineWorkspaceWholePatternFixBindsEveryMemberCandidate(t *testin
 	}
 	signalReviewPolicyTask(t, f, verify, "--report", report, "--findings", findings, "--verdict", "pass")
 	audit("verification round")
-	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "working", "Validate the fixed candidates"); code != 0 {
-		t.Fatalf("reopen for local stages: code=%d %s", code, output)
-	}
+	deliverReviewPassNextStep(t, f, ws.leadEnv, ws.root, change)
 	for _, member := range []string{"web", "api"} {
 		candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, member)
 		if err != nil {
