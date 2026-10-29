@@ -146,3 +146,90 @@ esac
 		t.Fatalf("MR merge not pinned: %q %v", invocations, err)
 	}
 }
+
+// clouddbv1 t24 (#720): the Member's MR head was rewritten outside `posse
+// publish`, so the squash-merged source head is neither the gated head nor on
+// the Member's Task branch. Posse keeps the guard, raises one Notice instead of
+// a pr_watch_failing streak, and settles once the head is on the Task branch.
+func TestWorkspaceGitLabSquashMergeOfUngatedHeadRaisesOneNotice(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nreview = \"none\"\nauto_teardown = \"never\"\n\n[repositories.worker]\nforge = \"gitlab\"\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	bin := filepath.Join(f.root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const script = `#!/bin/sh
+set -eu
+case "$*" in
+  *"/merge_requests/17") cat "$POSSE_TEST_GLAB_STATE" ;;
+  *) printf 'unexpected glab call: %s\n' "$*" >&2; exit 90 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "glab"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	worker := filepath.Join(f.workspace, "worker")
+	remote := filepath.Join(f.root, "remotes", "worker.git")
+	gitTest(t, worker, "remote", "set-url", "origin", "https://git.example.com/group/worker.git")
+	gitTest(t, worker, "config", "remote.origin.pushurl", remote)
+	gitTest(t, worker, "config", "url.file://"+remote+".insteadOf", "https://git.example.com/group/worker.git")
+
+	memberWorktree := filepath.Join(f.task.WorktreePath, "worker")
+	gated := strings.TrimSpace(gitTest(t, memberWorktree, "rev-parse", "HEAD"))
+	rewritten := strings.TrimSpace(gitTest(t, memberWorktree, "commit-tree", gated+"^{tree}", "-p", gated+"^", "-m", "change worker, rewritten outside posse publish"))
+	squash := strings.TrimSpace(gitTest(t, memberWorktree, "commit-tree", gated+"^{tree}", "-p", "refs/remotes/origin/main", "-m", "squash merge worker MR"))
+	gitTest(t, memberWorktree, "push", "origin", squash+":refs/heads/main")
+	repo := f.repos()["worker"]
+	repo.PRURL = "https://git.example.com/group/worker/-/merge_requests/17"
+	repo.GatedSHA = gated
+	repo.State = store.TaskRepoMerge
+	if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateMerging, "cli", "merge t24 shape"); err != nil {
+		t.Fatal(err)
+	}
+	mr, err := json.Marshal(map[string]any{"web_url": repo.PRURL, "state": "merged", "sha": rewritten, "source_branch": f.task.Branch, "target_branch": "main", "source_project_id": 7, "target_project_id": 7, "squash_commit_sha": squash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(f.root, "glab-state.json")
+	if err := os.WriteFile(state, mr, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_STATE", state)
+
+	for range 4 {
+		if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.state() != store.StateMerging || countNoticeKind(notices, "pr_watch_failing") != 0 || countNoticeKind(notices, "pr_merged_ungated") != 1 {
+		t.Fatalf("ungated squash merge: state=%s notices=%+v", f.state(), notices)
+	}
+	for _, notice := range notices {
+		if notice.Kind != "pr_merged_ungated" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["repo"] != "worker" || data["gated_head"] != gated || data["merged_head"] != rewritten || data["trees"] != "match" || !strings.Contains(notice.Summary, "reset --keep "+rewritten) {
+			t.Fatalf("pr_merged_ungated Notice = %+v", notice)
+		}
+	}
+
+	gitTest(t, memberWorktree, "reset", "--keep", rewritten)
+	if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
+		t.Fatal(err)
+	}
+	if f.state() != store.StateMerged || f.repos()["worker"].State != store.TaskRepoMerged {
+		t.Fatalf("recovered Member did not settle: state=%s repos=%#v", f.state(), f.repos())
+	}
+}
