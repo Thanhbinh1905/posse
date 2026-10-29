@@ -3106,7 +3106,7 @@ func relaunchInstructionsFor(task store.Task, gitStateReport string, messages []
 }
 
 func relaunchTurnLine(turnToken string) string {
-	return fmt.Sprintf("\nCurrent Worker turn token: `%s`. Your first `done` Signal must be `posse signal done \"<summary>\" --turn %s`; the token in `launch.md` may be stale. After a Lead instruction, use the `turn` token from its Posse envelope.\n", turnToken, turnToken)
+	return fmt.Sprintf("\nCurrent Worker turn token: `%s`. Pass it as `--turn %s` on your first `done` Signal; the token in `launch.md` may be stale. After a `working` Signal, use the `turn_token` it returns; after a Lead instruction, use the `turn` token from its Posse envelope.\n", turnToken, turnToken)
 }
 
 func relaunchBody(task store.Task, gitStateReport string, messages []store.Message) []byte {
