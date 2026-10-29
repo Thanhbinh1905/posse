@@ -3426,7 +3426,7 @@ func taskRelaunchable(ctx context.Context, db *store.DB, task store.Task) (bool,
 
 func staleWorkerTurnFailure(ctx context.Context, db *store.DB, taskID int64) *axi.Error {
 	current, err := db.TaskTurnToken(ctx, taskID)
-	if err != nil || current == "" {
+	if err != nil || !strings.HasPrefix(current, "signal:") {
 		return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Use the --turn token from the current launch file, latest instruction envelope or successful working Signal")
 	}
 	return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Current turn token: "+current, "Retry the same Signal with `--turn "+current+"`")
