@@ -348,8 +348,12 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		var targetSelected bool
 		targetBranch, targetSelected = targetBranchForTask(cfg, brief, "", project.DefaultBranch)
 		if targetSelected {
-			if _, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target"); err != nil {
+			targetRef, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target")
+			if err != nil {
 				return err
+			}
+			if baseFromTarget(cfg, brief, "", project.DefaultBranch) {
+				baseRef = targetRef
 			}
 		}
 	}
@@ -527,10 +531,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			waitReason = "Waiting for " + strings.Join(unmetDependencies, ", ")
 		}
 		result := axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}}
-		if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
-			result = append(result, axi.Field{Key: "warnings", Value: warnings})
-		}
-		return ctx.Print(result)
+		return ctx.Print(append(result, startPlanFields(cfg, project, brief, plan)...))
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
@@ -686,6 +687,11 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
+		argsForAgent, skillErr = appendSkillUseLaunchArgs(home, project, kind, argsForAgent)
+		if skillErr != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
+			return skillErr
+		}
 	}
 	if generated != nil {
 		briefData = []byte(withReviewDir(string(briefData), taskHome))
@@ -703,7 +709,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
@@ -772,9 +778,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
 	}
-	if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
-		result = append(result, axi.Field{Key: "warnings", Value: warnings})
-	}
+	result = append(result, startPlanFields(cfg, project, brief, plan)...)
 	if report {
 		return ctx.Print(result)
 	}
@@ -1235,7 +1239,7 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 				repoFlag = " --repo <member>"
 				requestFrom = "after submitting every changed Member"
 			}
-			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints; it is a fresh worktree, so copy any gitignored local files that validation needs (for example local configuration) from the Sandbox into it. To request a Review Round, run `posse signal done \"<summary>\" --turn <token>` " + requestFrom + " and end the turn; the Task stays reviewable, and Review fixes or the next step arrive as Lead instructions. Never use needs-decision to ask for Review. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
+			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints; it is a fresh worktree, so copy any gitignored local files that validation needs (for example local configuration) from the Sandbox into it. To request a Review Round, run `posse signal done \"<summary>\" --turn <token>` " + requestFrom + " and end the turn; the Task stays reviewable, and Review fixes or, after a pass, the validate-and-promote step arrive as instructions. Never use needs-decision to ask for Review. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
 		}
 	}
 	if task.Type == "change" {
@@ -1788,6 +1792,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return err
 		}
 		verdict = &store.ReviewVerdictInput{Verdict: verdictFlag, ReportSHA256: digest, Findings: reviewFindings}
+		if verdictFlag == store.ReviewPass && reviewFindings != nil {
+			if verdict.NextStep, err = reviewPassNextStep(ctx.Context, db, project, task); err != nil {
+				return err
+			}
+		}
 	}
 	var state store.State
 	if noChange {
@@ -1844,6 +1853,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return err
 		}
 		signalResult = append(signalResult, axi.Field{Key: "turn_token", Value: turnToken})
+	}
+	if verb == "done" {
+		if checklist, ok, err := taskSkillChecklist(ctx.Context, db, task, "done"); err != nil {
+			return err
+		} else if ok {
+			signalResult = append(signalResult, checklist)
+		}
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
@@ -2950,6 +2966,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(skillErr)
 		}
 		startArgs, skillErr = appendResearchLaunchArgs(ctx, home, project, cfg, kind, startArgs)
+		if skillErr != nil {
+			return failure(skillErr)
+		}
+		startArgs, skillErr = appendSkillUseLaunchArgs(home, project, kind, startArgs)
 		if skillErr != nil {
 			return failure(skillErr)
 		}

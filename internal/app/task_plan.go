@@ -66,7 +66,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if execution.Scope == "" {
 		execution.Scope = "repo"
 	}
-	if brief.Base != "" && !project.IsWorkspace() {
+	if !project.IsWorkspace() && pinsBase(cfg, brief, "", project.DefaultBranch) {
 		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
 		if err != nil {
 			return taskplan.Plan{}, err
@@ -79,7 +79,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		if cfg.Repositories[member.Name].Review != "" {
 			selected.ReviewSource = "repositories." + member.Name + ".review"
 		}
-		if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, member.Name, ""); explicit {
+		if pinsBase(cfg, brief, member.Name, member.DefaultBranch) {
 			selected.BaseCommit, err = selectedBaseCommit(ctx, member.Root, member.BaseRef)
 			if err != nil {
 				return taskplan.Plan{}, err
@@ -179,7 +179,7 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
-	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + roleSkillProtocol(plan) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	contents = appendKnowledgeInstructions(contents, project, planKnowledge(plan))
 	return writeFile(launchPath, []byte(contents))

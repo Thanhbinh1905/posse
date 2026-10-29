@@ -244,6 +244,11 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		help = "Publish every changed PR member, then run `posse signal done \"<summary>\"`"
 		result = append(result, axi.Field{Key: "repo", Value: member.repo.Repo})
 	}
+	if checklist, ok, err := taskSkillChecklist(out.Context, db, task, "publish"); err != nil {
+		return err
+	} else if ok {
+		result = append(result, checklist)
+	}
 	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help}}))
 }
 

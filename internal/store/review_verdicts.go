@@ -50,6 +50,8 @@ type ReviewVerdictInput struct {
 	Verdict      string
 	ReportSHA256 string
 	Findings     *ReviewFindingsInput
+	// NextStep is queued to the Change Worker only when the verdict is pass.
+	NextStep *ReviewPassNextStep
 }
 
 func ValidReviewVerdict(verdict string) bool {
@@ -273,5 +275,8 @@ func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID in
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO review_verdicts(task_id,signal_id,verdict,report_sha256,targets_json,launch_number,profile_name,configured_model,model_known,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		taskID, signalID, input.Verdict, input.ReportSHA256, string(encoded), reviewer.LaunchNumber, reviewer.Profile, reviewer.ConfiguredModel, modelKnown, time.Now().UnixMilli())
-	return err
+	if err != nil || input.Verdict != ReviewPass || input.NextStep == nil || !changeTaskID.Valid {
+		return err
+	}
+	return queueReviewPassNextStepTx(ctx, tx, projectID, changeTaskID.Int64, *input.NextStep)
 }

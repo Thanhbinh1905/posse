@@ -131,8 +131,12 @@ func (s *Service) planTaskMembersWithChoice(ctx context.Context, db *store.DB, p
 			var targetSelected bool
 			member.TargetBranch, targetSelected = targetBranchForTask(cfg, brief, repo.Name, repo.DefaultBranch)
 			if targetSelected {
-				if _, err := selectedBranchRef(ctx, member.Root, member.TargetBranch, "target"); err != nil {
+				targetRef, err := selectedBranchRef(ctx, member.Root, member.TargetBranch, "target")
+				if err != nil {
 					return nil, "", err
+				}
+				if baseFromTarget(cfg, brief, repo.Name, repo.DefaultBranch) {
+					member.BaseRef = targetRef
 				}
 			}
 		}
