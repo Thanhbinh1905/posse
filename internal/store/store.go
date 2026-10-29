@@ -2283,7 +2283,10 @@ func (db *DB) UnfinishedTaskMessages(ctx context.Context, taskID int64) ([]Messa
 	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
 FROM messages WHERE task_id=? AND status='delivered'
   AND delivered_at > COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb IN ('done','needs-decision','failed')), 0)
-ORDER BY delivered_at, id`, taskID, taskID)
+  AND id NOT IN (
+    SELECT json_extract(item.value, '$.message_id') FROM notices, json_each(notices.data_json, '$.messages') AS item
+    WHERE notices.task_id=? AND notices.kind='instruction_aborted')
+ORDER BY delivered_at, id`, taskID, taskID, taskID)
 	if err != nil {
 		return nil, err
 	}
