@@ -1878,10 +1878,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			// Watch retries deferred maintenance and logs its own contention.
 			return ctx.Print(signalResult)
 		}
-		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 		if maintenanceCtx.Err() != nil {
+			fmt.Fprintln(ctx.ErrOut, "Signal recorded; Project maintenance deferred: it ran out of time. No action is needed; Watch and the next posse command retry it.")
 			return ctx.Print(signalResult)
 		}
+		fmt.Fprintf(ctx.ErrOut, "Signal recorded; Project maintenance deferred: %v. Do not resend the Signal; Watch and the next posse command retry the maintenance, so act on this error only if it repeats.\n", normalizeCommandError(store.WithoutBusy(err)))
 	}
 	if noticeKind != "" {
 		if err := s.deliverNotices(maintenanceCtx, db, project); err != nil && !isHerdrUnavailable(err) {
@@ -2350,7 +2351,7 @@ func (s *Service) peek(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.prepareTaskProject(ctx.Context, db, project, task.ID)
+	_, err = s.prepareTaskProject(store.WithDeferrableWrites(ctx.Context), db, project, task.ID)
 	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}

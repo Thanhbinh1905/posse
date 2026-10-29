@@ -47,12 +47,30 @@ func restoreBusyTimeoutAndClose(conn *sql.Conn) error {
 	return closeErr
 }
 
+type deferrableWritesKey struct{}
+
+// WithDeferrableWrites marks writes the caller can skip under contention, such
+// as the observations a read command records before it prints the last
+// recorded state. Each waits at most ObservationWriteBusyTimeout for the write
+// lock and returns its busy error without retrying.
+func WithDeferrableWrites(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deferrableWritesKey{}, true)
+}
+
+func deferrableWrites(ctx context.Context) bool {
+	deferrable, _ := ctx.Value(deferrableWritesKey{}).(bool)
+	return deferrable
+}
+
 // Busy handlers can outlive context cancellation. A short-lived writer uses
 // short lock waits and retries within its context, not SQLite's five-second wait.
 func writeBusyTimeout(ctx context.Context) int {
 	deadline, bounded := ctx.Deadline()
-	if !bounded || time.Until(deadline) > time.Duration(sqliteBusyTimeoutMillis)*time.Millisecond {
+	if !deferrableWrites(ctx) && (!bounded || time.Until(deadline) > time.Duration(sqliteBusyTimeoutMillis)*time.Millisecond) {
 		return sqliteBusyTimeoutMillis
+	}
+	if !bounded {
+		return reconcileWriteBusyTimeoutMillis
 	}
 	return max(1, min(reconcileWriteBusyTimeoutMillis, int(time.Until(deadline)/time.Millisecond)))
 }
@@ -69,7 +87,7 @@ func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (resul
 			result, err = conn.ExecContext(ctx, query, args...)
 			return err
 		})
-		if !isBusyErr(err) || ctx.Err() != nil {
+		if !isBusyErr(err) || ctx.Err() != nil || deferrableWrites(ctx) {
 			return result, err
 		}
 		select {
@@ -101,7 +119,7 @@ func (db *DB) beginTxWithRetry(ctx context.Context) (*writeTx, error) {
 			return &writeTx{Tx: tx, conn: conn}, nil
 		}
 		lastErr = err
-		if !isBusyErr(err) {
+		if !isBusyErr(err) || deferrableWrites(ctx) {
 			break
 		}
 		select {

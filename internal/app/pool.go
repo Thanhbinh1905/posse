@@ -425,7 +425,7 @@ func (s *Service) listSandboxes(ctx *axi.Context) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	_, err = s.prepareProject(ctx.Context, db, project)
+	_, err = s.prepareProject(store.WithDeferrableWrites(ctx.Context), db, project)
 	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}

@@ -189,16 +189,19 @@ func TestListShowsDurableViewDuringObservationContention(t *testing.T) {
 }
 
 func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
+	const projectDeferred = "Project observations were deferred"
 	commands := []struct {
-		name string
-		args []string
-		want string
+		name     string
+		args     []string
+		want     string
+		deferred string
 	}{
-		{name: "lead", args: []string{"lead"}, want: "instructions"},
-		{name: "show", args: []string{"show", "t1"}, want: "t1"},
-		{name: "project show", args: []string{"project", "show"}, want: "shop"},
-		{name: "pool", args: []string{"pool"}, want: "sandboxes"},
-		{name: "peek", args: []string{"peek", "t1"}, want: "output"},
+		{name: "lead", args: []string{"lead"}, want: "instructions", deferred: projectDeferred},
+		{name: "show", args: []string{"show", "t1"}, want: "t1", deferred: projectDeferred},
+		{name: "project show", args: []string{"project", "show"}, want: "shop", deferred: projectDeferred},
+		{name: "pool", args: []string{"pool"}, want: "sandboxes", deferred: projectDeferred},
+		{name: "peek", args: []string{"peek", "t1"}, want: "output", deferred: projectDeferred},
+		{name: "list", args: []string{"list", "--json"}, want: "tasks", deferred: "Some Task observations were deferred"},
 	}
 	for _, command := range commands {
 		t.Run(command.name, func(t *testing.T) {
@@ -226,9 +229,14 @@ func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			started := time.Now()
 			code, output, errOut := fixture.run(command.args...)
-			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, "Project observations were deferred") || strings.Contains(output+errOut, "store_busy") {
+			elapsed := time.Since(started)
+			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, command.deferred) || strings.Contains(output+errOut, "store_busy") {
 				t.Fatalf("%s did not return its durable view during observation contention: exit=%d output=%s stderr=%s", command.name, code, output, errOut)
+			}
+			if elapsed > 1500*time.Millisecond {
+				t.Fatalf("%s took %s to return its deferred view, want about 1s", command.name, elapsed)
 			}
 		})
 	}
@@ -406,4 +414,30 @@ func TestSignalDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	if lastObservationAt <= 1 {
 		t.Fatal("later observations did not progress on fresh bounded reconcile passes")
 	}
+}
+
+func TestSignalSaysDeferredMaintenanceNeedsNoAction(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	t.Setenv(workerHomeEnv, fixture.home)
+	fixture.service.Herdr = snapshotUntilDeadlineAdapter{Fake: fixture.service.Herdr.(*herdr.Fake)}
+
+	code, out, errOut := fixture.run("signal", "working", "Still working")
+	if code != 0 {
+		t.Fatalf("Signal failed: exit=%d output=%s stderr=%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "Project maintenance deferred") || !strings.Contains(errOut, "No action is needed") {
+		t.Fatalf("deferred maintenance message does not say whether action is needed: stderr=%s", errOut)
+	}
+}
+
+type snapshotUntilDeadlineAdapter struct {
+	*herdr.Fake
+}
+
+func (a snapshotUntilDeadlineAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		time.Sleep(time.Until(deadline) - 20*time.Millisecond)
+	}
+	return a.Fake.Snapshot(ctx)
 }
