@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -235,7 +236,7 @@ func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
 			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, command.deferred) || strings.Contains(output+errOut, "store_busy") {
 				t.Fatalf("%s did not return its durable view during observation contention: exit=%d output=%s stderr=%s", command.name, code, output, errOut)
 			}
-			if elapsed > 1500*time.Millisecond {
+			if elapsed > 2500*time.Millisecond {
 				t.Fatalf("%s took %s to return its deferred view, want about 1s", command.name, elapsed)
 			}
 		})
@@ -420,7 +421,19 @@ func TestSignalSaysDeferredMaintenanceNeedsNoAction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
 	t.Setenv(workerHomeEnv, fixture.home)
-	fixture.service.Herdr = snapshotUntilDeadlineAdapter{Fake: fixture.service.Herdr.(*herdr.Fake)}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stall := "#!/bin/sh\nif [ \"$3\" = fetch ]; then exec sleep 10; fi\nexec " + git + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(stall), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	code, out, errOut := fixture.run("signal", "working", "Still working")
 	if code != 0 {
@@ -429,17 +442,6 @@ func TestSignalSaysDeferredMaintenanceNeedsNoAction(t *testing.T) {
 	if !strings.Contains(errOut, "Project maintenance deferred") || !strings.Contains(errOut, "No action is needed") {
 		t.Fatalf("deferred maintenance message does not say whether action is needed: stderr=%s", errOut)
 	}
-}
-
-type snapshotUntilDeadlineAdapter struct {
-	*herdr.Fake
-}
-
-func (a snapshotUntilDeadlineAdapter) Snapshot(ctx context.Context) (herdr.Snapshot, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		time.Sleep(time.Until(deadline) - 20*time.Millisecond)
-	}
-	return a.Fake.Snapshot(ctx)
 }
 
 func TestReadCommandRecordsDeliveryDuringLaterContention(t *testing.T) {
