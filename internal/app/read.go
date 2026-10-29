@@ -786,6 +786,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			view["review_receipts"] = views
 		}
 	}
+	if err := taskSkillUseView(ctx.Context, db, task, plan, view); err != nil {
+		return err
+	}
 	recovery, err := db.TaskRecovery(ctx.Context, task.ID)
 	if err != nil {
 		return err

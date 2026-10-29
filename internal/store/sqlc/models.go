@@ -672,6 +672,14 @@ type TaskRepo struct {
 	TargetBranch string
 }
 
+type TaskSkillUse struct {
+	TaskID  int64
+	Skill   string
+	Uses    int64
+	FirstAt int64
+	LastAt  int64
+}
+
 type TaskTargetChange struct {
 	ID           int64
 	ProjectID    int64
