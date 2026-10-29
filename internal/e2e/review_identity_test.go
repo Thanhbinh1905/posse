@@ -715,3 +715,68 @@ requires_openai_auth = false
 		}
 	}
 }
+
+// relaunchReviewIdentityAuthor relaunches t1 with profile, optionally after
+// committing a change in its worktree.
+func relaunchReviewIdentityAuthor(t *testing.T, fixture *prLifecycleFixture, profile string, commit bool) {
+	t.Helper()
+	author := fixture.mustTask(t, "t1")
+	if commit {
+		if err := os.WriteFile(filepath.Join(author.WorktreePath, "authored.txt"), []byte(profile+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, fixture.env, author.WorktreePath, "add", "authored.txt")
+		gitTest(t, fixture.env, author.WorktreePath, "commit", "-m", "authored by "+profile)
+	}
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1", "--profile", profile); code != 0 {
+		t.Fatalf("author relaunch with %s: code=%d %s", profile, code, output)
+	}
+}
+
+func TestReviewIgnoresAuthorLaunchesThatLeftNoCommit(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, fixture)
+	// The t585 shape: three model-a launches end before writing code, then
+	// model-b launches write the change.
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	relaunchReviewIdentityAuthor(t, fixture, "author", false)
+	relaunchReviewIdentityAuthor(t, fixture, "author", false)
+	relaunchReviewIdentityAuthor(t, fixture, "author-b", false)
+	relaunchReviewIdentityAuthor(t, fixture, "author-b", true)
+	code, output := startReviewIdentityTask(t, fixture, "Author model review", "author-b", "t1")
+	requireReviewIdentityRefusal(t, code, output)
+	if code, output := startReviewIdentityTask(t, fixture, "Commit-less model review", "author", "t1"); code != 0 {
+		t.Fatalf("review by the commit-less launches' Profile was refused: code=%d %s", code, output)
+	}
+	code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "author-b")
+	requireReviewIdentityRefusal(t, code, output)
+}
+
+func TestReviewRelaunchMovesToCommitLessAuthorProfile(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, fixture)
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	relaunchReviewIdentityAuthor(t, fixture, "author-b", false)
+	relaunchReviewIdentityAuthor(t, fixture, "author-b", true)
+	if code, output := startReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
+		t.Fatalf("independent review spawn: code=%d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "author"); code != 0 {
+		t.Fatalf("review relaunch to the commit-less launch Profile was refused: code=%d %s", code, output)
+	}
+}
+
+func TestReviewStillRejectsAuthorLaunchThatCommitted(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, fixture)
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	relaunchReviewIdentityAuthor(t, fixture, "author-b", true)
+	code, output := startReviewIdentityTask(t, fixture, "Committed model review", "author", "t1")
+	requireReviewIdentityRefusal(t, code, output)
+}

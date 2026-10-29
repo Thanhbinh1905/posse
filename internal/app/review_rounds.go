@@ -666,11 +666,10 @@ func (s *Service) autoStartReviewProfile(ctx context.Context, db *store.DB, home
 	if resolveErr != nil && (!errors.As(resolveErr, &profileErr) || profileErr.Code != "profile_required" || len(profileErr.Candidates) == 0) {
 		return "", profileError(resolveErr)
 	}
-	authorLaunches, err := db.TaskLaunchIdentities(ctx, change.ID)
+	authorLaunches, authorKnown, err := reviewAuthorLaunches(ctx, db, change)
 	if err != nil {
 		return "", err
 	}
-	authorKnown := change.Launches > 0 && launchHistoryComplete(change, authorLaunches)
 	ineligible := func(resolution dispatch.Resolution) string {
 		kind, found := cfg.Kinds[resolution.Resolved.Kind]
 		if !found {

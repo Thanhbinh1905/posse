@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -32,6 +33,44 @@ func launchHistoryComplete(task store.Task, identities []store.TaskLaunchIdentit
 		}
 	}
 	return true
+}
+
+// reviewAuthorLaunches returns the Change Task launches a reviewer must be
+// independent of, and whether that launch history is known. A launch counts
+// unless the next launch started on the same clean HEAD, which shows it left
+// no commit; the last launch and launches without a recorded HEAD always count.
+func reviewAuthorLaunches(ctx context.Context, db *store.DB, change store.Task) ([]store.TaskLaunchIdentity, bool, error) {
+	launches, err := db.TaskLaunchIdentities(ctx, change.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if change.Launches <= 0 || !launchHistoryComplete(change, launches) {
+		return launches, false, nil
+	}
+	authors := make([]store.TaskLaunchIdentity, 0, len(launches))
+	for index, launch := range launches {
+		if index+1 < len(launches) && launch.StartHead != "" && launch.StartHead == launches[index+1].StartHead {
+			continue
+		}
+		authors = append(authors, launch)
+	}
+	return authors, true, nil
+}
+
+// launchStartHead returns the HEAD of a clean single-repository worktree, or
+// "" when the worktree is dirty, unreadable or spans several repositories.
+func launchStartHead(ctx context.Context, project store.Project, worktree string) string {
+	if project.IsWorkspace() || worktree == "" {
+		return ""
+	}
+	if status, err := gitStatusOutput(ctx, worktree, "--porcelain", "--untracked-files=all"); err != nil || status != "" {
+		return ""
+	}
+	head, err := gitOutput(ctx, worktree, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return head
 }
 
 func compareReviewIdentity(authorLaunches []store.TaskLaunchIdentity, authorHistoryKnown bool, reviewer store.TaskLaunchIdentity) reviewIdentityCheck {

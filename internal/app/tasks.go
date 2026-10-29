@@ -307,11 +307,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			baseRef = candidate.RefName
 		}
 		reviewedTask = &reviewed
-		authorLaunchIdentities, err = db.TaskLaunchIdentities(ctx.Context, reviewed.ID)
+		authorLaunchIdentities, authorIdentityHistoryKnown, err = reviewAuthorLaunches(ctx.Context, db, reviewed)
 		if err != nil {
 			return err
 		}
-		authorIdentityHistoryKnown = reviewed.Launches > 0 && launchHistoryComplete(reviewed, authorLaunchIdentities)
 		kindConfig, found := cfg.Kinds[resolution.Resolved.Kind]
 		if !found {
 			return axi.Failure("config_invalid", "Review Task Profile uses unknown agent kind "+resolution.Resolved.Kind, false)
@@ -654,7 +653,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	launch := 0
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.sequence", func() error {
 		var launchErr error
-		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx.Context, taskID, resolution.Profile, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
+		launch, launchErr = db.NextTaskLaunchFromHead(ctx.Context, taskID, resolution.Profile, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown, launchStartHead(ctx.Context, project, worktreePath))
 		return launchErr
 	})
 	if err != nil {
@@ -2730,7 +2729,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if author.Type != "change" {
 			return failure(axi.Failure("review_identity_ineligible", "Review Task does not reference a Change Task", false))
 		}
-		authorLaunches, err := db.TaskLaunchIdentities(ctx, author.ID)
+		authorLaunches, authorHistoryKnown, err := reviewAuthorLaunches(ctx, db, author)
 		if err != nil {
 			return failure(err)
 		}
@@ -2738,7 +2737,6 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if err != nil {
 			return failure(err)
 		}
-		authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
 		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
 		launchRefusal := reviewSessionOverrideReason(kind, workerAgentArgs(profile, kindConfig, ""))
 		if resumeRefusal := reviewResumeArgsRefusal(kind, kindConfig.ResumeArgs, session); resumeRefusal != "" {
@@ -2879,7 +2877,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error
-		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
+		launch, launchErr = db.NextTaskLaunchFromHead(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown, launchStartHead(ctx, project, task.WorktreePath))
 		return launchErr
 	}); err != nil {
 		return failure(err)

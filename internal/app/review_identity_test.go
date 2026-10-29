@@ -390,3 +390,89 @@ func seedReviewAuthor(t *testing.T, fixture startFixture) {
 		t.Fatal(err)
 	}
 }
+
+func TestReviewAuthorLaunchesIgnoreLaunchesThatLeftNoCommit(t *testing.T) {
+	const base, change = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+	type launch struct{ profile, model, head string }
+	for _, test := range []struct {
+		name        string
+		launches    []launch
+		wantAuthors []string
+		wantKnown   bool
+	}{
+		{name: "commit-less launches before the author", launches: []launch{{"opus", "opus", base}, {"opus", "opus", base}, {"opus", "opus", base}, {"sonnet", "sonnet", base}, {"sonnet", "sonnet", change}}, wantAuthors: []string{"sonnet", "sonnet"}, wantKnown: true},
+		{name: "launch that committed", launches: []launch{{"opus", "opus", base}, {"sonnet", "sonnet", change}}, wantAuthors: []string{"opus", "sonnet"}, wantKnown: true},
+		{name: "unrecorded head", launches: []launch{{"opus", "opus", ""}, {"sonnet", "sonnet", ""}}, wantAuthors: []string{"opus", "sonnet"}, wantKnown: true},
+		{name: "dirty next launch", launches: []launch{{"opus", "opus", base}, {"sonnet", "sonnet", ""}}, wantAuthors: []string{"opus", "sonnet"}, wantKnown: true},
+		{name: "last launch", launches: []launch{{"sonnet", "sonnet", base}, {"opus", "opus", change}}, wantAuthors: []string{"sonnet", "opus"}, wantKnown: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newStartFixture(t)
+			db, err := store.Open(fixture.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			changeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Author change", ShortName: "author", MergeMode: "local", Branch: "posse/author", BaseRef: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, launch := range test.launches {
+				if _, err := db.NextTaskLaunchFromHead(ctx, changeID, launch.profile, launch.model, true, launch.head); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task, err := db.TaskByID(ctx, fixture.project.ID, changeID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authors, known, err := reviewAuthorLaunches(ctx, db, task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var profiles []string
+			for _, author := range authors {
+				profiles = append(profiles, author.Profile)
+			}
+			if known != test.wantKnown || !reflect.DeepEqual(profiles, test.wantAuthors) {
+				t.Fatalf("author launches = %v known=%t, want %v known=%t", profiles, known, test.wantAuthors, test.wantKnown)
+			}
+		})
+	}
+}
+
+func TestReviewAuthorLaunchesFailClosedOnIncompleteHistory(t *testing.T) {
+	fixture := newStartFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	changeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Author change", ShortName: "author", MergeMode: "local", Branch: "posse/author", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const head = "1111111111111111111111111111111111111111"
+	for range 2 {
+		if _, err := db.NextTaskLaunchFromHead(ctx, changeID, "opus", "opus", true, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM task_launch_identities WHERE task_id=? AND launch_number=2`, changeID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, fixture.project.ID, changeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authors, known, err := reviewAuthorLaunches(ctx, db, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := compareReviewIdentity(authors, known, store.TaskLaunchIdentity{Profile: "sonnet", ConfiguredModel: "sonnet", ModelKnown: true})
+	if known || check.Eligible || len(authors) != 1 {
+		t.Fatalf("incomplete history: authors=%#v known=%t check=%#v, want unknown and ineligible", authors, known, check)
+	}
+}
