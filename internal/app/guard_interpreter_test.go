@@ -1,6 +1,10 @@
 package app
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // goSourceNamingHerdr is Posse source text that names the herdr package and
 // the herdr program as data, the way an inline edit of internal/app carries it.
@@ -70,5 +74,27 @@ func TestGuardAllowsInterpreterHerdrAccessToAnIsolatedServer(t *testing.T) {
 	command := "HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['herdr', 'pane', 'list'])\nEOF"
 	if refused, reason := guardCommand(command, scope); refused {
 		t.Fatalf("guard refused Herdr access to an isolated server: %#v", reason)
+	}
+}
+
+func TestGuardTreatsArgumentsAfterInlineCodeAsData(t *testing.T) {
+	scope, dir := guardFixture(t)
+	source := "package app\n\nconst socket = \"/home/u/.config/herdr/herdr.sock\"\n\nvar _ = exec.Command(\"herdr\", \"pane\", \"list\")\n"
+	if err := os.WriteFile(filepath.Join(dir, "guard.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`perl -0pi -e 's/Command/CommandContext/' guard.go`,
+		`perl -ne 'print if /sock/' guard.go`,
+		`ruby -i -pe 'gsub(/sock/, "socket")' guard.go`,
+		`python3 -c 'import sys; print(open(sys.argv[1]).read())' guard.go`,
+		`node -e 'console.log(require("fs").readFileSync(process.argv[1], "utf8"))' guard.go`,
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard ran a data file as a script %q: %#v", command, reason)
+		}
+	}
+	if refused, reason := guardCommand("perl guard.go", scope); !refused || reason.rule != ruleNamesSessionSocket {
+		t.Errorf("guard did not read a script file named without inline code: %v %#v", refused, reason)
 	}
 }

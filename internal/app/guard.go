@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -25,8 +26,9 @@ const guardExitBlocked = 2
 // RunGuard is the `posse _guard` PreToolUse hook. Outside a Worker it allows
 // everything. In a Worker it refuses a shell command that could change the
 // Herdr session the Worker runs in, or run a posse build other than the
-// installed one against the Worker's posse home. ADR 0007 states what it
-// covers and what it cannot.
+// installed one against the Worker's posse home, and a shell command or file
+// tool that writes that home outside the Worker's Sandbox and Task scratch.
+// ADR 0007 states what it covers and what it cannot.
 func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	data, err := io.ReadAll(io.LimitReader(stdin, 4<<20))
 	if err != nil {
@@ -34,22 +36,32 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	}
 	var input struct {
 		CWD       string `json:"cwd"`
+		ToolName  string `json:"tool_name"`
 		ToolInput struct {
-			Command json.RawMessage `json:"command"`
+			Command      json.RawMessage `json:"command"`
+			FilePath     string          `json:"file_path"`
+			NotebookPath string          `json:"notebook_path"`
 		} `json:"tool_input"`
 	}
-	if json.Unmarshal(data, &input) != nil || len(input.ToolInput.Command) == 0 {
+	if json.Unmarshal(data, &input) != nil {
 		return 0
 	}
-	command := ""
-	if json.Unmarshal(input.ToolInput.Command, &command) != nil {
+	command, written := "", ""
+	if fileWriteTools[input.ToolName] {
+		written = input.ToolInput.FilePath + input.ToolInput.NotebookPath
+		if written == "" {
+			return 0
+		}
+	} else if len(input.ToolInput.Command) == 0 {
+		return 0
+	} else if json.Unmarshal(input.ToolInput.Command, &command) != nil {
 		var argv []string
 		if json.Unmarshal(input.ToolInput.Command, &argv) != nil {
 			return 0
 		}
 		command = strings.Join(quoteArgv(argv), " ")
 	}
-	if strings.TrimSpace(command) == "" {
+	if written == "" && strings.TrimSpace(command) == "" {
 		return 0
 	}
 	home, err := s.homePath()
@@ -61,12 +73,47 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 		cwd, _ = os.Getwd()
 	}
 	self, _ := os.Executable()
-	refused, reason := guardCommand(command, guardScope{env: os.Environ(), cwd: cwd, workerHome: home, posse: self})
+	scope := guardScope{env: os.Environ(), cwd: cwd, workerHome: home, writable: s.workerWritable(home), posse: self}
+	refused, reason := false, guardReason{}
+	if written != "" {
+		refused, reason = guardFileWrite(written, scope)
+	} else {
+		refused, reason = guardCommand(command, scope)
+	}
 	if !refused {
 		return 0
 	}
 	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker by guard rule %s: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.rule, reason.why)
 	return guardExitBlocked
+}
+
+// fileWriteTools are the agent tools that write the file their input names.
+var fileWriteTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true}
+
+// workerWritable returns the places in home the calling Worker may write: its
+// Task's Sandbox and scratch, or every Sandbox and scratch directory when
+// posse cannot tell which Task the Worker runs.
+func (s *Service) workerWritable(home string) []string {
+	fallback := []string{filepath.Join(home, "pool"), filepath.Join(home, "scratch")}
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return fallback
+	}
+	defer db.Close()
+	ctx := context.Background()
+	task, err := s.workerTask(ctx, db)
+	if err != nil || task.WorktreePath == "" {
+		return fallback
+	}
+	project, err := db.ProjectByID(ctx, task.ProjectID)
+	if err != nil {
+		return fallback
+	}
+	scratch, err := taskScratchPath(home, project, task)
+	if err != nil {
+		return fallback
+	}
+	return []string{task.WorktreePath, scratch}
 }
 
 type guardReason struct {
@@ -92,23 +139,34 @@ const (
 	ruleHerdrUnknownServer  = "herdr-unknown-server"
 	ruleHerdrDefaultSocket  = "herdr-default-socket"
 	ruleHerdrSessionChange  = "herdr-session-change"
+	ruleWorkerHomeWrite     = "worker-home-write"
 )
 
 // guardScope is what a guarded command runs against.
 type guardScope struct {
 	env        []string
 	cwd        string
-	workerHome string // the posse home this process is a Worker of
-	posse      string // the posse executable running the guard
+	workerHome string   // the posse home this process is a Worker of
+	writable   []string // the places in workerHome the Worker may write
+	posse      string   // the posse executable running the guard
 }
 
 // guardCommand reports whether a shell command may change the Herdr session
 // reached from scope.env, or run another posse build against the Worker home.
 func guardCommand(script string, scope guardScope) (bool, guardReason) {
 	state := newShellEnv(scope.env)
-	g := &guard{realSocket: herdr.SocketPath(scope.env), userHome: state.values["HOME"], workerHome: scope.workerHome, posse: scope.posse, visited: map[string]bool{}}
+	g := &guard{realSocket: herdr.SocketPath(scope.env), userHome: state.values["HOME"], workerHome: scope.workerHome, writable: scope.writable, posse: scope.posse, visited: map[string]bool{}}
 	state.cwd = scope.cwd
 	return g.check(state, script, 0, false)
+}
+
+// guardFileWrite reports whether an agent tool that writes path writes the
+// Worker home outside the places the Worker may write.
+func guardFileWrite(path string, scope guardScope) (bool, guardReason) {
+	state := newShellEnv(scope.env)
+	state.cwd = scope.cwd
+	g := &guard{workerHome: scope.workerHome, writable: scope.writable}
+	return g.homeWrite(state, path, path)
 }
 
 // guardHerdrCommand is guardCommand for a Worker of no posse home.
@@ -126,6 +184,7 @@ type guard struct {
 	realSocket string
 	userHome   string
 	workerHome string
+	writable   []string
 	posse      string
 	visited    map[string]bool
 	source     string          // the script being checked at the current depth
@@ -217,6 +276,9 @@ func (g *guard) statements(e *shellEnv, script string, stmts []*syntax.Stmt, dep
 }
 
 func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth int, stdinRedirected bool) (bool, guardReason) {
+	if refused, reason := g.redirectsToHome(e, script, stmt); refused {
+		return true, reason
+	}
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.IfClause:
 		if len(cmd.Cond) == 0 {
@@ -304,6 +366,10 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 			return false
 		}
 		switch node := node.(type) {
+		case *syntax.Stmt:
+			if node != stmt {
+				refused, reason = g.redirectsToHome(e, script, node)
+			}
 		case *syntax.DeclClause:
 			if node.Variant != nil && node.Variant.Value == "export" {
 				for _, assign := range node.Args {
@@ -316,6 +382,24 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		return !refused
 	})
 	return refused, reason
+}
+
+// redirectsToHome refuses a statement that redirects output into the
+// Worker's posse home.
+func (g *guard) redirectsToHome(e *shellEnv, script string, stmt *syntax.Stmt) (bool, guardReason) {
+	for _, redirect := range stmt.Redirs {
+		if !strings.Contains(redirect.Op.String(), ">") || redirect.Word == nil {
+			continue
+		}
+		target, ok := e.word(script, redirect.Word)
+		if !ok || redirect.Op == syntax.DplOut && (target == "-" || strings.Trim(target, "0123456789") == "") {
+			continue
+		}
+		if refused, reason := g.homeWrite(e, sourceText(script, stmt), target); refused {
+			return true, reason
+		}
+	}
+	return false, guardReason{}
 }
 
 // merge retains only environment facts established on every possible path.
@@ -468,6 +552,11 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 		}
 		program := args[0]
 		name := filepath.Base(program)
+		for _, target := range writtenPaths(name, args[1:], literal[1:]) {
+			if refused, reason := g.homeWrite(e, raw, target); refused {
+				return true, reason
+			}
+		}
 		switch {
 		case name == "command" && len(args) == 3 && literal[1] && literal[2] && (args[1] == "-v" || args[1] == "-V"):
 			// These shell-builtin forms inspect a single program name; they do
@@ -577,6 +666,123 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 	return false, guardReason{}
 }
 
+// homeWrite refuses a write to a path in the Worker's posse home outside the
+// places the Worker may write.
+func (g *guard) homeWrite(e *shellEnv, raw, name string) (bool, guardReason) {
+	path := e.path(name)
+	if g.workerHome == "" || path == "" {
+		return false, guardReason{}
+	}
+	resolved := resolvedNewPath(path)
+	if !lexicallyInside(resolved, resolvedNewPath(g.workerHome)) {
+		return false, guardReason{}
+	}
+	for _, root := range g.writable {
+		if lexicallyInside(resolved, resolvedNewPath(root)) {
+			return false, guardReason{}
+		}
+	}
+	return refuse(ruleWorkerHomeWrite, raw, "it writes "+path+" in the live posse home "+g.workerHome+", and a Worker writes there only in its Sandbox and Task scratch")
+}
+
+// resolvedNewPath resolves the symlinks of the longest existing ancestor of a
+// path that may not exist yet.
+func resolvedNewPath(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(path, rest)
+		}
+		rest = filepath.Join(filepath.Base(path), rest)
+		path = parent
+	}
+}
+
+func lexicallyInside(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// writtenPaths returns the files a file-writing program changes, taken from
+// its literal arguments.
+func writtenPaths(name string, args []string, literal []bool) []string {
+	language := strings.TrimRight(name, "0123456789.")
+	editor := name == "sed" || language == "perl" || language == "ruby"
+	copier := name == "cp" || name == "mv" || name == "ln" || name == "install"
+	var valueOptions map[string]bool
+	switch {
+	case copier:
+		valueOptions = map[string]bool{"-t": true, "-S": true, "-m": true, "-o": true, "-g": true}
+	case name == "mkdir" || name == "truncate" || name == "touch" || name == "shred":
+		valueOptions = map[string]bool{"-m": true, "-s": true, "-r": true, "-d": true, "-t": true, "-n": true}
+	case name == "sed":
+		valueOptions = map[string]bool{"-e": true, "-f": true, "-l": true}
+	case editor:
+		valueOptions = map[string]bool{"-e": true, "-E": true, "-I": true, "-M": true, "-m": true, "-r": true}
+	case !slices.Contains([]string{"tee", "rm", "rmdir", "unlink", "chmod", "chown", "chgrp", "rsync", "dd"}, name):
+		return nil
+	}
+	var positionals, targets []string
+	inPlace, inline, options := false, false, true
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if !literal[index] {
+			arg = ""
+		}
+		switch {
+		case !options || arg == "" || arg == "-" || !strings.HasPrefix(arg, "-"):
+			if name == "dd" && strings.HasPrefix(arg, "of=") {
+				targets = append(targets, strings.TrimPrefix(arg, "of="))
+			}
+			positionals = append(positionals, arg)
+		case arg == "--":
+			options = false
+		case strings.HasPrefix(arg, "--target-directory="):
+			targets = append(targets, strings.TrimPrefix(arg, "--target-directory="))
+		case strings.HasPrefix(arg, "--in-place"):
+			inPlace = true
+		case valueOptions[arg[:2]] && len(arg) > 2:
+		case valueOptions[arg]:
+			if index+1 < len(args) {
+				if arg == "-t" && copier && literal[index+1] {
+					targets = append(targets, args[index+1])
+				}
+				inline = inline || arg == "-e" || arg == "-E" || arg == "-f"
+				index++
+			}
+		case editor && !strings.HasPrefix(arg, "--") && strings.Contains(arg, "i"):
+			inPlace = true
+		}
+	}
+	switch name {
+	case "cp", "ln", "install", "rsync":
+		if len(targets) == 0 && len(positionals) > 1 {
+			targets = append(targets, positionals[len(positionals)-1])
+		}
+	case "chmod", "chown", "chgrp":
+		if len(positionals) > 0 {
+			targets = append(targets, positionals[1:]...)
+		}
+	case "dd":
+	case "mv", "tee", "rm", "rmdir", "unlink", "mkdir", "truncate", "touch", "shred":
+		targets = append(targets, positionals...)
+	default:
+		// An editor without inline code reads its script from the first operand.
+		if inPlace && !inline && len(positionals) > 0 {
+			positionals = positionals[1:]
+		}
+		if inPlace {
+			targets = append(targets, positionals...)
+		}
+	}
+	return slices.DeleteFunc(targets, func(target string) bool { return target == "" })
+}
+
 // wrapperOptions lists programs that run the rest of their arguments as a
 // command, with the options of each that take a value.
 var wrapperOptions = map[string]map[string]bool{
@@ -677,7 +883,7 @@ func (g *guard) script(e *shellEnv, name, raw string, depth int, stdinRedirected
 }
 
 func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, stdin string, stdinRedirected bool) (bool, guardReason) {
-	code := ""
+	code, inline := "", false
 	for index := 1; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -685,8 +891,12 @@ func (g *guard) interpreter(e *shellEnv, args []string, literal []bool, raw, std
 			if index+1 < len(args) {
 				code += args[index+1] + "\n"
 				index++
+				inline = true
 			}
 		case strings.HasPrefix(arg, "-"):
+		case inline:
+			// Arguments after inline code are data files the code reads.
+			index = len(args)
 		default:
 			if contents, ok := g.readFile(e, arg); ok {
 				code += contents + "\n"
