@@ -127,6 +127,54 @@ func TestReportAcceptanceRequiresCurrentIndependentPassAndSurvivesRebuild(t *tes
 	}
 }
 
+func TestReportAcceptanceAcceptsSameModelPassFromSeparateSession(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := OpenAt(filepath.Join(home, "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "research", Title: "Publication report", ReportKind: "spec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(ctx, reportID, "author", "model-a", true); err != nil {
+		t.Fatal(err)
+	}
+	transitionTaskToReported(t, ctx, db, reportID)
+	const manifest = `{"version":1,"task":"t1","files":[{"path":"report.md","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}`
+	digest := reportManifestDigest(manifest)
+	if err := db.RecordReportBundle(ctx, reportID, digest, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, reportID, StateReported, StateTornDown, "cli", "Sandbox released"); err != nil {
+		t.Fatal(err)
+	}
+	reviewID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "review", ReviewsTaskID: reportID, Title: "Same-model review", Profile: "author"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(ctx, reviewID, "author", "model-a", true); err != nil {
+		t.Fatal(err)
+	}
+	transitionTaskToReported(t, ctx, db, reviewID)
+	if _, err := db.RecordReportReview(ctx, reportID, reviewID, digest, "pass"); err != nil {
+		t.Fatal(err)
+	}
+	acceptance, err := db.AcceptReport(ctx, reportID, digest, "lead", "User accepts the spec")
+	if err != nil {
+		t.Fatalf("acceptance with a same-model pass from a separate session: %v", err)
+	}
+	if acceptance.ReportDigest != digest {
+		t.Fatalf("acceptance = %#v", acceptance)
+	}
+}
+
 func transitionTaskToReported(t *testing.T, ctx context.Context, db *DB, taskID int64) {
 	t.Helper()
 	for _, state := range []State{StateWorking, StateDone, StateReported} {

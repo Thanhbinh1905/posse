@@ -104,6 +104,12 @@ func TestClassifyQuotaExhaustionRecognizesEachHarness(t *testing.T) {
 			resets: "450h2m10s",
 		},
 		{
+			name:   "pi all credentials cooling down",
+			kind:   "pi",
+			output: " Error: All credentials for model gpt-5.6-luna are cooling down via provider codex (last error: usage_limit_reached: The usage limit has been reached)\n" + quotaPiHelp + "\n",
+			line:   "All credentials for model gpt-5.6-luna are cooling down via provider codex (last error: usage_limit_reached: The usage limit has been reached)",
+		},
+		{
 			name:   "opencode provider quota",
 			kind:   "opencode",
 			output: "  Build  gpt-5.5\n\n  Error: You exceeded your current quota, please check your plan and billing details.\n\n  ┃  Ask anything...\n  ctrl+p commands\n",

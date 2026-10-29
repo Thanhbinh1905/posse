@@ -2830,7 +2830,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if session != "" {
 		// An agent reports its session when it starts but persists it only
 		// after a prompt, so a Task that never began working has none to resume.
-		worked, err := taskEverWorked(ctx, db, task.ID)
+		worked, err := db.TaskEverWorked(ctx, task.ID)
 		if err != nil {
 			return failure(err)
 		}
@@ -3491,14 +3491,8 @@ func taskNeverStarted(ctx context.Context, db *store.DB, task store.Task) (bool,
 	if task.State != store.StateFailed {
 		return false, nil
 	}
-	worked, err := taskEverWorked(ctx, db, task.ID)
+	worked, err := db.TaskEverWorked(ctx, task.ID)
 	return !worked, err
-}
-
-func taskEverWorked(ctx context.Context, db *store.DB, taskID int64) (bool, error) {
-	var worked bool
-	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM transitions WHERE task_id=? AND to_state=?)`, taskID, store.StateWorking).Scan(&worked)
-	return worked, err
 }
 
 // relaunchNeverStarted repeats the start of a failed Task whose Sandbox was

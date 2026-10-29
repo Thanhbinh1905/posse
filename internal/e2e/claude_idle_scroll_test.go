@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,31 +57,8 @@ func TestIdleFullscreenClaudeWorkerKeepsItsViewDuringAutomaticReads(t *testing.T
 	runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "idle-scroll")
 	task := base.mustTask(t, "t1")
 
-	visible := func() string {
-		raw, err := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": task.PaneID, "source": "visible"})
-		if err != nil {
-			return ""
-		}
-		var screen struct {
-			Read struct {
-				Text string `json:"text"`
-			} `json:"read"`
-		}
-		_ = json.Unmarshal(raw, &screen)
-		return screen.Read.Text
-	}
-	idle := func() bool {
-		snapshot, err := client.Snapshot(context.Background())
-		if err != nil {
-			return false
-		}
-		for _, pane := range snapshot.Panes {
-			if pane.PaneID == task.PaneID {
-				return pane.AgentStatus == "idle" || pane.AgentStatus == "done"
-			}
-		}
-		return false
-	}
+	visible := func() string { return paneVisibleText(client, task.PaneID) }
+	idle := func() bool { return paneIdle(client, task.PaneID) }
 	lastLine := regexp.MustCompile(`line 150`)
 	var settled string
 	if !waitForCondition(60*time.Second, func() bool {
