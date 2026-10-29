@@ -1,7 +1,11 @@
 package setup
 
 import (
+	"encoding/json"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -139,5 +143,67 @@ func TestEmbeddedSkillAssetsAreReadable(t *testing.T) {
 	}
 	if _, err := SkillAssets("not-a-skill"); err == nil {
 		t.Fatal("SkillAssets accepted an unknown skill")
+	}
+}
+
+func TestPiWorkerGuardSendsFileWritesToTheGuard(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable to load the pi extension")
+	}
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	received := filepath.Join(dir, "received")
+	posse := filepath.Join(dir, "posse")
+	if err := os.WriteFile(posse, []byte("#!/bin/sh\ncat >> "+received+"\necho >> "+received+"\necho refused >&2\nexit 2\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := PiWorkerGuard(posse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The extension has no type annotations, so node loads it as a module.
+	extension := filepath.Join(dir, "guard.mjs")
+	if err := os.WriteFile(extension, guard, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	driver := `const { default: register } = await import(process.argv[1]);
+let handler;
+register({ on: (_name, fn) => { handler = fn; } });
+const results = [];
+for (const [toolName, input] of [["write", { path: "~/.posse/user-shell-path", content: "x" }], ["edit", { path: "@notes.txt", edits: [] }], ["read", { path: "notes.txt" }]]) {
+	results.push(await handler({ type: "tool_call", toolCallId: "1", toolName, input }));
+}
+console.log(JSON.stringify(results));`
+	command := exec.Command(node, "--input-type=module", "-e", driver, extension)
+	command.Dir = dir
+	command.Env = append(os.Environ(), "HOME="+home)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, output)
+	}
+	if want := `[{"block":true,"reason":"refused"},{"block":true,"reason":"refused"},null]`; strings.TrimSpace(string(output)) != want {
+		t.Errorf("pi guard results = %s, want %s", output, want)
+	}
+	data, err := os.ReadFile(received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type call struct {
+		ToolName  string `json:"tool_name"`
+		ToolInput struct {
+			FilePath string `json:"file_path"`
+		} `json:"tool_input"`
+	}
+	var calls []call
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var received call
+		if err := json.Unmarshal([]byte(line), &received); err != nil {
+			t.Fatalf("guard input %q: %v", line, err)
+		}
+		calls = append(calls, received)
+	}
+	if len(calls) != 2 || calls[0].ToolName != "Write" || calls[0].ToolInput.FilePath != filepath.Join(home, ".posse", "user-shell-path") || calls[1].ToolName != "Edit" || calls[1].ToolInput.FilePath != filepath.Join(dir, "notes.txt") {
+		t.Errorf("pi guard sent %+v, want Write of %s and Edit of %s", calls, filepath.Join(home, ".posse", "user-shell-path"), filepath.Join(dir, "notes.txt"))
 	}
 }
