@@ -117,7 +117,6 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	}
 	defer db.Close()
 	ctx := context.Background()
-	// The doctor skips Project roots under os.TempDir, so keep TMPDIR off the fixture root.
 	fixtureRoot := t.TempDir()
 	projectRoot := filepath.Join(fixtureRoot, "shop")
 	if err := os.MkdirAll(projectRoot, 0o700); err != nil {

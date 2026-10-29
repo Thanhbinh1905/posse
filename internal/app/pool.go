@@ -1076,8 +1076,6 @@ func sandboxLockReason(ctx context.Context, repo, path string) (string, error) {
 	return reason, nil
 }
 
-// worktreeLockReasons maps every registered worktree path to its lock reason,
-// which is empty for an unlocked worktree.
 func worktreeLockReasons(ctx context.Context, repo string) (map[string]string, error) {
 	listing, err := gitOutput(ctx, repo, "worktree", "list", "--porcelain")
 	if err != nil {
@@ -1088,9 +1086,6 @@ func worktreeLockReasons(ctx context.Context, repo string) (map[string]string, e
 		lines := strings.Split(block, "\n")
 		path, ok := strings.CutPrefix(lines[0], "worktree ")
 		if !ok {
-			continue
-		}
-		if _, seen := reasons[path]; seen {
 			continue
 		}
 		reasons[path] = ""

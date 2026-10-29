@@ -41,8 +41,6 @@ func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFai
 	}
 }
 
-// watchContentionCause names which contention deferred a Watch phase, so a
-// log line tells a Posse file lock wait from a SQLite lock wait.
 func watchContentionCause(err error) string {
 	var causes []string
 	var lockWait *fileLockWaitError

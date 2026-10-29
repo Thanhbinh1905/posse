@@ -1230,8 +1230,6 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		gitlabFailures[task.ID] = failures
 		forgeAnswered = true
 	}
-	// A forge answer clears earlier project failures even when some targets
-	// failed; those failures are recorded on their own Tasks.
 	if globalFailure != "" {
 		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
 			return err

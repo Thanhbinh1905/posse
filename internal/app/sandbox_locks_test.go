@@ -655,8 +655,6 @@ func TestReleaseDoesNotExposeHeldCheckoutAfterGitUnlock(t *testing.T) {
 	}
 }
 
-// Reconcile runs under the Sandbox state lock that every command and Watch pass
-// takes, so one pass must read the worktree listing once, not once per Sandbox.
 func TestHeldSandboxLocksReadWorktreeListOncePerPass(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
