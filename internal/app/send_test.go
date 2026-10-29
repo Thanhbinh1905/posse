@@ -1085,3 +1085,54 @@ func TestSendFileStoresInstructionInTaskDirectory(t *testing.T) {
 		t.Fatalf("stored instruction paths = %q, want two distinct files", stored)
 	}
 }
+
+func TestSendInterruptRetriesAbortWhenHarnessStartsQueuedTurn(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	aborts := 0
+	fake.BeforeCall = func(method string) {
+		if method == "agent.send_keys" {
+			aborts++
+			if aborts == 2 {
+				fake.SnapshotValue.Panes[0].AgentStatus = "idle"
+			}
+		}
+	}
+	service := testService(home, fake)
+	t.Chdir(repo)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	code := cli.Run([]string{"send", "t1", "--interrupt", "Fresh redirect"})
+	if code != 0 || !strings.Contains(output.String(), "state: delivered") || !strings.Contains(output.String(), "delivered_after_interrupt") {
+		t.Fatalf("send --interrupt did not stop the queued turn and deliver: exit=%d output=%s", code, output.String())
+	}
+	if aborts != 2 {
+		t.Fatalf("abort key sequences sent = %d, want 2", aborts)
+	}
+}
