@@ -147,7 +147,11 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 	if err != nil {
 		return err
 	}
-	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(current.State)}, {Key: "repos", Value: memberRows(members)}}
+	rows, err := memberRows(ctx, db, task, members)
+	if err != nil {
+		return err
+	}
+	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(current.State)}, {Key: "repos", Value: rows}}
 	if merged {
 		if _, err := s.syncProjectRoot(ctx, db, project, cfg, true); err != nil {
 			return err
@@ -497,15 +501,30 @@ func (s *Service) recoverWorkspaceMergeIntent(ctx context.Context, db *store.DB,
 	return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 }
 
-func memberRows(members []memberMerge) []any {
+func memberRows(ctx context.Context, db *store.DB, task store.Task, members []memberMerge) ([]any, error) {
 	rows := make([]any, 0, len(members))
 	for _, member := range members {
+		prHead, err := memberPRHead(ctx, db, task, member.repo)
+		if err != nil {
+			return nil, err
+		}
 		rows = append(rows, axi.Object{
 			{Key: "repo", Value: member.repo.Repo}, {Key: "mode", Value: member.repo.MergeMode},
-			{Key: "state", Value: member.repo.State}, {Key: "pr_url", Value: member.repo.PRURL}, {Key: "gated_sha", Value: member.repo.GatedSHA},
+			{Key: "state", Value: member.repo.State}, {Key: "pr_url", Value: member.repo.PRURL}, {Key: "gated_sha", Value: member.repo.GatedSHA}, {Key: "pr_head", Value: prHead},
 		})
 	}
-	return rows
+	return rows, nil
+}
+
+func memberPRHead(ctx context.Context, db *store.DB, task store.Task, repo store.TaskRepo) (string, error) {
+	if repo.PRURL == "" {
+		return "", nil
+	}
+	observation, err := db.LatestMemberPRObservation(ctx, task.ID, repo.Repo)
+	if store.IsNotFound(err) || err == nil && observation.PRURL != repo.PRURL {
+		return "", nil
+	}
+	return observation.HeadSHA, err
 }
 
 func memberFailure(repo string, err error) error {

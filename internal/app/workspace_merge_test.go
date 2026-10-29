@@ -598,3 +598,50 @@ func TestWorkspaceBriefsNameKnownMembersAndReviewsInheritThem(t *testing.T) {
 		t.Fatal("a review may not name a member the reviewed Task does not touch")
 	}
 }
+
+func TestWorkspaceMergeShowAndPRInspectNameEachMemberGatedHead(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	bin := filepath.Join(f.root, "bin")
+	state := filepath.Join(f.root, "gh-view.json")
+	script := "#!/bin/sh\nset -eu\ncase \"$1 $2\" in\n" +
+		"  \"pr list\") printf '[]\\n' ;;\n" +
+		"  \"pr create\") printf 'https://github.com/acme/worker/pull/7\\n' ;;\n" +
+		"  \"pr view\") cat \"$POSSE_TEST_GH_VIEW\" ;;\n" +
+		"  *) exit 90 ;;\nesac\n"
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("POSSE_TEST_GH_VIEW", state)
+	worker := filepath.Join(f.workspace, "worker")
+	gitTest(t, worker, "remote", "set-url", "origin", "https://github.com/acme/worker.git")
+	remote := filepath.Join(f.root, "remotes", "worker.git")
+	gitTest(t, worker, "config", "remote.origin.pushurl", remote)
+	gitTest(t, worker, "config", "url.file://"+remote+".insteadOf", "https://github.com/acme/worker.git")
+	head := strings.TrimSpace(gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD"))
+	view, _ := json.Marshal(map[string]any{"url": "https://github.com/acme/worker/pull/7", "state": "OPEN", "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED", "statusCheckRollup": []any{}})
+	if err := os.WriteFile(state, view, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge: %d\n%s", code, f.out.String())
+	}
+	if gated := f.repos()["worker"].GatedSHA; gated != head {
+		t.Fatalf("gated head = %q, want %q", gated, head)
+	}
+	if err := f.service.pollWorkspacePullRequests(context.Background(), f.db, f.project, f.config(), true); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.run("merge", "t1", "--json"); code != 0 || !strings.Contains(f.out.String(), `"gated_sha":"`+head+`"`) || !strings.Contains(f.out.String(), `"pr_head":"`+head+`"`) {
+		t.Fatalf("merge does not name the gated and PR heads: %d\n%s", code, f.out.String())
+	}
+	if code := f.run("show", "t1", "--json"); code != 0 || !strings.Contains(f.out.String(), `"gated_sha":"`+head+`"`) || !strings.Contains(f.out.String(), `"pr_head":"`+head+`"`) {
+		t.Fatalf("show does not name the gated and PR heads: %d\n%s", code, f.out.String())
+	}
+	if code := f.run("pr", "inspect", "t1", "--repo", "worker"); code != 0 || !strings.Contains(f.out.String(), head) {
+		t.Fatalf("pr inspect --repo worker: %d\n%s", code, f.out.String())
+	}
+}
