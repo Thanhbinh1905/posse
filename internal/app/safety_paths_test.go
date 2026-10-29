@@ -25,6 +25,8 @@ func TestStartRejectsEachLooserContractBeforeCreatingTask(t *testing.T) {
 			root := t.TempDir()
 			repo := filepath.Join(root, "repo")
 			initRepo(t, repo)
+			// Without an origin the Project Merges locally, so local would not loosen it.
+			gitTest(t, repo, "remote", "add", "origin", filepath.Join(root, "origin.git"))
 			home := filepath.Join(root, "posse")
 			if err := os.MkdirAll(home, 0o700); err != nil {
 				t.Fatal(err)
