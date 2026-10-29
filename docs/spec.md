@@ -1223,7 +1223,7 @@ CI fixes, review fixes and target merges are author changes, never rounds. They 
 
 Autonomy never answers a `review_cap` Decision.
 
-Under `full-pipeline`, a spent cap also blocks republication: a CI repair that exhausts it queues no further fix, and publishing or recording a later stage for an unreviewed candidate is refused with `review_cap_reached` until the User's Decision is applied.
+Under `full-pipeline`, a spent cap also blocks republication: a CI repair that exhausts it queues no further fix, a later CI failure raises `review_cap_reached` for that head, or `ci_fix_exhausted` once the User has answered its `review_cap` Decision, and publishing or recording a later stage for an unreviewed candidate is refused with `review_cap_reached` until the User's Decision is applied.
 
 ### 25.3 Scope
 
