@@ -195,7 +195,7 @@ func leadIdentity(cfg config.Config) config.IdentityRole {
 const artifactProseLanguage = "English"
 
 func artifactProseInstruction() string {
-	return "Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in English in a neutral voice, even when the User writes in another language or identity.lead.language selects one. Keep the Lead persona out of artifacts. Preserve User quotations exactly. Keep code identifiers, machine keys, Task IDs, issue numbers, branch refs, CLI commands, config keys and file paths unchanged."
+	return "Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in English in a neutral voice. Keep the Lead persona out of artifacts. Preserve User quotations exactly. Keep code identifiers, machine keys, Task IDs, issue numbers, branch refs, CLI commands, config keys and file paths unchanged."
 }
 
 func leadLanguageRule(cfg config.Config) string {
