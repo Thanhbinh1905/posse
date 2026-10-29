@@ -115,7 +115,7 @@ func TestTaskPreferenceRefusalsHaveNoTaskEffects(t *testing.T) {
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: No origin\ndone_when: checked\nmerge_mode: pr\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "no-origin", "--profile", "author"); code != 1 || !strings.Contains(output, "without origin") {
+	if code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "no-origin", "--profile", "author"); code != 1 || !strings.Contains(output, "remote_missing") {
 		t.Fatalf("PR without Git remote: %d %s", code, output)
 	}
 }
