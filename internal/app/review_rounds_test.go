@@ -741,8 +741,7 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 			name:         "resolved target conflict",
 			conflict:     true,
 			wantKind:     "delta",
-			wantIn:       []string{"resolved"},
-			wantOut:      []string{"target-only.txt", "author-before.txt"},
+			wantOut:      []string{"conflict.txt", "<<<<<<<", ">>>>>>>", "target version", "resolved"},
 			wantConflict: "conflict.txt",
 		},
 		{
@@ -880,6 +879,15 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 			}
 			if !test.conflict && len(scope.Conflicts) != 0 {
 				t.Fatalf("unexpected virtual merge conflicts: %#v", scope.Conflicts)
+			}
+			if test.conflict {
+				brief := string(generatedReviewBrief(store.Task{Seq: 1}, taskplan.Plan{}, 2, []reviewRoundScope{scope}, false))
+				if !strings.Contains(brief, "Conflicted paths: `conflict.txt`.") || !strings.Contains(brief, "Review them in `{{review_dir}}/cumulative.patch`.") {
+					t.Fatalf("Review Round brief does not name the conflicted path and point to cumulative.patch:\n%s", brief)
+				}
+				if err := verifyReviewDeltaBindings(ctx, store.Project{}, []store.ReviewRound{scope.Binding}, scope.DeltaPatch, map[string]string{"shop": repo}); err != nil {
+					t.Fatalf("delta.patch does not verify against its binding: %v", err)
+				}
 			}
 			if test.name == "clean target merge then one author commit" && scope.Binding.TargetCommitSHA != targetTip {
 				t.Fatalf("target commit = %s, want latest frozen target commit %s", scope.Binding.TargetCommitSHA, targetTip)
