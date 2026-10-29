@@ -464,7 +464,7 @@ func printPromotedCandidate(out *axi.Context, db *store.DB, lane candidateLane, 
 	}
 	return out.Print(append(result,
 		axi.Field{Key: "pr_url", Value: prURL}, axi.Field{Key: "result", Value: fmt.Sprintf("already promoted: candidate %s at %s", taskIDString(task.Seq), shortSHA(candidate.PromotedSHA))},
-		axi.Field{Key: "help", Value: []any{"Run `posse publish" + lane.repoFlag() + " --refresh \"<summary>\"` with fresh --verify, --proof and --risk values to rewrite the Posse-owned PR/MR text"}},
+		axi.Field{Key: "help", Value: []any{"From the Task Sandbox, not the candidate checkout, run `posse publish" + lane.repoFlag() + " --refresh \"<summary>\"` with fresh --verify, --proof and --risk values to rewrite the Posse-owned PR/MR text; if the target has advanced, it submits a fresh candidate"}},
 	))
 }
 
