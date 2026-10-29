@@ -298,6 +298,17 @@ func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane
 	return nil
 }
 
+func requireSubmittedCandidate(ctx context.Context, db *store.DB, task store.Task, lane candidateLane) (store.ValidationCandidate, error) {
+	candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
+	if err != nil && !store.IsNotFound(err) {
+		return candidate, err
+	}
+	if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+		return candidate, axi.Failure("candidate_missing", lane.memberLabel("submit a private candidate before requesting Review"), false, "Run `posse publish --repo "+lane.repo+" \"<summary>\"` from the Task Sandbox")
+	}
+	return candidate, nil
+}
+
 // workspaceCandidateReviewRequest reports whether a workspace done Signal
 // requests Review of unpromoted private candidates, as a single-repository
 // done Signal from an active candidate does. Candidates a Review already
@@ -329,9 +340,9 @@ func (s *Service) workspaceCandidateReviewRequest(ctx context.Context, db *store
 		if lane.member.State == store.TaskRepoMerged {
 			continue
 		}
-		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
-		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
-			return false, axi.Failure("candidate_missing", lane.memberLabel("submit a private candidate before requesting Review"), false, "Run `posse publish --repo "+lane.repo+" \"<summary>\"` from the Task Sandbox")
+		candidate, err := requireSubmittedCandidate(ctx, db, task, lane)
+		if err != nil {
+			return false, err
 		}
 		if candidate.State != store.ValidationCandidateActive {
 			continue

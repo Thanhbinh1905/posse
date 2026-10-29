@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -780,5 +781,37 @@ func TestCIFixInstructionNamesRunJobAndLogCommand(t *testing.T) {
 		if !strings.Contains(ci, required) {
 			t.Errorf("CI fix instruction omitted %q: %s", required, ci)
 		}
+	}
+}
+
+func TestRequireSubmittedCandidateKeepsStoreErrorsDistinctFromMissing(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	db, err := store.Open(filepath.Join(root, "home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "t", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := store.Task{ID: taskID}
+	var refusal *axi.Error
+	_, err = requireSubmittedCandidate(ctx, db, task, candidateLane{})
+	if !errors.As(err, &refusal) || refusal.Code != "candidate_missing" {
+		t.Fatalf("absent candidate = %v, want candidate_missing", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = requireSubmittedCandidate(ctx, db, task, candidateLane{})
+	if err == nil || errors.As(err, &refusal) {
+		t.Fatalf("store error = %v, want it returned unchanged", err)
 	}
 }

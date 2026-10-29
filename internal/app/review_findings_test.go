@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func TestDecodeReviewFindingsEnforcesSchemaAndFailClosedDefaults(t *testing.T) {
@@ -364,5 +366,35 @@ block_at = "P1"
 	}
 	if key != "out-of-scope-hunk" || state != "open" || severity != "P1" || inScope != 1 || path != "cleanup.go" {
 		t.Fatalf("persisted finding = key %q state %q severity %q in_scope %d path %q", key, state, severity, inScope, path)
+	}
+}
+
+func TestReviewLaunchFindingsExampleCarriesFilledResolution(t *testing.T) {
+	brief := string(generatedReviewBrief(store.Task{Seq: 1}, taskplan.Plan{}, 1, nil, false))
+	_, after, ok := strings.Cut(brief, "```json\n")
+	if !ok {
+		t.Fatal("review brief has no json example")
+	}
+	example, _, _ := strings.Cut(after, "\n```")
+	parsed, err := decodeReviewFindings([]byte(example))
+	if err != nil {
+		t.Fatalf("example does not parse: %v", err)
+	}
+	if len(parsed.Resolutions) != 1 {
+		t.Fatalf("example resolutions = %d, want 1", len(parsed.Resolutions))
+	}
+	resolution := parsed.Resolutions[0]
+	if resolution.Finding == "" || resolution.Status == "" || resolution.Note == "" {
+		t.Fatalf("example resolution leaves a field empty: %+v", resolution)
+	}
+	fields := reflect.TypeOf(resolution).NumField()
+	var raw struct {
+		Resolutions []map[string]any `json:"resolutions"`
+	}
+	if err := json.Unmarshal([]byte(example), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Resolutions[0]) != fields {
+		t.Fatalf("example resolution has %d fields, parser accepts %d", len(raw.Resolutions[0]), fields)
 	}
 }
