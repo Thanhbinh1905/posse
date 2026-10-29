@@ -539,7 +539,7 @@ Notices stay open until the Lead runs `posse ack <id...|all>`, except an active 
 A Task in `working` is stalled when all hold for `stall_after`:
 
 - Herdr status is `working`.
-- The hash of the last 200 lines of `pane.read --source recent-unwrapped` is unchanged.
+- The hash of `pane.read --source visible` (the visible screen) is unchanged.
 - The worktree `HEAD` and `git status --porcelain` output are unchanged.
 
 `last_output_hash` and `last_progress_at` are updated whenever an evaluation sees a change, and reset whenever a Task enters `working` or an evaluation is skipped because the Task is not `working` in Herdr. Resetting the stall clock does not clear the separate idle-without-Signal clock. A `stalled` Task whose output or worktree changes returns to `working`. Evaluation runs on every `posse` call and ingest for the Project, and every 60 seconds inside `posse watch`. A stall creates a `stalled` Notice; nothing is killed automatically.
