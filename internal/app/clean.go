@@ -100,16 +100,7 @@ func (s *Service) clean(ctx *axi.Context, args []string) error {
 
 	rows := make([]any, 0, len(items))
 	for _, item := range items {
-		processes := taskContainmentProcessDetails(item.task)
-		if scratchProcesses, scratchErr := taskScratchProcessDetails(home, item.project, item.task); scratchErr == nil {
-			processes = mergeTaskProcessDetails(processes, scratchProcesses)
-		}
-		if item.task.WorktreePath != "" {
-			sandboxProcesses, sandboxErr := sandboxTaskProcessDetails(item.task.WorktreePath)
-			if sandboxErr == nil {
-				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
-			}
-		}
+		processes, _ := finishedTaskProcesses(home, item.project, item.task)
 		processRows := make([]any, 0, len(processes))
 		for _, process := range processes {
 			processRows = append(processRows, map[string]any{"pid": process.PID, "command": process.Command, "ports": process.Ports})

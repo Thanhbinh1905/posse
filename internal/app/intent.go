@@ -154,6 +154,33 @@ func crashIntentAt(command, phase, step string) {
 	}
 }
 
+// finishSettledTeardownIntent completes a Teardown intent whose Task already
+// reached torn-down. Only idempotent bookkeeping follows that step, so another
+// Teardown may finish it even while the recorded owner process stays alive.
+func (s *Service) finishSettledTeardownIntent(ctx context.Context, db *store.DB, projectID, taskID int64) (bool, error) {
+	intent, err := db.IntentByTask(ctx, taskID)
+	if store.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if intent.Command != "teardown" || strings.TrimPrefix(intent.Step, "resuming:") != "done:task.torn_down" {
+		return false, nil
+	}
+	task, err := db.TaskByID(ctx, projectID, taskID)
+	if err != nil || task.State != store.StateTornDown {
+		return false, err
+	}
+	if err := s.regenerateProjects(ctx, db); err != nil {
+		return false, err
+	}
+	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil && !errors.Is(err, store.ErrIntentOwned) {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) finishTaskIntent(ctx context.Context, db *store.DB, taskID int64) error {
 	intent, err := db.IntentByTask(ctx, taskID)
 	if store.IsNotFound(err) {

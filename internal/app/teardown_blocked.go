@@ -14,12 +14,7 @@ import (
 func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {
 	collect := func() []taskProcessDetail {
 		processes := taskContainmentProcessDetails(task)
-		if task.WorktreePath != "" {
-			sandboxProcesses, err := sandboxTaskProcessDetails(task.WorktreePath)
-			if err == nil {
-				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
-			}
-		}
+		// Owned roots cover the Sandbox only while this Task still holds it.
 		if home, err := s.homePath(); err == nil {
 			if roots, rootErr := taskOwnedProcessRoots(ctx, db, home, project, task); rootErr == nil {
 				if pids, pidErr := processIDsInRoots(roots); pidErr == nil {

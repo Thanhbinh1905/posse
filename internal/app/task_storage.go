@@ -37,21 +37,8 @@ func taskDiskLeakSummary(home string, project store.Project, tasks []store.Task)
 		if taskHoldsSandboxState(task.State) {
 			continue
 		}
-		processes := taskContainmentProcessDetails(task)
-		if task.WorktreePath != "" && !sandboxHeldByAnotherTask(task, tasks) {
-			sandboxProcesses, sandboxErr := sandboxTaskProcessDetails(task.WorktreePath)
-			if sandboxErr == nil {
-				processes = mergeTaskProcessDetails(processes, sandboxProcesses)
-			} else {
-				problems = append(problems, fmt.Sprintf("t%d process scan: %v", task.Seq, sandboxErr))
-			}
-		}
-		scratchProcesses, scratchErr := taskScratchProcessDetails(home, project, task)
-		if scratchErr != nil {
-			problems = append(problems, fmt.Sprintf("t%d scratch process scan: %v", task.Seq, scratchErr))
-		} else {
-			processes = mergeTaskProcessDetails(processes, scratchProcesses)
-		}
+		processes, scanProblems := finishedTaskProcesses(home, project, task)
+		problems = append(problems, scanProblems...)
 		for _, process := range processes {
 			label := fmt.Sprintf("t%d PID %d %s", task.Seq, process.PID, process.Command)
 			if len(process.Ports) > 0 {
@@ -96,16 +83,28 @@ func taskHoldsSandboxState(state store.State) bool {
 	return false
 }
 
-// sandboxHeldByAnotherTask reports whether a live Task now holds the Sandbox that
-// a finished Task used, so processes found there belong to the live Task.
-func sandboxHeldByAnotherTask(task store.Task, tasks []store.Task) bool {
-	path := filepath.Clean(task.WorktreePath)
-	for _, other := range tasks {
-		if other.ID != task.ID && taskHoldsSandboxState(other.State) && other.WorktreePath != "" && filepath.Clean(other.WorktreePath) == path {
-			return true
+// finishedTaskProcesses lists the live processes attributable to a finished
+// Task: members of its cgroup or marker, processes that reference its scratch,
+// and processes in its Sandbox while the Task still holds it. A released
+// Sandbox may serve another Task or none, so its processes are not this Task's.
+func finishedTaskProcesses(home string, project store.Project, task store.Task) ([]taskProcessDetail, []string) {
+	problems := []string{}
+	processes := taskContainmentProcessDetails(task)
+	if task.SandboxID != 0 && task.WorktreePath != "" {
+		sandboxProcesses, err := sandboxTaskProcessDetails(task.WorktreePath)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("t%d process scan: %v", task.Seq, err))
+		} else {
+			processes = mergeTaskProcessDetails(processes, sandboxProcesses)
 		}
 	}
-	return false
+	scratchProcesses, err := taskScratchProcessDetails(home, project, task)
+	if err != nil {
+		problems = append(problems, fmt.Sprintf("t%d scratch process scan: %v", task.Seq, err))
+	} else {
+		processes = mergeTaskProcessDetails(processes, scratchProcesses)
+	}
+	return processes, problems
 }
 
 func projectDiskUsage(home string, project store.Project) (string, error) {
