@@ -413,6 +413,7 @@ func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate st
 	if lane.localDelivery() {
 		help = "A later validation pass may promote this exact candidate; no target ref was changed by submission"
 	}
+	ignoredHelp := "The candidate checkout lacks gitignored local files; copy the ones validation needs from the Sandbox, which never counts as a candidate change"
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}}
 	if lane.repo != "" {
 		result = append(result, axi.Field{Key: "repo", Value: lane.repo})
@@ -422,7 +423,7 @@ func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate st
 		axi.Field{Key: "candidate_head", Value: candidate.CandidateSHA}, axi.Field{Key: "target_head", Value: candidate.TargetSHA},
 		axi.Field{Key: "expected_remote_head", Value: candidate.ExpectedRemoteSHA}, axi.Field{Key: "candidate_checkout", Value: candidate.WorktreePath},
 		axi.Field{Key: "result", Value: message},
-		axi.Field{Key: "help", Value: []any{help}},
+		axi.Field{Key: "help", Value: []any{help, ignoredHelp}},
 	))
 }
 
@@ -438,21 +439,39 @@ func printPromotedCandidate(out *axi.Context, db *store.DB, lane candidateLane, 
 			axi.Field{Key: "result", Value: fmt.Sprintf("already promoted: candidate %s at %s for local delivery", taskIDString(task.Seq), shortSHA(candidate.PromotedSHA))},
 		))
 	}
-	prURL := task.PRURL
-	if lane.repo != "" {
-		repos, err := db.TaskRepos(out.Context, task.ID)
-		if err != nil {
-			return err
-		}
-		for _, repo := range repos {
-			if repo.Repo == lane.repo {
-				prURL = repo.PRURL
-			}
-		}
+	prURL, err := promotedPullRequestURL(out.Context, db, lane)
+	if err != nil {
+		return err
 	}
 	return out.Print(append(result,
 		axi.Field{Key: "pr_url", Value: prURL}, axi.Field{Key: "result", Value: fmt.Sprintf("already promoted: candidate %s at %s", taskIDString(task.Seq), shortSHA(candidate.PromotedSHA))},
+		axi.Field{Key: "help", Value: []any{"Run `posse publish" + lane.repoFlag() + " --refresh \"<summary>\"` with fresh --verify, --proof and --risk values to rewrite the Posse-owned PR/MR text"}},
 	))
+}
+
+// promotedPullRequestURL prefers the PR/MR its Posse ownership marker binds,
+// since the Task row records a single-repository URL only at done.
+func promotedPullRequestURL(ctx context.Context, db *store.DB, lane candidateLane) (string, error) {
+	marker, err := db.GetPRBodyMarker(ctx, lane.task.ID, lane.repo)
+	if err != nil && !store.IsNotFound(err) {
+		return "", err
+	}
+	if err == nil && marker.PRURL != "" {
+		return marker.PRURL, nil
+	}
+	if lane.repo == "" {
+		return lane.task.PRURL, nil
+	}
+	repos, err := db.TaskRepos(ctx, lane.task.ID)
+	if err != nil {
+		return "", err
+	}
+	for _, repo := range repos {
+		if repo.Repo == lane.repo {
+			return repo.PRURL, nil
+		}
+	}
+	return "", nil
 }
 
 func (s *Service) archiveCandidate(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) error {

@@ -115,6 +115,23 @@ func (db *DB) PRBodyMarkersForTask(ctx context.Context, taskID int64) ([]PRBodyM
 	return markers, nil
 }
 
+// PRBodyMarkerOwner identifies the Task whose stored token marks a PR/MR body.
+type PRBodyMarkerOwner struct {
+	Project string
+	Seq     int
+	State   State
+}
+
+// PRBodyMarkerOwnerByToken returns the Task that owns a marker token, in any
+// Project, including torn-down Tasks.
+func (db *DB) PRBodyMarkerOwnerByToken(ctx context.Context, token string) (PRBodyMarkerOwner, error) {
+	var owner PRBodyMarkerOwner
+	err := db.QueryRowContext(ctx, `SELECT p.name, t.seq, t.state
+		FROM pr_body_markers m JOIN tasks t ON t.id=m.task_id JOIN projects p ON p.id=t.project_id
+		WHERE m.marker_token=?`, token).Scan(&owner.Project, &owner.Seq, &owner.State)
+	return owner, err
+}
+
 func newPRBodyMarkerToken() (string, error) {
 	var value [32]byte
 	if _, err := rand.Read(value[:]); err != nil {

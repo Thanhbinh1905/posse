@@ -76,7 +76,15 @@ func markerIsWholeLine(value string, start int, marker string) bool {
 }
 
 func hasUnownedTokenizedPublishMarkerPair(body string) bool {
+	return len(tokenizedPublishMarkerPairs(body)) > 0
+}
+
+// tokenizedPublishMarkerPairs returns, in order, each token that has a start
+// marker line followed by its end marker line.
+func tokenizedPublishMarkerPairs(body string) []string {
 	starts := make(map[string]int)
+	var tokens []string
+	paired := make(map[string]bool)
 	for index, line := range strings.Split(body, "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if token, ok := publishBodyMarkerToken(line, "start"); ok && token != "legacy" {
@@ -84,12 +92,13 @@ func hasUnownedTokenizedPublishMarkerPair(body string) bool {
 			continue
 		}
 		if token, ok := publishBodyMarkerToken(line, "end"); ok && token != "legacy" {
-			if start, found := starts[token]; found && start < index {
-				return true
+			if start, found := starts[token]; found && start < index && !paired[token] {
+				paired[token] = true
+				tokens = append(tokens, token)
 			}
 		}
 	}
-	return false
+	return tokens
 }
 
 func publishBodyMarkerToken(line, edge string) (string, bool) {

@@ -120,3 +120,11 @@ func (l candidateLane) memberLabel(message string) string {
 	}
 	return l.repo + ": " + message
 }
+
+// repoFlag is the `--repo <member>` argument that names the lane in a command.
+func (l candidateLane) repoFlag() string {
+	if l.repo == "" {
+		return ""
+	}
+	return " --repo " + l.repo
+}

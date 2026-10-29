@@ -281,6 +281,50 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 	})
 }
 
+// refreshPromotedPullRequest rewrites the Posse-owned title and body span of
+// a promoted lane's PR/MR from fresh Worker metadata. It changes no ref and no
+// candidate custody; the PR/MR must still report the promoted head.
+func (s *Service) refreshPromotedPullRequest(out *axi.Context, db *store.DB, lane candidateLane, cfg config.Config, candidate store.ValidationCandidate, summary, verification, proof, risk string) (returnErr error) {
+	ctx := out.Context
+	project, task := lane.project, lane.task
+	prURL, err := promotedPullRequestURL(ctx, db, lane)
+	if err != nil {
+		return err
+	}
+	if prURL == "" {
+		return axi.Failure("pr_refresh_failed", lane.memberLabel("the promoted candidate has no recorded PR/MR"), false)
+	}
+	forge, err := forgeForRepository(ctx, project.Root, cfg, lane.repo)
+	if err != nil {
+		return err
+	}
+	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "publish")
+	if err != nil {
+		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
+	}
+	defer func() {
+		if finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID); returnErr == nil && finishErr != nil {
+			returnErr = finishErr
+		}
+	}()
+	promotedTask := task
+	promotedTask.GatedSHA = candidate.PromotedSHA
+	if err := validateWorkerPullRequest(ctx, project, promotedTask, forge, prURL, candidate.PromotedSHA); err != nil {
+		return err
+	}
+	if err := s.refreshExistingPullRequest(ctx, db, intent, project, promotedTask, forge, prURL, lane.repo, summary, verification, proof, risk, true); err != nil {
+		return err
+	}
+	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}}
+	if lane.repo != "" {
+		result = append(result, axi.Field{Key: "repo", Value: lane.repo})
+	}
+	return out.Print(append(result,
+		axi.Field{Key: "candidate_head", Value: candidate.PromotedSHA}, axi.Field{Key: "pr_url", Value: prURL},
+		axi.Field{Key: "result", Value: fmt.Sprintf("refreshed: PR/MR text for promoted candidate %s at %s", taskIDString(task.Seq), shortSHA(candidate.PromotedSHA))},
+	))
+}
+
 // completeLocalPromotion records a local-delivery candidate as promoted once
 // the author Task branch is exactly the validated head. Nothing is pushed and
 // no PR/MR is opened; Merge integrates the head into the target ref.
