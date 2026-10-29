@@ -186,17 +186,24 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		if !ok || taskRef != taskIDString(task.Seq) || task.Type != "change" {
 			return axi.Failure("decision_refused", "Review cap Decision binding is invalid", false)
 		}
-		actualHead, err := currentReviewCapHead(out.Context, db, project, task)
+		actual, err := currentReviewCapHead(out.Context, db, project, task)
 		if err != nil {
 			return err
 		}
-		if actualHead != expectedHead {
+		if actual.Head != expectedHead {
 			return axi.Failure("decision_refused", "the reviewed candidate head changed after this Review cap Decision; refresh the cap Notice before applying it", false)
 		}
 		switch decision.Answer {
 		case "accept-head":
-			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, expectedHead, decision.UserQuote, userDispositionBlockAt(task)); err != nil {
+			heads := make([]string, len(actual.Targets))
+			for i, target := range actual.Targets {
+				heads[i] = target.Commit
+			}
+			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, heads, decision.UserQuote, userDispositionBlockAt(task)); err != nil {
 				return err
+			}
+			if len(actual.Targets) > 1 {
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "heads", Value: actual.Targets}})
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "head", Value: expectedHead}})
 		case "final-fix":

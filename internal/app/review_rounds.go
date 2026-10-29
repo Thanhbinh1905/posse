@@ -147,14 +147,14 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 			return usageErr
 		}
 		used := reviewCapUsed(change, usage)
-		head, headErr := reviewCapHead(ctx.Context, db, project, change)
+		binding, headErr := reviewCapHead(ctx.Context, db, project, change)
 		if headErr != nil {
 			return headErr
 		}
-		if noticeErr := s.raiseReviewCapNotice(ctx.Context, db, project, change, head, used, maxRounds); noticeErr != nil {
+		if noticeErr := s.raiseReviewCapNotice(ctx.Context, db, project, change, binding, used, maxRounds); noticeErr != nil {
 			return noticeErr
 		}
-		return axi.Failure("review_round_cap", fmt.Sprintf("frozen Review and repair cap reached at %s (%d of %d rounds used)", shortSHA(head), used, maxRounds), false, "Wait for the User's `review_cap` Decision")
+		return axi.Failure("review_round_cap", fmt.Sprintf("frozen Review and repair cap reached at %s (%d of %d rounds used)", binding.label(), used, maxRounds), false, "Wait for the User's `review_cap` Decision")
 	}
 	return err
 }
