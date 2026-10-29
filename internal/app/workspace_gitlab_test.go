@@ -220,7 +220,7 @@ esac
 		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
 			t.Fatal(err)
 		}
-		if data["repo"] != "worker" || data["gated_head"] != gated || data["merged_head"] != rewritten || data["trees"] != "match" || !strings.Contains(notice.Summary, "reset --keep "+rewritten) {
+		if data["repo"] != "worker" || data["gated_head"] != gated || data["merged_head"] != rewritten || data["trees"] != "match" || !strings.Contains(notice.Summary, "reset --keep "+rewritten) || !strings.Contains(notice.Summary, "leaves the Task merging") {
 			t.Fatalf("pr_merged_ungated Notice = %+v", notice)
 		}
 	}

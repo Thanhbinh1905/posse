@@ -75,7 +75,7 @@ func raiseUngatedMergedHeadNotice(ctx context.Context, db *store.DB, project sto
 	if repo != "" {
 		target = repo + " " + prURL
 	}
-	summary := fmt.Sprintf("%s: %s merged source head %s, but the gated head is %s (trees %s). Posse keeps the Task in merging. %s", task.Title, target, mergedHead, gatedSHA, trees, recovery)
+	summary := fmt.Sprintf("%s: %s merged source head %s, but the gated head is %s (trees %s). Posse leaves the Task %s. %s", task.Title, target, mergedHead, gatedSHA, trees, task.State, recovery)
 	data := map[string]any{"pr_url": prURL, "gated_head": gatedSHA, "merged_head": mergedHead, "trees": trees, "recovery": recovery}
 	if repo != "" {
 		data["repo"] = repo

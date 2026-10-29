@@ -1218,7 +1218,7 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 				t.Fatalf("merge Notices=%d want=%d", got, wantNotices)
 			}
 			ungated := tc.name == "different head"
-			if countNoticeKind(notices, "pr_merged_ungated") != map[bool]int{true: 1}[ungated] || ungated && countNoticeKind(notices, "pr_watch_failing") != 0 {
+			if countNoticeKind(notices, "pr_merged_ungated") != map[bool]int{true: 1}[ungated] || ungated && (countNoticeKind(notices, "pr_watch_failing") != 0 || !strings.Contains(notices[len(notices)-1].Summary, "leaves the Task working")) {
 				t.Fatalf("ungated merged head Notices = %+v", notices)
 			}
 		})
