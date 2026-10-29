@@ -197,11 +197,7 @@ func (s *Service) checkReviewCapAfterDone(ctx context.Context, db *store.DB, hom
 	if used < max {
 		return nil
 	}
-	qualifies, err := reviewVerdictQualifies(ctx, db, task)
-	if err != nil {
-		return err
-	}
-	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets, qualifies)
+	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets)
 	if err != nil {
 		return err
 	}

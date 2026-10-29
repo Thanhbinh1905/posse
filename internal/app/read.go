@@ -756,24 +756,6 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 	}
 	if task.Type == "review" {
-		reviewerLaunches, err := db.TaskLaunchIdentities(ctx.Context, task.ID)
-		if err != nil {
-			return err
-		}
-		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
-		if task.ReviewsTaskID == 0 {
-			view["review_identity"] = map[string]any{"review_task": id, "eligible": false, "reason": "Review Task has no recorded Change Task", "review_history_known": reviewerHistoryKnown, "review_launches": identityViews(reviewerLaunches)}
-		} else {
-			author, err := db.TaskByID(ctx.Context, project.ID, task.ReviewsTaskID)
-			if err != nil {
-				return err
-			}
-			authorLaunches, authorHistoryKnown, err := reviewAuthorLaunches(ctx.Context, db, author)
-			if err != nil {
-				return err
-			}
-			view["review_identity"] = reviewIdentityHistoryResult(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown)
-		}
 		if verdict, err := db.ReviewVerdict(ctx.Context, task.ID); err == nil {
 			current := false
 			if author, authorErr := db.TaskByID(ctx.Context, project.ID, task.ReviewsTaskID); authorErr == nil {

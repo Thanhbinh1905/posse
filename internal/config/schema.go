@@ -68,6 +68,7 @@ var keySpecs = []KeySpec{
 	{Key: "review_loop.auto_start", Type: TypeBoolean, Default: true, Meaning: "Automatically admit the next Review Round when a completed Task enters the merge flow.", UserOnly: true},
 	{Key: "review_loop.docs", Type: TypeBoolean, Default: false, Meaning: "Include documentation gaps in the Review rubric.", UserOnly: true},
 	{Key: "review_loop.guidance", Type: TypeStringArray, Default: []string{}, Meaning: "Repository guidance paths supplied to Reviewers from the frozen target branch.", UserOnly: true},
+	{Key: "review_loop.profile", Type: TypeString, Default: "", Meaning: "Profile every Review Task launches with when `posse review start` names none; empty leaves the choice to the review Dispatch Rules. A Review Task always runs in its own session, so this Profile may match the author's.", UserOnly: true},
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
 	{Key: "full_pipeline.run_workflows", Type: TypeBoolean, Default: false, Meaning: "Explicitly allow locally executing repository CI workflow shell steps in the private full-pipeline candidate; unsupported jobs remain visible and cannot be inferred from repository files.", UserOnly: true},

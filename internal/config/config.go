@@ -62,6 +62,7 @@ type ReviewLoop struct {
 	AutoStart bool     `toml:"auto_start" json:"auto_start"`
 	Docs      bool     `toml:"docs" json:"docs"`
 	Guidance  []string `toml:"guidance" json:"guidance"`
+	Profile   string   `toml:"profile" json:"profile"`
 }
 
 type CILoop struct {
@@ -680,7 +681,7 @@ func defaultMap() map[string]any {
 		"retention":       map[string]any{"task_artifacts": "2160h"},
 		"research":        map[string]any{"native": DefaultResearch.Native, "max_active": DefaultResearch.MaxActive, "max_result_bytes": DefaultResearch.MaxResultBytes, "max_output_bytes": DefaultResearch.MaxOutputBytes, "timeout": DefaultResearch.Timeout},
 		"worker_go_cache": map[string]any{"max_size": DefaultWorkerGoCache.MaxSize, "min_age": DefaultWorkerGoCache.MinAge, "interval": DefaultWorkerGoCache.Interval},
-		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}},
+		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}, "profile": ""},
 		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
 		"full_pipeline":   map[string]any{"run_workflows": false},
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
@@ -861,6 +862,11 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	if c.DispatchDefault.Use != "" {
 		if _, ok := c.Profiles[c.DispatchDefault.Use]; !ok {
 			add("dispatch.default.use", "references unknown Profile "+c.DispatchDefault.Use)
+		}
+	}
+	if c.ReviewLoop.Profile != "" {
+		if _, ok := c.Profiles[c.ReviewLoop.Profile]; !ok {
+			add("review_loop.profile", "references unknown Profile "+c.ReviewLoop.Profile)
 		}
 	}
 	for i, rule := range c.Dispatch {

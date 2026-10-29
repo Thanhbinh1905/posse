@@ -639,7 +639,6 @@ type TaskLaunchIdentity struct {
 	ConfiguredModel string
 	ModelKnown      int64
 	PlanRevision    int64
-	StartHead       string
 }
 
 type TaskPlanRevision struct {

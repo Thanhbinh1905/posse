@@ -14,7 +14,6 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`ALTER TABLE task_launch_identities DROP COLUMN start_head`,
 		`ALTER TABLE project_watch_state DROP COLUMN pr_poll_last_error`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_notice_raised`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_cause`,

@@ -217,13 +217,13 @@ func (db *DB) ReviewCapUsage(ctx context.Context, taskID int64) (ReviewCapUsage,
 	return usage, nil
 }
 
-// ReviewEvidenceFor reports whether the targets are covered by one qualified
-// pass, with any target outside that pass covered by a proved carry or an
-// exact-head User disposition. Passes from different Review Rounds are never
+// ReviewEvidenceFor reports whether the targets are covered by one pass, with
+// any target outside that pass covered by a proved carry or an exact-head User
+// disposition. Passes from different Review Rounds are never
 // combined: a workspace pass binds the Member heads its Reviewer saw together,
 // so it covers exactly those heads, or a subset of them. Carries and
 // dispositions never imply test, docs, lint or CI evidence.
-func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []ReviewTarget, qualifies func(ReviewVerdict) bool) (ReviewEvidence, error) {
+func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []ReviewTarget) (ReviewEvidence, error) {
 	var evidence ReviewEvidence
 	if len(targets) == 0 {
 		return evidence, nil
@@ -260,7 +260,7 @@ func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []Rev
 		return result, true
 	}
 	for _, verdict := range verdicts {
-		if verdict.Verdict != ReviewPass || qualifies != nil && !qualifies(verdict) {
+		if verdict.Verdict != ReviewPass {
 			continue
 		}
 		if result, ok := coveredBy(verdict.Targets); ok && result.Pass {

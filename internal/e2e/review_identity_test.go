@@ -369,25 +369,6 @@ func TestReviewResumeTemplateRejectsSecondSessionSelector(t *testing.T) {
 	}
 }
 
-func TestReviewRejectsAttachedCodexModelConfig(t *testing.T) {
-	fixture := reviewIdentityFixture(t)
-	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-		t.Fatalf("author spawn: code=%d %s", code, output)
-	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
-	setReviewIdentityProfileArgs(t, fixture, "reviewer", []string{`-cmodel="model-a"`})
-	code, output := startReviewIdentityTask(t, fixture, "Attached config review", "reviewer", "t1")
-	requireReviewIdentityRefusal(t, code, output)
-	setReviewIdentityProfileArgs(t, fixture, "reviewer", nil)
-	if code, output := startReviewIdentityTask(t, fixture, "Independent codex", "reviewer", "t1"); code != 0 {
-		t.Fatalf("initial independent review: code=%d %s", code, output)
-	}
-	setReviewIdentityProfileArgs(t, fixture, "reviewer", []string{`-cmodel="model-a"`})
-	code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
-	requireReviewIdentityRefusal(t, code, output)
-}
-
 func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, fixture)
@@ -408,9 +389,6 @@ func TestAuthorRelaunchResumeModelOverrideIsRecordedUnknown(t *testing.T) {
 	if err != nil || len(identities) != 2 || identities[1].ModelKnown {
 		t.Fatalf("author relaunch identity = %#v, err=%v; want launch 2 model unknown", identities, err)
 	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", "model-b")
-	code, output := startReviewIdentityTask(t, fixture, "Resumed model review", "reviewer", "t1")
-	requireReviewIdentityRefusal(t, code, output)
 }
 
 func setReviewIdentityProfileArgs(t *testing.T, fixture *prLifecycleFixture, profile string, args []string) {
@@ -423,45 +401,6 @@ func setReviewIdentityProfileArgs(t *testing.T, fixture *prLifecycleFixture, pro
 		t.Fatal(err)
 	}
 	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles."+profile+".args", string(encoded))
-}
-
-func TestReviewRejectsQuotedSameModelOverride(t *testing.T) {
-	fixture := reviewIdentityFixture(t)
-	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-		t.Fatalf("author spawn: code=%d %s", code, output)
-	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-c","model=\"{model}\""]`)
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.args", `["-c","model=\"model-a\""]`)
-	code, output := startReviewIdentityTask(t, fixture, "Same model review", "reviewer", "t1")
-	if code == 0 {
-		runReviewIdentityCLI(t, fixture, "show", "t2", "--full")
-		reviewer := fixture.mustTask(t, "t2")
-		identities, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("persisted configured identity: %#v", identities)
-		args, _ := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
-		t.Logf("agent.start argument evidence:\n%s", args)
-	}
-	requireReviewIdentityRefusal(t, code, output)
-}
-
-func TestReviewRejectsMalformedModelAliasOverride(t *testing.T) {
-	fixture := reviewIdentityFixture(t)
-	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-		t.Fatalf("author spawn: code=%d %s", code, output)
-	}
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
-	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.args", `["--model"]`)
-	code, output := startReviewIdentityTask(t, fixture, "Ambiguous alias review", "reviewer", "t1")
-	if code == 0 {
-		runReviewIdentityCLI(t, fixture, "show", "t2", "--full")
-		args, _ := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
-		t.Logf("agent.start argument evidence:\n%s", args)
-	}
-	requireReviewIdentityRefusal(t, code, output)
 }
 
 func TestReviewRejectsCaseVariantCodexModelKeysAtSpawnAndRelaunch(t *testing.T) {
@@ -562,64 +501,6 @@ func TestReviewRejectsCodexProfileSelectorAtSpawnAndRelaunch(t *testing.T) {
 	}
 }
 
-func TestReviewRejectsCodexTOMLModelLiteralAndCommentsAtSpawnAndRelaunch(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		profile   string
-		modelArgs []string
-	}{
-		{name: "triple literal string", profile: "''model-a''", modelArgs: []string{"-c", "model='{model}'"}},
-		{name: "literal string with inline comment", profile: "'model-a'#comment", modelArgs: []string{"-c", "model={model}"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := reviewIdentityFixture(t)
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.kind", "codex")
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.kind", "codex")
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
-			if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-				t.Fatalf("author spawn: code=%d %s", code, output)
-			}
-
-			profileModel, err := json.Marshal(test.profile)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", string(profileModel))
-			modelArgs, err := json.Marshal(test.modelArgs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", string(modelArgs))
-			code, output := startReviewIdentityTask(t, fixture, "Rejected TOML Review", "reviewer", "t1")
-			requireReviewIdentityRefusal(t, code, output)
-			tasks, err := fixture.db.Tasks(context.Background(), fixture.project.ID, true)
-			if err != nil || len(tasks) != 1 {
-				t.Fatalf("refused spawn allocated a Review Task: tasks=%d err=%v", len(tasks), err)
-			}
-
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", `"model-c"`)
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", `["-m","{model}"]`)
-			if code, output := startReviewIdentityTask(t, fixture, "Independent reviewer", "reviewer", "t1"); code != 0 {
-				t.Fatalf("independent review spawn: code=%d %s", code, output)
-			}
-			reviewer := fixture.mustTask(t, "t2")
-			before, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
-			if err != nil || len(before) != 1 {
-				t.Fatalf("Review launch identities = %#v, err=%v", before, err)
-			}
-
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.reviewer.model", string(profileModel))
-			runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "kinds.codex.model_args", string(modelArgs))
-			code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "reviewer")
-			requireReviewIdentityRefusal(t, code, output)
-			after, err := fixture.db.TaskLaunchIdentities(context.Background(), reviewer.ID)
-			if err != nil || len(after) != len(before) {
-				t.Fatalf("refused relaunch recorded another launch: before=%#v after=%#v err=%v", before, after, err)
-			}
-		})
-	}
-}
-
 func TestCodexCaseVariantModelKeysKeepLoopbackModelAtDefault(t *testing.T) {
 	codex, err := exec.LookPath("codex")
 	if err != nil {
@@ -716,67 +597,28 @@ requires_openai_auth = false
 	}
 }
 
-// relaunchReviewIdentityAuthor relaunches t1 with profile, optionally after
-// committing a change in its worktree.
-func relaunchReviewIdentityAuthor(t *testing.T, fixture *prLifecycleFixture, profile string, commit bool) {
-	t.Helper()
-	author := fixture.mustTask(t, "t1")
-	if commit {
-		if err := os.WriteFile(filepath.Join(author.WorktreePath, "authored.txt"), []byte(profile+"\n"), 0o600); err != nil {
-			t.Fatal(err)
+func TestReviewAcceptsAuthorProfileAndModelInFreshSession(t *testing.T) {
+	fixture := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, fixture)
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.args", `["--session-id","99e0a111-1ad9-4010-a1a1-1e2944973bce"]`)
+	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
+		t.Fatalf("author spawn: code=%d %s", code, output)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.env, "config", "set", "profiles.author.args", `[]`)
+	if code, output := startReviewIdentityTask(t, fixture, "Author profile review", "author", "t1"); code != 0 {
+		t.Fatalf("review with the author Profile and model was refused: code=%d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "same-model"); code != 0 {
+		t.Fatalf("review relaunch with the author model was refused: code=%d %s", code, output)
+	}
+	args, err := os.ReadFile(filepath.Join(fixture.root, "review-identity-args.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := fixture.mustTask(t, "t2")
+	for _, line := range strings.Split(string(args), "\n") {
+		if strings.HasPrefix(line, review.WorktreePath+"\t") && strings.Contains(line, "99e0a111") {
+			t.Fatalf("Review Task launch reused the author session: %s", line)
 		}
-		gitTest(t, fixture.env, author.WorktreePath, "add", "authored.txt")
-		gitTest(t, fixture.env, author.WorktreePath, "commit", "-m", "authored by "+profile)
 	}
-	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t1", "--profile", profile); code != 0 {
-		t.Fatalf("author relaunch with %s: code=%d %s", profile, code, output)
-	}
-}
-
-func TestReviewIgnoresAuthorLaunchesThatLeftNoCommit(t *testing.T) {
-	fixture := reviewIdentityFixture(t)
-	stopBackgroundWatch(t, fixture)
-	// The t585 shape: three model-a launches end before writing code, then
-	// model-b launches write the change.
-	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-		t.Fatalf("author spawn: code=%d %s", code, output)
-	}
-	relaunchReviewIdentityAuthor(t, fixture, "author", false)
-	relaunchReviewIdentityAuthor(t, fixture, "author", false)
-	relaunchReviewIdentityAuthor(t, fixture, "author-b", false)
-	relaunchReviewIdentityAuthor(t, fixture, "author-b", true)
-	code, output := startReviewIdentityTask(t, fixture, "Author model review", "author-b", "t1")
-	requireReviewIdentityRefusal(t, code, output)
-	if code, output := startReviewIdentityTask(t, fixture, "Commit-less model review", "author", "t1"); code != 0 {
-		t.Fatalf("review by the commit-less launches' Profile was refused: code=%d %s", code, output)
-	}
-	code, output = runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "author-b")
-	requireReviewIdentityRefusal(t, code, output)
-}
-
-func TestReviewRelaunchMovesToCommitLessAuthorProfile(t *testing.T) {
-	fixture := reviewIdentityFixture(t)
-	stopBackgroundWatch(t, fixture)
-	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-		t.Fatalf("author spawn: code=%d %s", code, output)
-	}
-	relaunchReviewIdentityAuthor(t, fixture, "author-b", false)
-	relaunchReviewIdentityAuthor(t, fixture, "author-b", true)
-	if code, output := startReviewIdentityTask(t, fixture, "Independent review", "reviewer", "t1"); code != 0 {
-		t.Fatalf("independent review spawn: code=%d %s", code, output)
-	}
-	if code, output := runReviewIdentityCLI(t, fixture, "relaunch", "t2", "--profile", "author"); code != 0 {
-		t.Fatalf("review relaunch to the commit-less launch Profile was refused: code=%d %s", code, output)
-	}
-}
-
-func TestReviewStillRejectsAuthorLaunchThatCommitted(t *testing.T) {
-	fixture := reviewIdentityFixture(t)
-	stopBackgroundWatch(t, fixture)
-	if code, output := startReviewIdentityTask(t, fixture, "Author candidate", "author", ""); code != 0 {
-		t.Fatalf("author spawn: code=%d %s", code, output)
-	}
-	relaunchReviewIdentityAuthor(t, fixture, "author-b", true)
-	code, output := startReviewIdentityTask(t, fixture, "Committed model review", "author", "t1")
-	requireReviewIdentityRefusal(t, code, output)
 }

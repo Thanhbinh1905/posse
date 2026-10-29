@@ -169,18 +169,13 @@ func (db *DB) ReviewVerdictsFor(ctx context.Context, changeTaskID int64) ([]Revi
 // bound targets equal its current candidate commits. A candidate that has
 // moved has no current pass, and an older pass is never rebound to the new
 // commits because targets are fixed when the Review Task is admitted.
-// qualifies lets the caller apply policy that Posse cannot see here, such as
-// Reviewer identity eligibility.
-func (db *DB) CurrentReviewPass(ctx context.Context, changeTaskID int64, candidate []ReviewTarget, qualifies func(ReviewVerdict) bool) (ReviewVerdict, bool, error) {
+func (db *DB) CurrentReviewPass(ctx context.Context, changeTaskID int64, candidate []ReviewTarget) (ReviewVerdict, bool, error) {
 	verdicts, err := db.ReviewVerdictsFor(ctx, changeTaskID)
 	if err != nil {
 		return ReviewVerdict{}, false, err
 	}
 	for _, verdict := range verdicts {
 		if verdict.Verdict != ReviewPass || !SameReviewTargets(verdict.Targets, candidate) {
-			continue
-		}
-		if qualifies != nil && !qualifies(verdict) {
 			continue
 		}
 		return verdict, true, nil

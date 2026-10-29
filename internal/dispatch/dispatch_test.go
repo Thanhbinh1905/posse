@@ -38,6 +38,24 @@ func TestResolveUsesSingleTypeRule(t *testing.T) {
 	}
 }
 
+func TestResolveReviewLoopProfileOverridesReviewRulesOnly(t *testing.T) {
+	cfg := config.Config{
+		Profiles:   map[string]config.Profile{"author": {Kind: "claude"}, "review": {Kind: "codex"}},
+		Dispatch:   []config.Rule{{Type: "review", Use: "review"}, {Use: "author"}},
+		ReviewLoop: config.ReviewLoop{Profile: "author"},
+	}
+	result, err := Resolve(cfg, "review", "")
+	if err != nil || result.Profile != "author" || result.Rule != "review_loop.profile" {
+		t.Fatalf("review Resolve() = %#v, %v", result, err)
+	}
+	if result, err := Resolve(cfg, "review", "review"); err != nil || result.Profile != "review" {
+		t.Fatalf("--profile Resolve() = %#v, %v", result, err)
+	}
+	if result, err := Resolve(cfg, "change", ""); err != nil || result.Profile != "author" || result.Rule != "when=" {
+		t.Fatalf("change Resolve() = %#v, %v", result, err)
+	}
+}
+
 func TestImplicitInheritanceDefaultsToKindAndCanUseLeadProfile(t *testing.T) {
 	cfg := config.Config{
 		Lead:     config.Lead{Kind: "claude", Profiles: map[string]string{"claude": "lead"}},

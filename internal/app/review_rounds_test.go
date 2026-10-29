@@ -430,7 +430,7 @@ func TestAutoStartSkipsUnavailableReviewerWithoutBlockingMerge(t *testing.T) {
 		explicitCode string
 	}{
 		{
-			name: "ineligible identity",
+			name: "reviewer resumes a session",
 			config: `[defaults]
 merge_mode = "local"
 review = "quick"
@@ -438,8 +438,17 @@ review = "quick"
 [profiles.author]
 kind = "claude"
 
-[dispatch.default]
+[profiles.reviewer]
+kind = "claude"
+args = ["--resume", "author-session"]
+
+[[dispatch]]
+type = "change"
 use = "author"
+
+[[dispatch]]
+type = "review"
+use = "reviewer"
 
 [review_loop]
 enabled = true
@@ -522,7 +531,7 @@ VALUES(?,1,?,?,'delta',?,?,?,?,?,'[]','verdict','pass',0)`, change.ID, change.ID
 	}
 }
 
-func TestAutoStartPicksFirstIndependentReviewRuleCandidate(t *testing.T) {
+func TestAutoStartPicksFirstReviewRuleCandidateEvenWithAuthorModel(t *testing.T) {
 	f, db, change := newAutoStartReviewFixture(t, `[defaults]
 merge_mode = "local"
 review = "quick"
@@ -561,7 +570,52 @@ auto_start = true
 		t.Fatalf("auto-start rounds = %#v, %v", rounds, err)
 	}
 	review, err := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
-	if err != nil || review.Profile != "opus" {
+	if err != nil || review.Profile != "sonnet" {
+		t.Fatalf("auto-start Review Task = %#v, %v", review, err)
+	}
+}
+
+func TestAutoStartUsesReviewLoopProfile(t *testing.T) {
+	f, db, change := newAutoStartReviewFixture(t, `[defaults]
+merge_mode = "local"
+review = "quick"
+
+[profiles.sonnet]
+kind = "claude"
+model = "model-a"
+
+[profiles.opus]
+kind = "claude"
+model = "model-b"
+
+[[dispatch]]
+type = "change"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "opus"
+
+[review_loop]
+enabled = true
+auto_start = true
+profile = "opus"
+`)
+	ctx := context.Background()
+	started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, change)
+	if err != nil || !started {
+		t.Fatalf("auto-start result = started %v, err %v; notices=%#v", started, err, reviewAutoStartSkippedNotices(t, db, change))
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("auto-start rounds = %#v, %v", rounds, err)
+	}
+	review, err := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
+	if err != nil || review.Profile != "opus" || review.DispatchRule != "review_loop.profile" {
 		t.Fatalf("auto-start Review Task = %#v, %v", review, err)
 	}
 }
@@ -571,17 +625,23 @@ func TestAutoStartNamesIneligibleReviewRuleCandidatesPerHead(t *testing.T) {
 merge_mode = "local"
 review = "quick"
 
+[profiles.author]
+kind = "claude"
+model = "model-a"
+
 [profiles.sonnet]
 kind = "claude"
 model = "model-a"
+args = ["--continue"]
 
 [profiles.sonnet-twin]
 kind = "claude"
 model = "model-a"
+args = ["--resume", "author-session"]
 
 [[dispatch]]
 type = "change"
-use = "sonnet"
+use = "author"
 
 [[dispatch]]
 type = "review"
@@ -597,7 +657,7 @@ auto_start = true
 `)
 	autoStartReviewExpectSkip(t, f, db, change)
 	notices := assertReviewAutoStartReadinessNotices(t, db, change, 1)
-	for _, want := range []string{"sonnet (Profile matches author launch 1; configured model matches author launch 1)", "sonnet-twin (configured model matches author launch 1)", fmt.Sprintf("posse review start t%d --profile <profile>", change.Seq)} {
+	for _, want := range []string{"sonnet (launch arguments contain 1 session selector(s))", "sonnet-twin (launch arguments contain 1 session selector(s))", fmt.Sprintf("posse review start t%d --profile <profile>", change.Seq)} {
 		if !strings.Contains(notices[0].Summary, want) {
 			t.Fatalf("auto-start readiness notice lacks %q: %s", want, notices[0].Summary)
 		}

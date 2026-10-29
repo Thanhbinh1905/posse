@@ -181,17 +181,17 @@ func TestCurrentReviewPassRequiresPassOnCurrentCandidate(t *testing.T) {
 			if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.review), "done", "x", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: tc.verdict, ReportSHA256: reportHash}); err != nil {
 				t.Fatal(err)
 			}
-			_, got, err := f.db.CurrentReviewPass(f.ctx, f.change, tc.candidate, nil)
+			_, got, err := f.db.CurrentReviewPass(f.ctx, f.change, tc.candidate)
 			if err != nil || got != tc.want {
 				t.Fatalf("current pass = %v, %v; want %v", got, err, tc.want)
 			}
 		})
 	}
 	f := newReviewVerdictFixture(t, old)
-	if _, _, err := f.db.CurrentReviewPass(f.ctx, f.change, old, nil); err != nil {
+	if _, _, err := f.db.CurrentReviewPass(f.ctx, f.change, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, got, _ := f.db.CurrentReviewPass(f.ctx, f.change, old, nil); got {
+	if _, got, _ := f.db.CurrentReviewPass(f.ctx, f.change, old); got {
 		t.Fatal("a Review Task without a verdict qualified")
 	}
 }
@@ -221,7 +221,7 @@ func TestReviewTargetsAndVerdictSurviveRebuild(t *testing.T) {
 	if err != nil || !SameReviewTargets(rebuilt, targets) {
 		t.Fatalf("rebuilt targets = %#v, %v", rebuilt, err)
 	}
-	if _, got, err := f.db.CurrentReviewPass(f.ctx, f.change, targets, nil); err != nil || !got {
+	if _, got, err := f.db.CurrentReviewPass(f.ctx, f.change, targets); err != nil || !got {
 		t.Fatalf("rebuilt pass current = %v, %v", got, err)
 	}
 }
@@ -258,7 +258,7 @@ func TestReviewEvidenceUsesOnePassForEveryWorkspaceMember(t *testing.T) {
 		{"heads from different passes", []ReviewTarget{reviewed[0], {Repository: "web", Commit: reviewShaA}}, false},
 		{"unreviewed Member", []ReviewTarget{{Repository: "docs", Commit: reviewShaA}}, false},
 	} {
-		evidence, err := f.db.ReviewEvidenceFor(f.ctx, f.change, tc.targets, nil)
+		evidence, err := f.db.ReviewEvidenceFor(f.ctx, f.change, tc.targets)
 		if err != nil || evidence.Complete != tc.want || evidence.Pass != tc.want {
 			t.Fatalf("%s: evidence=%+v err=%v, want complete=%v", tc.name, evidence, err, tc.want)
 		}

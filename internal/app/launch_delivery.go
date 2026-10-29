@@ -314,7 +314,7 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 	}
 	frozenCfg, resolution := frozenLaunchConfig(cfg, plan)
 	launchCtx := &axi.Context{Context: ctx}
-	launchErr := s.launchAdmittedTask(launchCtx, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false)
+	launchErr := s.launchAdmittedTask(launchCtx, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, false)
 	finishErr := db.FinishIntent(ctx, intent.ID, intent.ProcessID)
 	if launchErr != nil {
 		return false, launchErr
