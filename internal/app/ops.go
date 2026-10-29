@@ -308,7 +308,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGTERM)
 	defer signal.Stop(stopSignals)
-	parsed, err := parseArgs("watch", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}})
+	parsed, err := parseArgs("watch", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}, "status": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -326,6 +326,11 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	if parsed.Bool("repair") && (parsed.Flags["timeout"] != "" || parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("handoff") || parsed.Bool("quiet-routine") || parsed.Bool("poll-only")) {
 		return axi.Usage("--repair cannot be combined with Watch wait or delivery options")
 	}
+	if parsed.Bool("status") {
+		if parsed.Flags["destination"] == "" || len(parsed.Flags) != 2 {
+			return axi.Usage("--status requires --destination <adapter:session> and takes no other options")
+		}
+	}
 	db, home, err := s.openDB()
 	if err != nil {
 		return err
@@ -334,6 +339,17 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	project, err := s.projectForCWD(ctx.Context, db)
 	if err != nil {
 		return err
+	}
+	if parsed.Bool("status") {
+		holder, active, err := handoffWatchStatus(home, parsed.Flags["destination"])
+		if err != nil {
+			return err
+		}
+		state := "inactive"
+		if active {
+			state = "active"
+		}
+		return ctx.Print(handoffWatchResult(state, parsed.Flags["destination"], holder))
 	}
 	if parsed.Bool("repair") {
 		return s.repairWatch(ctx, db, home, project)
@@ -382,12 +398,12 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		return axi.Usage("--handoff cannot be combined with --ack or --requeue")
 	}
 	if parsed.Bool("handoff") {
-		lock, activePID, err := acquireHandoffWatchLock(home, parsed.Flags["destination"], os.Getpid())
+		lock, holder, err := acquireHandoffWatchLock(home, parsed.Flags["destination"], os.Getpid())
 		if err != nil {
 			return err
 		}
-		if activePID != 0 {
-			return axi.Failure("watch_already_active", fmt.Sprintf("A handoff Watch for %s is already active (pid %d).", parsed.Flags["destination"], activePID), false)
+		if lock == nil {
+			return ctx.Print(handoffWatchResult("already_active", parsed.Flags["destination"], holder))
 		}
 		defer func() {
 			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)

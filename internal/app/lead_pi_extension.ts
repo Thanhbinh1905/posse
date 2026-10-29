@@ -435,6 +435,11 @@ export default function (pi) {
 				choiceRevision++;
 				applyLowkey(lowkey);
 			}
+			// Another Watch owns this destination; back off instead of re-arming at once.
+			if (result.state === "already_active") {
+				retry(generation);
+				return;
+			}
 			if (result.state === "uncertain") {
 				const delivery = result.delivery;
 				if (delivery?.delivery_id && sessionHasReceipt(delivery) === true) {

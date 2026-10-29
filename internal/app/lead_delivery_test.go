@@ -828,7 +828,7 @@ func TestNoticeRulesForbidPollingForEveryDelivery(t *testing.T) {
 			t.Errorf("%s Notice rule = %q", delivery, rule)
 		}
 		if delivery == config.NoticeDeliveryWatch {
-			for _, expected := range []string{"--handoff", "CLAUDE_CODE_SESSION_ID", "without model turns", "`Read` on the output file", "exact Notice IDs", "receipt is accepted"} {
+			for _, expected := range []string{"--handoff", "CLAUDE_CODE_SESSION_ID", "without model turns", "`Read` on the output file", "exact Notice IDs", "receipt is accepted", "posse watch --status --destination \"claude:$CLAUDE_CODE_SESSION_ID\"", "`inactive`", "already_active"} {
 				if !strings.Contains(rule, expected) {
 					t.Errorf("Claude Lead watch rule omitted %q: %q", expected, rule)
 				}
