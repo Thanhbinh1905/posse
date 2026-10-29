@@ -48,7 +48,7 @@ html, body { height: 100%; margin: 0; }
 body {
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--bg);
   color: var(--text);
   font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -56,6 +56,7 @@ body {
 button { font: inherit; color: inherit; }
 a { color: var(--accent-2); }
 .mono { font-family: var(--mono); }
+.topbar { min-width: 0; }
 
 .strip {
   display: flex;
@@ -232,7 +233,7 @@ main {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.peek .body { max-height: 260px; overflow: hidden; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.peek .body { margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .peek dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
 .peek dt { color: var(--muted); }
 .peek dd { margin: 0; overflow-wrap: anywhere; }
@@ -246,7 +247,7 @@ main {
   align-items: center;
   min-width: 0;
   padding: 6px 14px;
-  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
   background: var(--surface);
   color: var(--muted);
   white-space: nowrap;
@@ -261,6 +262,7 @@ main {
   inset: 0;
   display: grid;
   place-items: center;
+  z-index: 3;
   padding: 16px;
   background: rgba(8, 14, 28, .45);
 }
@@ -282,6 +284,20 @@ main {
 .keys dt { white-space: nowrap; }
 .keys dd { margin: 0; color: var(--muted); }
 
+/* From 1061px the document scrolls, so every card stays reachable and the
+   header, column heads and peek stick; narrower, the five columns no longer
+   fit beside the peek and the lanes scroll inside the board instead. */
+@media (min-width: 1061px) {
+  html, body { height: auto; }
+  html { scroll-padding-top: var(--sticky); }
+  body { min-height: 100vh; overflow: visible; }
+  .topbar { position: sticky; top: 0; z-index: 2; }
+  main { align-items: start; }
+  .board { overflow-x: visible; }
+  .colheads { position: sticky; top: var(--top); z-index: 1; background: var(--bg); }
+  .lanes { overflow-y: visible; }
+  .peek { position: sticky; top: var(--top); height: calc(100vh - var(--top)); }
+}
 @media (max-width: 1300px) {
   main { grid-template-columns: minmax(0, 1fr) 280px; }
 }
@@ -294,7 +310,8 @@ main {
 </style>
 </head>
 <body>
-<header class="strip">
+<header class="topbar" id="topbar">
+<div class="strip">
   <div class="brand">
     <svg width="22" height="16" viewBox="0 0 132 110" aria-hidden="true"><path d="M38 55h37m0 0 26-34m-26 34 26 34" stroke="#78e4d3" stroke-width="9" fill="none" stroke-linecap="round"/><circle cx="20" cy="55" r="18" fill="#78e4d3"/><circle cx="110" cy="20" r="15" fill="#94aafb"/><circle cx="110" cy="90" r="15" fill="#94aafb"/></svg>
     <span>posse board</span><span class="project" id="project"></span>
@@ -303,6 +320,8 @@ main {
   <div class="spacer"></div>
   <input class="filter" id="filter" type="search" placeholder="/ filter" aria-label="Filter cards" autocomplete="off">
   <span class="helpkey"><kbd>?</kbd> keys</span>
+</div>
+<div class="activity"><span class="label">Activity</span><span class="items" id="activity"></span></div>
 </header>
 <main>
   <section class="board" aria-label="Board">
@@ -311,7 +330,6 @@ main {
   </section>
   <aside class="peek" id="peek" aria-live="polite"></aside>
 </main>
-<footer class="activity"><span class="label">Activity</span><span class="items" id="activity"></span></footer>
 
 <div class="overlay" id="confirm" hidden>
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
@@ -693,7 +711,7 @@ main {
         row("Labels", (issue.labels || []).map((label) => label.name).join(", ")),
         row("Age", shortAge(issue.createdAt, now)),
       ));
-      if (issue.body) nodes.push(h("h3", null, "Issue"), h("p", { class: "body" }, issue.body.slice(0, 1200)));
+      if (issue.body) nodes.push(h("h3", null, "Issue"), h("p", { class: "body" }, issue.body));
       nodes.push(h("div", { class: "hint" }, card.column === "ready" ? [h("kbd", null, "s"), " starts it · "] : null, h("kbd", null, "enter"), " opens the issue"));
     }
     $("peek").replaceChildren(...nodes);
@@ -852,6 +870,14 @@ main {
     event.preventDefault();
     action();
   });
+
+  const sticky = new ResizeObserver(() => {
+    const top = $("topbar").offsetHeight;
+    document.documentElement.style.setProperty("--top", top + "px");
+    document.documentElement.style.setProperty("--sticky", top + $("colheads").offsetHeight + "px");
+  });
+  sticky.observe($("topbar"));
+  sticky.observe($("colheads"));
 
   $("filter").addEventListener("input", () => { state.filter = $("filter").value.trim(); render(); });
   $("confirm-ok").addEventListener("click", confirmStart);

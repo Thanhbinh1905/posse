@@ -35,7 +35,7 @@ func boardFixture(t *testing.T) string {
 	posse := map[string]any{
 		"project": map[string]any{"name": "shop", "lead": "idle"},
 		"pool":    map[string]any{"used": 3, "max": 4},
-		"notices": []any{map[string]any{"id": 7, "task": "t5", "kind": "pr_checks_failed", "summary": "CI failed"}},
+		"notices": []any{map[string]any{"id": 7, "task": "t5", "kind": "pr_checks_failed", "summary": "CI failed on the race shard after the third retry of the merge queue"}},
 		"tasks": []any{
 			task("t1", "change", "queued", "#21", map[string]any{"after": []string{"t2:landed"}, "wait_reason": "waiting for t2:landed"}),
 			task("t2", "change", "working", "#20", nil),
@@ -67,7 +67,28 @@ func boardFixture(t *testing.T) string {
 		issue(25, "Merged days ago", "CLOSED", "", 400*time.Hour, 100*time.Hour),
 		issue(26, "Loose and stale", "OPEN", "", 40*24*time.Hour, 0),
 	}
+	return writeBoard(t, posse, issues)
+}
 
+// longLaneFixture fills one lane with 34 Ready issues, each with a body
+// longer than the peek, plus a few Running Tasks beside them.
+func longLaneFixture(t *testing.T) string {
+	t.Helper()
+	created := time.Now().Add(-5 * time.Hour).UTC().Format(time.RFC3339)
+	body := strings.Repeat("A long issue body line that wraps in the peek. ", 60) + "END-OF-BODY"
+	var issues, tasks []any
+	for number := 100; number < 134; number++ {
+		issues = append(issues, map[string]any{"number": number, "title": fmt.Sprintf("Ready issue %d with a title long enough to wrap", number), "state": "OPEN", "body": body, "url": fmt.Sprintf("https://example.test/issues/%d", number), "createdAt": created, "closedAt": nil, "labels": []any{}})
+	}
+	for id := 1; id <= 4; id++ {
+		tasks = append(tasks, map[string]any{"id": fmt.Sprintf("t%d", id), "type": "change", "state": "working", "title": fmt.Sprintf("Task t%d", id), "name": fmt.Sprintf("t%d", id), "created_at": created})
+	}
+	posse := map[string]any{"project": map[string]any{"name": "shop", "lead": "idle"}, "pool": map[string]any{"used": 4, "max": 4}, "tasks": tasks}
+	return writeBoard(t, posse, issues)
+}
+
+func writeBoard(t *testing.T, posse map[string]any, issues []any) string {
+	t.Helper()
 	dir := t.TempDir()
 	page, err := files.ReadFile("skills/posse-board/board.html")
 	if err != nil {
@@ -121,12 +142,13 @@ func runChrome(t *testing.T, chrome string, args ...string) []byte {
 }
 
 type boardRun struct {
-	Columns     map[string]string `json:"columns"`
-	Lanes       []string          `json:"lanes"`
-	PageScrolls bool              `json:"pageScrolls"`
-	Selected    string            `json:"selected"`
-	Dialog      bool              `json:"dialog"`
-	Prompts     []struct {
+	Columns      map[string]string `json:"columns"`
+	Lanes        []string          `json:"lanes"`
+	PageScrollsX bool              `json:"pageScrollsX"`
+	PageScrollsY bool              `json:"pageScrollsY"`
+	Selected     string            `json:"selected"`
+	Dialog       bool              `json:"dialog"`
+	Prompts      []struct {
 		Text    string `json:"text"`
 		Options struct {
 			Tag  string         `json:"tag"`
@@ -137,17 +159,31 @@ type boardRun struct {
 	Activity string `json:"activity"`
 }
 
-func runBoard(t *testing.T, chrome, url string, width, height int) boardRun {
+type layoutRun struct {
+	Cards       int      `json:"cards"`
+	Unreachable []string `json:"unreachable"`
+	Covered     []string `json:"covered"`
+	PeekClipped bool     `json:"peekClipped"`
+	PeekFull    bool     `json:"peekFull"`
+	Hidden      []string `json:"hidden"`
+}
+
+func runHarness(t *testing.T, chrome, url string, width, height int, query string, into any) {
 	t.Helper()
-	dom := runChrome(t, chrome, "--window-size=1600,1000", "--dump-dom", fmt.Sprintf("%s/harness.html?w=%d&h=%d&issue=23", url, width, height))
+	dom := runChrome(t, chrome, fmt.Sprintf("--window-size=%d,%d", max(width, 1600), height+100), "--dump-dom", fmt.Sprintf("%s/harness.html?w=%d&h=%d&%s", url, width, height, query))
 	match := regexp.MustCompile(`(?s)<pre id="result">(.*?)</pre>`).FindSubmatch(dom)
 	if match == nil || len(match[1]) == 0 {
 		t.Fatalf("harness wrote no result: %s", dom)
 	}
-	var run boardRun
-	if err := json.Unmarshal([]byte(html.UnescapeString(string(match[1]))), &run); err != nil {
+	if err := json.Unmarshal([]byte(html.UnescapeString(string(match[1]))), into); err != nil {
 		t.Fatalf("decode harness result %s: %v", match[1], err)
 	}
+}
+
+func runBoard(t *testing.T, chrome, url string, width, height int) boardRun {
+	t.Helper()
+	var run boardRun
+	runHarness(t, chrome, url, width, height, "issue=23", &run)
 	return run
 }
 
@@ -190,14 +226,44 @@ func TestBoardMapsFixtureDataAndQueuesOneStartPrompt(t *testing.T) {
 	}
 }
 
-func TestBoardHasNoPageScrollAtDesktopAndNarrowWidths(t *testing.T) {
+func TestBoardNeverScrollsThePageSideways(t *testing.T) {
 	chrome := chromeBinary(t)
 	server := httptest.NewServer(http.FileServer(http.Dir(boardFixture(t))))
 	defer server.Close()
-	for _, size := range [][2]int{{1440, 900}, {1240, 860}, {390, 844}} {
-		if run := runBoard(t, chrome, server.URL, size[0], size[1]); run.PageScrolls {
-			t.Errorf("page scrolls at %dx%d", size[0], size[1])
+	for _, size := range [][2]int{{1798, 1000}, {1440, 900}, {1240, 860}, {1061, 800}, {1000, 800}, {390, 844}} {
+		run := runBoard(t, chrome, server.URL, size[0], size[1])
+		if run.PageScrollsX {
+			t.Errorf("page scrolls sideways at %dx%d", size[0], size[1])
 		}
+		if size[0] <= 1060 && run.PageScrollsY {
+			t.Errorf("narrow page scrolls at %dx%d, want its lanes to scroll instead", size[0], size[1])
+		}
+	}
+}
+
+// TestBoardKeepsEveryCardOfALongLaneReachable checks the board the way the
+// Lavish layout audit does: a card counts as reachable only within the
+// document's scroll height, and nothing may paint over a card at load.
+func TestBoardKeepsEveryCardOfALongLaneReachable(t *testing.T) {
+	chrome := chromeBinary(t)
+	server := httptest.NewServer(http.FileServer(http.Dir(longLaneFixture(t))))
+	defer server.Close()
+	var run layoutRun
+	runHarness(t, chrome, server.URL, 1798, 1000, "layout=1", &run)
+	if run.Cards != 38 {
+		t.Fatalf("cards = %d, want 38", run.Cards)
+	}
+	if len(run.Unreachable) > 0 {
+		t.Errorf("cards below the document's scroll height: %v", run.Unreachable)
+	}
+	if len(run.Covered) > 0 {
+		t.Errorf("cards covered by another element at load: %v", run.Covered)
+	}
+	if run.PeekClipped || !run.PeekFull {
+		t.Errorf("peek body clipped = %v, shows the whole body = %v", run.PeekClipped, run.PeekFull)
+	}
+	if len(run.Hidden) > 0 {
+		t.Errorf("cards not fully in view after j selects them: %v", run.Hidden)
 	}
 }
 

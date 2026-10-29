@@ -23,13 +23,38 @@
   win.lavish = { queuePrompt: (text, options) => prompts.push({ text, options }), sendQueuedPrompts: () => { sends++; } };
   for (let i = 0; i < 50 && !doc.querySelector(".card"); i++) await sleep(100);
 
-  const columns = {};
-  doc.querySelectorAll(".card").forEach((card) => { columns[card.dataset.key] = card.dataset.column; });
-  const lanes = [...doc.querySelectorAll(".lane")].map((lane) => lane.dataset.lane);
-  const root = doc.scrollingElement;
-  const pageScrolls = root.scrollHeight > root.clientHeight || root.scrollWidth > root.clientWidth;
-
   const key = (name, target) => (target || doc).dispatchEvent(new win.KeyboardEvent("keydown", { key: name, bubbles: true }));
+  const root = doc.scrollingElement;
+  const cards = [...doc.querySelectorAll(".card")];
+
+  if (params.has("layout")) {
+    // A card is covered when a sample point inside the viewport shows
+    // something else, and in full view when every sample point shows it.
+    const samples = (rect) => [0.2, 0.5, 0.8].flatMap((x) => [0.2, 0.5, 0.8].map((y) => [rect.left + rect.width * x, rect.top + rect.height * y]));
+    const inside = ([x, y]) => x >= 0 && y >= 0 && x < win.innerWidth && y < win.innerHeight;
+    const shows = (card, point) => card.contains(doc.elementFromPoint(...point));
+    const unreachable = cards.filter((card) => card.getBoundingClientRect().bottom + win.scrollY > root.scrollHeight).map((card) => card.dataset.key);
+    const covered = cards.filter((card) => samples(card.getBoundingClientRect()).filter(inside).some((point) => !shows(card, point))).map((card) => card.dataset.key);
+    const body = doc.querySelector(".peek .body");
+    const peekClipped = !body || body.scrollHeight > body.clientHeight + 1;
+    const peekFull = !!body && body.textContent.endsWith("END-OF-BODY");
+    const hidden = [];
+    for (let i = 0; i < cards.length; i++) {
+      const card = doc.querySelector(".card.selected");
+      if (!samples(card.getBoundingClientRect()).every((point) => inside(point) && shows(card, point))) hidden.push(card.dataset.key);
+      key("j");
+      if (doc.querySelector(".card.selected") === card) break;
+    }
+    document.getElementById("result").textContent = JSON.stringify({ cards: cards.length, unreachable, covered, peekClipped, peekFull, hidden });
+    return;
+  }
+
+  const columns = {};
+  cards.forEach((card) => { columns[card.dataset.key] = card.dataset.column; });
+  const lanes = [...doc.querySelectorAll(".lane")].map((lane) => lane.dataset.lane);
+  const pageScrollsX = root.scrollWidth > root.clientWidth;
+  const pageScrollsY = root.scrollHeight > root.clientHeight;
+
   const filter = doc.getElementById("filter");
   key("/");
   filter.value = params.get("issue");
@@ -44,7 +69,7 @@
   key("Enter");
   const activity = doc.getElementById("activity").textContent;
 
-  document.getElementById("result").textContent = JSON.stringify({ columns, lanes, pageScrolls, selected, dialog, prompts, sends, activity });
+  document.getElementById("result").textContent = JSON.stringify({ columns, lanes, pageScrollsX, pageScrollsY, selected, dialog, prompts, sends, activity });
 })();
 </script>
 </body>
