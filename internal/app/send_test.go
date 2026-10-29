@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1134,5 +1135,94 @@ func TestSendInterruptRetriesAbortWhenHarnessStartsQueuedTurn(t *testing.T) {
 	}
 	if aborts != 2 {
 		t.Fatalf("abort key sequences sent = %d, want 2", aborts)
+	}
+}
+
+func TestSendInterruptReportsInstructionsTheAbortedTurnLeftUnfinished(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	deliver := func(body string, at int64) int64 {
+		t.Helper()
+		id, err := db.QueueMessage(ctx, taskID, body, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claimed, err := db.ClaimMessage(ctx, id, "delivery", at, 0); err != nil || !claimed {
+			t.Fatalf("claim message = %v, %v", claimed, err)
+		}
+		if err := db.MarkMessageSubmitting(ctx, id, "delivery"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.MarkClaimedMessageDelivered(ctx, id, "delivery", at); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	now := time.Now().UnixMilli()
+	finished := deliver("Already answered", now-3000)
+	if _, err := db.ExecContext(ctx, `INSERT INTO signals(task_id,verb,note,data_json,at) VALUES(?,?,?,?,?)`, taskID, "done", "answered", "{}", now-2000); err != nil {
+		t.Fatal(err)
+	}
+	aborted := deliver("Run the slow suite", now-1000)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	fake.BeforeCall = func(method string) {
+		if method == "agent.send_keys" {
+			fake.SnapshotValue.Panes[0].AgentStatus = "idle"
+		}
+	}
+	service := testService(home, fake)
+	t.Chdir(repo)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"send", "t1", "--interrupt", "Fresh redirect"}); code != 0 || !strings.Contains(output.String(), "delivered_after_interrupt") {
+		t.Fatalf("send --interrupt exit=%d output=%s", code, output.String())
+	}
+
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notices, err := db.Notices(ctx, project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "instruction_aborted" {
+			reports = append(reports, notice)
+		}
+	}
+	if len(reports) != 1 {
+		t.Fatalf("instruction_aborted Notices = %+v, want one naming #%d", notices, aborted)
+	}
+	summary := reports[0].Summary
+	if !strings.Contains(summary, fmt.Sprintf("#%d", aborted)) || strings.Contains(summary, fmt.Sprintf("#%d", finished)) || !strings.Contains(reports[0].DataJSON, "Run the slow suite") {
+		t.Fatalf("instruction_aborted Notice = %+v, want only #%d with its instruction", reports[0], aborted)
 	}
 }

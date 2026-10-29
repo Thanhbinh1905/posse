@@ -2591,8 +2591,12 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, project store.Pr
 		exceptID = messageID
 	}
 	releaseErr := db.ReleaseMessageClaims(ctx.Context, task.ID, token, exceptID)
-	if deliveryErr != nil || readErr != nil || releaseErr != nil {
-		return errors.Join(deliveryErr, readErr, releaseErr, s.regenerateProjects(ctx.Context, db))
+	var reportErr error
+	if outcome.Interrupted {
+		reportErr = reportAbortedInstructions(ctx.Context, db, project, task, messageID)
+	}
+	if deliveryErr != nil || readErr != nil || releaseErr != nil || reportErr != nil {
+		return errors.Join(deliveryErr, readErr, releaseErr, reportErr, s.regenerateProjects(ctx.Context, db))
 	}
 	state := message.Status
 	if state == "claimed" {
@@ -2641,6 +2645,34 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, project store.Pr
 		{Key: "abort_keys", Value: outcome.Keys},
 		{Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}},
 	})
+}
+
+// Posse does not resend aborted instructions because the redirect may supersede them.
+func reportAbortedInstructions(ctx context.Context, db *store.DB, project store.Project, task store.Task, redirectID int64) error {
+	messages, err := db.UnfinishedTaskMessages(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	var instructions []map[string]any
+	for _, message := range messages {
+		if message.ID == redirectID {
+			continue
+		}
+		ids = append(ids, fmt.Sprintf("#%d", message.ID))
+		instructions = append(instructions, map[string]any{"message_id": message.ID, "instruction": message.Body})
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(map[string]any{"messages": instructions})
+	if err != nil {
+		return err
+	}
+	summary := fmt.Sprintf("send --interrupt aborted %s's turn before it signaled completion of instructions %s. Posse will not resend them; inspect with `posse peek %s` and resend any still needed with `posse send %s <message>`.",
+		taskIDString(task.Seq), strings.Join(ids, ", "), taskIDString(task.Seq), taskIDString(task.Seq))
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "instruction_aborted", Summary: summary, DataJSON: string(data)})
+	return err
 }
 
 func (s *Service) relaunch(ctx *axi.Context, args []string) error {

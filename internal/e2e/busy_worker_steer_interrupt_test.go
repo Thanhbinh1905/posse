@@ -219,6 +219,19 @@ func TestBusyPiSteerPastQueuedMessageAndInterruptE2E(t *testing.T) {
 	if _, err := os.Stat(blockedForge); !os.IsNotExist(err) {
 		t.Fatalf("posse send --interrupt waited for or started the blocked PR refresh: stat err=%v", err)
 	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aborted []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "instruction_aborted" {
+			aborted = append(aborted, notice)
+		}
+	}
+	if len(aborted) != 1 || !strings.Contains(aborted[0].DataJSON, "Wait until the current turn ends") || strings.Contains(aborted[0].DataJSON, "Stop and redirect this turn") {
+		t.Fatalf("send --interrupt did not report the instructions its abort left unfinished: %#v", aborted)
+	}
 	remaining, err := fixture.db.OldestQueuedMessage(context.Background(), task.ID)
 	if err != nil || remaining.ID != claimed.ID || remaining.Body != "Keep this queued" {
 		t.Fatalf("interrupt reordered or duplicated a queued message: %#v, %v", remaining, err)
