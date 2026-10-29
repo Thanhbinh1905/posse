@@ -22,6 +22,7 @@ func reviewEvidenceFixture(t *testing.T, review string) *prLifecycleFixture {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", review)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "false")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	return f
 }

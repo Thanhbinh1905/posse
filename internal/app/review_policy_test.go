@@ -137,8 +137,8 @@ func TestLocalReviewRecheckedBeforeMerge(t *testing.T) {
 		t.Fatalf("merge: %d %s", code, out)
 	}
 	before := gitTest(t, f.repo, "rev-parse", "main")
-	// Evidence becomes ineligible even though the branch still equals the recorded merge head.
-	if _, err := f.db.NextTaskLaunchWithIdentity(context.Background(), f.task.ID, "reviewer", "model-b", true); err != nil {
+	// Evidence disappears even though the branch still equals the recorded merge head.
+	if _, err := f.db.ExecContext(context.Background(), `DELETE FROM review_verdicts`); err != nil {
 		t.Fatal(err)
 	}
 	code, out, _ := f.run("merge", "t1", "--execute", "--user-approved", "Merge this candidate")

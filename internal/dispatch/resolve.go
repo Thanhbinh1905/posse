@@ -60,6 +60,9 @@ func Resolve(cfg config.Config, taskType, requested string) (Resolution, error) 
 	if requested != "" {
 		return resolve(requested, "--profile "+requested)
 	}
+	if taskType == "review" && cfg.ReviewLoop.Profile != "" {
+		return resolve(cfg.ReviewLoop.Profile, "review_loop.profile")
+	}
 	var typedMatches, genericMatches []config.Rule
 	for _, rule := range cfg.Dispatch {
 		if rule.Type == taskType {

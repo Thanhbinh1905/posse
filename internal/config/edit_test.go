@@ -139,7 +139,7 @@ func TestSetDispatchRejectsFieldsItCannotWrite(t *testing.T) {
 }
 
 func TestSchemaDrivesUserOnlyAndNewKeys(t *testing.T) {
-	for _, key := range []string{"review_loop.enabled", "review_loop.max_rounds", "review_loop.block_at", "review_loop.auto_start", "review_loop.docs", "review_loop.guidance", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled", "pool.setup", "kinds.claude.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
+	for _, key := range []string{"review_loop.enabled", "review_loop.max_rounds", "review_loop.block_at", "review_loop.auto_start", "review_loop.docs", "review_loop.guidance", "review_loop.profile", "ci_loop.max_fix_rounds", "ci_loop.rerun_cancelled", "pool.setup", "kinds.claude.lead_auto_approve", "autonomy.review", "autonomy.merge", "autonomy.yolo"} {
 		if !IsUserOnly(key) {
 			t.Errorf("%s is not User-only", key)
 		}

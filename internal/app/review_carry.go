@@ -52,17 +52,13 @@ func ensureReviewCarry(ctx context.Context, db *store.DB, project store.Project,
 	if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", targetSHA, target.Commit); err != nil {
 		return nil
 	}
-	qualifies, err := reviewVerdictQualifies(ctx, db, task)
-	if err != nil {
-		return err
-	}
 	verdicts, err := db.ReviewVerdictsFor(ctx, task.ID)
 	if err != nil {
 		return err
 	}
 	var passedHead string
 	for _, verdict := range verdicts {
-		if verdict.Verdict != store.ReviewPass || len(verdict.Targets) != 1 || verdict.Targets[0].Repository != target.Repository || !qualifies(verdict) {
+		if verdict.Verdict != store.ReviewPass || len(verdict.Targets) != 1 || verdict.Targets[0].Repository != target.Repository {
 			continue
 		}
 		passedHead = verdict.Targets[0].Commit

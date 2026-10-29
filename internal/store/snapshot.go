@@ -1209,7 +1209,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("invalid launch number %d in snapshot for t%d", identity.LaunchNumber, task.Seq)
 			}
 			modelKnown := identity.ModelKnown && strings.TrimSpace(identity.ConfiguredModel) != ""
-			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision,start_head) VALUES(?,?,?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown, identity.PlanRevision, identity.StartHead); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) VALUES(?,?,?,?,?,?)`, task.ID, identity.LaunchNumber, identity.Profile, identity.ConfiguredModel, modelKnown, identity.PlanRevision); err != nil {
 				return err
 			}
 		}

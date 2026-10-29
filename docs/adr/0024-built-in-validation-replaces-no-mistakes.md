@@ -28,7 +28,7 @@ The guidance the User refers to is "How the Claude Code team does code review" (
 
 no-mistakes (studied at v1.50.0, commit `c4bc34b`) already bounds fix attempts per step and defaults the review step to zero automatic fixes (`internal/config/config.go:1656-1665`). Its rereview is session-free, so the rereviewer is never the session that prescribed fixes, and pipeline fixes are reviewed as author code (`internal/pipeline/steps/review.go:295-305`). Unclassified findings default to `ask-user` (`internal/types/findings.go:355-363`). It differs from the four rules in three ways. A fix-mode rereview diffs the whole branch against its base again (`internal/pipeline/steps/review.go:118-130`). Finding IDs are positional (`<prefix>-<n>`, `internal/types/findings.go:118-127`), so nothing identifies a finding across rounds. Findings are flat per file and line, not grouped by cause.
 
-Posse already binds a Review Verdict to the exact Change revision it examined and requires the Reviewer launch to differ from every author launch (ADR 0020). It requires a PR head to contain the current target before final CI and merge, and asks the Worker to merge, not rebase, `origin/<target>` into the Task branch (ADR 0019). In practice only P0/P1 defects introduced by the change block a merge; P2/P3 findings become follow-up issues. Every Review Task today reviews the full candidate, every finding is free text in a Report, and nothing limits how many Review Tasks a Change Task receives.
+Posse already binds a Review Verdict to the exact Change revision it examined (ADR 0020). It requires a PR head to contain the current target before final CI and merge, and asks the Worker to merge, not rebase, `origin/<target>` into the Task branch (ADR 0019). In practice only P0/P1 defects introduced by the change block a merge; P2/P3 findings become follow-up issues. Every Review Task today reviews the full candidate, every finding is free text in a Report, and nothing limits how many Review Tasks a Change Task receives.
 
 The User then set the goal:
 
@@ -130,7 +130,7 @@ Successive Review Tasks of one Change Task become numbered **Review Rounds** ove
 
 #### Roles, binding and freshness
 
-- Every round is a fresh Review Task with the existing ADR 0020 launch identity rule; the Reviewer never fixes, and the Change Worker (the author) applies every fix. Fixes are author code in the next delta.
+- Every round is a fresh Review Task in its own agent session; the Reviewer never fixes, and the Change Worker (the author) applies every fix. Fixes are author code in the next delta.
 - Admission binds each round to its scope base, head, contained target commit, baseline tree and delta digest; the Reviewer cannot choose them.
 - A `pass` binds only its head. A clean target merge after a pass is carried forward without a round when Posse proves that `H`'s tree equals the conflict-free `merge-tree` of the passed head and `T`. The carry is a separate insert-only record. It does not rebind the verdict, so ADR 0020's rule that no operation rebinds a verdict is unchanged. Any other new commit, including a hand-resolved conflict or a CI fix, needs a new round or a cap Decision. This matches the guidance that an approval covers one commit.
 - ADR 0019 is unchanged: rounds may review a behind head, and Merge still requires the current target. Carry-forward means the target merges ADR 0019 demands do not consume rounds.

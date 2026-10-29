@@ -196,59 +196,73 @@ func TestReviewResumeArgsRefuseUnknownSessionOrModelOverrides(t *testing.T) {
 	}
 }
 
-func TestReviewIdentityRequiresDistinctKnownProfileAndModel(t *testing.T) {
-	author := []store.TaskLaunchIdentity{
-		{TaskID: 10, LaunchNumber: 1, Profile: "author-a", ConfiguredModel: "model-a", ModelKnown: true},
-		{TaskID: 10, LaunchNumber: 2, Profile: "author-b", ConfiguredModel: "model-b", ModelKnown: true},
+func TestReviewStartAllowsAuthorProfileAndModelInFreshSession(t *testing.T) {
+	fixture := newStartFixture(t)
+	configureReviewIdentityFixture(t, fixture, "")
+	seedReviewAuthor(t, fixture)
+	output, code := startReviewIdentityTask(t, fixture, "--profile", "author")
+	if code != 0 {
+		t.Fatalf("review with the author Profile and model was refused: code=%d output=%s", code, output)
 	}
-	for _, test := range []struct {
-		name     string
-		reviewer store.TaskLaunchIdentity
-		known    bool
-		want     bool
-		contains string
-	}{
-		{name: "independent", reviewer: store.TaskLaunchIdentity{Profile: "review", ConfiguredModel: "model-c", ModelKnown: true}, known: true, want: true},
-		{name: "same profile", reviewer: store.TaskLaunchIdentity{Profile: "author-a", ConfiguredModel: "model-c", ModelKnown: true}, known: true, contains: "Profile matches author launch 1"},
-		{name: "same model despite different profile", reviewer: store.TaskLaunchIdentity{Profile: "review", ConfiguredModel: "model-b", ModelKnown: true}, known: true, contains: "configured model matches author launch 2"},
-		{name: "unknown reviewer model", reviewer: store.TaskLaunchIdentity{Profile: "review", ConfiguredModel: "model-c"}, known: true, contains: "Review Task has no determinable configured model"},
-		{name: "unknown author model", reviewer: store.TaskLaunchIdentity{Profile: "review", ConfiguredModel: "model-c", ModelKnown: true}, known: false, contains: "launch-identity history is incomplete"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			check := compareReviewIdentity(author, test.known, test.reviewer)
-			if check.Eligible != test.want || (test.contains != "" && !strings.Contains(check.Reason, test.contains)) {
-				t.Fatalf("comparison = %#v, want eligible=%t and reason containing %q", check, test.want, test.contains)
-			}
-		})
-	}
+	assertReviewLaunch(t, fixture, "claude", "author", "model-a")
 }
 
-func TestReviewStartRefusesSameConfiguredIdentityWithComparedEvidence(t *testing.T) {
+func TestReviewStartUsesReviewLoopProfile(t *testing.T) {
 	fixture := newStartFixture(t)
-	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n")
+	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n\n[review_loop]\nprofile = \"reviewer\"\n")
 	seedReviewAuthor(t, fixture)
+	output, code := startReviewIdentityTask(t, fixture)
+	if code != 0 || !strings.Contains(output, "profile: reviewer") {
+		t.Fatalf("review_loop.profile was not used: code=%d output=%s", code, output)
+	}
+	assertReviewLaunch(t, fixture, "pi", "reviewer", "model-b")
+}
+
+func startReviewIdentityTask(t *testing.T, fixture startFixture, args ...string) (string, int) {
+	t.Helper()
 	brief := filepath.Join(filepath.Dir(fixture.brief), "review-brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: review\ntitle: Review launch identity\ndone_when: the author change is independently reviewed\nreview_of: t1\n---\nReview the candidate.\n"), 0o600); err != nil {
+	if err := os.WriteFile(brief, []byte("---\ntype: review\ntitle: Review launch identity\ndone_when: the author change is reviewed\nreview_of: t1\n---\nReview the candidate.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	output := &bytes.Buffer{}
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = output, output
-	code := cli.Run([]string{"start", "--brief", brief, "--name", "review-launch-identity", "--profile", "author"})
-	if code != 1 || !strings.Contains(output.String(), "review_identity_ineligible") || !strings.Contains(output.String(), "Profile matches author launch 1") || !strings.Contains(output.String(), "Profile=author model=") || !strings.Contains(output.String(), "model-a") {
-		t.Fatalf("same-identity review was not refused with comparison evidence: code=%d output=%s", code, output.String())
+	code := cli.Run(append([]string{"start", "--brief", brief, "--name", "review-launch-identity"}, args...))
+	return output.String(), code
+}
+
+// assertReviewLaunch checks that the Review Task started a fresh agent session
+// and recorded the expected launch identity.
+func assertReviewLaunch(t *testing.T, fixture startFixture, kind, profile, model string) {
+	t.Helper()
+	freshSession := false
+	for _, call := range fixture.fake.Calls {
+		if call.Method != "agent.start" || call.Params["kind"] != kind {
+			continue
+		}
+		args := call.Params["args"].([]string)
+		freshSession = !strings.Contains(strings.Join(args, " "), "author-session")
+		for _, arg := range args {
+			if arg == "--session" || arg == "--resume" || arg == "resume" {
+				freshSession = false
+			}
+		}
 	}
-	if fixture.fake.CallCount("agent.start") != 0 {
-		t.Fatalf("ineligible review started an agent: %#v", fixture.fake.Calls)
+	if !freshSession {
+		t.Fatalf("Review Task reused the Change Task session: %#v", fixture.fake.Calls)
 	}
 	db, err := store.Open(fixture.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	tasks, err := db.Tasks(context.Background(), fixture.project.ID, true)
-	if err != nil || len(tasks) != 1 {
-		t.Fatalf("refused review created a Task: %#v, %v", tasks, err)
+	task, err := db.Task(context.Background(), fixture.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities, err := db.TaskLaunchIdentities(context.Background(), task.ID)
+	if err != nil || task.Launches != 1 || len(identities) != 1 || identities[0].TaskID != task.ID || identities[0].LaunchNumber != 1 || identities[0].Profile != profile || identities[0].ConfiguredModel != model || !identities[0].ModelKnown {
+		t.Fatalf("Review Task launch identity = %#v task=%#v, %v", identities, task, err)
 	}
 }
 
@@ -309,58 +323,6 @@ func TestReviewRelaunchRejectsProfileResumeOverrideBeforeHerdr(t *testing.T) {
 	}
 }
 
-func TestReviewStartRecordsAndShowsDistinctConfiguredIdentities(t *testing.T) {
-	fixture := newStartFixture(t)
-	configureReviewIdentityFixture(t, fixture, "[profiles.reviewer]\nkind = \"pi\"\nmodel = \"model-b\"\n")
-	seedReviewAuthor(t, fixture)
-	brief := filepath.Join(filepath.Dir(fixture.brief), "review-brief.md")
-	if err := os.WriteFile(brief, []byte("---\ntype: review\ntitle: Review launch identity\ndone_when: the author change is independently reviewed\nreview_of: t1\n---\nReview the candidate.\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	output := &bytes.Buffer{}
-	cli := fixture.service.CLI()
-	cli.Out, cli.ErrOut = output, output
-	code := cli.Run([]string{"start", "--brief", brief, "--name", "review-launch-identity", "--profile", "reviewer"})
-	if code != 0 || !strings.Contains(output.String(), "review_identity") || !strings.Contains(output.String(), `model-b`) {
-		t.Fatalf("independent review launch failed or omitted comparison: code=%d output=%s", code, output.String())
-	}
-	freshSession := false
-	for _, call := range fixture.fake.Calls {
-		if call.Method != "agent.start" || call.Params["kind"] != "pi" {
-			continue
-		}
-		args := call.Params["args"].([]string)
-		freshSession = !strings.Contains(strings.Join(args, " "), "author-session")
-		for _, arg := range args {
-			if arg == "--session" || arg == "--resume" || arg == "resume" {
-				freshSession = false
-			}
-		}
-	}
-	if !freshSession {
-		t.Fatalf("Review Task reused the Change Task session: %#v", fixture.fake.Calls)
-	}
-	db, err := store.Open(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	task, err := db.Task(context.Background(), fixture.project.ID, "t2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	identities, err := db.TaskLaunchIdentities(context.Background(), task.ID)
-	if err != nil || task.Launches != 1 || len(identities) != 1 || identities[0].TaskID != task.ID || identities[0].LaunchNumber != 1 || identities[0].Profile != "reviewer" || identities[0].ConfiguredModel != "model-b" || !identities[0].ModelKnown {
-		t.Fatalf("Review Task launch identity = %#v task=%#v, %v", identities, task, err)
-	}
-	show := &bytes.Buffer{}
-	showCLI := fixture.service.CLI()
-	showCLI.Out, showCLI.ErrOut = show, show
-	if code := showCLI.Run([]string{"show", "t2"}); code != 0 || !strings.Contains(show.String(), "eligible: true") || !strings.Contains(show.String(), "model-a") || !strings.Contains(show.String(), "model-b") {
-		t.Fatalf("Review Task show omitted its identity comparison: code=%d output=%s", code, show.String())
-	}
-}
-
 func configureReviewIdentityFixture(t *testing.T, fixture startFixture, reviewerProfile string) {
 	t.Helper()
 	configText := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.author]\nkind = \"claude\"\nmodel = \"model-a\"\n\n" + reviewerProfile + "\n[dispatch.default]\nuse = \"author\"\n"
@@ -388,91 +350,5 @@ func seedReviewAuthor(t *testing.T, fixture startFixture) {
 	// Review admission pins a completed Change revision.
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done' WHERE id=?`, authorID); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestReviewAuthorLaunchesIgnoreLaunchesThatLeftNoCommit(t *testing.T) {
-	const base, change = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
-	type launch struct{ profile, model, head string }
-	for _, test := range []struct {
-		name        string
-		launches    []launch
-		wantAuthors []string
-		wantKnown   bool
-	}{
-		{name: "commit-less launches before the author", launches: []launch{{"opus", "opus", base}, {"opus", "opus", base}, {"opus", "opus", base}, {"sonnet", "sonnet", base}, {"sonnet", "sonnet", change}}, wantAuthors: []string{"sonnet", "sonnet"}, wantKnown: true},
-		{name: "launch that committed", launches: []launch{{"opus", "opus", base}, {"sonnet", "sonnet", change}}, wantAuthors: []string{"opus", "sonnet"}, wantKnown: true},
-		{name: "unrecorded head", launches: []launch{{"opus", "opus", ""}, {"sonnet", "sonnet", ""}}, wantAuthors: []string{"opus", "sonnet"}, wantKnown: true},
-		{name: "dirty next launch", launches: []launch{{"opus", "opus", base}, {"sonnet", "sonnet", ""}}, wantAuthors: []string{"opus", "sonnet"}, wantKnown: true},
-		{name: "last launch", launches: []launch{{"sonnet", "sonnet", base}, {"opus", "opus", change}}, wantAuthors: []string{"sonnet", "opus"}, wantKnown: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newStartFixture(t)
-			db, err := store.Open(fixture.home)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close()
-			ctx := context.Background()
-			changeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Author change", ShortName: "author", MergeMode: "local", Branch: "posse/author", BaseRef: "main"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, launch := range test.launches {
-				if _, err := db.NextTaskLaunchFromHead(ctx, changeID, launch.profile, launch.model, true, launch.head); err != nil {
-					t.Fatal(err)
-				}
-			}
-			task, err := db.TaskByID(ctx, fixture.project.ID, changeID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			authors, known, err := reviewAuthorLaunches(ctx, db, task)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var profiles []string
-			for _, author := range authors {
-				profiles = append(profiles, author.Profile)
-			}
-			if known != test.wantKnown || !reflect.DeepEqual(profiles, test.wantAuthors) {
-				t.Fatalf("author launches = %v known=%t, want %v known=%t", profiles, known, test.wantAuthors, test.wantKnown)
-			}
-		})
-	}
-}
-
-func TestReviewAuthorLaunchesFailClosedOnIncompleteHistory(t *testing.T) {
-	fixture := newStartFixture(t)
-	db, err := store.Open(fixture.home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-	changeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Author change", ShortName: "author", MergeMode: "local", Branch: "posse/author", BaseRef: "main"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	const head = "1111111111111111111111111111111111111111"
-	for range 2 {
-		if _, err := db.NextTaskLaunchFromHead(ctx, changeID, "opus", "opus", true, head); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM task_launch_identities WHERE task_id=? AND launch_number=2`, changeID); err != nil {
-		t.Fatal(err)
-	}
-	task, err := db.TaskByID(ctx, fixture.project.ID, changeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	authors, known, err := reviewAuthorLaunches(ctx, db, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	check := compareReviewIdentity(authors, known, store.TaskLaunchIdentity{Profile: "sonnet", ConfiguredModel: "sonnet", ModelKnown: true})
-	if known || check.Eligible || len(authors) != 1 {
-		t.Fatalf("incomplete history: authors=%#v known=%t check=%#v, want unknown and ineligible", authors, known, check)
 	}
 }

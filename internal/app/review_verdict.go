@@ -150,19 +150,6 @@ func shortSHA(sha string) string {
 	return sha
 }
 
-// reviewVerdictQualifies applies the Reviewer identity rule to a recorded
-// verdict: the Reviewer launch that produced it must still differ from every
-// author launch of the Change Task.
-func reviewVerdictQualifies(ctx context.Context, db *store.DB, change store.Task) (func(store.ReviewVerdict) bool, error) {
-	launches, known, err := reviewAuthorLaunches(ctx, db, change)
-	if err != nil {
-		return nil, err
-	}
-	return func(verdict store.ReviewVerdict) bool {
-		return compareReviewIdentity(launches, known, verdict.Reviewer).Eligible
-	}, nil
-}
-
 // currentReviewPass reports the pass verdict, if any, that qualifies the Change
 // Task's present candidate for quick review.
 func currentReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task) (store.ReviewVerdict, bool, error) {
@@ -175,11 +162,7 @@ func currentReviewPass(ctx context.Context, db *store.DB, project store.Project,
 }
 
 func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candidate []store.ReviewTarget) (store.ReviewVerdict, bool, error) {
-	qualifies, err := reviewVerdictQualifies(ctx, db, change)
-	if err != nil {
-		return store.ReviewVerdict{}, false, err
-	}
-	return db.CurrentReviewPass(ctx, change.ID, candidate, qualifies)
+	return db.CurrentReviewPass(ctx, change.ID, candidate)
 }
 
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
@@ -195,11 +178,7 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 	if err != nil {
 		return err
 	}
-	qualifies, err := reviewVerdictQualifies(ctx, db, change)
-	if err != nil {
-		return err
-	}
-	evidence, err := db.ReviewEvidenceFor(ctx, change.ID, targets, qualifies)
+	evidence, err := db.ReviewEvidenceFor(ctx, change.ID, targets)
 	if err != nil {
 		return err
 	}
@@ -207,7 +186,7 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 		if err := ensureReviewCarry(ctx, db, project, change, targets); err != nil {
 			return err
 		}
-		evidence, err = db.ReviewEvidenceFor(ctx, change.ID, targets, qualifies)
+		evidence, err = db.ReviewEvidenceFor(ctx, change.ID, targets)
 		if err != nil {
 			return err
 		}
@@ -222,7 +201,7 @@ func requireReviewPass(ctx context.Context, db *store.DB, project store.Project,
 	}
 	help := "Dispatch a Review Task for " + id + " with `review_of: " + id + "` and wait for a `pass` verdict; only an explicit User choice may select lighter review"
 	if plan, err := change.AdmittedPlan(); err == nil && requireFrozenReviewLoop(plan) == nil {
-		help = "Run `posse review start " + id + " --profile <profile>` with a Profile independent of every author launch and wait for a `pass` verdict; only an explicit User choice may select lighter review"
+		help = "Run `posse review start " + id + " --profile <profile>` and wait for a `pass` verdict; only an explicit User choice may select lighter review"
 	}
 	return axi.Failure("review_required", "Task "+id+" has no passing Review, proved carry, or exact-head User disposition for "+revision, false, help)
 }

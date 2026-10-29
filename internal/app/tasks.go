@@ -265,10 +265,6 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	var reviewsTaskID int64
 	var reviewedTask *store.Task
 	var reviewTargets []store.ReviewTarget
-	var reviewIdentityDetails map[string]any
-	var reviewLaunchIdentity store.TaskLaunchIdentity
-	var authorLaunchIdentities []store.TaskLaunchIdentity
-	var authorIdentityHistoryKnown bool
 	if brief.Type == "review" {
 		reviewed, err := s.currentTask(ctx.Context, db, project, brief.ReviewOf)
 		if err != nil {
@@ -308,21 +304,13 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			baseRef = candidate.RefName
 		}
 		reviewedTask = &reviewed
-		authorLaunchIdentities, authorIdentityHistoryKnown, err = reviewAuthorLaunches(ctx.Context, db, reviewed)
-		if err != nil {
-			return err
-		}
 		kindConfig, found := cfg.Kinds[resolution.Resolved.Kind]
 		if !found {
 			return axi.Failure("config_invalid", "Review Task Profile uses unknown agent kind "+resolution.Resolved.Kind, false)
 		}
-		reviewLaunchIdentity = configuredLaunchIdentity(resolution.Profile, resolution.Resolved, kindConfig, workerAgentArgs(resolution.Resolved, kindConfig, ""))
-		launchRefusal := reviewSessionOverrideReason(resolution.Resolved.Kind, workerAgentArgs(resolution.Resolved, kindConfig, ""))
-		if check := compareReviewIdentity(authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity); !check.Eligible || launchRefusal != "" {
-			return reviewIdentityFailure(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity, launchRefusal)
+		if refusal := reviewSessionOverrideReason(resolution.Resolved.Kind, workerAgentArgs(resolution.Resolved, kindConfig, "")); refusal != "" {
+			return reviewSessionFailure(resolution.Profile, refusal)
 		}
-		reviewLaunchIdentity.LaunchNumber = 1
-		reviewIdentityDetails = reviewIdentityResult(reviewed, authorLaunchIdentities, authorIdentityHistoryKnown, reviewLaunchIdentity)
 	}
 	members, workspaceMode, err := s.planTaskMembersWithChoice(ctx.Context, db, project, cfg, brief, reviewedTask, choice != nil)
 	if err != nil {
@@ -561,10 +549,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	} else if admitted != nil {
 		plan = *admitted
 	}
-	return s.launchAdmittedTask(ctx, db, home, project, cfg, task, taskID, sequence, intent, plan, brief, briefData, resolution, mode, name, members, generated, reviewIdentityDetails, true)
+	return s.launchAdmittedTask(ctx, db, home, project, cfg, task, taskID, sequence, intent, plan, brief, briefData, resolution, mode, name, members, generated, true)
 }
 
-func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, taskID int64, sequence int, intent store.Intent, plan taskplan.Plan, brief dispatch.Brief, briefData []byte, resolution dispatch.Resolution, mode, name string, members []taskMember, generated *generatedReviewRound, reviewIdentityDetails map[string]any, report bool) error {
+func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, taskID int64, sequence int, intent store.Intent, plan taskplan.Plan, brief dispatch.Brief, briefData []byte, resolution dispatch.Resolution, mode, name string, members []taskMember, generated *generatedReviewRound, report bool) error {
 	var scratchPath string
 	if err := s.runIntentStep(ctx.Context, db, intent, "scratch.create", func() error {
 		var createErr error
@@ -658,7 +646,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	launch := 0
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.sequence", func() error {
 		var launchErr error
-		launch, launchErr = db.NextTaskLaunchFromHead(ctx.Context, taskID, resolution.Profile, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown, launchStartHead(ctx.Context, project, worktreePath))
+		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx.Context, taskID, resolution.Profile, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
 		return launchErr
 	})
 	if err != nil {
@@ -781,9 +769,6 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		{Key: "help", Value: []any{"Run `posse show " + taskIDString(sequence) + "` to inspect the Worker", "Run `posse peek " + taskIDString(sequence) + "` to read Worker output"}},
 	}
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
-	if reviewIdentityDetails != nil {
-		result = append(result, axi.Field{Key: "review_identity", Value: reviewIdentityDetails})
-	}
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
 	}
@@ -2734,29 +2719,15 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if author.Type != "change" {
 			return failure(axi.Failure("review_identity_ineligible", "Review Task does not reference a Change Task", false))
 		}
-		authorLaunches, authorHistoryKnown, err := reviewAuthorLaunches(ctx, db, author)
-		if err != nil {
-			return failure(err)
+		var refusals []string
+		if refusal := reviewSessionOverrideReason(kind, workerAgentArgs(profile, kindConfig, "")); refusal != "" {
+			refusals = append(refusals, refusal)
 		}
-		reviewerLaunches, err := db.TaskLaunchIdentities(ctx, task.ID)
-		if err != nil {
-			return failure(err)
+		if refusal := reviewResumeArgsRefusal(kind, kindConfig.ResumeArgs, session); refusal != "" {
+			refusals = append(refusals, refusal)
 		}
-		reviewerHistoryKnown := launchHistoryComplete(task, reviewerLaunches)
-		launchRefusal := reviewSessionOverrideReason(kind, workerAgentArgs(profile, kindConfig, ""))
-		if resumeRefusal := reviewResumeArgsRefusal(kind, kindConfig.ResumeArgs, session); resumeRefusal != "" {
-			if launchRefusal != "" {
-				launchRefusal += "; "
-			}
-			launchRefusal += resumeRefusal
-		}
-		if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, launchIdentity); !check.Eligible || !reviewerHistoryKnown || launchRefusal != "" {
-			return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity, launchRefusal))
-		}
-		for _, previous := range reviewerLaunches {
-			if check := compareReviewIdentity(authorLaunches, authorHistoryKnown, previous); !check.Eligible {
-				return failure(reviewRelaunchIdentityFailure(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown, launchIdentity, launchRefusal))
-			}
+		if len(refusals) > 0 {
+			return failure(reviewSessionFailure(profileName, strings.Join(refusals, "; ")))
 		}
 	}
 	if plan != nil && plan.Execution.Mode == "in-place" {
@@ -2882,7 +2853,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error
-		launch, launchErr = db.NextTaskLaunchFromHead(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown, launchStartHead(ctx, project, task.WorktreePath))
+		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
 		return launchErr
 	}); err != nil {
 		return failure(err)
@@ -3421,7 +3392,7 @@ func (s *Service) relaunchNeverStarted(ctx context.Context, db *store.DB, home s
 		return failure(err)
 	}
 	frozenCfg, resolution := frozenLaunchConfig(cfg, plan)
-	if err := s.launchAdmittedTask(&axi.Context{Context: ctx}, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, nil, false); err != nil {
+	if err := s.launchAdmittedTask(&axi.Context{Context: ctx}, db, home, project, frozenCfg, task, task.ID, task.Seq, intent, *plan, brief, briefBytes, resolution, plan.Delivery, task.ShortName, members, nil, false); err != nil {
 		return failure(err)
 	}
 	task, err = db.TaskByID(ctx, project.ID, task.ID)

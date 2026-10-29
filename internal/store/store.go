@@ -836,7 +836,6 @@ type TaskLaunchIdentity struct {
 	Profile         string `toml:"profile" json:"profile"`
 	ConfiguredModel string `toml:"configured_model" json:"configured_model"`
 	ModelKnown      bool   `toml:"model_known" json:"model_known"`
-	StartHead       string `toml:"start_head,omitempty" json:"start_head"`
 }
 
 type Task struct {
@@ -1485,12 +1484,6 @@ func (db *DB) NextTaskLaunch(ctx context.Context, taskID int64) (int, error) {
 // false when the configured model is absent or an override prevents Posse from
 // identifying the effective configured value.
 func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, profile, configuredModel string, modelKnown bool) (int, error) {
-	return db.NextTaskLaunchFromHead(ctx, taskID, profile, configuredModel, modelKnown, "")
-}
-
-// NextTaskLaunchFromHead is NextTaskLaunchWithIdentity that also records the
-// clean worktree HEAD the launch starts from; startHead is empty when unknown.
-func (db *DB) NextTaskLaunchFromHead(ctx context.Context, taskID int64, profile, configuredModel string, modelKnown bool, startHead string) (int, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return 0, err
@@ -1504,7 +1497,7 @@ func (db *DB) NextTaskLaunchFromHead(ctx context.Context, taskID int64, profile,
 	if modelKnown && strings.TrimSpace(configuredModel) == "" {
 		modelKnown = false
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision,start_head) SELECT id,?,?,?,?,CASE WHEN plan_json='' THEN 0 ELSE json_extract(plan_json,'$.revision') END,? FROM tasks WHERE id=?`, launches, profile, configuredModel, modelKnown, startHead, taskID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) SELECT id,?,?,?,?,CASE WHEN plan_json='' THEN 0 ELSE json_extract(plan_json,'$.revision') END FROM tasks WHERE id=?`, launches, profile, configuredModel, modelKnown, taskID); err != nil {
 		return 0, err
 	}
 	if err := setTaskTurnTokenTx(ctx, tx, taskID, fmt.Sprintf("launch:%d", launches), now); err != nil {
@@ -1535,7 +1528,7 @@ func (db *DB) TaskTurnToken(ctx context.Context, taskID int64) (string, error) {
 }
 
 func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLaunchIdentity, error) {
-	rows, err := db.QueryContext(ctx, `SELECT task_id,launch_number,profile_name,configured_model,model_known,plan_revision,start_head FROM task_launch_identities WHERE task_id=? ORDER BY launch_number`, taskID)
+	rows, err := db.QueryContext(ctx, `SELECT task_id,launch_number,profile_name,configured_model,model_known,plan_revision FROM task_launch_identities WHERE task_id=? ORDER BY launch_number`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1544,7 +1537,7 @@ func (db *DB) TaskLaunchIdentities(ctx context.Context, taskID int64) ([]TaskLau
 	for rows.Next() {
 		var identity TaskLaunchIdentity
 		var modelKnown int
-		if err := rows.Scan(&identity.TaskID, &identity.LaunchNumber, &identity.Profile, &identity.ConfiguredModel, &modelKnown, &identity.PlanRevision, &identity.StartHead); err != nil {
+		if err := rows.Scan(&identity.TaskID, &identity.LaunchNumber, &identity.Profile, &identity.ConfiguredModel, &modelKnown, &identity.PlanRevision); err != nil {
 			return nil, err
 		}
 		identity.ModelKnown = modelKnown == 1

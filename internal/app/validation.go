@@ -215,11 +215,7 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 	if err := ensureReviewCarry(ctx, db, project, task, targets); err != nil {
 		return err
 	}
-	qualifies, err := reviewVerdictQualifies(ctx, db, task)
-	if err != nil {
-		return err
-	}
-	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets, qualifies)
+	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets)
 	if err != nil {
 		return err
 	}

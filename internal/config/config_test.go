@@ -318,6 +318,16 @@ auto_start = false
 		t.Fatalf("effective CI loop = %#v, warnings = %v", cfg.CILoop, cfg.Warnings)
 	}
 
+	writeConfig(t, filepath.Join(home, "config.toml"), "[profiles.reviewer]\nkind = \"codex\"\n")
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), "[review_loop]\nprofile = \"reviewer\"\n")
+	if cfg, err := Load(home, "shop"); err != nil || cfg.ReviewLoop.Profile != "reviewer" {
+		t.Fatalf("Project review_loop.profile = %q, %v", cfg.ReviewLoop.Profile, err)
+	}
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), "[review_loop]\nprofile = \"missing\"\n")
+	if _, err := Load(home, "shop"); err == nil || !strings.Contains(err.Error(), "review_loop.profile") {
+		t.Fatalf("unknown review_loop.profile error = %v", err)
+	}
+
 	writeConfig(t, filepath.Join(home, "config.toml"), "[review_loop]\nmax_rounds = 4\n")
 	if _, err := Load(home, ""); err == nil || !strings.Contains(err.Error(), "review_loop.max_rounds") {
 		t.Fatalf("max_rounds=4 config error = %v", err)
