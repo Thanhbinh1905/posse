@@ -413,8 +413,15 @@ func TestWorkspaceLocalMergeMergesEveryChangedMember(t *testing.T) {
 	if code := f.run("merge", "t1", "--execute"); code == 0 || !strings.Contains(f.out.String(), "merge_approval_required") {
 		t.Fatalf("merge without approval: %d\n%s", code, f.out.String())
 	}
-	if code := f.run("merge", "t1", "--execute", "--user-approved", "merge both"); code != 0 {
-		t.Fatalf("merge --execute: %d\n%s", code, f.out.String())
+	gated := map[string]string{}
+	for _, member := range []string{"backend", "e2e-tool"} {
+		gated[member] = repos[member].GatedSHA
+		if gated[member] == "" {
+			t.Fatalf("%s has no gated head: %#v", member, repos[member])
+		}
+	}
+	if code := f.run("merge", "t1", "--execute", "--user-approved", "merge both"); code != 0 || !strings.Contains(f.out.String(), gated["backend"]) || !strings.Contains(f.out.String(), gated["e2e-tool"]) {
+		t.Fatalf("merge --execute does not name every merged head: %d\n%s", code, f.out.String())
 	}
 	if f.state() != store.StateMerged {
 		t.Fatalf("state = %s\n%s", f.state(), f.out.String())
@@ -431,10 +438,10 @@ func TestWorkspaceLocalMergeMergesEveryChangedMember(t *testing.T) {
 	}
 	found := false
 	for _, notice := range notices {
-		found = found || (notice.Kind == "merge_ready" && strings.Contains(notice.Summary, "backend, e2e-tool"))
+		found = found || (notice.Kind == "merge_ready" && strings.Contains(notice.Summary, "backend at "+shortSHA(gated["backend"])+", e2e-tool at "+shortSHA(gated["e2e-tool"])) && strings.Contains(notice.DataJSON, gated["backend"]) && strings.Contains(notice.DataJSON, gated["e2e-tool"]))
 	}
 	if !found {
-		t.Fatalf("merge_ready does not name the members: %#v", notices)
+		t.Fatalf("merge_ready does not name each member head: %#v", notices)
 	}
 	if code := f.run("teardown", "t1"); code != 0 || !strings.Contains(f.out.String(), "branch_removed: true") {
 		t.Fatalf("teardown: %d\n%s", code, f.out.String())
