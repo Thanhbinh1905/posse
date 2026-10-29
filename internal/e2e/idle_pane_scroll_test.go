@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 // Herdr collects the history of an idle fullscreen agent by scrolling it to the
@@ -110,6 +111,13 @@ func TestIdleFullscreenWorkerKeepsItsViewDuringAutomaticReads(t *testing.T) {
 		t.Fatalf("Pi never settled after the shell command:\n%s", visible())
 	}
 
+	assertIdleViewStaysPut(t, base, task, visible, " 150")
+}
+
+// assertIdleViewStaysPut samples the visible screen while Posse runs the reads
+// that follow a turn end and a peek, and fails if the screen ever changes.
+func assertIdleViewStaysPut(t *testing.T, base *prLifecycleFixture, task store.Task, visible func() string, peekWants string) {
+	t.Helper()
 	frames := map[string]bool{}
 	stop := make(chan struct{})
 	sampled := make(chan struct{})
@@ -141,7 +149,7 @@ func TestIdleFullscreenWorkerKeepsItsViewDuringAutomaticReads(t *testing.T) {
 		}
 		t.Fatalf("idle Worker view moved during automatic reads: %d frames\n%s", len(frames), strings.Join(shown, "\n=====\n"))
 	}
-	if !strings.Contains(peeked, " 150") {
+	if !strings.Contains(peeked, peekWants) {
 		t.Fatalf("peek did not show the visible screen:\n%s", peeked)
 	}
 }
