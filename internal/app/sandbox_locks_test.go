@@ -654,3 +654,59 @@ func TestReleaseDoesNotExposeHeldCheckoutAfterGitUnlock(t *testing.T) {
 		t.Fatalf("single-force removal of the cleaned Sandbox failed: %v", err)
 	}
 }
+
+// Reconcile runs under the Sandbox state lock that every command and Watch pass
+// takes, so one pass must read the worktree listing once, not once per Sandbox.
+func TestHeldSandboxLocksReadWorktreeListOncePerPass(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq := 1; seq <= 3; seq++ {
+		id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: seq, Type: "change", Title: "Held", MergeMode: "local", Branch: fmt.Sprintf("posse/t%d", seq), BaseRef: "main"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := db.TaskByID(ctx, project.ID, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := acquireSandbox(ctx, db, project, task, home, "warm", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	logPath := filepath.Join(root, "git.log")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shim := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexec %q \"$@\"\n", logPath, realGit)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := ensureHeldSandboxLocks(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listings := strings.Count(string(calls), "worktree list"); listings != 1 {
+		t.Fatalf("worktree listings per reconcile pass = %d, want 1:\n%s", listings, calls)
+	}
+}
