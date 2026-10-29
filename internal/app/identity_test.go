@@ -44,13 +44,13 @@ func TestArtifactProseDefaultsToNeutralEnglish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := artifactProseLanguage(cfg); got != "English" {
-		t.Fatalf("default artifact prose language = %q", got)
-	}
-	instruction := artifactProseInstruction(artifactProseLanguage(cfg))
+	instruction := artifactProseInstruction()
 	composed, err := composeLeadInstructions(home, store.Project{Name: "shop"}, cfg, "claude", nil)
 	if err != nil || !strings.Contains(composed.Text, instruction) {
 		t.Fatalf("Lead instructions did not propagate default English prose: %v\n%s", err, composed.Text)
+	}
+	if !strings.Contains(composed.Text, "Any instruction longer than a few lines goes in a Markdown file sent with `posse send <task> --file <path.md>`") {
+		t.Errorf("Lead instructions do not require --file for long instructions:\n%s", composed.Text)
 	}
 	for _, expected := range []string{"in English in a neutral voice", "Preserve User quotations exactly", "Task IDs", "branch refs", "Keep the Lead persona out of artifacts"} {
 		if !strings.Contains(instruction, expected) {
@@ -119,10 +119,10 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 			t.Fatal(err)
 		}
 		composed, err := composeLeadInstructions(home, project, cfg, "claude", nil)
-		if err != nil || !strings.Contains(composed.Text, artifactProseInstruction("vi")) {
-			t.Fatalf("Lead instructions did not propagate configured prose language: %v\n%s", err, composed.Text)
+		if err != nil || !strings.Contains(composed.Text, "and other evidence in English in a neutral voice") || !strings.Contains(composed.Text, "Reply to the User in the explicitly configured language: vi.") || strings.Contains(composed.Text, `the configured language ("vi")`) {
+			t.Fatalf("Lead instructions must keep artifacts in English and use the configured language only for the User: %v\n%s", err, composed.Text)
 		}
-		contents := workerProtocol(home, project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence)), "legacy", artifactProseLanguage(cfg)) + "\n\n" + brief.Body + "\n"
+		contents := workerProtocol(home, project, task, brief, launchPath, filepath.Join(home, "scratch", project.Name, taskIDString(sequence)), "legacy") + "\n\n" + brief.Body + "\n"
 		if err := writeFile(launchPath, []byte(contents)); err != nil {
 			t.Fatal(err)
 		}
@@ -130,8 +130,8 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(launch), artifactProseInstruction("vi")) || !strings.Contains(string(launch), `"Keep this exact."`) || strings.Contains(string(launch), cfg.Identity.Lead.Persona) {
-			t.Fatalf("Worker artifact did not preserve configured prose, exact User quote and persona boundary: %s", launch)
+		if !strings.Contains(string(launch), "and other evidence in English in a neutral voice") || !strings.Contains(string(launch), `"Keep this exact."`) || strings.Contains(string(launch), cfg.Identity.Lead.Persona) {
+			t.Fatalf("Worker artifact did not keep English prose, exact User quote and persona boundary: %s", launch)
 		}
 		notices, err := db.Notices(ctx, project.ID, true)
 		if err != nil || len(notices) != 1 {

@@ -724,10 +724,10 @@ func (a *blockedLeadStartAdapter) Call(ctx context.Context, method string, param
 func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 	brief := dispatch.Brief{Type: "change", DoneWhen: "tests pass"}
 	project := store.Project{Name: "shop"}
-	local := workerProtocol("/home/user/.posse", project, store.Task{Seq: 1, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
-	pr := workerProtocol("/home/user/.posse", project, store.Task{Seq: 2, Type: "change", MergeMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2", "none", "English")
-	noMistakes := workerProtocol("/home/user/.posse", project, store.Task{Seq: 3, Type: "change", MergeMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none", "English")
-	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none", "English")
+	local := workerProtocol("/home/user/.posse", project, store.Task{Seq: 1, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none")
+	pr := workerProtocol("/home/user/.posse", project, store.Task{Seq: 2, Type: "change", MergeMode: "pr"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t2", "none")
+	noMistakes := workerProtocol("/home/user/.posse", project, store.Task{Seq: 3, Type: "change", MergeMode: "no-mistakes"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none")
+	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none")
 	if !strings.Contains(local, "Never git push or open a PR") || !strings.Contains(local, "Use the Posse-owned Task scratch directory `/home/user/.posse/scratch/shop/t1`") || !strings.Contains(local, "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/home/user/.posse/scratch/shop/t1`)") || !strings.Contains(local, "Go builds use the shared Posse-owned `GOCACHE` at `/home/user/.posse/cache/worker-go-build`") || !strings.Contains(local, "`GOMODCACHE` remains the user's shared module cache") {
 		t.Fatalf("normal Worker protocol does not ban push: %s", local)
 	}
@@ -748,16 +748,16 @@ func TestWorkerProtocolCarriesScopeRule(t *testing.T) {
 	brief := dispatch.Brief{Type: "change", DoneWhen: "tests pass"}
 	rule := "Scope: this Task's changes hold only what Done when needs, and every hunk traces to a Done when item."
 	for _, task := range []store.Task{{Seq: 1, Type: "change", MergeMode: "local"}, {Seq: 2, Type: "change", MergeMode: "pr"}} {
-		protocol := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, task, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "English")
+		protocol := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, task, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none")
 		if !strings.Contains(protocol, rule) || !strings.Contains(protocol, "`friction:` note or a proposed follow-up issue") || !strings.Contains(protocol, "read `git diff <base>...HEAD` and revert any hunk that serves no Done when item") {
 			t.Fatalf("%s Worker protocol omits the scope rule: %s", task.MergeMode, protocol)
 		}
 	}
-	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 3, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t3", "none", "English")
+	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 3, Type: "change"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t3", "none")
 	if !strings.Contains(workspace, rule) {
 		t.Fatalf("workspace Worker protocol omits the scope rule: %s", workspace)
 	}
-	research := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 4, Type: "research"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t4", "none", "English")
+	research := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 4, Type: "research"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t4", "none")
 	if strings.Contains(research, "Scope:") {
 		t.Fatalf("Research Worker protocol carries the Change scope rule: %s", research)
 	}

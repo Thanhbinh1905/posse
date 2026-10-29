@@ -822,7 +822,7 @@ type fakeProgress struct {
 	onWorktree func() error
 }
 
-func (p *fakeProgress) ReadPane(context.Context, herdr.Adapter, string, int) (string, error) {
+func (p *fakeProgress) ReadScreen(context.Context, herdr.Adapter, string) (string, error) {
 	return p.output, nil
 }
 

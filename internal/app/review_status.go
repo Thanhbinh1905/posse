@@ -186,6 +186,7 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 		{Key: "total_used", Value: capUsed},
 		{Key: "max_rounds", Value: max},
 		{Key: "remaining", Value: remaining},
+		{Key: "cap", Value: reviewCapRule(change, max)},
 		{Key: "rounds", Value: roundRows},
 		{Key: "patterns", Value: patternRows},
 		{Key: "carries", Value: carries},

@@ -198,7 +198,7 @@ func (s *Service) handleTaskQuotaExhaustion(ctx context.Context, db *store.DB, p
 	} else if !store.IsNotFound(err) {
 		return nil, err
 	}
-	output, err := (runtime.SystemProgress{}).ReadPane(ctx, s.Herdr, pane.PaneID, 200)
+	output, err := (runtime.SystemProgress{}).ReadScreen(ctx, s.Herdr, pane.PaneID)
 	if err != nil {
 		return nil, nil
 	}

@@ -221,7 +221,7 @@ A User-written rule that says which Profile a kind of Task should use.
 _Avoid_: Routing rule, policy
 
 **Identity**:
-The User-chosen Lead name, persona, language and form of address. Name, persona and form of address apply to User messages; language also selects neutral artifact prose. Persona is not evidence, and quoted User intent stays exact.
+The User-chosen Lead name, persona, language and form of address. Name, persona, language and form of address apply to User messages only; artifact prose is always neutral English. Persona is not evidence, and quoted User intent stays exact.
 _Avoid_: Alias, nickname
 
 **Knowledge**:

@@ -32,7 +32,7 @@ type KeySpec struct {
 var keySpecs = []KeySpec{
 	{Key: "identity.lead.name", Type: TypeString, Default: "Lead", Meaning: "Display name and Lead voice toward the User."},
 	{Key: "identity.lead.persona", Type: TypeString, Default: "", Meaning: "Lead persona used only when speaking to the User."},
-	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language for Lead messages to the User and neutral prose in Briefs, send instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence."},
+	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language for Lead messages to the User. Briefs, send instructions, reviews, Reports, commit messages and other artifacts stay in English."},
 	{Key: "identity.lead.address_user", Type: TypeString, Default: "", Meaning: "How the Lead addresses the User."},
 	{Key: "identity.worker.display_prefix", Type: TypeString, Default: "worker", Meaning: "Deprecated; retained for compatibility and has no effect on Herdr labels or Task names."},
 	{Key: "lead.kind", Type: TypeString, Default: "", Meaning: "Default agent kind used by posse up."},

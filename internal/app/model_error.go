@@ -170,7 +170,7 @@ func (s *Service) handleModelErrorTurnEnd(ctx context.Context, db *store.DB, pro
 	if task.State != store.StateWorking || pane.Agent == "" {
 		return nil, nil
 	}
-	output, err := (runtime.SystemProgress{}).ReadPane(ctx, s.Herdr, pane.PaneID, 200)
+	output, err := (runtime.SystemProgress{}).ReadScreen(ctx, s.Herdr, pane.PaneID)
 	if err != nil {
 		return nil, err
 	}
