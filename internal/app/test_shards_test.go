@@ -19,12 +19,27 @@ import (
 // as CI shards do, keeps one process.
 const maxAppTestShards = 8
 
+// Children would each report coverage, fail fast or shuffle for only their
+// own subset, so these flags keep the run in one process.
+var appTestSingleProcessFlags = []string{
+	"test.run", "test.list", "test.bench", "test.fuzz", "test.skip",
+	"test.coverprofile", "test.gocoverdir", "test.cpuprofile", "test.memprofile", "test.blockprofile", "test.mutexprofile", "test.trace",
+	"test.failfast", "test.shuffle",
+}
+
+func appTestRunsInOneProcess(flags *flag.FlagSet) bool {
+	for _, name := range appTestSingleProcessFlags {
+		if selected := flags.Lookup(name); selected.Value.String() != selected.DefValue {
+			return true
+		}
+	}
+	return false
+}
+
 func runAppTestShards() (int, bool) {
 	flag.Parse()
-	for _, name := range []string{"test.run", "test.list", "test.bench", "test.fuzz", "test.skip", "test.coverprofile", "test.cpuprofile", "test.memprofile", "test.blockprofile", "test.mutexprofile", "test.trace"} {
-		if flag.Lookup(name).Value.String() != "" {
-			return 0, false
-		}
+	if appTestRunsInOneProcess(flag.CommandLine) {
+		return 0, false
 	}
 	shardCount := min(runtime.GOMAXPROCS(0), maxAppTestShards)
 	if shardCount < 2 {
@@ -122,6 +137,43 @@ func TestWithoutFinalTestStatusKeepsEverythingElse(t *testing.T) {
 	} {
 		if got := withoutFinalTestStatus(tc.output); got != tc.want {
 			t.Errorf("withoutFinalTestStatus(%q) = %q, want %q", tc.output, got, tc.want)
+		}
+	}
+}
+
+func TestAppTestRunStaysInOneProcessForSelectionCoverageAndOrderFlags(t *testing.T) {
+	newFlags := func() *flag.FlagSet {
+		flags := flag.NewFlagSet("app.test", flag.ContinueOnError)
+		for _, name := range appTestSingleProcessFlags {
+			switch name {
+			case "test.failfast":
+				flags.Bool(name, false, "")
+			case "test.shuffle":
+				flags.String(name, "off", "")
+			default:
+				flags.String(name, "", "")
+			}
+		}
+		flags.Bool("test.v", false, "")
+		return flags
+	}
+	if appTestRunsInOneProcess(newFlags()) {
+		t.Fatal("a bare run stayed in one process")
+	}
+	flags := newFlags()
+	if err := flags.Set("test.v", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if appTestRunsInOneProcess(flags) {
+		t.Fatal("-v kept the run in one process")
+	}
+	for name, value := range map[string]string{"test.gocoverdir": "/tmp/cover", "test.run": "TestA", "test.coverprofile": "c.out", "test.failfast": "true", "test.shuffle": "on"} {
+		flags := newFlags()
+		if err := flags.Set(name, value); err != nil {
+			t.Fatal(err)
+		}
+		if !appTestRunsInOneProcess(flags) {
+			t.Errorf("-%s=%s was split across processes", name, value)
 		}
 	}
 }
