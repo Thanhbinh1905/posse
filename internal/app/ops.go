@@ -832,9 +832,9 @@ func (s *Service) projectShow(ctx *axi.Context, args []string) error {
 	}
 	var cfg config.Config
 	if project.IsWorkspace() {
-		cfg, err = s.prepareProjectObservation(ctx.Context, db, project)
+		cfg, err = s.prepareProjectObservation(store.WithDeferrableWrites(ctx.Context), db, project)
 	} else {
-		cfg, err = s.prepareProjectInspection(ctx.Context, db, project)
+		cfg, err = s.prepareProjectInspection(store.WithDeferrableWrites(ctx.Context), db, project)
 	}
 	err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,6 +17,7 @@ import (
 type writeTx struct {
 	*sql.Tx
 	conn        *sql.Conn
+	ctx         context.Context
 	releaseOnce sync.Once
 	releaseErr  error
 }
@@ -26,7 +28,11 @@ func (tx *writeTx) release() error {
 }
 
 func (tx *writeTx) Commit() error {
-	return errors.Join(retryableContention(tx.Tx.Commit()), tx.release())
+	err := tx.Tx.Commit()
+	if err == nil {
+		endDeferrableWrites(tx.ctx)
+	}
+	return errors.Join(retryableContention(err), tx.release())
 }
 
 func (tx *writeTx) Rollback() error {
@@ -47,12 +53,39 @@ func restoreBusyTimeoutAndClose(conn *sql.Conn) error {
 	return closeErr
 }
 
+type deferrableWritesKey struct{}
+
+// WithDeferrableWrites marks writes the caller can skip under contention, such
+// as the observations a read command records before it prints the last
+// recorded state. Each waits at most ObservationWriteBusyTimeout for the write
+// lock and returns its busy error without retrying. The first write that
+// succeeds ends deferral for the rest of ctx: it may be a claim that leads to
+// a side effect, such as a prompt sent to a pane, and the write recording that
+// side effect must wait the full busy timeout.
+func WithDeferrableWrites(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deferrableWritesKey{}, new(atomic.Bool))
+}
+
+func deferrableWrites(ctx context.Context) bool {
+	ended, ok := ctx.Value(deferrableWritesKey{}).(*atomic.Bool)
+	return ok && !ended.Load()
+}
+
+func endDeferrableWrites(ctx context.Context) {
+	if ended, ok := ctx.Value(deferrableWritesKey{}).(*atomic.Bool); ok {
+		ended.Store(true)
+	}
+}
+
 // Busy handlers can outlive context cancellation. A short-lived writer uses
 // short lock waits and retries within its context, not SQLite's five-second wait.
 func writeBusyTimeout(ctx context.Context) int {
 	deadline, bounded := ctx.Deadline()
-	if !bounded || time.Until(deadline) > time.Duration(sqliteBusyTimeoutMillis)*time.Millisecond {
+	if !deferrableWrites(ctx) && (!bounded || time.Until(deadline) > time.Duration(sqliteBusyTimeoutMillis)*time.Millisecond) {
 		return sqliteBusyTimeoutMillis
+	}
+	if !bounded {
+		return reconcileWriteBusyTimeoutMillis
 	}
 	return max(1, min(reconcileWriteBusyTimeoutMillis, int(time.Until(deadline)/time.Millisecond)))
 }
@@ -69,7 +102,7 @@ func (db *DB) ExecContext(ctx context.Context, query string, args ...any) (resul
 			result, err = conn.ExecContext(ctx, query, args...)
 			return err
 		})
-		if !isBusyErr(err) || ctx.Err() != nil {
+		if !isBusyErr(err) || ctx.Err() != nil || deferrableWrites(ctx) {
 			return result, err
 		}
 		select {
@@ -98,10 +131,10 @@ func (db *DB) beginTxWithRetry(ctx context.Context) (*writeTx, error) {
 		}
 		tx, err := conn.BeginTx(ctx, nil)
 		if err == nil {
-			return &writeTx{Tx: tx, conn: conn}, nil
+			return &writeTx{Tx: tx, conn: conn, ctx: ctx}, nil
 		}
 		lastErr = err
-		if !isBusyErr(err) {
+		if !isBusyErr(err) || deferrableWrites(ctx) {
 			break
 		}
 		select {

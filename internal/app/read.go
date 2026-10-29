@@ -133,7 +133,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 	var summaries []projectSummary
 	for _, project := range projects {
 		projectName := project.Name
-		cfg, err := s.prepareProject(ctx.Context, db, project)
+		cfg, err := s.prepareProject(store.WithDeferrableWrites(ctx.Context), db, project)
 		err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 		if err != nil {
 			summaries = append(summaries, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
@@ -176,7 +176,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 }
 
 func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store.Project, full bool) error {
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProject(store.WithDeferrableWrites(ctx.Context), db, project)
 	err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 	if err != nil {
 		return err
@@ -429,7 +429,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 		var rows []projectSummary
 		for _, project := range projects {
 			projectName := project.Name
-			cfg, err := s.prepareProject(ctx.Context, db, project)
+			cfg, err := s.prepareProject(store.WithDeferrableWrites(ctx.Context), db, project)
 			err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state.")
 			if err != nil {
 				rows = append(rows, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
@@ -461,7 +461,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareProject(store.WithDeferrableWrites(ctx.Context), db, project)
 	if err = deferObservationContention(ctx, err, "Some Task observations were deferred; showing their last recorded state."); err != nil {
 		return err
 	}
@@ -679,9 +679,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	var preparationErr error
 	if project.IsWorkspace() {
-		_, preparationErr = s.prepareProjectObservation(ctx.Context, db, project)
+		_, preparationErr = s.prepareProjectObservation(store.WithDeferrableWrites(ctx.Context), db, project)
 	} else {
-		_, preparationErr = s.prepareTaskProjectInspection(ctx.Context, db, project, task.ID)
+		_, preparationErr = s.prepareTaskProjectInspection(store.WithDeferrableWrites(ctx.Context), db, project, task.ID)
 	}
 	if err := deferObservationContention(ctx, preparationErr, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err

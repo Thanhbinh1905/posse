@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -189,16 +190,19 @@ func TestListShowsDurableViewDuringObservationContention(t *testing.T) {
 }
 
 func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
+	const projectDeferred = "Project observations were deferred"
 	commands := []struct {
-		name string
-		args []string
-		want string
+		name     string
+		args     []string
+		want     string
+		deferred string
 	}{
-		{name: "lead", args: []string{"lead"}, want: "instructions"},
-		{name: "show", args: []string{"show", "t1"}, want: "t1"},
-		{name: "project show", args: []string{"project", "show"}, want: "shop"},
-		{name: "pool", args: []string{"pool"}, want: "sandboxes"},
-		{name: "peek", args: []string{"peek", "t1"}, want: "output"},
+		{name: "lead", args: []string{"lead"}, want: "instructions", deferred: projectDeferred},
+		{name: "show", args: []string{"show", "t1"}, want: "t1", deferred: projectDeferred},
+		{name: "project show", args: []string{"project", "show"}, want: "shop", deferred: projectDeferred},
+		{name: "pool", args: []string{"pool"}, want: "sandboxes", deferred: projectDeferred},
+		{name: "peek", args: []string{"peek", "t1"}, want: "output", deferred: projectDeferred},
+		{name: "list", args: []string{"list", "--json"}, want: "tasks", deferred: "Some Task observations were deferred"},
 	}
 	for _, command := range commands {
 		t.Run(command.name, func(t *testing.T) {
@@ -226,9 +230,14 @@ func TestReadCommandsDeferTaskObservationContention(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			started := time.Now()
 			code, output, errOut := fixture.run(command.args...)
-			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, "Project observations were deferred") || strings.Contains(output+errOut, "store_busy") {
+			elapsed := time.Since(started)
+			if code != 0 || !strings.Contains(output, command.want) || !strings.Contains(errOut, command.deferred) || strings.Contains(output+errOut, "store_busy") {
 				t.Fatalf("%s did not return its durable view during observation contention: exit=%d output=%s stderr=%s", command.name, code, output, errOut)
+			}
+			if elapsed > 2500*time.Millisecond {
+				t.Fatalf("%s took %s to return its deferred view, want about 1s", command.name, elapsed)
 			}
 		})
 	}
@@ -405,5 +414,105 @@ func TestSignalDoneSurvivesOtherTasksObservationContention(t *testing.T) {
 	}
 	if lastObservationAt <= 1 {
 		t.Fatal("later observations did not progress on fresh bounded reconcile passes")
+	}
+}
+
+func TestSignalSaysDeferredMaintenanceNeedsNoAction(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	t.Setenv(workerHomeEnv, fixture.home)
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stall := "#!/bin/sh\nif [ \"$3\" = fetch ]; then exec sleep 10; fi\nexec " + git + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(stall), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	code, out, errOut := fixture.run("signal", "working", "Still working")
+	if code != 0 {
+		t.Fatalf("Signal failed: exit=%d output=%s stderr=%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "Project maintenance deferred") || !strings.Contains(errOut, "No action is needed") {
+		t.Fatalf("deferred maintenance message does not say whether action is needed: stderr=%s", errOut)
+	}
+}
+
+func TestReadCommandRecordsDeliveryDuringLaterContention(t *testing.T) {
+	for _, kind := range []string{"notice", "message"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "local", store.StateWorking)
+			ctx := context.Background()
+			project, err := fixture.db.ProjectByID(ctx, fixture.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var delivered func() (bool, error)
+			if kind == "notice" {
+				noticeID, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "Delivered during contention"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				delivered = func() (bool, error) {
+					notices, err := fixture.db.NoticesByIDs(ctx, project.ID, []int64{noticeID})
+					return err == nil && len(notices) == 1 && notices[0].DeliveredAt != 0, err
+				}
+			} else {
+				messageID, err := fixture.db.QueueMessage(ctx, fixture.task.ID, "Delivered during contention", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				delivered = func() (bool, error) {
+					message, err := fixture.db.MessageByID(ctx, messageID)
+					return err == nil && message.Status == "delivered", err
+				}
+			}
+			writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			released := make(chan error, 1)
+			var lockOnce sync.Once
+			fake := fixture.service.Herdr.(*herdr.Fake)
+			fake.BeforeCall = func(method string) {
+				if method != "agent.prompt" {
+					return
+				}
+				lockOnce.Do(func() {
+					tx, err := writer.BeginTx(ctx, nil)
+					if err == nil {
+						_, err = tx.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, project.ID)
+					}
+					if err != nil {
+						released <- err
+						return
+					}
+					go func() {
+						time.Sleep(time.Second)
+						released <- tx.Commit()
+					}()
+				})
+			}
+			t.Setenv("HERDR_PANE_ID", project.LeadPaneID)
+			t.Setenv("HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+
+			code, output, errOut := fixture.run("show", "t1")
+			if code != 0 || fake.CallCount("agent.prompt") == 0 {
+				t.Fatalf("show did not deliver the %s: exit=%d prompts=%d output=%s stderr=%s", kind, code, fake.CallCount("agent.prompt"), output, errOut)
+			}
+			if err := <-released; err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := delivered(); !ok {
+				t.Fatalf("sent %s was not recorded as delivered: %v, stderr=%s", kind, err, errOut)
+			}
+		})
 	}
 }
