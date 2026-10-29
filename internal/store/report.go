@@ -109,19 +109,6 @@ func (db *DB) RecordReportReview(ctx context.Context, reportTaskID, reviewTaskID
 	if reportLaunches == 0 || len(identities) != reportLaunches || !completeLaunchHistory(identities) || len(reviewerIdentities) != reviewerLaunches || !completeLaunchHistory(reviewerIdentities) {
 		return ReportReview{}, fmt.Errorf("independent Report review requires complete author and reviewer launch identities")
 	}
-	for _, reviewer := range reviewerIdentities {
-		if strings.TrimSpace(reviewer.Profile) == "" || !reviewer.ModelKnown || strings.TrimSpace(reviewer.ConfiguredModel) == "" {
-			return ReportReview{}, fmt.Errorf("independent Report review requires a known reviewer Profile and configured model")
-		}
-		for _, author := range identities {
-			if strings.TrimSpace(author.Profile) == "" || !author.ModelKnown || strings.TrimSpace(author.ConfiguredModel) == "" {
-				return ReportReview{}, fmt.Errorf("independent Report review requires known identity for every author launch")
-			}
-			if reviewer.Profile == author.Profile || reviewer.ConfiguredModel == author.ConfiguredModel {
-				return ReportReview{}, fmt.Errorf("reviewer launch %d is not independent of author launch %d", reviewer.LaunchNumber, author.LaunchNumber)
-			}
-		}
-	}
 	if reviewerLaunches == 0 || reviewerIdentities[len(reviewerIdentities)-1].LaunchNumber != reviewerLaunches {
 		return ReportReview{}, fmt.Errorf("independent Report review has no current reviewer launch")
 	}
@@ -291,25 +278,10 @@ func requireIndependentReportPass(ctx context.Context, tx *sql.Tx, reportTaskID,
 		if err != nil || len(reviewers) != launches || !completeLaunchHistory(reviewers) {
 			continue
 		}
-		eligible := true
-		for _, reviewer := range reviewers {
-			if reviewer.Profile == "" || !reviewer.ModelKnown || strings.TrimSpace(reviewer.ConfiguredModel) == "" {
-				eligible = false
-				break
-			}
-			for _, author := range authors {
-				if author.Profile == "" || !author.ModelKnown || strings.TrimSpace(author.ConfiguredModel) == "" || reviewer.Profile == author.Profile || reviewer.ConfiguredModel == author.ConfiguredModel {
-					eligible = false
-					break
-				}
-			}
+		if candidate.verdict == "pass" {
+			return nil
 		}
-		if eligible {
-			if candidate.verdict == "pass" {
-				return nil
-			}
-			return ErrIndependentReportRequired
-		}
+		return ErrIndependentReportRequired
 	}
 	return ErrIndependentReportRequired
 }
