@@ -369,17 +369,11 @@ func calculateReviewRoundScope(ctx context.Context, repository reviewRoundReposi
 	if err != nil {
 		return reviewRoundScope{}, err
 	}
-	diffArgs := []string{"diff", "--binary", "--no-ext-diff"}
-	if repository.workspace {
-		prefix := repository.name + "/"
-		diffArgs = append(diffArgs, "--src-prefix=a/"+prefix, "--dst-prefix=b/"+prefix)
-	}
-	deltaArgs := append(append([]string(nil), diffArgs...), baselineTree, repository.head)
-	delta, err := gitOutputRaw(ctx, repository.root, deltaArgs...)
+	delta, err := gitOutputRaw(ctx, repository.root, reviewDeltaArgs(repository.workspace, repository.name, baselineTree, repository.head, conflicts)...)
 	if err != nil {
 		return reviewRoundScope{}, err
 	}
-	cumulativeArgs := append(append([]string(nil), diffArgs...), targetCommit, repository.head)
+	cumulativeArgs := append(reviewDiffArgs(repository.workspace, repository.name), targetCommit, repository.head)
 	cumulative, err := gitOutputRaw(ctx, repository.root, cumulativeArgs...)
 	if err != nil {
 		return reviewRoundScope{}, err
@@ -398,6 +392,28 @@ func calculateReviewRoundScope(ctx context.Context, repository reviewRoundReposi
 		DeltaPatch: []byte(delta), Cumulative: []byte(cumulative), Conflicts: conflicts,
 		Guidance: guidanceFiles, TargetBranch: repository.targetBranch,
 	}, nil
+}
+
+func reviewDiffArgs(workspace bool, repository string) []string {
+	args := []string{"diff", "--binary", "--no-ext-diff"}
+	if workspace {
+		prefix := repository + "/"
+		args = append(args, "--src-prefix=a/"+prefix, "--dst-prefix=b/"+prefix)
+	}
+	return args
+}
+
+// A conflicted path's virtual baseline holds conflict markers and target-side
+// lines, so delta.patch leaves it out and the Reviewer reads it in cumulative.patch.
+func reviewDeltaArgs(workspace bool, repository, baselineTree, head string, conflicts []string) []string {
+	args := append(reviewDiffArgs(workspace, repository), baselineTree, head)
+	if len(conflicts) > 0 {
+		args = append(args, "--", ":(top)")
+		for _, conflict := range conflicts {
+			args = append(args, ":(top,exclude,literal)"+conflict)
+		}
+	}
+	return args
 }
 
 func virtualMergeTree(ctx context.Context, root, reviewed, target string) (string, []string, error) {
@@ -572,6 +588,18 @@ func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scop
 	}
 	builder.WriteString("---\n")
 	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `{{review_dir}}/delta.patch`, using `{{review_dir}}/cumulative.patch` for context. An introduced finding at blocking severity on a line `{{review_dir}}/cumulative.patch` adds also counts. The immutable bindings are in `{{review_dir}}/round.json`; conflicts are listed in `{{review_dir}}/conflicts.txt`; the Finding Ledger is in `{{review_dir}}/ledger.md`. Repository guidance is copied into `{{review_dir}}/guidance/` from the frozen target's origin ref, never from the Change branch. Do not modify the checkout.\n\nFinish by writing a JSON file in this Task's scratch directory using this schema, then signal done with `--report <report-file> --verdict <pass|changes_requested|inconclusive> --findings <findings-file>`. A pass must have no blocking open findings; Posse derives and checks the verdict. Use an empty patterns array for no findings.\n\n```json\n{\n  \"schema\": \"posse.review-findings.v1\",\n  \"patterns\": [{\n    \"key\": \"unchecked-error-return\",\n    \"title\": \"Store write errors are dropped\",\n    \"rule\": \"Every store write error reaches the caller\",\n    \"root_cause\": \"New helpers ignore database errors\",\n    \"fix_guidance\": \"Check every new write call in the affected package\",\n    \"severity\": \"P1\",\n    \"origin\": \"introduced\",\n    \"instances\": [{\n      \"repository\": \"posse\", \"path\": \"internal/app/x.go\", \"line\": 42,\n      \"symbol\": \"saveRound\", \"excerpt\": \"db.Exec(ctx, q)\",\n      \"description\": \"The returned error is ignored\", \"cause\": null,\n      \"matches\": null, \"regresses\": null\n    }]\n  }],\n  \"resolutions\": []\n}\n```\n\nEach excerpt must occur in its repository file at the bound head after whitespace normalization. Use `cause: \"path:line\"` only to cite an added line in `{{review_dir}}/delta.patch` that caused an interaction finding. `matches` and `regresses` use existing IDs such as `F-3`. Include one pattern per root cause, with every located instance. Missing or unknown severity is treated as unclassified and blocks. For every ledger finding claimed fixed, include a resolution with status `resolved` or `unresolved`; omitted answers remain unverified.\n\nScope check: every hunk in `{{review_dir}}/delta.patch` must trace to a `done_when` item of the Change Brief below, whatever skills are loaded. Record each hunk that traces to no `done_when` item, including unrelated refactors, separate bug fixes, debug prints, whitespace and docstring churn, as a finding with key `out-of-scope-hunk`, severity `P1` and origin `introduced`.\n\n", round)
+	var conflicted []string
+	for _, scope := range scopes {
+		for _, conflict := range scope.Conflicts {
+			if workspace {
+				conflict = scope.Binding.Repository + "/" + conflict
+			}
+			conflicted = append(conflicted, "`"+conflict+"`")
+		}
+	}
+	if len(conflicted) > 0 {
+		fmt.Fprintf(&builder, "Conflicted paths: %s. The previous reviewed head conflicts with the target on these paths, so `{{review_dir}}/delta.patch` leaves them out. Review them in `{{review_dir}}/cumulative.patch`.\n\n", strings.Join(conflicted, ", "))
+	}
 	for _, input := range plan.Inputs {
 		if input.Role != "brief" {
 			continue

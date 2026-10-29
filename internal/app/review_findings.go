@@ -511,13 +511,11 @@ func writeReviewFindingsArtifact(project store.Project, review store.Task, home 
 func verifyReviewDeltaBindings(ctx context.Context, project store.Project, rounds []store.ReviewRound, patch []byte, roots map[string]string) error {
 	var rebuilt bytes.Buffer
 	for _, round := range rounds {
-		args := []string{"diff", "--binary", "--no-ext-diff"}
-		if project.IsWorkspace() {
-			prefix := round.Repository + "/"
-			args = append(args, "--src-prefix=a/"+prefix, "--dst-prefix=b/"+prefix)
+		var conflicts []string
+		if err := json.Unmarshal([]byte(round.ConflictedPaths), &conflicts); err != nil {
+			return fmt.Errorf("read conflicted paths of the Review Round binding for %s: %w", round.Repository, err)
 		}
-		args = append(args, round.BaselineTree, round.HeadSHA)
-		output, err := gitOutputRaw(ctx, roots[round.Repository], args...)
+		output, err := gitOutputRaw(ctx, roots[round.Repository], reviewDeltaArgs(project.IsWorkspace(), round.Repository, round.BaselineTree, round.HeadSHA, conflicts)...)
 		if err != nil {
 			return err
 		}
