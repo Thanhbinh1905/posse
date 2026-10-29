@@ -1698,12 +1698,27 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 		if current.Mergeable == "CONFLICTING" && (newHead || previous.Mergeable != "CONFLICTING") {
 			addNotice("pr_conflict", task.Title+": pull request conflicts with the Task's frozen target branch", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
+		// A head pushed after the gate, outside `posse publish`, is never merge-ready.
+		if task.GatedSHA != "" && current.HeadSHA != task.GatedSHA {
+			if newHead {
+				addNotice("head_discontinuity", headDiscontinuityPRSummary(project, task, current), map[string]any{"url": current.PRURL, "gated_head": task.GatedSHA, "pr_head": current.HeadSHA})
+			}
+			break
+		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
 		if ready && (task.State == store.StateDone || task.State == store.StateMerging) {
 			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}
 	return effect
+}
+
+func headDiscontinuityPRSummary(project store.Project, task store.Task, current store.PRObservation) string {
+	summary := fmt.Sprintf("%s: pull request head %s is not the gated head %s; Posse withholds merge_ready and `posse merge --execute` refuses. Restore %s on the request branch, or have the Worker adopt %s (reset the Task branch to it, publish and signal done) so Posse gates it. Rewrite published history only with `posse publish --rewrite --user-approved \"<User's words>\" \"<summary>\"`, which re-gates the new head", task.Title, current.HeadSHA, task.GatedSHA, task.GatedSHA, current.HeadSHA)
+	if project.IsWorkspace() {
+		summary += "; it supports single-repository Tasks only, so a workspace Member republishes a descendant of the gated head"
+	}
+	return summary + "."
 }
 
 // stampNoticedFailures records which failures the latest pr_checks_failed
