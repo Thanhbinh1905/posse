@@ -112,7 +112,7 @@ func runChrome(t *testing.T, chrome string, args ...string) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	base := []string{"--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--no-first-run", "--user-data-dir=" + t.TempDir(), "--virtual-time-budget=8000"}
+	base := []string{"--headless=new", "--disable-gpu", "--no-sandbox", "--hide-scrollbars", "--no-first-run", "--user-data-dir=" + t.TempDir(), "--virtual-time-budget=8000", "--disable-partial-raster"}
 	output, err := exec.CommandContext(ctx, chrome, append(base, args...)...).Output()
 	if err != nil {
 		t.Fatalf("chrome %v: %v", args, err)
