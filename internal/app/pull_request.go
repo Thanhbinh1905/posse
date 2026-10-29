@@ -487,12 +487,15 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 		}
 		existingTitle, existingBody = pull.Title, pull.Body
 	}
-	_, markerErr := db.GetPRBodyMarker(ctx, task.ID, member)
-	if store.IsNotFound(markerErr) && hasUnownedTokenizedPublishMarkerPair(existingBody) {
-		return missingPRBodyMarkerError()
-	}
+	marker, markerErr := db.GetPRBodyMarker(ctx, task.ID, member)
 	if markerErr != nil && !store.IsNotFound(markerErr) {
 		return markerErr
+	}
+	if err := requirePullRequestOwnedByTask(ctx, db, task, prURL, existingBody, marker, markerErr == nil); err != nil {
+		return err
+	}
+	if store.IsNotFound(markerErr) && hasUnownedTokenizedPublishMarkerPair(existingBody) {
+		return missingPRBodyMarkerError()
 	}
 	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, prURL)
 	if err != nil {
@@ -514,6 +517,36 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 	}
 	if err != nil {
 		return axi.Failure("pr_refresh_failed", "could not refresh Posse-owned pull request metadata", true, err.Error())
+	}
+	return nil
+}
+
+// requirePullRequestOwnedByTask refuses to adopt an open PR/MR on the Task
+// branch unless its stored marker binds it to this Task and member, or its
+// body carries this Task's token. A body whose tokens belong to another Task,
+// including a torn-down one, or to no Task this home knows, is never adopted.
+// A body without tokens falls through to the legacy-template rules.
+func requirePullRequestOwnedByTask(ctx context.Context, db *store.DB, task store.Task, prURL, body string, marker store.PRBodyMarker, hasMarker bool) error {
+	tokens := tokenizedPublishMarkerPairs(body)
+	if hasMarker && (marker.PRURL == prURL || slices.Contains(tokens, marker.Token)) {
+		return nil
+	}
+	for _, token := range tokens {
+		owner, err := db.PRBodyMarkerOwnerByToken(ctx, token)
+		if store.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return axi.Failure("pr_owner_mismatch",
+			fmt.Sprintf("open PR/MR %s on the Task branch belongs to %s %s (%s), not to %s", prURL, owner.Project, taskIDString(owner.Seq), owner.State, taskIDString(task.Seq)),
+			false, "Publish never adopts another Task's PR/MR; close it, then retry `posse publish`")
+	}
+	if len(tokens) > 0 && hasMarker {
+		return axi.Failure("pr_owner_mismatch",
+			fmt.Sprintf("open PR/MR %s on the Task branch carries a Posse marker that belongs to no known Task", prURL),
+			false, "Publish never adopts another Task's PR/MR; close it, then retry `posse publish`")
 	}
 	return nil
 }

@@ -303,6 +303,15 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	if err := refuseAgentAttribution(ctx, lane.task.WorktreePath, head, lane.task); err != nil {
 		return err
 	}
+	if parsed.Bool("refresh") && candidateErr == nil && candidate.State == store.ValidationCandidatePromoted && head == candidate.PromotedSHA && !lane.localDelivery() {
+		targetHead, err := lane.targetHead(ctx)
+		if err != nil {
+			return axi.Failure("candidate_target_head_failed", "could not inspect the frozen target before refreshing the PR/MR", true, err.Error())
+		}
+		if targetHead == candidate.TargetSHA {
+			return s.refreshPromotedPullRequest(out, db, lane, cfg, candidate, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"))
+		}
+	}
 	if candidateCWD {
 		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
 			return err
