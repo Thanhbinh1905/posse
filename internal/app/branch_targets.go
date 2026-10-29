@@ -9,6 +9,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func taskTargetBranch(project store.Project, task store.Task) string {
@@ -99,6 +100,66 @@ func targetBranchForTask(cfg config.Config, brief dispatch.Brief, repo string, d
 		return brief.Target, true
 	}
 	return branch, configured
+}
+
+// baseFromTarget reports whether a Change Task without an explicit base starts
+// from its selected non-default target branch rather than the default branch.
+func baseFromTarget(cfg config.Config, brief dispatch.Brief, repo string, defaultBranch string) bool {
+	if brief.Type != "change" {
+		return false
+	}
+	if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, repo, ""); explicit {
+		return false
+	}
+	target, selected := targetBranchForTask(cfg, brief, repo, defaultBranch)
+	return selected && target != defaultBranch
+}
+
+// pinsBase reports whether admission freezes the start commit. A base taken
+// from the target stays live after a landed prerequisite, which lands later.
+func pinsBase(cfg config.Config, brief dispatch.Brief, repo string, defaultBranch string) bool {
+	if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, repo, ""); explicit {
+		return true
+	}
+	return baseFromTarget(cfg, brief, repo, defaultBranch) && !hasLandedPrerequisite(brief.After)
+}
+
+// startPlanFields adds a Change Task's branch plan and all admission warnings
+// to the `posse start` result.
+func startPlanFields(cfg config.Config, project store.Project, brief dispatch.Brief, plan taskplan.Plan) axi.Object {
+	var fields axi.Object
+	warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body)
+	if brief.Type == "change" {
+		branches, branchWarnings := startBranchPlan(project, plan)
+		fields = append(fields, axi.Field{Key: "branches", Value: branches})
+		warnings = append(warnings, branchWarnings...)
+	}
+	if len(warnings) > 0 {
+		fields = append(fields, axi.Field{Key: "warnings", Value: warnings})
+	}
+	return fields
+}
+
+// startBranchPlan lists each repository's admitted base and target, with a
+// warning for every base that is not its target.
+func startBranchPlan(project store.Project, plan taskplan.Plan) ([]axi.Object, []any) {
+	type branchPlan struct{ repo, base, commit, target string }
+	selected := []branchPlan{{project.Name, plan.Execution.Base, plan.Execution.BaseCommit, plan.Execution.Target}}
+	if project.IsWorkspace() {
+		selected = selected[:0]
+		for _, member := range plan.Execution.Members {
+			selected = append(selected, branchPlan{member.Name, member.Base, member.BaseCommit, member.Target})
+		}
+	}
+	rows, warnings := []axi.Object{}, []any{}
+	for _, branch := range selected {
+		base := strings.TrimPrefix(strings.TrimPrefix(branch.base, "refs/remotes/origin/"), "refs/heads/")
+		rows = append(rows, axi.Object{{Key: "repo", Value: branch.repo}, {Key: "base", Value: base}, {Key: "base_commit", Value: branch.commit}, {Key: "target", Value: branch.target}})
+		if base != branch.target {
+			warnings = append(warnings, fmt.Sprintf("%s: base %s differs from target %s", branch.repo, base, branch.target))
+		}
+	}
+	return rows, warnings
 }
 
 func taskTargetRef(ctx context.Context, project store.Project, task store.Task) (string, error) {

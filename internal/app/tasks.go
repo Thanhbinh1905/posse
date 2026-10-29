@@ -348,8 +348,12 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		var targetSelected bool
 		targetBranch, targetSelected = targetBranchForTask(cfg, brief, "", project.DefaultBranch)
 		if targetSelected {
-			if _, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target"); err != nil {
+			targetRef, err := selectedBranchRef(ctx.Context, project.Root, targetBranch, "target")
+			if err != nil {
 				return err
+			}
+			if baseFromTarget(cfg, brief, "", project.DefaultBranch) {
+				baseRef = targetRef
 			}
 		}
 	}
@@ -527,10 +531,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			waitReason = "Waiting for " + strings.Join(unmetDependencies, ", ")
 		}
 		result := axi.Object{{Key: "task", Value: taskIDString(sequence)}, {Key: "type", Value: brief.Type}, {Key: "name", Value: name}, {Key: "state", Value: string(store.StateQueued)}, {Key: "wait_reason", Value: waitReason}, {Key: "profile", Value: resolution.Profile}, {Key: "help", Value: []any{"Task admitted durably without a Sandbox, branch or Worker; inspect it with `posse show " + taskIDString(sequence) + "`"}}}
-		if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
-			result = append(result, axi.Field{Key: "warnings", Value: warnings})
-		}
-		return ctx.Print(result)
+		return ctx.Print(append(result, startPlanFields(cfg, project, brief, plan)...))
 	}
 	defer func() { _ = db.FinishIntent(ctx.Context, intent.ID, intent.ProcessID) }()
 	crashIntentAt("start", "after", "task.create")
@@ -772,9 +773,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	if workflow := plan.Workflow; workflow != nil {
 		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
 	}
-	if warnings := briefSkillWarnings(cfg, brief.Type, brief.Title+"\n"+brief.Body); len(warnings) > 0 {
-		result = append(result, axi.Field{Key: "warnings", Value: warnings})
-	}
+	result = append(result, startPlanFields(cfg, project, brief, plan)...)
 	if report {
 		return ctx.Print(result)
 	}
