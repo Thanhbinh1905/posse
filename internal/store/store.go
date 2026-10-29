@@ -653,6 +653,30 @@ func (db *DB) TransitionEndedReview(ctx context.Context, taskID int64, expected 
 	return db.PersistTask(ctx, taskID)
 }
 
+// TransitionNeverStarted releases a failed Task that never reached working.
+// No Worker received its Brief, so the move needs no User approval.
+func (db *DB) TransitionNeverStarted(ctx context.Context, taskID int64, note string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var worked bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM transitions WHERE task_id=? AND to_state=?)`, taskID, StateWorking).Scan(&worked); err != nil {
+		return err
+	}
+	if worked {
+		return ErrInvalidApprovedDiscardTransition
+	}
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateFailed, StateTornDown, "cli", note); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
 func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
 	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
