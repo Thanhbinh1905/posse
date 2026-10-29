@@ -29,7 +29,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		"Start a Worker from a Brief with an optional display name.",
 		"List a Project's Pool or prune safe, Posse-owned orphan panes.",
 		"Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).",
-		"Send a message, optionally queueing it or interrupting and redirecting a busy Worker.",
+		"Send a message or a Markdown instruction file, optionally queueing it or interrupting and redirecting a busy Worker.",
 		"Withdraw a queued Worker message before delivery begins.",
 		"Interrupt a working Worker and verify it stopped; report when no working turn can be interrupted.",
 		"Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.",
@@ -46,7 +46,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("relaunch help omitted the Profile option: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"send", "--help"}); code != 0 || !strings.Contains(output.String(), "send <task> --interrupt <message>") || !strings.Contains(output.String(), "--queue") {
+	if code := cli.Run([]string{"send", "--help"}); code != 0 || !strings.Contains(output.String(), "send <task> --interrupt <message>") || !strings.Contains(output.String(), "send <task> --file <path.md>") || !strings.Contains(output.String(), "--queue") {
 		t.Fatalf("send help omitted interrupt or queue usage: code=%d output=%s", code, output.String())
 	}
 	output.Reset()

@@ -999,3 +999,89 @@ func TestSendRefusesQueuedTaskNamingItsState(t *testing.T) {
 		t.Fatalf("queued Task stored %d messages, err=%v", count, err)
 	}
 }
+
+func TestSendFileStoresInstructionInTaskDirectory(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err == nil {
+		err = db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "started")
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	instruction := "# Follow-up\n\nRename the flag.\n\nThen rerun the tests.\n"
+	source := filepath.Join(root, "follow-up.md")
+	if err := os.WriteFile(source, []byte(instruction), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	t.Chdir(repo)
+	run := func(args ...string) (int, string) {
+		var output bytes.Buffer
+		cli := testService(home, fake).CLI()
+		cli.Out, cli.ErrOut = &output, &output
+		return cli.Run(args), output.String()
+	}
+	for _, args := range [][]string{{"send", "t1", "inline", "--file", source}, {"send", "t1", "--interrupt", "Stop", "--file", source}, {"send", "t1", "--file", filepath.Join(root, "missing.md")}} {
+		if code, output := run(args...); code == 0 {
+			t.Fatalf("%v was accepted: %s", args, output)
+		}
+	}
+	if code, output := run("send", "t1", "--queue", "--file", source); code != 0 {
+		t.Fatalf("send --file: code=%d output=%s", code, output)
+	}
+	if code, output := run("send", "t1", "--file", source); code != 0 {
+		t.Fatalf("send --file: code=%d output=%s", code, output)
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `SELECT body FROM messages WHERE task_id=? ORDER BY id`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var stored []string
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(body, "\n") || strings.Contains(body, "Rename the flag") {
+			t.Fatalf("message body is not one short pointer line: %q", body)
+		}
+		start := strings.Index(body, filepath.Join(home, "projects", "shop", "tasks", "t1"))
+		end := strings.LastIndex(body, ".md")
+		if start < 0 || end < start {
+			t.Fatalf("message body does not point into the Task directory: %q", body)
+		}
+		path := body[start : end+len(".md")]
+		contents, err := os.ReadFile(path)
+		if err != nil || string(contents) != instruction {
+			t.Fatalf("stored instruction %s = %q, %v", path, contents, err)
+		}
+		stored = append(stored, path)
+	}
+	if len(stored) != 2 || stored[0] == stored[1] {
+		t.Fatalf("stored instruction paths = %q, want two distinct files", stored)
+	}
+}

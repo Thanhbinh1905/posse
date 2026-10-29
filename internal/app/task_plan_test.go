@@ -152,7 +152,7 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	}
 	task, _ := f.onlyTask(t)
 	plan, err := task.AdmittedPlan()
-	if err != nil || plan == nil || !bytes.Equal(plan.Inputs[0].Bytes, original) || plan.ProseLanguage != "vi" {
+	if err != nil || plan == nil || !bytes.Equal(plan.Inputs[0].Bytes, original) || plan.ProseLanguage != "English" {
 		t.Fatalf("selected Brief lost exact bytes: %#v %v", plan, err)
 	}
 	if err := os.WriteFile(filepath.Join(plan.Paths.Output, "brief.md"), []byte(strings.ReplaceAll(string(original), "12", "999")), 0o600); err != nil {
@@ -179,7 +179,7 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 		t.Fatalf("crash restore changed Brief: %q %v", restored, err)
 	}
 	launch, err := os.ReadFile(filepath.Join(plan.Paths.Output, "launch.md"))
-	if err != nil || !strings.Contains(string(launch), "Original preference.") || strings.Contains(string(launch), "Edited preference.") || !strings.Contains(string(launch), "configured language (\"vi\")") {
+	if err != nil || !strings.Contains(string(launch), "Original preference.") || strings.Contains(string(launch), "Edited preference.") || !strings.Contains(string(launch), "other evidence in English in a neutral voice") {
 		t.Fatalf("crash restore used edited preferences: %s %v", launch, err)
 	}
 }

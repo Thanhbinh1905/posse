@@ -44,7 +44,7 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	}
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "# Posse Lead instructions\n\nYou are the Lead for Project %s. The User talks to you, and you plan, dispatch and supervise Workers. Identity for User communication: %s. Use the persona only when talking to the User. %s A Worker is the visible name for a Worker agent.\n\n", project.Name, identityText(identity), artifactProseInstruction(artifactProseLanguage(cfg)))
+	fmt.Fprintf(&text, "# Posse Lead instructions\n\nYou are the Lead for Project %s. The User talks to you, and you plan, dispatch and supervise Workers. Identity for User communication: %s. Use the persona only when talking to the User. %s A Worker is the visible name for a Worker agent.\n\n", project.Name, identityText(identity), artifactProseInstruction())
 	text.WriteString("## Default workflow guidance\n\n")
 	text.Write(guidance)
 	intake, err := leadIntakeLine(cfg)
@@ -97,7 +97,7 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 		text.WriteString("- Change Briefs may set `base:` to choose the branch the Task starts from and `target:` to choose the PR/MR target; a workspace `target:` may be an inline member map such as `{backend: staging}`. Targets are frozen on admission. `defaults.target_branch` and `repositories.<member>.target_branch` provide optional defaults. Explicit base and target branches must exist on origin.\n")
 		text.WriteString("- The optional Brief fields `ticket:` and `refs:` are available for forge issue links: `ticket:` names the one issue a Change Task closes when its PR Merges, and `refs:` adds non-closing references. During compatibility, `issues: [<one issue>]` is accepted as the same ticket; never list multiple closing issues. In a workspace, qualify the ticket and each reference with its member name as `member#number`, for example `ticket: worker#12`. Issue references accept `12`, `\"#12\"` and `member#12`; quote `#12` because an unquoted `#` starts a YAML comment.\n")
 	}
-	text.WriteString("- Use `posse peek`, `posse send`, `posse interrupt`, `posse unsend`, and `posse show` to supervise Workers. `posse send` steers a supported Worker mid-turn even when its pane is focused; use `--queue` when a message should wait for the current turn. For an urgent stop or redirect, use `posse send <task> --interrupt <message>`; Posse verifies the turn stopped and delivers the redirect before queued messages. Add `--reason <ci|conflict|review|scope|...>` to any send so the cause is recorded. `posse interrupt <task>` stops without sending a message. `posse unsend <message-id>` withdraws only a queued message and refuses once delivery is claimed or submitting.\n")
+	text.WriteString("- Use `posse peek`, `posse send`, `posse interrupt`, `posse unsend`, and `posse show` to supervise Workers. `posse send` steers a supported Worker mid-turn even when its pane is focused; use `--queue` when a message should wait for the current turn. Any instruction longer than a few lines goes in a Markdown file sent with `posse send <task> --file <path.md>`; Posse stores it in the Task directory and delivers one short line pointing to it. For an urgent stop or redirect, use `posse send <task> --interrupt <message>`; Posse verifies the turn stopped and delivers the redirect before queued messages. Add `--reason <ci|conflict|review|scope|...>` to any send so the cause is recorded. `posse interrupt <task>` stops without sending a message. `posse unsend <message-id>` withdraws only a queued message and refuses once delivery is claimed or submitting.\n")
 	if project.IsDirectory() {
 		text.WriteString("- Existing Tasks may be inspected and torn down, but no new work is admitted here.\n")
 	} else {
@@ -191,21 +191,11 @@ func leadIdentity(cfg config.Config) config.IdentityRole {
 	return identity
 }
 
-func artifactProseLanguage(cfg config.Config) string {
-	language := strings.TrimSpace(cfg.Identity.Lead.Language)
-	if language == "" || strings.EqualFold(language, "en") || strings.EqualFold(language, "english") {
-		return "English"
-	}
-	return language
-}
+// artifactProseLanguage is fixed so Workers and reviewers read one language regardless of identity.lead.language.
+const artifactProseLanguage = "English"
 
-func artifactProseInstruction(language string) string {
-	language = strings.TrimSpace(language)
-	languageDescription := "English"
-	if language != "" && !strings.EqualFold(language, "en") && !strings.EqualFold(language, "english") {
-		languageDescription = fmt.Sprintf("the configured language (%q)", language)
-	}
-	return fmt.Sprintf("Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in %s in a neutral voice. Keep the Lead persona out of artifacts. Preserve User quotations exactly. Keep code identifiers, machine keys, Task IDs, issue numbers, branch refs, CLI commands, config keys and file paths unchanged.", languageDescription)
+func artifactProseInstruction() string {
+	return "Write Briefs, `posse send` instructions, reviews, decisions, Reports, commit messages, Signal notes and summaries, and other evidence in English in a neutral voice, even when the User writes in another language or identity.lead.language selects one. Keep the Lead persona out of artifacts. Preserve User quotations exactly. Keep code identifiers, machine keys, Task IDs, issue numbers, branch refs, CLI commands, config keys and file paths unchanged."
 }
 
 func leadLanguageRule(cfg config.Config) string {
