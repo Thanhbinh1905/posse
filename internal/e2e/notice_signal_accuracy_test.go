@@ -809,9 +809,67 @@ func TestDoneSignalRefusesTurnFromBeforeDeliveredInstruction(t *testing.T) {
 	if err == nil || !strings.Contains(string(output), "stale_worker_turn") {
 		t.Fatalf("pre-instruction completion was not refused: err=%v output=%s", err, output)
 	}
+	if strings.Contains(string(output), "Retry the same Signal") {
+		t.Fatalf("refusal after a delivered instruction told the Worker to retry blindly: %s", output)
+	}
 	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, taskID)
 	if err != nil || task.State != store.StateWorking {
 		t.Fatalf("stale completion changed Task state: task=%+v err=%v", task, err)
+	}
+}
+
+func TestDoneSignalAfterWorkingSignalNamesCurrentTurnToken(t *testing.T) {
+	fixture := newPRLifecycleFixtureWithManualWatchOwner(t)
+	defer fixture.db.Close()
+	ctx := context.Background()
+	worktree := filepath.Join(fixture.root, "posse", "pool", "working-rotation")
+	gitTest(t, fixture.env, fixture.repo, "worktree", "add", "-b", "posse/t1", worktree, "main")
+	if err := os.WriteFile(filepath.Join(worktree, "report.md"), []byte("Current Research report.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{
+		Seq: 1, Type: "research", Title: "Working rotation", MergeMode: "local", Branch: "posse/t1",
+		BaseRef: "main", WorktreePath: worktree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "E2E fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.NextTaskLaunchWithIdentity(ctx, taskID, "deep", "", false); err != nil {
+		t.Fatal(err)
+	}
+	earlier, err := fixture.db.TaskTurnToken(ctx, taskID)
+	if err != nil || earlier == "" {
+		t.Fatalf("read turn token: %q %v", earlier, err)
+	}
+	workerEnv := setEnv(fixture.leadEnv, "HERDR_PANE_ID", "")
+	run := func(args ...string) (string, error) {
+		worker := exec.Command(fixture.binary, args...)
+		worker.Dir, worker.Env = worktree, workerEnv
+		output, err := worker.CombinedOutput()
+		return string(output), err
+	}
+	if output, err := run("signal", "working", "Progress note"); err != nil {
+		t.Fatalf("working Signal failed: err=%v output=%s", err, output)
+	}
+	current, err := fixture.db.TaskTurnToken(ctx, taskID)
+	if err != nil || current == earlier || !strings.HasPrefix(current, "signal:") {
+		t.Fatalf("working Signal did not rotate the token: earlier=%q current=%q err=%v", earlier, current, err)
+	}
+	output, err := run("signal", "done", "Completion with the earlier token", "--report", "report.md", "--turn", earlier)
+	if err == nil || !strings.Contains(output, "stale_worker_turn") || !strings.Contains(output, "Retry the same Signal with `--turn "+current+"`") {
+		t.Fatalf("refusal does not name the current token %q: err=%v output=%s", current, err, output)
+	}
+	// The fixture has no live pane, so the working Signal's maintenance marks the Task lost.
+	if lost, err := fixture.db.TaskByID(ctx, fixture.project.ID, taskID); err == nil && lost.State == store.StateLost {
+		if err := fixture.db.Transition(ctx, taskID, store.StateLost, store.StateWorking, "cli", "E2E fixture reopen"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if output, err := run("signal", "done", "Completion with the current token", "--report", "report.md", "--turn", current); err != nil || !strings.Contains(output, "signal: done") {
+		t.Fatalf("retry with the current token failed: err=%v output=%s", err, output)
 	}
 }
 
