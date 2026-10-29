@@ -599,6 +599,11 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			return result, axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded", false)
 		}
 	}
+	release, err := s.holdTaskTeardown(ctx, db, task.ID)
+	if err != nil {
+		return result, err
+	}
+	defer release()
 	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests}))
 	if err != nil {
 		settled, settleErr := s.finishSettledTeardownIntent(ctx, db, project.ID, task.ID)

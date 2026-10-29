@@ -82,6 +82,34 @@ func intentProcessAlive(intent store.Intent) bool {
 	return err == nil && bootID == intent.ProcessBootID && startTime == intent.ProcessStartTime
 }
 
+func (s *Service) holdTaskTeardown(ctx context.Context, db *store.DB, taskID int64) (func(), error) {
+	key := fmt.Sprintf("%s:%d", db.Path, taskID)
+	for {
+		s.teardownMu.Lock()
+		held, busy := s.teardowns[key]
+		if !busy {
+			if s.teardowns == nil {
+				s.teardowns = map[string]chan struct{}{}
+			}
+			released := make(chan struct{})
+			s.teardowns[key] = released
+			s.teardownMu.Unlock()
+			return func() {
+				s.teardownMu.Lock()
+				delete(s.teardowns, key)
+				s.teardownMu.Unlock()
+				close(released)
+			}, nil
+		}
+		s.teardownMu.Unlock()
+		select {
+		case <-held:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
 func (s *Service) beginIntentStep(ctx context.Context, db *store.DB, intent store.Intent, step string) error {
 	return db.UpdateIntentStep(ctx, intent.ID, os.Getpid(), "in_progress:"+step)
 }

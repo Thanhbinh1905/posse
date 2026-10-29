@@ -39,6 +39,8 @@ type Service struct {
 	maintenance          map[string]bool
 	maintenanceCancels   map[string]context.CancelFunc
 	maintenanceWG        sync.WaitGroup
+	teardownMu           sync.Mutex
+	teardowns            map[string]chan struct{}
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
 	// DetachQueuedLaunch runs each queued Task start in its own session. The
 	// posse binary sets it; unit tests keep the start in-process.
