@@ -35,6 +35,7 @@ func TestMain(m *testing.M) {
 	// A Service without an explicit Home must never reach the real posse home,
 	// and a Worker running these tests must not carry its own Worker marker in.
 	_ = os.Unsetenv(workerHomeEnv)
+	persistUserShellPath = false
 	tmpRoot := os.TempDir()
 	reapAbandonedAppTestRuns(tmpRoot)
 	runRoot, err := os.MkdirTemp(tmpRoot, "posse-app-test-run-")

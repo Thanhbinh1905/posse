@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
@@ -114,6 +115,17 @@ const userShellPathFile = "user-shell-path"
 var userShellPathMu sync.Mutex
 var recordedUserShellPath string
 
+// isUserCommandEntry reports whether this process can be shown to run from the
+// User's shell: it has a terminal on stdin, or runs in a Herdr pane such as a
+// Lead or Worker agent's, and carries no watch or plugin marker. A process
+// started by cron, systemd or another service has neither.
+func isUserCommandEntry() bool {
+	if os.Getenv(watchRuntimeTokenEnv) != "" || os.Getenv("HERDR_PLUGIN_ID") != "" {
+		return false
+	}
+	return isatty.IsTerminal(os.Stdin.Fd()) || os.Getenv("HERDR_PANE_ID") != ""
+}
+
 // externalCommandPath resolves gh and glab the same way in every posse
 // process: first in the User's shell PATH, then in this process's PATH.
 func externalCommandPath(name string) string {
@@ -121,7 +133,7 @@ func externalCommandPath(name string) string {
 		return name
 	}
 	path := os.Getenv("PATH")
-	if os.Getenv(watchRuntimeTokenEnv) == "" && os.Getenv("HERDR_PLUGIN_ID") == "" {
+	if isUserCommandEntry() {
 		recordUserShellPath(path)
 	} else if userPath := readUserShellPath(); userPath != "" {
 		path = userPath + string(os.PathListSeparator) + path
@@ -138,9 +150,13 @@ func externalCommandPath(name string) string {
 	return name
 }
 
+// persistUserShellPath is false in the package tests so that the PATH of one
+// test never leaks into the PATH resolution of another through the home.
+var persistUserShellPath = true
+
 func recordUserShellPath(path string) {
 	home, err := config.DefaultHome()
-	if err != nil || path == "" {
+	if err != nil || path == "" || !persistUserShellPath {
 		return
 	}
 	file := filepath.Join(home, userShellPathFile)

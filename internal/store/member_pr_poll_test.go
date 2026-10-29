@@ -103,6 +103,9 @@ func TestPRPollFailureNoticeUpdatesAndRecoversOnce(t *testing.T) {
 	if err != nil || state.PRConsecutiveFailures != 6 {
 		t.Fatalf("poll without a successful forge observation cleared the failure episode: %+v, %v", state, err)
 	}
+	if failure, err := db.PRPollLastError(ctx, project.ID); err != nil || failure != "" {
+		t.Fatalf("poll without a global failure left pr_poll_last_error %q, %v", failure, err)
+	}
 	if _, err := db.RecordPRPoll(ctx, project.ID, 8, ""); err != nil {
 		t.Fatal(err)
 	}
