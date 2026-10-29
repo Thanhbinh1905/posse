@@ -67,16 +67,16 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
 		case notice.Kind == "review_cap_reached" && task.Type == "change":
-			head, used, max, err := reviewCapNoticeData(notice)
+			binding, used, max, err := reviewCapNoticeData(notice)
 			if err != nil {
 				return err
 			}
-			if err := db.ObsoleteStaleReviewCapDecisions(ctx, task.ID, reviewCapOrigin(task, head)); err != nil {
+			if err := db.ObsoleteStaleReviewCapDecisions(ctx, task.ID, reviewCapOrigin(task, binding.Head)); err != nil {
 				return err
 			}
 			request.Kind = "review_cap"
-			request.Origin = reviewCapOrigin(task, head)
-			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%d of %d Review/repair rounds used). Choose how to proceed.", taskIDString(task.Seq), shortSHA(head), used, max)
+			request.Origin = reviewCapOrigin(task, binding.Head)
+			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%d of %d Review/repair rounds used). Choose how to proceed.", taskIDString(task.Seq), binding.label(), used, max)
 			request.Options = []string{"accept-head", "final-fix", "rethink", "discard"}
 		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && (task.State == store.StateDone || task.State == store.StateMerging):
 			request.Kind = "merge_ready"

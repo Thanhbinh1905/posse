@@ -294,24 +294,31 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(ship_task_id,repository,from_head,to_head) DO 
 	return db.PersistTask(ctx, carry.ChangeTaskID)
 }
 
-// RecordReviewDisposition binds an explicit User acceptance to one exact head
-// and appends its finding-state events atomically.
-func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID int64, head, quote, blockAt string) error {
-	if taskID < 1 || !validValidationSHA(head) || strings.TrimSpace(quote) == "" || !oneOf(blockAt, "P0", "P1", "P2") {
+// RecordReviewDisposition binds an explicit User acceptance to exact heads,
+// one per changed repository, and appends its finding-state events atomically.
+func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID int64, heads []string, quote, blockAt string) error {
+	if taskID < 1 || len(heads) == 0 || strings.TrimSpace(quote) == "" || !oneOf(blockAt, "P0", "P1", "P2") {
 		return fmt.Errorf("invalid Review disposition")
+	}
+	for _, head := range heads {
+		if !validValidationSHA(head) {
+			return fmt.Errorf("invalid Review disposition")
+		}
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var existing bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
-		return err
-	}
-	if !existing {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
+	for _, head := range heads {
+		var existing bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
 			return err
+		}
+		if !existing {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
+				return err
+			}
 		}
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.seq,f.severity,f.origin,f.in_scope,f.state FROM review_findings f WHERE f.ship_task_id=? ORDER BY f.seq`, taskID)

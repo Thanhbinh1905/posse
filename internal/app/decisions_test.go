@@ -81,7 +81,7 @@ func TestReviewCapNoticeIsRecreatedWhenHeadReturns(t *testing.T) {
 	ctx := context.Background()
 	service := testService(fixture.home, herdr.NewFake())
 	for _, head := range []string{fixture.headSHA, strings.Repeat("a", 40), fixture.headSHA} {
-		if err := createReviewCapNotice(ctx, fixture.db, fixture.project, fixture.task, head, 1, 1); err != nil {
+		if err := createReviewCapNotice(ctx, fixture.db, fixture.project, fixture.task, reviewCapBinding{Head: head}, 1, 1); err != nil {
 			t.Fatal(err)
 		}
 		if err := service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {

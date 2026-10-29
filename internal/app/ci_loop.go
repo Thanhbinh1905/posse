@@ -261,7 +261,16 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 		if usage.Total() < plan.ValidationLoops.MaxReviewRounds() {
 			return nil
 		}
-		return createReviewCapNotice(ctx, db, project, task, observation.HeadSHA, usage.Total(), plan.ValidationLoops.MaxReviewRounds())
+		var binding reviewCapBinding
+		if member == "" {
+			binding, err = newReviewCapBinding([]store.ReviewTarget{{Repository: project.Name, Commit: observation.HeadSHA}})
+		} else {
+			binding, err = reviewCapHead(ctx, db, project, task)
+		}
+		if err != nil {
+			return err
+		}
+		return createReviewCapNotice(ctx, db, project, task, binding, usage.Total(), plan.ValidationLoops.MaxReviewRounds())
 	}
 	if result.Queued {
 		data := marshalJSON(map[string]any{"url": prURL, "head_sha": observation.HeadSHA, "check_set": checkSetKey, "checks": names, "repository": member})
