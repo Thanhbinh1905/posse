@@ -848,10 +848,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		rows := make([]any, 0, len(repos))
 		for _, repo := range repos {
-			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.MergeMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}, {Key: "target_branch", Value: repo.TargetBranch}}
+			row := axi.Object{{Key: "repo", Value: repo.Repo}, {Key: "mode", Value: repo.MergeMode}, {Key: "state", Value: repo.State}, {Key: "pr_url", Value: repo.PRURL}, {Key: "pr_state", Value: ""}, {Key: "gated_sha", Value: repo.GatedSHA}, {Key: "pr_head", Value: ""}, {Key: "target_branch", Value: repo.TargetBranch}}
 			if repo.PRURL != "" {
 				if observation, err := db.LatestMemberPRObservation(ctx.Context, task.ID, repo.Repo); err == nil {
 					row[4].Value = observation.State
+					if observation.PRURL == repo.PRURL {
+						row[6].Value = observation.HeadSHA
+					}
 				} else if !store.IsNotFound(err) {
 					return err
 				}

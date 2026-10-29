@@ -116,7 +116,15 @@ func (s *Service) resolveStewardTarget(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return stewardTarget{}, err
 	}
-	forge, err := forgeForRepository(ctx, project.Root, cfg, member)
+	root := project.Root
+	if member != "" {
+		target, err := projectTarget(ctx, db, project, member)
+		if err != nil {
+			return stewardTarget{}, err
+		}
+		root = target.Root
+	}
+	forge, err := forgeForRepository(ctx, root, cfg, member)
 	if err != nil {
 		return stewardTarget{}, err
 	}
