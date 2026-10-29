@@ -43,7 +43,8 @@ var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
 const storeOpenMigrationBudget = 30 * time.Second
-const migrationLockWaitBudget = 5 * time.Second
+const migrationLockStallBudget = 5 * time.Second
+const migrationHeartbeatInterval = 500 * time.Millisecond
 
 // Observation lock waits stay short enough to defer contended work within
 // the overall reconciliation budget.
@@ -211,13 +212,12 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	if db.schemaCurrent(ctx, sources) {
 		return nil
 	}
-	lockCtx, cancelLock := context.WithTimeout(ctx, migrationLockWaitBudget)
-	lock, err := acquireMigrationLock(lockCtx, db.Path)
-	cancelLock()
+	lock, err := awaitMigrationLock(ctx, db.Path)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
+	defer beatMigrationLock(db.Path)()
 	var journalMode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		return err
