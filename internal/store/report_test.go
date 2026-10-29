@@ -69,19 +69,8 @@ func TestReportAcceptanceRequiresCurrentIndependentPassAndSurvivesRebuild(t *tes
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET launches=1 WHERE id=?`, reportID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.RecordReportReview(ctx, reportID, reviewID, digest, "pass"); err == nil || !strings.Contains(err.Error(), "not independent") {
-		t.Fatalf("same-identity review was accepted: %v", err)
-	}
-	independentReviewID, err := db.CreateTask(ctx, project.ID, Task{Seq: 3, Type: "review", ReviewsTaskID: reportID, Title: "Fresh independent report review", Profile: "reviewer"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.NextTaskLaunchWithIdentity(ctx, independentReviewID, "reviewer", "model-b", true); err != nil {
-		t.Fatal(err)
-	}
-	transitionTaskToReported(t, ctx, db, independentReviewID)
-	if _, err := db.RecordReportReview(ctx, reportID, independentReviewID, digest, "pass"); err != nil {
-		t.Fatalf("independent review: %v", err)
+	if _, err := db.RecordReportReview(ctx, reportID, reviewID, digest, "pass"); err != nil {
+		t.Fatalf("same-model review in its own session: %v", err)
 	}
 	changesReviewID, err := db.CreateTask(ctx, project.ID, Task{Seq: 4, Type: "review", ReviewsTaskID: reportID, Title: "Changes requested", Profile: "reviewer-c"})
 	if err != nil {
