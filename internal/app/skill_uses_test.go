@@ -110,6 +110,14 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 			t.Fatalf("show lacks %q:\n%s", want, shown)
 		}
 	}
+
+	if err := os.Remove(filepath.Join(f.home, "projects", "shop", "tasks", "t1", skillHookMarker)); err != nil {
+		t.Fatal(err)
+	}
+	unhooked := outcomeCLI(t, f.service, 0, "show", "t1")
+	if !strings.Contains(unhooked, "skill_uses_recorded_by: \"nothing: Posse records skill uses only for claude Workers launched with the skill hook\"") || strings.Contains(unhooked, "role_skills") {
+		t.Fatalf("show of a Task launched without the skill hook reports uses:\n%s", unhooked)
+	}
 }
 
 func TestRoleSkillChecklistNamesOnlyTheSkillsOfThatStep(t *testing.T) {

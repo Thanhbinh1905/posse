@@ -96,15 +96,15 @@ func roleSkillChecklist(skills []string, step string, uses map[string]int, recor
 	return checks
 }
 
-// skillUsesRecorded reports whether Posse records the skill uses of a Worker
-// of this harness kind.
-func skillUsesRecorded(plan *taskplan.Plan) bool {
-	return plan != nil && plan.Launch.Profile.Kind == "claude"
+// skillUsesRecorded reports whether Posse records the skill uses of this
+// Task: a claude Worker whose launch installed the Skill hook.
+func skillUsesRecorded(plan *taskplan.Plan, hookInstalled bool) bool {
+	return plan != nil && plan.Launch.Profile.Kind == "claude" && hookInstalled
 }
 
 // taskSkillChecklist is the `skill_checklist` field of publish and done
 // output, or nil when no loaded role skill applies to step.
-func taskSkillChecklist(ctx context.Context, db *store.DB, task store.Task, step string) (axi.Field, bool, error) {
+func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, step string) (axi.Field, bool, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {
 		return axi.Field{}, false, err
@@ -113,7 +113,7 @@ func taskSkillChecklist(ctx context.Context, db *store.DB, task store.Task, step
 	if err != nil {
 		return axi.Field{}, false, err
 	}
-	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan))
+	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)))
 	if len(checks) == 0 {
 		return axi.Field{}, false, nil
 	}
@@ -125,13 +125,13 @@ func taskSkillChecklist(ctx context.Context, db *store.DB, task store.Task, step
 }
 
 // taskSkillUseView reports how often the Worker invoked each role skill.
-func taskSkillUseView(ctx context.Context, db *store.DB, task store.Task, plan *taskplan.Plan, view map[string]any) error {
+func taskSkillUseView(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, plan *taskplan.Plan, view map[string]any) error {
 	skills := planRoleSkills(plan)
 	if len(skills) == 0 {
 		return nil
 	}
-	if !skillUsesRecorded(plan) {
-		view["skill_uses_recorded_by"] = "nothing: Posse records skill uses only for claude Workers"
+	if !skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)) {
+		view["skill_uses_recorded_by"] = "nothing: Posse records skill uses only for claude Workers launched with the skill hook"
 		return nil
 	}
 	uses, err := db.TaskSkillUses(ctx, task.ID)
@@ -197,8 +197,18 @@ func (s *Service) recordSkillUse(ctx context.Context, skill string) error {
 	return db.RecordTaskSkillUse(ctx, parent.task.ID, skill)
 }
 
-// appendSkillUseLaunchArgs installs the Skill hook plugin for a Claude Worker.
-func appendSkillUseLaunchArgs(home string, project store.Project, kind string, args []string) ([]string, error) {
+// skillHookMarker names the file in a Task's home that records a launch
+// installed the Skill hook; Tasks launched before the hook have none.
+const skillHookMarker = "skill-hook"
+
+func skillHookInstalled(home, project string, seq int) bool {
+	_, err := os.Stat(filepath.Join(home, "projects", project, "tasks", taskIDString(seq), skillHookMarker))
+	return err == nil
+}
+
+// appendSkillUseLaunchArgs installs the Skill hook plugin for a Claude Worker
+// and marks the Task as recorded.
+func appendSkillUseLaunchArgs(home string, project store.Project, taskSeq int, kind string, args []string) ([]string, error) {
 	if kind != "claude" {
 		return args, nil
 	}
@@ -206,24 +216,19 @@ func appendSkillUseLaunchArgs(home string, project store.Project, kind string, a
 	if err != nil {
 		return nil, fmt.Errorf("locate posse executable for the Claude skill hook: %w", err)
 	}
-	hooks, err := json.MarshalIndent(map[string]any{"hooks": map[string]any{
+	hooks := map[string]any{
 		"PostToolUse": []any{map[string]any{"matcher": "Skill", "hooks": []any{map[string]any{"type": "command", "command": shellQuote(executable) + " _skill-hook claude", "timeout": 10}}}},
-	}}, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	manifest, err := json.MarshalIndent(map[string]string{"name": "posse-skill-uses", "version": "1.0.0", "description": "Posse record of the skills a Worker invokes"}, "", "  ")
-	if err != nil {
-		return nil, err
 	}
 	root := filepath.Join(home, "projects", project.Name, "claude-skill-uses")
-	for path, data := range map[string][]byte{filepath.Join(root, ".claude-plugin", "plugin.json"): manifest, filepath.Join(root, "hooks", "hooks.json"): hooks} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return nil, err
-		}
-		if err := writeFile(path, append(data, '\n')); err != nil {
-			return nil, err
-		}
+	if err := writeClaudeHookPlugin(root, "posse-skill-uses", "Posse record of the skills a Worker invokes", hooks); err != nil {
+		return nil, err
+	}
+	marker := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(taskSeq), skillHookMarker)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		return nil, err
+	}
+	if err := writeFile(marker, nil); err != nil {
+		return nil, err
 	}
 	return append(args, "--plugin-dir", root), nil
 }
