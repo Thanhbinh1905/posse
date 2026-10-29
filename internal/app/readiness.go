@@ -215,7 +215,7 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 			remote = originHost(ctx, target.Root)
 		}
 		target.OriginHost = remote
-		modes[index] = cfg.Defaults.MergeMode
+		modes[index] = memberMergeMode(cfg, "", remote)
 		if target.Name != "" {
 			modes[index] = savedMemberMergeMode(cfg, target.Name, remote)
 		}

@@ -488,15 +488,22 @@ func cleanupEmptyFixtureTaskCgroups(t *testing.T, home string) {
 	}
 }
 
+type workerTabsOptions struct {
+	manualWatchOwner bool
+	// emptyFolder starts the Lead in a folder with no Git repository and no
+	// configured Merge Mode.
+	emptyFolder bool
+}
+
 func newWorkerTabsFixture(t *testing.T) *workerTabsFixture {
-	return newWorkerTabsFixtureWithOptions(t, false)
+	return newWorkerTabsFixtureWithOptions(t, workerTabsOptions{})
 }
 
 func newWorkerTabsFixtureWithManualWatchOwner(t *testing.T) *workerTabsFixture {
-	return newWorkerTabsFixtureWithOptions(t, true)
+	return newWorkerTabsFixtureWithOptions(t, workerTabsOptions{manualWatchOwner: true})
 }
 
-func newWorkerTabsFixtureWithOptions(t *testing.T, manualWatchOwner bool) *workerTabsFixture {
+func newWorkerTabsFixtureWithOptions(t *testing.T, options workerTabsOptions) *workerTabsFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("tabs-"))
 	home := filepath.Join(root, "posse")
@@ -509,7 +516,7 @@ func newWorkerTabsFixtureWithOptions(t *testing.T, manualWatchOwner bool) *worke
 		}
 	}
 	env := isolatedE2EEnv(t, root)
-	if manualWatchOwner {
+	if options.manualWatchOwner {
 		env = setEnv(env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
 	}
 	for key, value := range map[string]string{
@@ -589,12 +596,22 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(agent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := "[lead]\nkind = \"claude\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 4\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
+	mergeMode := "merge_mode = \"local\"\n"
+	if options.emptyFolder {
+		mergeMode = ""
+	}
+	config := "[lead]\nkind = \"claude\"\n\n[defaults]\n" + mergeMode + "auto_teardown = \"never\"\nmax_workers = 4\n\n[profiles.deep]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"deep\"\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	repo := filepath.Join(root, "repo")
-	initRepository(t, repo, filepath.Join(root, "origin.git"), env)
+	if options.emptyFolder {
+		if err := os.MkdirAll(repo, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		initRepository(t, repo, filepath.Join(root, "origin.git"), env)
+	}
 
 	client := herdr.NewWithEnv("herdr", env)
 	t.Cleanup(func() {
@@ -695,7 +712,7 @@ esac
 	if project.HerdrWorkspaceID != lead.Workspace.WorkspaceID || project.LeadPaneID != lead.RootPane.PaneID {
 		t.Fatalf("Lead did not start in the calling pane: %#v", project)
 	}
-	if manualWatchOwner {
+	if options.manualWatchOwner {
 		if pids := watchPIDs(root); len(pids) != 0 {
 			t.Fatalf("manual Watch owner unexpectedly started hidden pollers: %v", pids)
 		}

@@ -422,7 +422,9 @@ func verifyFastForward(ctx context.Context, project store.Project, task store.Ta
 	if err != nil {
 		return axi.Failure("target_branch_unavailable", "could not inspect Task target branch "+taskTargetBranch(project, task), true, err.Error())
 	}
-	if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", targetRef, "refs/heads/"+task.Branch); err != nil {
+	// The first commit on an unborn default branch fast-forwards it from nothing.
+	unborn := taskTargetBranch(project, task) == project.DefaultBranch && defaultBranchUnborn(ctx, projectRepoTarget(project))
+	if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", targetRef, "refs/heads/"+task.Branch); err != nil && !unborn {
 		branch := taskTargetBranch(project, task)
 		return axi.Failure("needs_rebase", "Task branch is not a fast-forward of target branch "+branch, false, "Rebase the Task branch on origin/"+branch+" and signal done again")
 	}

@@ -142,14 +142,14 @@ func workspaceMemberPaths(targets []taskMember) (map[string]bool, error) {
 }
 
 // reportAttachmentGitArgs lists changes without treating an absent base ref as
-// an empty pathspec. The HEAD diff includes staged and unstaged changes.
-func reportAttachmentGitArgs(baseRef string) [][]string {
+// an empty pathspec. The head diff includes staged and unstaged changes.
+func reportAttachmentGitArgs(baseRef, head string) [][]string {
 	args := make([][]string, 0, 3)
 	if baseRef != "" {
-		args = append(args, []string{"diff", "--name-only", "-z", baseRef, "HEAD"})
+		args = append(args, []string{"diff", "--name-only", "-z", baseRef, head})
 	}
 	return append(args,
-		[]string{"diff", "--name-only", "-z", "HEAD"},
+		[]string{"diff", "--name-only", "-z", head},
 		[]string{"ls-files", "--others", "--exclude-standard", "-z"},
 	)
 }
@@ -219,7 +219,17 @@ func preserveReportAttachmentsWithOptions(ctx context.Context, db *store.DB, hom
 	ignoredFiles := []string{}
 	deletedFiles := []string{}
 	for _, repository := range repositories {
-		attachmentArgs := reportAttachmentGitArgs(repository.baseRef)
+		head, err := revisionOrEmptyTree(ctx, repository.path, "HEAD")
+		if err != nil {
+			return fmt.Errorf("list Report attachments in %s: %w", repository.path, err)
+		}
+		baseRef := repository.baseRef
+		if baseRef != "" {
+			if baseRef, err = revisionOrEmptyTree(ctx, repository.path, baseRef); err != nil {
+				return fmt.Errorf("list Report attachments in %s: %w", repository.path, err)
+			}
+		}
+		attachmentArgs := reportAttachmentGitArgs(baseRef, head)
 		if preserveIgnored {
 			attachmentArgs = append(attachmentArgs, []string{"ls-files", "--others", "--ignored", "--exclude-standard", "-z"})
 		}

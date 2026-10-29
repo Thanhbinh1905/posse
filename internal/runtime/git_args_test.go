@@ -29,7 +29,7 @@ func TestRepositoryFingerprintDisablesOptionalGitLocks(t *testing.T) {
 	}
 	gotArgs := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	wantArgs := []string{
-		"--no-optional-locks", "-C", root, "rev-parse", "HEAD",
+		"--no-optional-locks", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD",
 		"--no-optional-locks", "-C", root, "status", "--porcelain",
 	}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {

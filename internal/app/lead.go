@@ -279,6 +279,10 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		name = project.Name
 	} else {
 		detected, err = detectProject(ctx.Context, dir)
+		var failure *axi.Error
+		if errors.As(err, &failure) && failure.Code == "not_in_git_repository" {
+			detected, err = newRepositoryDetection(ctx.Context, dir), nil
+		}
 		if err != nil {
 			return err
 		}

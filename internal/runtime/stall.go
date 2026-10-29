@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -276,8 +277,10 @@ func directoryFingerprint(ctx context.Context, root string) (string, error) {
 }
 
 func repositoryFingerprint(ctx context.Context, path string) (string, error) {
-	head, err := execgroup.CommandContext(ctx, "git", "--no-optional-locks", "-C", path, "rev-parse", "HEAD").CombinedOutput()
-	if err != nil {
+	head, err := execgroup.CommandContext(ctx, "git", "--no-optional-locks", "-C", path, "rev-parse", "--verify", "--quiet", "HEAD").CombinedOutput()
+	var exit *exec.ExitError
+	// Exit status 1 is an unborn branch: a Task before its repository's first commit.
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}

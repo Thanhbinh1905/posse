@@ -27,6 +27,8 @@ type detectedProject struct {
 	DefaultBranch string // repo Projects only
 	Repos         []detectedRepo
 	Hint          string
+	// Initialize means dir holds no repository yet; registration runs `git init` first.
+	Initialize bool
 }
 
 type detectedRepo struct {
@@ -92,6 +94,18 @@ func detectProject(ctx context.Context, dir string) (detectedProject, error) {
 		return detectedProject{}, axi.Failure("not_in_git_repository", "this folder is not a Git repository and has no Git repositories directly inside it", false, "Run `posse up` inside a repository, or in a folder whose direct subfolders are repositories. Edit non-Git directories directly outside Posse")
 	}
 	return detectedProject{Kind: store.ProjectKindWorkspace, Root: dir, Name: projectName(filepath.Base(dir)), Repos: repos}, nil
+}
+
+// newRepositoryDetection describes a folder with no repository as a repo
+// Project that `posse up` initializes on the User's confirmation.
+func newRepositoryDetection(ctx context.Context, dir string) detectedProject {
+	branch, err := gitOutput(ctx, dir, "config", "--get", "init.defaultBranch")
+	if err != nil || branch == "" {
+		branch = "main"
+	}
+	name := projectName(filepath.Base(dir))
+	return detectedProject{Kind: store.ProjectKindRepo, Root: dir, Name: name, DefaultBranch: branch, Initialize: true,
+		Repos: []detectedRepo{{Name: name, Path: ".", DefaultBranch: branch}}}
 }
 
 // scanWorkspace lists the direct child folders of root that are the top level of
@@ -173,11 +187,16 @@ func memberMergeMode(cfg config.Config, name, remote string) string {
 	return cfg.Defaults.MergeMode
 }
 
-func projectMergeMode(project store.Project, cfg config.Config) string {
+// projectMergeMode is how a Project Merges. A repo Project Merges locally
+// until it has an origin to open pull requests against.
+func projectMergeMode(ctx context.Context, project store.Project, cfg config.Config) string {
 	if project.IsDirectory() {
 		return "local"
 	}
-	return cfg.Defaults.MergeMode
+	if project.IsWorkspace() {
+		return cfg.Defaults.MergeMode
+	}
+	return memberMergeMode(cfg, "", originHost(ctx, project.Root))
 }
 
 func savedMemberMergeMode(cfg config.Config, name, remote string) string {
@@ -314,6 +333,9 @@ func detectionObject(detected detectedProject, cfg config.Config) axi.Object {
 		{Key: "detected", Value: axi.Object{{Key: "project", Value: detected.Name}, {Key: "kind", Value: detected.Kind}, {Key: "root", Value: detected.Root}}},
 		{Key: "repos", Value: repos},
 	}
+	if detected.Initialize {
+		object = append(object, axi.Field{Key: "initialize", Value: "git init -b " + detected.DefaultBranch})
+	}
 	if detected.Hint != "" {
 		object = append(object, axi.Field{Key: "hint", Value: detected.Hint})
 	}
@@ -340,6 +362,11 @@ func registerDetected(ctx context.Context, db *store.DB, detected detectedProjec
 		}
 		project, err = db.CreateWorkspaceProject(ctx, detected.Name, detected.Root, repos)
 	} else {
+		if detected.Initialize {
+			if _, err := gitOutput(ctx, detected.Root, "init", "-b", detected.DefaultBranch); err != nil {
+				return store.Project{}, err
+			}
+		}
 		project, err = db.CreateProject(ctx, detected.Name, detected.Root, detected.DefaultBranch)
 	}
 	if err != nil {
@@ -381,6 +408,9 @@ func (s *Service) confirmRegistration(ctx *axi.Context, detected detectedProject
 		confirm = terminalConfirm
 	}
 	question := fmt.Sprintf("Register %s as a %s Project?", detected.Root, detected.Kind)
+	if detected.Initialize {
+		question = fmt.Sprintf("Initialize a Git repository in %s and register it as a %s Project?", detected.Root, detected.Kind)
+	}
 	yes, interactive, err := confirm(ctx.ErrOut, question)
 	if err != nil {
 		return err
