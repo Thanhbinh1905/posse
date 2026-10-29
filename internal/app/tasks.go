@@ -2402,6 +2402,13 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "keys", Value: args[1:]}, {Key: "state", Value: "sent"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the pane"}}})
 }
 
+const (
+	interruptVerifyTimeout = 10 * time.Second
+	// Claude Code exits on a second Ctrl+C within about a second at an idle
+	// prompt, so a repeated abort waits well past that window.
+	interruptRetryInterval = 2 * time.Second
+)
+
 type interruptOutcome struct {
 	Pane        herdr.Pane
 	Kind        string
@@ -2489,8 +2496,9 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": pane.PaneID, "keys": keys}); err != nil {
 		return interruptOutcome{}, err
 	}
+	lastAbort := time.Now()
 
-	verifyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	verifyCtx, cancel := context.WithTimeout(ctx, interruptVerifyTimeout)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -2506,6 +2514,13 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 				snapshotErr = compactErr
 			} else if current.AgentStatus != "working" {
 				return interruptOutcome{Pane: current, Kind: kind, Keys: keys, Status: current.AgentStatus, Interrupted: true, Verified: true}, nil
+			} else if time.Since(lastAbort) >= interruptRetryInterval {
+				// A harness can start a turn for a message it had queued as soon
+				// as the previous turn is aborted, so abort that turn too.
+				if _, err := s.herdrCall(verifyCtx, "agent.send_keys", map[string]any{"target": pane.PaneID, "keys": keys}); err != nil {
+					snapshotErr = err
+				}
+				lastAbort = time.Now()
 			}
 		}
 		select {
