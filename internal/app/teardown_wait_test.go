@@ -75,3 +75,50 @@ func TestWatchMaintenanceTreatsActiveTeardownAsRoutine(t *testing.T) {
 		}
 	}
 }
+
+func TestTeardownCompletesSettledIntentOfLiveOwner(t *testing.T) {
+	fixture, task, cfg := newMergedLocalTeardownFixture(t)
+	ctx := context.Background()
+	// The owner reached torn-down after this caller read the Task as merged,
+	// then never finished its intent while its process stayed alive.
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.Process.Kill(); _ = owner.Wait() }()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, task.ID, "teardown", "done:task.torn_down", `{"discard":false}`, owner.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, task.ID, store.StateMerged, store.StateTornDown, "cli", "Task Sandbox released after completion"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.teardownTask(ctx, fixture.db, fixture.project, cfg, task, false, "")
+	if err != nil || !result.AlreadyTornDown {
+		t.Fatalf("Teardown of a settled intent = %#v, %v", result, err)
+	}
+	if intent, err := fixture.db.IntentByTask(ctx, task.ID); !store.IsNotFound(err) {
+		t.Fatalf("settled Teardown intent stayed active: %#v, %v", intent, err)
+	}
+}
+
+func TestTeardownCommandCompletesSettledIntentOfTornDownTask(t *testing.T) {
+	fixture, task, _ := newMergedLocalTeardownFixture(t)
+	ctx := context.Background()
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.Process.Kill(); _ = owner.Wait() }()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, task.ID, "teardown", "done:task.torn_down", `{"discard":false}`, owner.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, task.ID, store.StateMerged, store.StateTornDown, "cli", "Task Sandbox released after completion"); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("teardown", "t1"); code != 0 || !strings.Contains(output, "already_torn_down") {
+		t.Fatalf("teardown of a torn-down Task = %d %s %s", code, output, stderr)
+	}
+	if intent, err := fixture.db.IntentByTask(ctx, task.ID); !store.IsNotFound(err) {
+		t.Fatalf("settled Teardown intent stayed active: %#v, %v", intent, err)
+	}
+}

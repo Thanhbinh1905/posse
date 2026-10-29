@@ -507,6 +507,9 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if task.State == store.StateTornDown {
+		if _, err := s.finishSettledTeardownIntent(ctx.Context, db, project.ID, task.ID); err != nil {
+			return err
+		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}})
 	}
 	if task.State == store.StateQueued {
@@ -595,6 +598,14 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests}))
 	if err != nil {
+		settled, settleErr := s.finishSettledTeardownIntent(ctx, db, project.ID, task.ID)
+		if settleErr != nil {
+			return result, settleErr
+		}
+		if settled {
+			result.AlreadyTornDown = true
+			return result, nil
+		}
 		return result, axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 	}
 	intentFinished := false
@@ -1194,7 +1205,8 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err := s.regenerateProjects(ctx, db); err != nil {
 		return result, err
 	}
-	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil {
+	// Another Teardown may already have completed this settled intent.
+	if err := db.FinishIntent(ctx, intent.ID, intent.ProcessID); err != nil && !errors.Is(err, store.ErrIntentOwned) {
 		return result, err
 	}
 	intentFinished = true
