@@ -90,6 +90,20 @@ func TestClassifyQuotaExhaustionRecognizesEachHarness(t *testing.T) {
 			line:   "You exceeded your current quota, please check your plan and billing details.",
 		},
 		{
+			name:   "pi model cooldown usage limit",
+			kind:   "pi",
+			output: " Error: OpenAI API error (429): " + piModelCooldownBody + "\n" + quotaPiHelp + "\n",
+			line:   "OpenAI API error (429): " + piModelCooldownBody,
+			resets: "450h2m10s",
+		},
+		{
+			name:   "pi model cooldown after retries",
+			kind:   "pi",
+			output: " Error: Retry failed after 3 attempts: OpenAI API error (429): " + piModelCooldownBody + "\n" + quotaPiHelp + "\n",
+			line:   "Retry failed after 3 attempts: OpenAI API error (429): " + piModelCooldownBody,
+			resets: "450h2m10s",
+		},
+		{
 			name:   "opencode provider quota",
 			kind:   "opencode",
 			output: "  Build  gpt-5.5\n\n  Error: You exceeded your current quota, please check your plan and billing details.\n\n  ┃  Ask anything...\n  ctrl+p commands\n",
@@ -116,6 +130,8 @@ func TestClassifyQuotaExhaustionRecognizesEachHarness(t *testing.T) {
 }
 
 const quotaPiHelp = piErrorHelpLine
+
+const piModelCooldownBody = `{"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been reached","provider":"codex","reset_seconds":1620130,"reset_time":"450h2m10s"}`
 
 func TestClassifyQuotaExhaustionIgnoresQuotaTextTheWorkerMovedPast(t *testing.T) {
 	for _, testCase := range []struct {
