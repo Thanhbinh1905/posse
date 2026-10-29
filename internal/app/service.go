@@ -173,7 +173,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "status", Summary: "Read only this Worker's recorded status and admitted plan without maintenance.", Handler: s.status},
 		{Name: "send", Usage: "$ send <task> <message> [--queue] [--reason <text>] | send <task> --interrupt <message> [--reason <text>]", Summary: "Send a message, optionally queueing it or interrupting and redirecting a busy Worker.", Handler: s.send},
 		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Worker message before delivery begins.", Handler: s.unsend},
-		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read recent Worker output.", Handler: s.peek},
+		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read the Worker's visible screen; --lines n reads n recent lines and scrolls a fullscreen Worker to the top and back.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Worker.", Handler: s.keys},
 		{Name: "interrupt", Usage: "$ interrupt <task>", Summary: "Interrupt a working Worker and verify it stopped; report when no working turn can be interrupted.", Handler: s.interrupt},
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Worker in the same execution root, optionally with another Profile.", Handler: s.relaunch},

@@ -57,7 +57,7 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 			}
 			continue
 		}
-		output, err := progress.ReadPane(ctx, adapter, pane.PaneID, 200)
+		output, err := progress.ReadScreen(ctx, adapter, pane.PaneID)
 		if err != nil {
 			if missingPaneReadError(err) {
 				if task.State == store.StateWorking {
@@ -136,8 +136,18 @@ func missingPaneReadError(err error) bool {
 	}
 }
 
+// ReadScreen reads only the visible screen. Herdr answers a longer read of an
+// idle fullscreen agent by scrolling it to the top and back to collect history.
+func (SystemProgress) ReadScreen(ctx context.Context, adapter herdr.Adapter, paneID string) (string, error) {
+	return readPane(ctx, adapter, map[string]any{"pane_id": paneID, "source": "visible"})
+}
+
 func (SystemProgress) ReadPane(ctx context.Context, adapter herdr.Adapter, paneID string, lines int) (string, error) {
-	raw, err := adapter.Call(ctx, "pane.read", map[string]any{"pane_id": paneID, "source": "recent_unwrapped", "lines": lines})
+	return readPane(ctx, adapter, map[string]any{"pane_id": paneID, "source": "recent_unwrapped", "lines": lines})
+}
+
+func readPane(ctx context.Context, adapter herdr.Adapter, params map[string]any) (string, error) {
+	raw, err := adapter.Call(ctx, "pane.read", params)
 	if err != nil {
 		return "", err
 	}
