@@ -955,7 +955,7 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse send <task> <msg> [--queue]` | Lead | send to a focused or unfocused Worker, steer a working Worker when supported, or wait for idle with `--queue` |
 | `posse send <task> --interrupt <msg>` | Lead | verify the current turn stopped, then deliver this redirect before queued messages |
 | `posse unsend <message-id>` | Lead | withdraw a queued message; refuse messages already claimed for delivery |
-| `posse peek <task> [--lines n]` | Lead | read the Worker pane |
+| `posse peek <task> [--lines n]` | Lead | read the Worker's visible screen; `--lines n` reads n recent lines and scrolls a fullscreen Worker's view to the top and back |
 | `posse keys <task> <key...>` | Lead | answer a blocked dialog |
 | `posse interrupt <task>` | Lead | send the kind's configured abort keys and verify the Worker leaves its busy turn |
 | `posse relaunch <task> [--profile <name>]` | Lead | restart the Worker in the same Sandbox (section 17) |

@@ -2261,7 +2261,7 @@ func (s *Service) peek(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("peek requires one Task id")
 	}
-	lines := 80
+	lines := 0
 	if value := parsed.Flags["lines"]; value != "" {
 		lines, err = strconv.Atoi(value)
 		if err != nil || lines < 1 || lines > 2000 {
@@ -2288,7 +2288,12 @@ func (s *Service) peek(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	output, err := (runtime.SystemProgress{}).ReadPane(ctx.Context, s.Herdr, task.PaneID, lines)
+	var output string
+	if lines == 0 {
+		output, err = (runtime.SystemProgress{}).ReadScreen(ctx.Context, s.Herdr, task.PaneID)
+	} else {
+		output, err = (runtime.SystemProgress{}).ReadPane(ctx.Context, s.Herdr, task.PaneID, lines)
+	}
 	if err != nil {
 		return herdrError(err)
 	}

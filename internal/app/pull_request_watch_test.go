@@ -104,7 +104,7 @@ func (fixture *prMergeFixture) advanceTarget(t *testing.T, conflicting, push boo
 
 type prMergeTestProgress struct{}
 
-func (prMergeTestProgress) ReadPane(context.Context, herdr.Adapter, string, int) (string, error) {
+func (prMergeTestProgress) ReadScreen(context.Context, herdr.Adapter, string) (string, error) {
 	return "", nil
 }
 

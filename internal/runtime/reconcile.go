@@ -23,7 +23,7 @@ type RunResult struct {
 }
 
 type ProgressSource interface {
-	ReadPane(context.Context, herdr.Adapter, string, int) (string, error)
+	ReadScreen(context.Context, herdr.Adapter, string) (string, error)
 	WorktreeFingerprint(context.Context, string, bool) (string, error)
 }
 

@@ -87,7 +87,7 @@ type taskFailureProgress struct {
 	waitForTimeout string
 }
 
-func (p taskFailureProgress) ReadPane(context.Context, herdr.Adapter, string, int) (string, error) {
+func (p taskFailureProgress) ReadScreen(context.Context, herdr.Adapter, string) (string, error) {
 	return "unchanged", nil
 }
 
