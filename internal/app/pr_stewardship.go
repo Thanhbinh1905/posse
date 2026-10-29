@@ -112,7 +112,7 @@ func (s *Service) resolveStewardTarget(ctx context.Context, db *store.DB, projec
 	if prURL == "" {
 		return stewardTarget{}, axi.Failure("pr_delivery_missing", "Task "+taskIDString(task.Seq)+" has no recorded PR/MR", false, "Wait for the Worker to run `posse publish`")
 	}
-	cfg, err := s.prepareProject(ctx, db, project)
+	cfg, err := s.prepareTaskProject(ctx, db, project, task.ID)
 	if err != nil {
 		return stewardTarget{}, err
 	}

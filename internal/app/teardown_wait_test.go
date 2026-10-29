@@ -202,3 +202,37 @@ func TestConcurrentSameProcessTeardownsSerialize(t *testing.T) {
 		t.Fatalf("Teardown intent stayed active: %#v, %v", intent, err)
 	}
 }
+
+func TestTaskCommandIgnoresAnotherTasksTeardown(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	otherID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "change", Title: "Other Task", State: store.StateSpawning, MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}, {store.StateMerging, store.StateMerged, "cli"}} {
+		if err := f.db.Transition(ctx, otherID, step.from, step.to, step.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.Process.Kill(); _ = owner.Wait() }()
+	if err := f.db.StartIntent(ctx, f.project.ID, otherID, "teardown", "sandbox.stop", "{}", owner.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	previous := teardownWaitTimeout
+	teardownWaitTimeout = 200 * time.Millisecond
+	defer func() { teardownWaitTimeout = previous }()
+	if code, output, stderr := f.run("show", "t1"); code != 0 {
+		t.Fatalf("show t1 failed on t2's Teardown: %d %s %s", code, output, stderr)
+	}
+	if code, output, _ := f.run("list"); code == 0 || !strings.Contains(output, "teardown_in_progress") {
+		t.Fatalf("list did not wait for t2's Teardown: %d %s", code, output)
+	}
+}

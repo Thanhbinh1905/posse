@@ -525,6 +525,14 @@ func (s *Service) prepareProject(ctx context.Context, db *store.DB, project stor
 	return s.prepareProjectMode(ctx, db, project, true, true)
 }
 
+func (s *Service) prepareTaskProject(ctx context.Context, db *store.DB, project store.Project, taskID int64) (config.Config, error) {
+	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{allowRecovery: true, pollRepositories: true, allowRunningLeadNetworkRecovery: true, deliverMessages: true, teardownTask: &taskID})
+}
+
+func (s *Service) prepareTaskProjectInspection(ctx context.Context, db *store.DB, project store.Project, taskID int64) (config.Config, error) {
+	return s.prepareProjectWithOptions(ctx, db, project, projectPreparationOptions{pollRepositories: true, allowRunningLeadNetworkRecovery: true, deliverMessages: true, teardownTask: &taskID})
+}
+
 func (s *Service) prepareProjectForTask(ctx context.Context, db *store.DB, project store.Project) (config.Config, error) {
 	return s.prepareProjectMode(ctx, db, project, true, false)
 }
@@ -576,6 +584,7 @@ type projectPreparationOptions struct {
 	allowRunningLeadNetworkRecovery bool
 	deliverMessages                 bool
 	watchObservation                bool
+	teardownTask                    *int64
 	// admitted is set once the watch pass finished its queue refill or moved a
 	// queued Task out of the queue.
 	admitted *bool
@@ -778,8 +787,14 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 			if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
 				return cfg, err
 			}
-			if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
-				return cfg, err
+			var waitErr error
+			if options.teardownTask != nil {
+				waitErr = waitForTaskTeardown(ctx, db, project.ID, *options.teardownTask)
+			} else {
+				waitErr = waitForActiveTeardowns(ctx, db, project.ID)
+			}
+			if waitErr != nil {
+				return cfg, waitErr
 			}
 		}
 		fresh, err := db.ProjectByID(ctx, project.ID)

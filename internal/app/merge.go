@@ -127,7 +127,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	var cfg config.Config
 	err = retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
 		var prepareErr error
-		cfg, prepareErr = s.prepareProject(ctx.Context, db, project)
+		cfg, prepareErr = s.prepareTaskProject(ctx.Context, db, project, task.ID)
 		return prepareErr
 	})
 	if err != nil {
@@ -361,7 +361,7 @@ func (s *Service) teardownMergedTask(ctx context.Context, db *store.DB, project 
 		return result, false, err
 	}
 	activeError := err
-	if err := waitForActiveTeardowns(ctx, db, project.ID); err != nil {
+	if err := waitForTaskTeardown(ctx, db, project.ID, task.ID); err != nil {
 		return result, false, err
 	}
 	current, err = db.TaskByID(ctx, project.ID, task.ID)
@@ -573,7 +573,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	} else if !inPlace && !reviewEnded && task.State != store.StateMerged && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	cfg, err := s.prepareTaskProject(ctx.Context, db, project, task.ID)
 	if err != nil {
 		return err
 	}

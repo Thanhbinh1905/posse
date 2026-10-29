@@ -69,7 +69,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if plan != nil && plan.Execution.Mode == "in-place" {
 		return axi.Failure("publish_refused", "in-place Tasks cannot publish or open a PR", false)
 	}
-	cfg, err := s.prepareProject(out.Context, db, project)
+	cfg, err := s.prepareTaskProject(out.Context, db, project, task.ID)
 	if err != nil {
 		return err
 	}

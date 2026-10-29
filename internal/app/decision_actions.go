@@ -32,12 +32,15 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 	if err := s.requireLead(out.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(out.Context, db, project)
+	decision, err := db.Decision(out.Context, project.ID, id)
 	if err != nil {
 		return err
 	}
-	decision, err := db.Decision(out.Context, project.ID, id)
+	cfg, err := s.prepareTaskProject(out.Context, db, project, decision.TaskID)
 	if err != nil {
+		return err
+	}
+	if decision, err = db.Decision(out.Context, project.ID, id); err != nil {
 		return err
 	}
 	if decision.AnsweredAt == 0 {

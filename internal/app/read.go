@@ -673,17 +673,20 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return configError(err)
 	}
+	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
+	if err != nil {
+		return err
+	}
 	var preparationErr error
 	if project.IsWorkspace() {
 		_, preparationErr = s.prepareProjectObservation(ctx.Context, db, project)
 	} else {
-		_, preparationErr = s.prepareProjectInspection(ctx.Context, db, project)
+		_, preparationErr = s.prepareTaskProjectInspection(ctx.Context, db, project, task.ID)
 	}
 	if err := deferObservationContention(ctx, preparationErr, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
-	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
-	if err != nil {
+	if task, err = s.currentTask(ctx.Context, db, project, parsed.Positionals[0]); err != nil {
 		return err
 	}
 	id := taskIDString(task.Seq)
