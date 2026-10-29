@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +47,13 @@ func TestTwoConcurrentHandoffWatchesForOneDestination(t *testing.T) {
 	// On the unfixed branch both processes stay in the wait loop here. The
 	// Task transition below races with two real handoff Watch processes.
 	time.Sleep(300 * time.Millisecond)
+	status := watchStatus(t, f.binary, f.repo, f.leadEnv, "pi:concurrent-session")
+	if status["state"] != "active" || status["pid"] != float64(first.Process.Pid) || status["started_at"] == nil {
+		t.Fatalf("status for a live handoff Watch = %v, want active with pid %d and start time", status, first.Process.Pid)
+	}
+	if status := watchStatus(t, f.binary, f.repo, f.leadEnv, "pi:other-session"); status["state"] != "inactive" || status["pid"] != nil {
+		t.Fatalf("status for an unwatched destination = %v, want inactive", status)
+	}
 	if err := f.db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker Signal received"); err != nil {
 		t.Fatal(err)
 	}
@@ -56,21 +61,25 @@ func TestTwoConcurrentHandoffWatchesForOneDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondErr := second.Wait()
-	if secondErr == nil || !strings.Contains(secondOutput.String(), `"code":"watch_already_active"`) {
-		t.Fatalf("second Watch was not refused with watch_already_active: err=%v output=%s", secondErr, secondOutput.String())
+	if err := second.Wait(); err != nil {
+		t.Fatalf("second Watch for a live destination failed: %v\n%s", err, secondOutput.String())
 	}
-	var refusal struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+	var duplicate map[string]any
+	if err := json.Unmarshal(secondOutput.Bytes(), &duplicate); err != nil {
+		t.Fatalf("decode already-active result %s: %v", secondOutput.String(), err)
 	}
-	if err := json.Unmarshal(secondOutput.Bytes(), &refusal); err != nil || refusal.Code != "watch_already_active" {
-		t.Fatalf("decode active-Watch refusal %s: %+v, %v", secondOutput.String(), refusal, err)
+	if duplicate["state"] != "already_active" || duplicate["destination"] != "pi:concurrent-session" || duplicate["pid"] != float64(first.Process.Pid) {
+		t.Fatalf("second Watch did not name the live Watch: first pid=%d result=%s", first.Process.Pid, secondOutput.String())
 	}
-	fields := strings.Fields(refusal.Message)
-	activePID, err := strconv.Atoi(strings.TrimRight(fields[len(fields)-1], ")."))
-	if err != nil || activePID != first.Process.Pid {
-		t.Fatalf("active Watch PID was not named: first pid=%d refusal=%q parse err=%v", first.Process.Pid, refusal.Message, err)
+	if _, found := duplicate["notices"]; found {
+		t.Fatalf("already-active result looks like a Notice batch: %s", secondOutput.String())
+	}
+	if _, found := duplicate["delivery"]; found {
+		t.Fatalf("already-active result looks like a Notice batch: %s", secondOutput.String())
+	}
+	startedAt, ok := duplicate["started_at"].(string)
+	if _, err := time.Parse(time.RFC3339, startedAt); !ok || err != nil {
+		t.Fatalf("already-active result has no start time: %s", secondOutput.String())
 	}
 
 	if err := first.Wait(); err != nil {
@@ -87,6 +96,9 @@ func TestTwoConcurrentHandoffWatchesForOneDestination(t *testing.T) {
 	if err := json.Unmarshal(firstOutput.Bytes(), &handoff); err != nil || len(handoff.Notices) != 1 || handoff.Notices[0].ID != noticeID || handoff.Delivery.DeliveryID == "" {
 		t.Fatalf("first Watch did not hand off exactly the pending Notice: %s; error=%v", firstOutput.String(), err)
 	}
+	if status := watchStatus(t, f.binary, f.repo, f.leadEnv, "pi:concurrent-session"); status["state"] != "inactive" {
+		t.Fatalf("status after the handoff Watch exited = %v, want inactive", status)
+	}
 	pending, err := f.db.UndeliveredNotices(ctx, f.project.ID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("handoff should hold the Notice once: pending=%#v err=%v", pending, err)
@@ -95,4 +107,19 @@ func TestTwoConcurrentHandoffWatchesForOneDestination(t *testing.T) {
 	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notice_delivery_receipts WHERE project_id=? AND destination=?`, f.project.ID, "pi:concurrent-session").Scan(&count); err != nil || count != 1 {
 		t.Fatalf("delivery receipts = %d, %v; want one", count, err)
 	}
+}
+
+func watchStatus(t *testing.T, binary, dir string, env []string, destination string) map[string]any {
+	t.Helper()
+	command := exec.Command(binary, "watch", "--json", "--status", "--destination", destination)
+	command.Dir, command.Env = dir, env
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("watch --status failed: %v\n%s", err, output)
+	}
+	var status map[string]any
+	if err := json.Unmarshal(output, &status); err != nil {
+		t.Fatalf("decode watch --status %s: %v", output, err)
+	}
+	return status
 }

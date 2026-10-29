@@ -123,6 +123,11 @@ export const PosseLead = async ({ client, directory }) => {
         retry();
         return;
       }
+      // Another Watch owns this destination; back off instead of re-arming at once.
+      if (result.state === "already_active") {
+        retry();
+        return;
+      }
       if (result.state === "uncertain") {
         const delivery = result.delivery;
         const destination = delivery?.destination ?? "";

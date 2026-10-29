@@ -195,7 +195,7 @@ func (s *Service) commands() *axi.Command {
 		}},
 		{Name: "sync", Summary: "Fast-forward the Project's default branch from origin when safe.", Handler: s.sync},
 		{Name: "teardown", Summary: "Teardown finished Tasks or cancel Sandbox work with User approval and verified Worker shutdown.", Handler: s.teardown},
-		{Name: "watch", Usage: "$ watch [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Wait for Notices; adapter handoffs are receiver-only, or perform a User-only repair of the Project watch.", Handler: s.wait},
+		{Name: "watch", Usage: "$ watch [--ack <ids>] [--timeout ms] [--quiet-routine] [--requeue <ids>] [--handoff --destination adapter:session] [--status --destination adapter:session] [--receipt <id> --receipt-outcome accepted|rejected|uncertain [--receipt-token token]] [--poll-only] [--repair]", Summary: "Wait for Notices; adapter handoffs are receiver-only, or perform a User-only repair of the Project watch.", Handler: s.wait},
 		{Name: "pool", Summary: "List a Project's Pool or prune safe, Posse-owned orphan panes.", Handler: s.pool},
 		{Name: "clean", Usage: "$ clean [--dry-run|--yes]", Summary: "Review or reclaim finished Tasks, their processes, scratch and held Sandboxes.", Handler: s.clean},
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
