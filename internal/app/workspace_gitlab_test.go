@@ -233,3 +233,89 @@ esac
 		t.Fatalf("recovered Member did not settle: state=%s repos=%#v", f.state(), f.repos())
 	}
 }
+
+// clouddbv1 t24 (#721): the Member's open MR head was rewritten outside `posse
+// publish` after the gate. Green checks on that head never make it merge-ready.
+func TestWorkspaceGitLabOpenMRAtUngatedHeadRaisesHeadDiscontinuity(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nreview = \"none\"\nauto_teardown = \"never\"\n\n[repositories.worker]\nforge = \"gitlab\"\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	bin := filepath.Join(f.root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(f.root, "glab.log")
+	const script = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$POSSE_TEST_GLAB_LOG"
+case "$*" in
+  *"/approvals"*) printf '{"approved":true,"approvals_left":0}\n' ;;
+  *"/merge_requests/17"*) cat "$POSSE_TEST_GLAB_STATE" ;;
+  "mr merge "*) printf 'Merged\n' ;;
+  *) printf 'unexpected glab call: %s\n' "$*" >&2; exit 90 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "glab"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("POSSE_TEST_GLAB_LOG", log)
+	worker := filepath.Join(f.workspace, "worker")
+	remote := filepath.Join(f.root, "remotes", "worker.git")
+	gitTest(t, worker, "remote", "set-url", "origin", "https://git.example.com/group/worker.git")
+	gitTest(t, worker, "config", "remote.origin.pushurl", remote)
+	gitTest(t, worker, "config", "url.file://"+remote+".insteadOf", "https://git.example.com/group/worker.git")
+
+	memberWorktree := filepath.Join(f.task.WorktreePath, "worker")
+	gated := strings.TrimSpace(gitTest(t, memberWorktree, "rev-parse", "HEAD"))
+	rewritten := strings.TrimSpace(gitTest(t, memberWorktree, "commit-tree", gated+"^{tree}", "-p", gated+"^", "-m", "change worker, rewritten outside posse publish"))
+	repo := f.repos()["worker"]
+	repo.PRURL = "https://git.example.com/group/worker/-/merge_requests/17"
+	repo.GatedSHA = gated
+	repo.State = store.TaskRepoMerge
+	if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateMerging, "cli", "merge t24 shape"); err != nil {
+		t.Fatal(err)
+	}
+	mr, err := json.Marshal(map[string]any{"web_url": repo.PRURL, "state": "opened", "sha": rewritten, "source_branch": f.task.Branch, "target_branch": "main", "source_project_id": 7, "target_project_id": 7, "detailed_merge_status": "mergeable", "head_pipeline": map[string]any{"status": "success"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(f.root, "glab-state.json")
+	if err := os.WriteFile(state, mr, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GLAB_STATE", state)
+
+	for range 2 {
+		if err := f.service.pollWorkspacePullRequests(ctx, f.db, f.project, f.config(), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "merge_ready") != 0 || countNoticeKind(notices, "head_discontinuity") != 1 {
+		t.Fatalf("ungated green MR head: notices=%+v", notices)
+	}
+	for _, notice := range notices {
+		if notice.Kind != "head_discontinuity" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["repo"] != "worker" || data["gated_head"] != gated || data["pr_head"] != rewritten || !strings.Contains(notice.Summary, gated) || !strings.Contains(notice.Summary, rewritten) || !strings.Contains(notice.Summary, "posse publish --rewrite --user-approved") {
+			t.Fatalf("head_discontinuity Notice = %+v", notice)
+		}
+	}
+	if code := f.run("merge", "t1", "--execute", "--user-approved", "merge it"); code != 1 {
+		t.Fatalf("merge of an ungated Member head exit=%d output=%s", code, f.out.String())
+	}
+	if calls, err := os.ReadFile(log); err != nil || strings.Contains(string(calls), "mr merge") {
+		t.Fatalf("ungated Member head was merged: %q %v", calls, err)
+	}
+}

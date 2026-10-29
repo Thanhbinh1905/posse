@@ -398,6 +398,57 @@ func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) 
 	}
 }
 
+// #721: a PR head force-pushed outside `posse publish` after the gate is green
+// but is not the head Posse gated, so it is never merge-ready.
+func TestPRWatchRaisesHeadDiscontinuityInsteadOfMergeReadyForUngatedHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.GatedSHA == "" {
+		t.Fatalf("gate did not record a head: task=%#v err=%v", task, err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET autonomy_land='auto' WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	rewritten := strings.Repeat("b", 40)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", rewritten)
+	fixture.setGHHead(t, rewritten)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll := func() []store.Notice {
+		t.Helper()
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return notices
+	}
+	poll()
+	notices := poll()
+	if countNoticeKind(notices, "merge_ready") != 0 || countNoticeKind(notices, "head_discontinuity") != 1 {
+		t.Fatalf("ungated green head: notices=%+v", notices)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "head_discontinuity" && (!strings.Contains(notice.Summary, task.GatedSHA) || !strings.Contains(notice.Summary, rewritten) || !strings.Contains(notice.Summary, "posse publish --rewrite --user-approved")) {
+			t.Fatalf("head_discontinuity Notice = %+v", notice)
+		}
+	}
+	if code, output, _ := fixture.run("merge", "t1", "--execute"); code != 1 {
+		t.Fatalf("merge of an ungated head exit=%d output=%s", code, output)
+	}
+	if log, err := os.ReadFile(fixture.ghLog); err != nil || strings.Contains(string(log), "pr merge") {
+		t.Fatalf("ungated head was merged: log=%q err=%v", log, err)
+	}
+}
+
 func TestPRWatchRejectsTargetThatAdvancesDuringCIObservation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	fixture.requireCurrentTarget(t)
