@@ -687,6 +687,11 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
+		argsForAgent, skillErr = appendSkillUseLaunchArgs(home, project, kind, argsForAgent)
+		if skillErr != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
+			return skillErr
+		}
 	}
 	if generated != nil {
 		briefData = []byte(withReviewDir(string(briefData), taskHome))
@@ -704,7 +709,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
@@ -1844,6 +1849,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		signalResult = append(signalResult, axi.Field{Key: "turn_token", Value: turnToken})
 	}
+	if verb == "done" {
+		if checklist, ok, err := taskSkillChecklist(ctx.Context, db, task, "done"); err != nil {
+			return err
+		} else if ok {
+			signalResult = append(signalResult, checklist)
+		}
+	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
 	if verb == "done" && task.Type == "change" && !noChange {
@@ -2949,6 +2961,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(skillErr)
 		}
 		startArgs, skillErr = appendResearchLaunchArgs(ctx, home, project, cfg, kind, startArgs)
+		if skillErr != nil {
+			return failure(skillErr)
+		}
+		startArgs, skillErr = appendSkillUseLaunchArgs(home, project, kind, startArgs)
 		if skillErr != nil {
 			return failure(skillErr)
 		}

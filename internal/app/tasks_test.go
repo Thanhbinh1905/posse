@@ -759,7 +759,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		switch call.Method {
 		case "agent.start":
 			args := call.Params["args"].([]string)
-			started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 14 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && !strings.Contains(strings.Join(args, " "), "relaunch.md")
+			started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 16 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && args[14] == "--plugin-dir" && args[15] == filepath.Join(home, "projects", "shop", "claude-skill-uses") && !strings.Contains(strings.Join(args, " "), "relaunch.md")
 		case "agent.prompt":
 			text, _ := call.Params["text"].(string)
 			typedRelaunch = typedRelaunch || strings.Contains(text, "relaunch.md")

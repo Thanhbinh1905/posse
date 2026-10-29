@@ -179,7 +179,7 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
-	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + roleSkillProtocol(plan) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	contents = appendKnowledgeInstructions(contents, project, planKnowledge(plan))
 	return writeFile(launchPath, []byte(contents))
