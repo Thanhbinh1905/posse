@@ -2987,7 +2987,13 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if err != nil {
 		return failure(err)
 	}
-	if err := track("relaunch.write", func() error { return writeFile(relaunchPath, relaunchInstructionsFor(task, gitStateReport, messages)) }); err != nil {
+	currentTurn, err := db.TaskTurnToken(ctx, task.ID)
+	if err != nil {
+		return failure(err)
+	}
+	if err := track("relaunch.write", func() error {
+		return writeFile(relaunchPath, relaunchInstructionsFor(task, gitStateReport, messages, currentTurn))
+	}); err != nil {
 		return failure(err)
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
@@ -3080,7 +3086,15 @@ func (s *Service) markRelaunchedWorking(ctx context.Context, db *store.DB, proje
 	}
 }
 
-func relaunchInstructionsFor(task store.Task, gitStateReport string, messages []store.Message) []byte {
+func relaunchInstructionsFor(task store.Task, gitStateReport string, messages []store.Message, turnToken string) []byte {
+	return append(relaunchBody(task, gitStateReport, messages), []byte(relaunchTurnLine(turnToken))...)
+}
+
+func relaunchTurnLine(turnToken string) string {
+	return fmt.Sprintf("\nCurrent Worker turn token: `%s`. Your first `done` Signal must be `posse signal done \"<summary>\" --turn %s`; the token in `launch.md` may be stale. After a Lead instruction, use the `turn` token from its Posse envelope.\n", turnToken, turnToken)
+}
+
+func relaunchBody(task store.Task, gitStateReport string, messages []store.Message) []byte {
 	if completedChangeTask(task) {
 		return relaunchText("Your Worker was restarted after this Task reached state "+string(task.State)+". Re-read `launch.md` and inspect `git status` and `git log`, but do not change the work on your own. Wait for Lead instructions; they arrive as Posse envelopes.\n", gitStateReport, messages)
 	}
