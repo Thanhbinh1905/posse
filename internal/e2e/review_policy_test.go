@@ -60,6 +60,7 @@ func TestSelectedReviewPolicyLocalMerge(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "false")
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	if code, out := startReviewIdentityTask(t, f, "Selected policy", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
@@ -150,6 +151,7 @@ func TestFrozen015LocalReviewPlanKeepsItsEvidenceRequirement(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "false")
 	if code, out := startReviewIdentityTask(t, f, "Legacy local review", "author", ""); code != 0 {
 		t.Fatalf("start: %d %s", code, out)
 	}

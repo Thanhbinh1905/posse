@@ -173,6 +173,7 @@ func TestStagingSelectedReviewModesPublishOnlyToStaging(t *testing.T) {
 			stagingTarget(t, f)
 			runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.merge_mode", "pr")
 			runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", mode)
+			runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_loop.auto_start", "false")
 			if code, output := startStagingTask(t, f, "Staging "+mode); code != 0 {
 				t.Fatalf("start staging Change Task: %d %s", code, output)
 			}
