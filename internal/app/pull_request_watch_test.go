@@ -864,6 +864,55 @@ func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 	}
 }
 
+func TestPRWatchRaisesCIExhaustedAfterAcceptHeadOnSpentReviewCap(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateMerging)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoopWithReview(t, fixture, 3, 0, "full-pipeline")
+	seedHistoricalValidationFixRounds(t, fixture, 3)
+	if err := createReviewCapNotice(ctx, fixture.db, fixture.project, fixture.task, reviewCapBinding{Head: fixture.headSHA}, 3, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	var decisionID int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, fixture.task.ID).Scan(&decisionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.AnswerDecision(ctx, fixture.project.ID, decisionID, "accept-head", "accept-head"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='merging' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var exhausted, openDecisions int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, fixture.task.ID).Scan(&exhausted); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decisions WHERE task_id=? AND answered_at=0 AND obsolete_at=0`, fixture.task.ID).Scan(&openDecisions); err != nil {
+		t.Fatal(err)
+	}
+	if exhausted != 1 || openDecisions != 0 {
+		t.Fatalf("CI failure after accept-head on a spent cap: ci_fix_exhausted notices=%d open Decisions=%d, want one Notice", exhausted, openDecisions)
+	}
+}
+
 func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()

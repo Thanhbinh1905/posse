@@ -241,14 +241,17 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	if member != "" {
 		memberLabel = member + ": "
 	}
-	if errors.Is(err, store.ErrValidationFixBudgetExhausted) {
+	exhausted := func(reason string) error {
 		data := marshalJSON(map[string]any{"url": prURL, "head_sha": observation.HeadSHA, "check_set": checkSetKey, "checks": names, "repository": member})
 		_, noticeErr := db.CreateValidationNoticeOnce(ctx, store.Notice{
 			ProjectID: project.ID, TaskID: task.ID, Kind: "ci_fix_exhausted",
-			Summary:  task.Title + ": " + memberLabel + "CI fix-round budget exhausted for gated head " + observation.HeadSHA + ": " + strings.Join(names, ", "),
+			Summary:  task.Title + ": " + memberLabel + reason + " for gated head " + observation.HeadSHA + ": " + strings.Join(names, ", "),
 			DataJSON: data,
 		}, prURL, observation.HeadSHA, checkSetKey, member)
 		return noticeErr
+	}
+	if errors.Is(err, store.ErrValidationFixBudgetExhausted) {
+		return exhausted("CI fix-round budget exhausted")
 	}
 	if err != nil {
 		return err
@@ -269,6 +272,13 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 		}
 		if err != nil {
 			return err
+		}
+		var capDecidedForHead bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND origin=? AND answered_at<>0)`, task.ID, reviewCapOrigin(task, binding.Head)).Scan(&capDecidedForHead); err != nil {
+			return err
+		}
+		if capDecidedForHead {
+			return exhausted("Review and repair cap already decided")
 		}
 		return createReviewCapNotice(ctx, db, project, task, binding, usage.Total(), plan.ValidationLoops.MaxReviewRounds())
 	}
