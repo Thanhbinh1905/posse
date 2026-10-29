@@ -614,6 +614,7 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 	}
 	legacyUUID := "f0a17a02-cb03-4371-89ab-544a51e36744"
 	for _, statement := range []string{
+		`ALTER TABLE task_launch_identities DROP COLUMN start_head`,
 		`ALTER TABLE project_watch_state DROP COLUMN pr_poll_last_error`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_notice_raised`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_cause`,
@@ -762,6 +763,7 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		t.Fatalf("claim legacy receipt = %+v, %v, %v", delivery, claimed, err)
 	}
 	for _, statement := range []string{
+		`ALTER TABLE task_launch_identities DROP COLUMN start_head`,
 		`ALTER TABLE project_watch_state DROP COLUMN pr_poll_last_error`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_notice_raised`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_cause`,
@@ -978,6 +980,7 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
+		`ALTER TABLE task_launch_identities DROP COLUMN start_head`,
 		`ALTER TABLE project_watch_state DROP COLUMN pr_poll_last_error`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_notice_raised`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_cause`,
