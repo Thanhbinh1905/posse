@@ -52,6 +52,9 @@ var quotaPatterns = []quotaPattern{
 	{kinds: []string{"claude", "codex", "pi", "opencode"}, phrase: regexp.MustCompile(`(?i)^you exceeded your current quota\b`)},
 	{kinds: []string{"claude", "pi", "opencode"}, phrase: regexp.MustCompile(`(?i)^(?:your )?credit balance is too low\b`)},
 	{kinds: []string{"pi", "opencode"}, phrase: regexp.MustCompile(`(?i)^insufficient_quota\b`)},
+	// Pi via a proxy provider: `OpenAI API error (429): {"code":"model_cooldown","last_upstream_error":"usage_limit_reached: ...","reset_time":"450h2m10s"}`.
+	{kinds: []string{"pi"}, phrase: regexp.MustCompile(`(?i)^(?:retry failed after \d+ attempts: )?openai api error \(429\):.*\busage_limit_reached\b`)},
+	{kinds: []string{"pi"}, phrase: regexp.MustCompile(`(?i)^all credentials for model \S+ are cooling down\b.*\busage_limit_reached\b`)},
 }
 
 var (
@@ -60,6 +63,7 @@ var (
 	quotaLinePrefix   = regexp.MustCompile(`^(?:[⏺●⎿■•✗✘×│┃▌>⚠]\s*)+`)
 	quotaErrorPrefix  = regexp.MustCompile(`(?i)^(?:api error:\s*|error:\s*|\[\w+\]\s*)?(?:\d{3}\s+)?`)
 	quotaJSONMessage  = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
+	quotaResetTime    = regexp.MustCompile(`"reset_time"\s*:\s*"([^"]+)"`)
 	quotaEpochSuffix  = regexp.MustCompile(`\|(\d{9,})$`)
 	quotaWhitespaceRE = regexp.MustCompile(`\s+`)
 )
@@ -121,6 +125,7 @@ func matchQuotaMessage(kind, line string) (quotaExhaustion, bool) {
 	text := strings.ReplaceAll(strings.TrimSpace(line), "’", "'")
 	text = strings.TrimSpace(quotaLinePrefix.ReplaceAllString(text, ""))
 	text = strings.TrimSpace(quotaErrorPrefix.ReplaceAllString(text, ""))
+	full := text
 	if match := quotaJSONMessage.FindStringSubmatch(text); match != nil {
 		text = match[1]
 	}
@@ -128,13 +133,21 @@ func matchQuotaMessage(kind, line string) (quotaExhaustion, bool) {
 		return quotaExhaustion{}, false
 	}
 	for _, pattern := range quotaPatterns {
-		if !oneOfString(kind, pattern.kinds...) || !pattern.phrase.MatchString(text) {
+		if !oneOfString(kind, pattern.kinds...) {
 			continue
+		}
+		if !pattern.phrase.MatchString(text) {
+			if !pattern.phrase.MatchString(full) {
+				continue
+			}
+			text = full
 		}
 		text = quotaWhitespaceRE.ReplaceAllString(text, " ")
 		found := quotaExhaustion{Line: text}
 		if epoch := quotaEpochSuffix.FindStringSubmatch(text); epoch != nil {
 			found.Resets = "at unix time " + epoch[1]
+		} else if reset := quotaResetTime.FindStringSubmatch(full); reset != nil {
+			found.Resets = reset[1]
 		} else if reset := quotaResetPattern.FindStringSubmatch(text); reset != nil {
 			found.Resets = strings.TrimSpace(reset[1] + reset[2])
 		}
