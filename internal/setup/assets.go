@@ -24,8 +24,8 @@ func PluginManifest(binary, version string) ([]byte, error) {
 	return []byte(contents), nil
 }
 
-// PiWorkerGuard is the pi extension that runs `posse _guard` before every bash
-// tool call.
+// PiWorkerGuard is the pi extension that runs `posse _guard` before every bash,
+// write and edit tool call.
 func PiWorkerGuard(binary string) ([]byte, error) {
 	template, err := files.ReadFile("assets/pi-worker-guard.ts")
 	if err != nil {

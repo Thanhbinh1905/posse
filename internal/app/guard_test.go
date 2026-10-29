@@ -458,6 +458,9 @@ func TestGuardAllowsScratchPosseAgainstAFreshTempHome(t *testing.T) {
 		"P=./posse-copy; export POSSE_HOME=$(mktemp -d); $P list",
 		"env -i HOME=$(mktemp -d) ./posse-copy list",
 		"bash lab.sh",
+		"export POSSE_HOME=$(mktemp -d); for bin in posse ./posse-copy; do $bin list; done",
+		"for bin in posse; do $bin list; done",
+		"for word in a b; do echo $word; done",
 		"LAB=$(mktemp -d); env -u HERDR_SOCKET_PATH XDG_CONFIG_HOME=$LAB/xdg herdr server",
 	} {
 		if refused, reason := guardCommand(command, scope); refused {
@@ -481,6 +484,10 @@ func TestGuardRefusesScratchPosseAgainstTheWorkerHome(t *testing.T) {
 		"POSSE_HOME=$(mktemp -d >/dev/null) ./posse-copy list",
 		"POSSE_HOME=$(mktemp --version) ./posse-copy list",
 		"bash real.sh",
+		"S=" + dir + "; for bin in posse $S/posse-copy; do echo '{}' | $bin _guard; done",
+		"for bin in posse ./posse-copy; do \"$bin\" list; done",
+		"for bin in posse \"$(git rev-parse --show-toplevel)/posse-copy\"; do ${bin} list; done",
+		"\"$(git rev-parse --show-toplevel)/posse-copy\" list",
 	} {
 		if refused, reason := guardCommand(command, scope); !refused || reason.rule != rulePosseBuild {
 			t.Errorf("guard did not refuse %q by %s: %v %#v", command, rulePosseBuild, refused, reason)

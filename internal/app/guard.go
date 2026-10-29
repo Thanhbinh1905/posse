@@ -187,10 +187,11 @@ type guard struct {
 	writable   []string
 	posse      string
 	visited    map[string]bool
-	source     string          // the script being checked at the current depth
-	written    map[string]bool // files source writes by name; nil when unknown
-	input      string          // what the command being checked reads on stdin
-	hereInput  bool            // the command reads its own here-document or here-string
+	source     string            // the script being checked at the current depth
+	written    map[string]bool   // files source writes by name; nil when unknown
+	input      string            // what the command being checked reads on stdin
+	hereInput  bool              // the command reads its own here-document or here-string
+	loopItems  map[string]string // source of the unresolved item each loop variable holds
 }
 
 func refuse(rule, command, why string) (bool, guardReason) {
@@ -340,12 +341,7 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		e.merge(e, body)
 		return false, guardReason{}
 	case *syntax.ForClause:
-		body := e.clone()
-		if refused, reason := g.statements(body, script, cmd.Do, depth, stdinRedirected); refused {
-			return true, reason
-		}
-		e.merge(e, body)
-		return false, guardReason{}
+		return g.forLoop(e, script, cmd, depth, stdinRedirected)
 	case *syntax.CaseClause:
 		paths := []*shellEnv{e.clone()} // no pattern need match
 		for _, item := range cmd.Items {
@@ -382,6 +378,65 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		return !refused
 	})
 	return refused, reason
+}
+
+// forLoop checks the body of a for loop once for each item it iterates over,
+// with the loop variable bound to that item.
+func (g *guard) forLoop(e *shellEnv, script string, loop *syntax.ForClause, depth int, stdinRedirected bool) (bool, guardReason) {
+	bodies := []*shellEnv{e}
+	check := func(body *shellEnv) (bool, guardReason) {
+		bodies = append(bodies, body)
+		return g.statements(body, script, loop.Do, depth, stdinRedirected)
+	}
+	iter, ok := loop.Loop.(*syntax.WordIter)
+	if !ok || !iter.InPos.IsValid() {
+		body := e.clone()
+		if ok {
+			body.unknown[iter.Name.Value] = true
+		}
+		if refused, reason := check(body); refused {
+			return true, reason
+		}
+		e.merge(bodies...)
+		return false, guardReason{}
+	}
+	name := iter.Name.Value
+	for _, item := range iter.Items {
+		value, known := e.word(script, item)
+		if !known {
+			body := e.clone()
+			body.unknown[name] = true
+			previous, bound := g.loopItems[name]
+			if g.loopItems == nil {
+				g.loopItems = map[string]string{}
+			}
+			g.loopItems[name] = sourceText(script, item)
+			refused, reason := check(body)
+			delete(g.loopItems, name)
+			if bound {
+				g.loopItems[name] = previous
+			}
+			if refused {
+				return true, reason
+			}
+			continue
+		}
+		values := []string{value}
+		if _, quoted := item.Parts[0].(*syntax.DblQuoted); len(item.Parts) > 1 || !quoted {
+			values = strings.Fields(value)
+		}
+		for _, value := range values {
+			body := e.clone()
+			body.values[name] = value
+			delete(body.unknown, name)
+			if refused, reason := check(body); refused {
+				return true, reason
+			}
+		}
+	}
+	e.merge(bodies...)
+	e.unknown[name] = true
+	return false, guardReason{}
 }
 
 // redirectsToHome refuses a statement that redirects output into the
@@ -547,6 +602,13 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 		if !literal[0] || args[0] == "" {
 			if g.mentionsHerdr(raw) {
 				return refuse(ruleDynamicProgramHerdr, raw, "posse cannot tell which program this runs, and it mentions Herdr")
+			}
+			source := args[0]
+			if item, ok := g.loopItems[strings.Trim(source, `"${}`)]; ok {
+				source = item
+			}
+			if strings.HasPrefix(filepath.Base(strings.Trim(source, `"'`)), "posse") {
+				return g.posseBuild(e, "", raw)
 			}
 			return false, guardReason{}
 		}
@@ -744,14 +806,37 @@ func writtenPaths(name string, args []string, literal []bool) []string {
 			options = false
 		case strings.HasPrefix(arg, "--target-directory="):
 			targets = append(targets, strings.TrimPrefix(arg, "--target-directory="))
+		case arg == "--target-directory":
+			if index+1 < len(args) {
+				if literal[index+1] {
+					targets = append(targets, args[index+1])
+				}
+				index++
+			}
 		case strings.HasPrefix(arg, "--in-place"):
 			inPlace = true
+		case copier && !strings.HasPrefix(arg, "--"):
+			// Short options bundle, as in -vt DIR, and a value option takes the
+			// rest of the bundle or the next argument.
+			for offset, option := range arg[1:] {
+				if !valueOptions["-"+string(option)] {
+					continue
+				}
+				value := arg[2+offset:]
+				if value == "" && index+1 < len(args) {
+					index++
+					if literal[index] {
+						value = args[index]
+					}
+				}
+				if option == 't' {
+					targets = append(targets, value)
+				}
+				break
+			}
 		case valueOptions[arg[:2]] && len(arg) > 2:
 		case valueOptions[arg]:
 			if index+1 < len(args) {
-				if arg == "-t" && copier && literal[index+1] {
-					targets = append(targets, args[index+1])
-				}
 				inline = inline || arg == "-e" || arg == "-E" || arg == "-f"
 				index++
 			}
