@@ -22,6 +22,7 @@ var workerCommands = map[string]bool{
 	"signal":             true,
 	"publish":            true,
 	"validate":           true,
+	"candidate abandon":  true,
 	"_context":           true,
 	"config schema":      true,
 	"research list":      true,

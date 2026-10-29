@@ -1390,7 +1390,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		// merge_ready tells the Lead to merge, so it waits for the review
 		// gate `posse merge` applies to the same head.
 		mergeReady := func(notice store.Notice) bool { return notice.Kind == "merge_ready" }
-		if slices.ContainsFunc(effect.Notices, mergeReady) && requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA) != nil {
+		if slices.ContainsFunc(effect.Notices, mergeReady) && (requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA) != nil || pendingCandidateFailure(ctx, db, observed.task) != nil) {
 			effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
 		}
 		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
@@ -1740,7 +1740,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
 		if ready && (task.State == store.StateDone || task.State == store.StateMerging) {
-			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
+			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge head "+shortSHA(current.HeadSHA), map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}
 	return effect

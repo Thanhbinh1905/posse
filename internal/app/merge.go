@@ -140,6 +140,9 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
+	if err := pendingCandidateFailure(ctx.Context, db, task); err != nil {
+		return err
+	}
 	if !project.IsWorkspace() && task.MergeMode == "pr" {
 		// Pull request evidence binds to the gated forge head, not the Sandbox tip.
 		return s.preparePullRequestMerge(ctx, db, project, cfg, task, parsed.Bool("execute"), strings.TrimSpace(parsed.Flags["user-approved"]), prMergeIntent)
@@ -238,7 +241,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if err := runMergeStep("notice.create", func() error {
-			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: task.Title + " is ready to merge locally", DataJSON: `{}`})
+			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: task.Title + " is ready to merge head " + shortSHA(task.GatedSHA) + " locally", DataJSON: marshalJSON(map[string]any{"head_sha": task.GatedSHA})})
 			return noticeErr
 		}); err != nil {
 			return err
@@ -251,7 +254,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			if err := s.regenerateProjects(ctx.Context, db); err != nil {
 				return err
 			}
-			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merging"}, {Key: "help", Value: []any{"Run `posse merge " + taskIDString(task.Seq) + " --execute --user-approved \"<User's words>\"` to merge"}}})
+			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merging"}, {Key: "gated_sha", Value: task.GatedSHA}, {Key: "help", Value: []any{"Run `posse merge " + taskIDString(task.Seq) + " --execute --user-approved \"<User's words>\"` to merge"}}})
 		}
 	}
 	if task.State != store.StateMerging {
@@ -330,14 +333,14 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if completedElsewhere {
-			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
+			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "merged_head", Value: task.GatedSHA}, {Key: "teardown", Value: "torn-down"}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}})
 		}
-		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
+		return ctx.Print(withTeardownDetails(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "merged_head", Value: task.GatedSHA}, {Key: "teardown", Value: "torn-down"}, {Key: "closed_panes", Value: result.Panes.Closed}, {Key: "foreign_panes", Value: result.Panes.Foreign}, {Key: "branch_removed", Value: result.BranchRemoved}, {Key: "remote_branch_removed", Value: result.RemoteBranchRemoved}, {Key: "stopped_processes", Value: result.StoppedProcesses}, {Key: "help", Value: []any{"The Task Report remains in its Project record"}}}, result))
 	}
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "merged_ref", Value: mergedRef}, {Key: "help", Value: []any{"Run `posse teardown " + taskIDString(task.Seq) + "` to release the Sandbox"}}})
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "merged"}, {Key: "merged_head", Value: task.GatedSHA}, {Key: "merged_ref", Value: mergedRef}, {Key: "help", Value: []any{"Run `posse teardown " + taskIDString(task.Seq) + "` to release the Sandbox"}}})
 }
 
 // teardownMergedTask reports success only after the Task reaches torn-down.

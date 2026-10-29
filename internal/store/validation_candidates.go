@@ -65,7 +65,17 @@ func (db *DB) NextValidationCandidateGeneration(ctx context.Context, taskID int6
 }
 
 func (db *DB) LatestValidationCandidate(ctx context.Context, taskID int64, repo string) (ValidationCandidate, error) {
-	candidate, err := scanValidationCandidate(db.QueryRowContext(ctx, `SELECT id,task_id,repo,generation,submitted_sha,candidate_sha,target_sha,expected_remote_sha,observed_author_sha,ref_name,worktree_path,state,promoted_sha,summary,verification,proof,risk,refresh,created_at,updated_at FROM validation_candidates WHERE task_id=? AND repo=? ORDER BY generation DESC LIMIT 1`, taskID, repo))
+	candidate, err := scanValidationCandidate(db.QueryRowContext(ctx, `SELECT id,task_id,repo,generation,submitted_sha,candidate_sha,target_sha,expected_remote_sha,observed_author_sha,ref_name,worktree_path,state,promoted_sha,summary,verification,proof,risk,refresh,created_at,updated_at FROM validation_candidates WHERE task_id=? AND repo=? AND state<>'discarded' ORDER BY generation DESC LIMIT 1`, taskID, repo))
+	if IsNotFound(err) {
+		return ValidationCandidate{}, ErrNotFound
+	}
+	return candidate, err
+}
+
+// PromotedValidationCandidateBefore returns the newest candidate older than
+// generation that was promoted, which an abandonment returns the Task to.
+func (db *DB) PromotedValidationCandidateBefore(ctx context.Context, taskID int64, repo string, generation int) (ValidationCandidate, error) {
+	candidate, err := scanValidationCandidate(db.QueryRowContext(ctx, `SELECT id,task_id,repo,generation,submitted_sha,candidate_sha,target_sha,expected_remote_sha,observed_author_sha,ref_name,worktree_path,state,promoted_sha,summary,verification,proof,risk,refresh,created_at,updated_at FROM validation_candidates WHERE task_id=? AND repo=? AND generation<? AND state IN ('promoted','superseded') AND promoted_sha<>'' ORDER BY generation DESC LIMIT 1`, taskID, repo, generation))
 	if IsNotFound(err) {
 		return ValidationCandidate{}, ErrNotFound
 	}
@@ -256,15 +266,44 @@ func (db *DB) CompleteValidationCandidatePromotion(ctx context.Context, id int64
 	return db.persistCandidateTask(ctx, id)
 }
 
-func (db *DB) DiscardValidationCandidate(ctx context.Context, id int64, expectedState string, candidateSHA string) error {
-	result, err := db.ExecContext(ctx, `UPDATE validation_candidates SET state='discarded',candidate_sha=?,updated_at=? WHERE id=? AND state=?`, candidateSHA, time.Now().UnixMilli(), id, expectedState)
+// AbandonValidationCandidate discards a stale, archived candidate and every
+// unpromoted candidate after the promoted one, restores the promoted one with
+// the Task-private ref and records note in Task history.
+func (db *DB) AbandonValidationCandidate(ctx context.Context, abandoned ValidationCandidate, archiveRef, archivedSHA string, promoted ValidationCandidate, privateRef, source, note string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	result, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='discarded',ref_name=?,candidate_sha=?,updated_at=? WHERE id=? AND task_id=? AND state='stale'`, archiveRef, archivedSHA, now, abandoned.ID, abandoned.TaskID)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrStateRace
 	}
-	return db.persistCandidateTask(ctx, id)
+	if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='discarded',updated_at=? WHERE task_id=? AND repo=? AND generation>? AND generation<? AND state='superseded'`, now, abandoned.TaskID, abandoned.Repo, promoted.Generation, abandoned.Generation); err != nil {
+		return err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE validation_candidates SET state='promoted',ref_name=?,updated_at=? WHERE id=? AND task_id=? AND repo=? AND state IN ('promoted','superseded') AND promoted_sha<>'' AND promoted_sha=candidate_sha`, privateRef, now, promoted.ID, abandoned.TaskID, abandoned.Repo)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrStateRace
+	}
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE id=?`, abandoned.TaskID).Scan(&state); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, abandoned.TaskID, state, state, source, note, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, abandoned.TaskID)
 }
 
 func (db *DB) persistCandidateTask(ctx context.Context, candidateID int64) error {

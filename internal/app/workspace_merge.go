@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -181,7 +182,8 @@ func (s *Service) mergeWorkspace(out *axi.Context, db *store.DB, project store.P
 // pr members. The Task moves to merging once every changed member is ready.
 func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, intent store.Intent, members []memberMerge) error {
 	changed := 0
-	var localReady []string
+	var localReady, localHeads []string
+	localHeadSHAs := map[string]string{}
 	for index := range members {
 		member := &members[index]
 		repo := member.repo
@@ -245,6 +247,8 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 		if repo.MergeMode == "local" {
 			repo.State = store.TaskRepoGated
 			localReady = append(localReady, repo.Repo)
+			localHeads = append(localHeads, repo.Repo+" at "+shortSHA(gatedSHA))
+			localHeadSHAs[repo.Repo] = gatedSHA
 		} else {
 			forge, err := forgeForRepository(ctx, member.target.Root, cfg, repo.Repo)
 			if err != nil {
@@ -310,7 +314,7 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 		return err
 	}
 	if len(localReady) > 0 {
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: task.Title + ": " + strings.Join(localReady, ", ") + " ready to merge locally", DataJSON: marshalJSON(map[string]any{"repos": localReady})}); err != nil {
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: task.Title + ": " + strings.Join(localHeads, ", ") + " ready to merge locally", DataJSON: marshalJSON(map[string]any{"repos": localReady, "head_shas": localHeadSHAs})}); err != nil {
 			return err
 		}
 	}
@@ -498,7 +502,7 @@ func memberRows(members []memberMerge) []any {
 	for _, member := range members {
 		rows = append(rows, axi.Object{
 			{Key: "repo", Value: member.repo.Repo}, {Key: "mode", Value: member.repo.MergeMode},
-			{Key: "state", Value: member.repo.State}, {Key: "pr_url", Value: member.repo.PRURL},
+			{Key: "state", Value: member.repo.State}, {Key: "pr_url", Value: member.repo.PRURL}, {Key: "gated_sha", Value: member.repo.GatedSHA},
 		})
 	}
 	return rows
@@ -859,6 +863,10 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			observation.Mergeable = previous.Mergeable
 		}
 		effect := prObservationEffect(project, member.task, observation, result.checks, previous, hasPrevious)
+		// A Member head is not merge-ready while any Member has a pending candidate.
+		if pendingCandidateFailure(ctx, db, task) != nil {
+			effect.Notices = slices.DeleteFunc(effect.Notices, func(notice store.Notice) bool { return notice.Kind == "merge_ready" })
+		}
 		memberEffect := store.MemberPREffect{Notices: effect.Notices, MergedRef: effect.MergedRef}
 		for index := range memberEffect.Notices {
 			memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)

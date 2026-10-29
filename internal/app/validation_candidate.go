@@ -142,6 +142,16 @@ func candidateAuthorMovedFailure(task store.Task, candidate store.ValidationCand
 		false, "Run `posse publish` again to submit a fresh candidate; the previous candidate remains preserved")
 }
 
+func candidateReturnedToPromotedFailure(task store.Task, candidate store.ValidationCandidate, promotedSHA, repo string) error {
+	command := "posse candidate abandon " + taskIDString(task.Seq)
+	if repo != "" {
+		command += " --repo " + repo
+	}
+	return axi.Failure("candidate_author_moved",
+		fmt.Sprintf("Task branch for t%d returned to the promoted head %s while candidate %s is pending", task.Seq, shortSHA(promotedSHA), shortSHA(candidate.SubmittedSHA)),
+		false, "Run `"+command+" --reason \"<why>\"` to abandon the pending candidate and keep the promoted head, or `posse publish` to submit a fresh candidate")
+}
+
 // requireCandidateSubmissionFreshness refuses a candidate whose author branch
 // or published Task branch moved after submission.
 func (s *Service) requireCandidateSubmissionFreshness(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
@@ -205,6 +215,15 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 			if canMarkStale {
 				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, actual); err != nil && err != store.ErrStateRace {
 					return err
+				}
+			}
+			if candidate.State != store.ValidationCandidatePromoting && branch == "refs/heads/"+task.Branch {
+				promoted, err := db.PromotedValidationCandidateBefore(ctx, task.ID, candidate.Repo, candidate.Generation)
+				if err != nil && !store.IsNotFound(err) {
+					return err
+				}
+				if err == nil && promoted.PromotedSHA == actual {
+					return candidateReturnedToPromotedFailure(memberTask, candidate, actual, lane.repo)
 				}
 			}
 			return candidateAuthorMovedFailure(memberTask, candidate, actual, branch)
@@ -478,70 +497,81 @@ func (s *Service) archiveCandidate(ctx context.Context, db *store.DB, task store
 	if candidate.State != store.ValidationCandidateStale && candidate.State != store.ValidationCandidatePromoted {
 		return axi.Failure("candidate_archive_refused", "only a stale or promoted candidate can be superseded", false)
 	}
-	candidateHead, found, err := readGitRef(ctx, task.WorktreePath, candidate.RefName)
+	archiveRef, candidateHead, err := archiveCandidateRef(ctx, db, task, candidate)
 	if err != nil {
 		return err
+	}
+	return db.SupersedeValidationCandidate(ctx, candidate.ID, candidate.State, archiveRef, candidateHead)
+}
+
+// archiveCandidateRef moves a candidate's private ref and checkout to its
+// archive ref and returns that ref and the archived head. A retry after a
+// crash finds the archive already in place.
+func archiveCandidateRef(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) (string, string, error) {
+	candidateHead, found, err := readGitRef(ctx, task.WorktreePath, candidate.RefName)
+	if err != nil {
+		return "", "", err
 	}
 	if !found {
 		candidateHead = candidate.CandidateSHA
 	} else if candidateHead != candidate.CandidateSHA {
 		if !gitAncestor(ctx, task.WorktreePath, candidate.CandidateSHA, candidateHead) {
-			return axi.Failure("candidate_ref_moved", "private candidate ref no longer descends from its recorded head", false, candidate.RefName)
+			return "", "", axi.Failure("candidate_ref_moved", "private candidate ref no longer descends from its recorded head", false, candidate.RefName)
 		}
 		if err := db.AdvanceValidationCandidate(ctx, candidate.ID, candidate.CandidateSHA, candidateHead); err != nil {
-			return err
+			return "", "", err
 		}
 		candidate.CandidateSHA = candidateHead
 	}
 	archiveRef := candidateArchiveRefName(task, candidate)
 	archivedHead, archiveFound, err := readGitRef(ctx, task.WorktreePath, archiveRef)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	if archiveFound && archivedHead != candidateHead {
-		return axi.Failure("candidate_archive_conflict", "the candidate archive ref already names another commit", false, archiveRef)
+		return "", "", axi.Failure("candidate_archive_conflict", "the candidate archive ref already names another commit", false, archiveRef)
 	}
 	if !archiveFound {
 		if err := updateGitRef(ctx, task.WorktreePath, archiveRef, candidateHead, strings.Repeat("0", len(candidateHead))); err != nil {
-			return err
+			return "", "", err
 		}
 	}
 	if info, statErr := os.Lstat(candidate.WorktreePath); statErr == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return axi.Failure("candidate_path_invalid", "candidate checkout path is not a directory", false, candidate.WorktreePath)
+			return "", "", axi.Failure("candidate_path_invalid", "candidate checkout path is not a directory", false, candidate.WorktreePath)
 		}
 		authorCommonDir, err := gitCommonDir(ctx, task.WorktreePath)
 		if err != nil {
-			return err
+			return "", "", err
 		}
 		candidateCommonDir, err := gitCommonDir(ctx, candidate.WorktreePath)
 		if err != nil || !samePath(authorCommonDir, candidateCommonDir) {
-			return axi.Failure("candidate_checkout_invalid", "candidate checkout is not linked to the Task repository", false, candidate.WorktreePath)
+			return "", "", axi.Failure("candidate_checkout_invalid", "candidate checkout is not linked to the Task repository", false, candidate.WorktreePath)
 		}
 		checkoutHead, headErr := gitOutput(ctx, candidate.WorktreePath, "rev-parse", "HEAD")
 		if headErr != nil {
-			return headErr
+			return "", "", headErr
 		}
 		if checkoutHead != candidateHead {
-			return axi.Failure("candidate_checkout_moved", "candidate checkout does not match its recorded head", false, candidate.WorktreePath)
+			return "", "", axi.Failure("candidate_checkout_moved", "candidate checkout does not match its recorded head", false, candidate.WorktreePath)
 		}
 		checkoutRef, refErr := gitOutput(ctx, candidate.WorktreePath, "symbolic-ref", "--quiet", "HEAD")
 		if refErr == nil && checkoutRef == candidate.RefName {
 			if _, err := gitOutput(ctx, candidate.WorktreePath, "symbolic-ref", "HEAD", archiveRef); err != nil {
-				return err
+				return "", "", err
 			}
 		}
 	} else if !os.IsNotExist(statErr) {
-		return statErr
+		return "", "", statErr
 	}
 	if current, ok, err := readGitRef(ctx, task.WorktreePath, candidate.RefName); err != nil {
-		return err
+		return "", "", err
 	} else if ok {
 		if err := deleteGitRef(ctx, task.WorktreePath, candidate.RefName, current); err != nil {
-			return err
+			return "", "", err
 		}
 	}
-	return db.SupersedeValidationCandidate(ctx, candidate.ID, candidate.State, archiveRef, candidateHead)
+	return archiveRef, candidateHead, nil
 }
 
 func (s *Service) ensureCandidateCheckout(ctx context.Context, db *store.DB, home string, task store.Task, candidate store.ValidationCandidate) error {

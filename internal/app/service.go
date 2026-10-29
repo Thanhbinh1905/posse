@@ -162,6 +162,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--resolutions <file>] [--report <file>] [--no-change]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
 		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] [--rewrite --user-approved <User's words>] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Repeated --verify, --proof and --risk values are retained in order.", Handler: s.publish},
 		{Name: "validate", Usage: "$ validate <status|test|docs|lint> [--repo <member>] [stage evidence flags]", Summary: "Record ordered, exact-head full-pipeline evidence from the private candidate checkout.", Handler: s.validateCandidate},
+		{Name: "candidate", Summary: "Manage a full-pipeline Task's private candidates.", Subcommands: []*axi.Command{
+			{Name: "abandon", Usage: "$ candidate abandon <task> [--repo <member>] --reason <why>", Summary: "Discard the pending unpromoted candidate and return to the promoted head the Task branch is reset to; recorded in Task history.", Handler: s.abandonCandidate},
+		}},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
 		{Name: "pr", Summary: "Steward a Task's PR/MR as the Lead: inspect it, reply, refresh Posse-owned metadata or rerun an existing failed CI run. Each operation is recorded; merge keeps its own approval.", Subcommands: []*axi.Command{
 			{Name: "inspect", Usage: "$ pr inspect <task> [--repo <member>]", Summary: "Read the current PR/MR state, failed checks, authors and recent steward operations.", Handler: s.prInspect},
