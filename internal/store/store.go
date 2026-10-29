@@ -151,7 +151,11 @@ func (db *DB) withBusyTimeout(ctx context.Context, timeoutMillis int, operation 
 	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout="+strconv.Itoa(timeoutMillis)); err != nil {
 		return errors.Join(retryableContention(err), restoreBusyTimeoutAndClose(conn))
 	}
-	return errors.Join(retryableContention(operation(conn)), restoreBusyTimeoutAndClose(conn))
+	err = operation(conn)
+	if err == nil {
+		endDeferrableWrites(ctx)
+	}
+	return errors.Join(retryableContention(err), restoreBusyTimeoutAndClose(conn))
 }
 
 func Open(home string) (*DB, error) {

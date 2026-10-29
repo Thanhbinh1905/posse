@@ -441,3 +441,76 @@ func (a snapshotUntilDeadlineAdapter) Snapshot(ctx context.Context) (herdr.Snaps
 	}
 	return a.Fake.Snapshot(ctx)
 }
+
+func TestReadCommandRecordsDeliveryDuringLaterContention(t *testing.T) {
+	for _, kind := range []string{"notice", "message"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "local", store.StateWorking)
+			ctx := context.Background()
+			project, err := fixture.db.ProjectByID(ctx, fixture.project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var delivered func() (bool, error)
+			if kind == "notice" {
+				noticeID, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "Delivered during contention"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				delivered = func() (bool, error) {
+					notices, err := fixture.db.NoticesByIDs(ctx, project.ID, []int64{noticeID})
+					return err == nil && len(notices) == 1 && notices[0].DeliveredAt != 0, err
+				}
+			} else {
+				messageID, err := fixture.db.QueueMessage(ctx, fixture.task.ID, "Delivered during contention", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				delivered = func() (bool, error) {
+					message, err := fixture.db.MessageByID(ctx, messageID)
+					return err == nil && message.Status == "delivered", err
+				}
+			}
+			writer, err := store.OpenAt(filepath.Join(fixture.home, "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			released := make(chan error, 1)
+			var lockOnce sync.Once
+			fake := fixture.service.Herdr.(*herdr.Fake)
+			fake.BeforeCall = func(method string) {
+				if method != "agent.prompt" {
+					return
+				}
+				lockOnce.Do(func() {
+					tx, err := writer.BeginTx(ctx, nil)
+					if err == nil {
+						_, err = tx.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at+1 WHERE id=?`, project.ID)
+					}
+					if err != nil {
+						released <- err
+						return
+					}
+					go func() {
+						time.Sleep(time.Second)
+						released <- tx.Commit()
+					}()
+				})
+			}
+			t.Setenv("HERDR_PANE_ID", project.LeadPaneID)
+			t.Setenv("HERDR_WORKSPACE_ID", project.HerdrWorkspaceID)
+
+			code, output, errOut := fixture.run("show", "t1")
+			if code != 0 || fake.CallCount("agent.prompt") == 0 {
+				t.Fatalf("show did not deliver the %s: exit=%d prompts=%d output=%s stderr=%s", kind, code, fake.CallCount("agent.prompt"), output, errOut)
+			}
+			if err := <-released; err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := delivered(); !ok {
+				t.Fatalf("sent %s was not recorded as delivered: %v, stderr=%s", kind, err, errOut)
+			}
+		})
+	}
+}

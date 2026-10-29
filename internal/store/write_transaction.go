@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,6 +17,7 @@ import (
 type writeTx struct {
 	*sql.Tx
 	conn        *sql.Conn
+	ctx         context.Context
 	releaseOnce sync.Once
 	releaseErr  error
 }
@@ -26,7 +28,11 @@ func (tx *writeTx) release() error {
 }
 
 func (tx *writeTx) Commit() error {
-	return errors.Join(retryableContention(tx.Tx.Commit()), tx.release())
+	err := tx.Tx.Commit()
+	if err == nil {
+		endDeferrableWrites(tx.ctx)
+	}
+	return errors.Join(retryableContention(err), tx.release())
 }
 
 func (tx *writeTx) Rollback() error {
@@ -52,14 +58,23 @@ type deferrableWritesKey struct{}
 // WithDeferrableWrites marks writes the caller can skip under contention, such
 // as the observations a read command records before it prints the last
 // recorded state. Each waits at most ObservationWriteBusyTimeout for the write
-// lock and returns its busy error without retrying.
+// lock and returns its busy error without retrying. The first write that
+// succeeds ends deferral for the rest of ctx: it may be a claim that leads to
+// a side effect, such as a prompt sent to a pane, and the write recording that
+// side effect must wait the full busy timeout.
 func WithDeferrableWrites(ctx context.Context) context.Context {
-	return context.WithValue(ctx, deferrableWritesKey{}, true)
+	return context.WithValue(ctx, deferrableWritesKey{}, new(atomic.Bool))
 }
 
 func deferrableWrites(ctx context.Context) bool {
-	deferrable, _ := ctx.Value(deferrableWritesKey{}).(bool)
-	return deferrable
+	ended, ok := ctx.Value(deferrableWritesKey{}).(*atomic.Bool)
+	return ok && !ended.Load()
+}
+
+func endDeferrableWrites(ctx context.Context) {
+	if ended, ok := ctx.Value(deferrableWritesKey{}).(*atomic.Bool); ok {
+		ended.Store(true)
+	}
 }
 
 // Busy handlers can outlive context cancellation. A short-lived writer uses
@@ -116,7 +131,7 @@ func (db *DB) beginTxWithRetry(ctx context.Context) (*writeTx, error) {
 		}
 		tx, err := conn.BeginTx(ctx, nil)
 		if err == nil {
-			return &writeTx{Tx: tx, conn: conn}, nil
+			return &writeTx{Tx: tx, conn: conn, ctx: ctx}, nil
 		}
 		lastErr = err
 		if !isBusyErr(err) || deferrableWrites(ctx) {
