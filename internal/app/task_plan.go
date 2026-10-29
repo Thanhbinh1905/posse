@@ -66,7 +66,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if execution.Scope == "" {
 		execution.Scope = "repo"
 	}
-	if brief.Base != "" && !project.IsWorkspace() {
+	if !project.IsWorkspace() && pinsBase(cfg, brief, "", project.DefaultBranch) {
 		execution.BaseCommit, err = selectedBaseCommit(ctx, project.Root, task.BaseRef)
 		if err != nil {
 			return taskplan.Plan{}, err
@@ -79,7 +79,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		if cfg.Repositories[member.Name].Review != "" {
 			selected.ReviewSource = "repositories." + member.Name + ".review"
 		}
-		if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, member.Name, ""); explicit {
+		if pinsBase(cfg, brief, member.Name, member.DefaultBranch) {
 			selected.BaseCommit, err = selectedBaseCommit(ctx, member.Root, member.BaseRef)
 			if err != nil {
 				return taskplan.Plan{}, err
