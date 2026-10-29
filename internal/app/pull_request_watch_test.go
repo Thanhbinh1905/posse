@@ -1185,7 +1185,7 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < 2; i++ {
+			for i := 0; i < 3; i++ {
 				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
 					t.Fatal(err)
 				}
@@ -1216,6 +1216,10 @@ func TestPRWatchActiveTaskRequiresVerifiedMergedHeadAndIdentity(t *testing.T) {
 			}
 			if got := countNoticeKind(notices, "pr_merged"); got != wantNotices {
 				t.Fatalf("merge Notices=%d want=%d", got, wantNotices)
+			}
+			ungated := tc.name == "different head"
+			if countNoticeKind(notices, "pr_merged_ungated") != map[bool]int{true: 1}[ungated] || ungated && (countNoticeKind(notices, "pr_watch_failing") != 0 || !strings.Contains(notices[len(notices)-1].Summary, "leaves the Task working")) {
+				t.Fatalf("ungated merged head Notices = %+v", notices)
 			}
 		})
 	}

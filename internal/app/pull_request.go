@@ -1306,14 +1306,10 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			// A head still on the Sandbox's Task branch is also the Worker's own.
 			if !verified && task.WorktreePath != "" && task.Branch != "" {
-				branch, branchErr := gitOutput(ctx, task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
-				if branchErr == nil && branch == task.Branch {
-					_, verifyErr = gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD")
-					verified = verifyErr == nil
-				}
+				verified = headOnTaskBranch(ctx, task.WorktreePath, task.Branch, observation.HeadSHA)
 			}
 			if !verified {
-				if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("merged head %s is neither on the Sandbox Task branch nor recorded by publish", observation.HeadSHA), now); err != nil {
+				if err := raiseUngatedMergedHeadNotice(ctx, db, project, task, task.WorktreePath, "", task.PRURL, task.GatedSHA, observation.HeadSHA); err != nil {
 					return err
 				}
 				continue

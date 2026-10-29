@@ -869,22 +869,11 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 				cancelPoll()
 				continue
 			}
-			branch, branchErr := gitOutput(ctx, member.task.WorktreePath, "symbolic-ref", "--quiet", "--short", "HEAD")
-			if (branchErr != nil || branch != task.Branch) && member.repo.GatedSHA != observation.HeadSHA {
+			if member.repo.GatedSHA != observation.HeadSHA && !headOnTaskBranch(ctx, member.task.WorktreePath, task.Branch, observation.HeadSHA) {
 				hasMemberFailure = true
 				failedMemberPolls[member.repo.Repo] = true
 				_ = db.RecordMemberWatchError(context.Background(), project.ID, member.repo.Repo, memberPRPollPhase, "merged head is not on the Member's Task branch", now.UnixMilli())
-				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
-					processingErr = err
-					cancelPoll()
-				}
-				continue
-			}
-			if _, err := gitOutput(ctx, member.task.WorktreePath, "merge-base", "--is-ancestor", observation.HeadSHA, "HEAD"); err != nil && member.repo.GatedSHA != observation.HeadSHA {
-				hasMemberFailure = true
-				failedMemberPolls[member.repo.Repo] = true
-				_ = db.RecordMemberWatchError(context.Background(), project.ID, member.repo.Repo, memberPRPollPhase, "merged head is not on the Member's Task branch", now.UnixMilli())
-				if err := recordWorkspacePRTaskWatchFailure(ctx, db, project, task, member.repo.Repo, member.repo.PRURL, fmt.Errorf("merged head is not on the Member's Task branch"), now); err != nil {
+				if err := raiseUngatedMergedHeadNotice(ctx, db, project, task, member.task.WorktreePath, member.repo.Repo, member.repo.PRURL, member.repo.GatedSHA, observation.HeadSHA); err != nil {
 					processingErr = err
 					cancelPoll()
 				}
