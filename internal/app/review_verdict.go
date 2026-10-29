@@ -154,11 +154,10 @@ func shortSHA(sha string) string {
 // verdict: the Reviewer launch that produced it must still differ from every
 // author launch of the Change Task.
 func reviewVerdictQualifies(ctx context.Context, db *store.DB, change store.Task) (func(store.ReviewVerdict) bool, error) {
-	launches, err := db.TaskLaunchIdentities(ctx, change.ID)
+	launches, known, err := reviewAuthorLaunches(ctx, db, change)
 	if err != nil {
 		return nil, err
 	}
-	known := change.Launches > 0 && launchHistoryComplete(change, launches)
 	return func(verdict store.ReviewVerdict) bool {
 		return compareReviewIdentity(launches, known, verdict.Reviewer).Eligible
 	}, nil

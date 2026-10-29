@@ -888,10 +888,11 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		t.Fatalf("recovered relaunch changed Task Sandbox/state incorrectly: %#v, %v", updated, err)
 	}
 	launchIdentities, err := observer.TaskLaunchIdentities(ctx, taskID)
+	head := strings.TrimSpace(gitTest(t, sandbox, "rev-parse", "HEAD"))
 	wantLaunchIdentities := []store.TaskLaunchIdentity{
-		{TaskID: taskID, LaunchNumber: 1, Profile: "fast", ConfiguredModel: "sonnet", ModelKnown: false},
-		{TaskID: taskID, LaunchNumber: 2, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true},
-		{TaskID: taskID, LaunchNumber: 3, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true},
+		{TaskID: taskID, LaunchNumber: 1, Profile: "fast", ConfiguredModel: "sonnet", ModelKnown: false, StartHead: head},
+		{TaskID: taskID, LaunchNumber: 2, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true, StartHead: head},
+		{TaskID: taskID, LaunchNumber: 3, Profile: "codex-fast", ConfiguredModel: "gpt-5", ModelKnown: true, StartHead: head},
 	}
 	if err != nil || !reflect.DeepEqual(launchIdentities, wantLaunchIdentities) {
 		t.Fatalf("relaunch identity history = %#v, %v; want %#v", launchIdentities, err, wantLaunchIdentities)

@@ -768,11 +768,10 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			authorLaunches, err := db.TaskLaunchIdentities(ctx.Context, author.ID)
+			authorLaunches, authorHistoryKnown, err := reviewAuthorLaunches(ctx.Context, db, author)
 			if err != nil {
 				return err
 			}
-			authorHistoryKnown := author.Launches > 0 && launchHistoryComplete(author, authorLaunches)
 			view["review_identity"] = reviewIdentityHistoryResult(author, authorLaunches, authorHistoryKnown, task, reviewerLaunches, reviewerHistoryKnown)
 		}
 		if verdict, err := db.ReviewVerdict(ctx.Context, task.ID); err == nil {
