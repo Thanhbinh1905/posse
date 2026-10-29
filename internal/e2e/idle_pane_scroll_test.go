@@ -60,31 +60,8 @@ func TestIdleFullscreenWorkerKeepsItsViewDuringAutomaticReads(t *testing.T) {
 	runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "idle-scroll")
 	task := base.mustTask(t, "t1")
 
-	visible := func() string {
-		raw, err := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": task.PaneID, "source": "visible"})
-		if err != nil {
-			return ""
-		}
-		var screen struct {
-			Read struct {
-				Text string `json:"text"`
-			} `json:"read"`
-		}
-		_ = json.Unmarshal(raw, &screen)
-		return screen.Read.Text
-	}
-	idle := func() bool {
-		snapshot, err := client.Snapshot(context.Background())
-		if err != nil {
-			return false
-		}
-		for _, pane := range snapshot.Panes {
-			if pane.PaneID == task.PaneID {
-				return pane.AgentStatus == "idle" || pane.AgentStatus == "done"
-			}
-		}
-		return false
-	}
+	visible := func() string { return paneVisibleText(client, task.PaneID) }
+	idle := func() bool { return paneIdle(client, task.PaneID) }
 	if !waitForCondition(20*time.Second, func() bool { return strings.Contains(visible(), "flagged") && idle() }) {
 		t.Fatalf("Pi never finished its first turn:\n%s", visible())
 	}
@@ -152,4 +129,31 @@ func assertIdleViewStaysPut(t *testing.T, base *prLifecycleFixture, task store.T
 	if !strings.Contains(peeked, peekWants) {
 		t.Fatalf("peek did not show the visible screen:\n%s", peeked)
 	}
+}
+
+func paneVisibleText(client *herdr.Client, paneID string) string {
+	raw, err := client.Call(context.Background(), "pane.read", map[string]any{"pane_id": paneID, "source": "visible"})
+	if err != nil {
+		return ""
+	}
+	var screen struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	_ = json.Unmarshal(raw, &screen)
+	return screen.Read.Text
+}
+
+func paneIdle(client *herdr.Client, paneID string) bool {
+	snapshot, err := client.Snapshot(context.Background())
+	if err != nil {
+		return false
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == paneID {
+			return pane.AgentStatus == "idle" || pane.AgentStatus == "done"
+		}
+	}
+	return false
 }

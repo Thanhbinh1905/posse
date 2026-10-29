@@ -653,6 +653,21 @@ func (db *DB) TransitionEndedReview(ctx context.Context, taskID int64, expected 
 	return db.PersistTask(ctx, taskID)
 }
 
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func taskEverWorked(ctx context.Context, q rowQuerier, taskID int64) (bool, error) {
+	var worked bool
+	err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM transitions WHERE task_id=? AND to_state=?)`, taskID, StateWorking).Scan(&worked)
+	return worked, err
+}
+
+// TaskEverWorked reports whether the Task ever reached working.
+func (db *DB) TaskEverWorked(ctx context.Context, taskID int64) (bool, error) {
+	return taskEverWorked(ctx, db, taskID)
+}
+
 // TransitionNeverStarted releases a failed Task that never reached working.
 // No Worker received its Brief, so the move needs no User approval.
 func (db *DB) TransitionNeverStarted(ctx context.Context, taskID int64, note string) error {
@@ -661,8 +676,8 @@ func (db *DB) TransitionNeverStarted(ctx context.Context, taskID int64, note str
 		return err
 	}
 	defer tx.Rollback()
-	var worked bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM transitions WHERE task_id=? AND to_state=?)`, taskID, StateWorking).Scan(&worked); err != nil {
+	worked, err := taskEverWorked(ctx, tx, taskID)
+	if err != nil {
 		return err
 	}
 	if worked {

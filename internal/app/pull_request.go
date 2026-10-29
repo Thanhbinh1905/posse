@@ -1723,7 +1723,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			noticed = nil
 		}
 		if len(failures) > 0 && (len(noticed) == 0 || !checks.Running && !sameFailures(noticed, failures)) {
-			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued) or raises ci_fix_exhausted, and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
+			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), or raises ci_fix_exhausted or review_cap_reached, and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
 		}
 		if current.Review == "CHANGES_REQUESTED" && (newHead || previous.Review != "CHANGES_REQUESTED") {
 			addNotice("pr_changes_requested", task.Title+": review requests changes", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "review": current.Review})
