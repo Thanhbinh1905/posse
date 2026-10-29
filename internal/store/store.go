@@ -2264,6 +2264,26 @@ FROM messages WHERE task_id=? AND status='delivered' AND created_at>=? ORDER BY 
 	return messages, nil
 }
 
+func (db *DB) UnfinishedTaskMessages(ctx context.Context, taskID int64) ([]Message, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
+FROM messages WHERE task_id=? AND status='delivered'
+  AND delivered_at > COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb IN ('done','needs-decision','failed')), 0)
+ORDER BY delivered_at, id`, taskID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []Message
+	for rows.Next() {
+		var message Message
+		if err := rows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
 func (db *DB) TaskTransitions(ctx context.Context, taskID int64, limit int) ([]TransitionRecord, error) {
 	if limit <= 0 {
 		limit = 20
