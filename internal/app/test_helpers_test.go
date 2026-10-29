@@ -20,6 +20,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if code, sharded := runAppTestShards(); sharded {
+		os.Exit(code)
+	}
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.HasPrefix(key, "HERDR_") || agentEnvironmentKey(key)) {

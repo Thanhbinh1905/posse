@@ -20,6 +20,9 @@ import (
 
 func TestLocalFetchContentionDoesNotInventRootBehindNotice(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	previousBudget := fetchLockWaitBudget
+	fetchLockWaitBudget = 100 * time.Millisecond
+	t.Cleanup(func() { fetchLockWaitBudget = previousBudget })
 	owner, err := acquireRepositoryFetchLock(context.Background(), fixture.repo)
 	if err != nil {
 		t.Fatal(err)
