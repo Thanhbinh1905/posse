@@ -1378,7 +1378,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		legacyFirstLaunch := currentTurn == "launch:1" && task.Launches == 1 && parsed.Flags["turn"] == ""
 		if currentTurn != "" && !legacyFirstLaunch && parsed.Flags["turn"] != currentTurn {
-			return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Use the --turn token from the current launch file, latest instruction envelope or successful working Signal")
+			return staleWorkerTurnFailure(ctx.Context, db, task.ID)
 		}
 	}
 	workerResumed := verb == "working" && (task.State == store.StateStalled || task.State == store.StateNeedsDecision || task.Type == "change" && (task.State == store.StateDone || task.State == store.StateMerging))
@@ -1801,7 +1801,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return queuedInstructionsPendingFailure(ctx.Context, db, task, time.Now())
 		}
 		if errors.Is(err, store.ErrStaleWorkerTurn) {
-			return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Use the --turn token from the current launch file, latest instruction envelope or successful working Signal")
+			return staleWorkerTurnFailure(ctx.Context, db, task.ID)
 		}
 		if store.IsBusy(err) {
 			return axi.Failure("store_busy", "the store was busy and this Signal was not recorded", true, "Run `posse signal` again with the same Signal")
@@ -3422,4 +3422,12 @@ func taskRelaunchable(ctx context.Context, db *store.DB, task store.Task) (bool,
 		return true, nil
 	}
 	return taskNeverStarted(ctx, db, task)
+}
+
+func staleWorkerTurnFailure(ctx context.Context, db *store.DB, taskID int64) *axi.Error {
+	current, err := db.TaskTurnToken(ctx, taskID)
+	if err != nil || current == "" {
+		return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Use the --turn token from the current launch file, latest instruction envelope or successful working Signal")
+	}
+	return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Current turn token: "+current, "Retry the same Signal with `--turn "+current+"`")
 }

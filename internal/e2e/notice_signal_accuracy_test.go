@@ -809,6 +809,10 @@ func TestDoneSignalRefusesTurnFromBeforeDeliveredInstruction(t *testing.T) {
 	if err == nil || !strings.Contains(string(output), "stale_worker_turn") {
 		t.Fatalf("pre-instruction completion was not refused: err=%v output=%s", err, output)
 	}
+	currentTurn, turnErr := fixture.db.TaskTurnToken(ctx, taskID)
+	if turnErr != nil || currentTurn == "" || !strings.Contains(string(output), "Retry the same Signal with `--turn "+currentTurn+"`") {
+		t.Fatalf("refusal does not print the current turn token %q: err=%v output=%s", currentTurn, turnErr, output)
+	}
 	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, taskID)
 	if err != nil || task.State != store.StateWorking {
 		t.Fatalf("stale completion changed Task state: task=%+v err=%v", task, err)
