@@ -95,6 +95,8 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 		}
 		return output
 	}
+	persistUserShellPath = true
+	t.Cleanup(func() { persistUserShellPath = false })
 	t.Setenv("PATH", userBin+string(os.PathListSeparator)+serverBin)
 	t.Setenv(watchRuntimeTokenEnv, "")
 	t.Setenv("HERDR_PLUGIN_ID", "")

@@ -150,9 +150,13 @@ func externalCommandPath(name string) string {
 	return name
 }
 
+// persistUserShellPath is false in the package tests so that the PATH of one
+// test never leaks into the PATH resolution of another through the home.
+var persistUserShellPath = true
+
 func recordUserShellPath(path string) {
 	home, err := config.DefaultHome()
-	if err != nil || path == "" {
+	if err != nil || path == "" || !persistUserShellPath {
 		return
 	}
 	file := filepath.Join(home, userShellPathFile)
