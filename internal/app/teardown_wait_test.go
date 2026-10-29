@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -120,5 +122,83 @@ func TestTeardownCommandCompletesSettledIntentOfTornDownTask(t *testing.T) {
 	}
 	if intent, err := fixture.db.IntentByTask(ctx, task.ID); !store.IsNotFound(err) {
 		t.Fatalf("settled Teardown intent stayed active: %#v, %v", intent, err)
+	}
+}
+
+func TestConcurrentSameProcessTeardownsSerialize(t *testing.T) {
+	fixture, task, cfg := newMergedLocalTeardownFixture(t)
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	snapshot := fake.SnapshotValue
+	snapshot.Panes[1].Agent = ""
+	adapter := &changingSnapshotAdapter{Fake: fake, snapshot: snapshot}
+	adapter.snapshot.Panes = adapter.snapshot.Panes[:1]
+	fixture.service.Herdr = adapter
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "pause")
+	t.Setenv("POSSE_TEST_ROOT", t.TempDir())
+	t.Setenv("POSSE_INTENT_PAUSE_AT", "teardown:after:process.stop")
+	t.Setenv("POSSE_INTENT_PAUSE_FILE", marker)
+	type outcome struct {
+		result teardownResult
+		err    error
+	}
+	teardown := func(results chan<- outcome) {
+		result, err := fixture.service.teardownTask(ctx, fixture.db, fixture.project, cfg, task, false, "")
+		results <- outcome{result, err}
+	}
+	first := make(chan outcome, 1)
+	go teardown(first)
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			select {
+			case got := <-first:
+				t.Fatalf("first Teardown never reached process.stop: %v", got.err)
+			default:
+				t.Fatal("first Teardown never reached process.stop")
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	second := make(chan outcome, 1)
+	go teardown(second)
+	select {
+	case got := <-second:
+		t.Fatalf("second Teardown returned while the first held the Task: %v", got.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := os.WriteFile(marker+".continue", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstOutcome := <-first
+	var secondOutcome outcome
+	select {
+	case secondOutcome = <-second:
+	case <-time.After(30 * time.Second):
+		t.Fatal("second Teardown never returned")
+	}
+	if firstOutcome.err != nil || secondOutcome.err != nil {
+		t.Fatalf("concurrent Teardowns failed: first=%v second=%v", firstOutcome.err, secondOutcome.err)
+	}
+	if firstOutcome.result.AlreadyTornDown || !secondOutcome.result.AlreadyTornDown {
+		t.Fatalf("second Teardown did not return the first result: first=%#v second=%#v", firstOutcome.result, secondOutcome.result)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "teardown_incomplete" {
+			t.Fatalf("concurrent Teardowns raised %#v", notice)
+		}
+	}
+	current, err := fixture.db.TaskByID(ctx, fixture.project.ID, task.ID)
+	if err != nil || current.State != store.StateTornDown {
+		t.Fatalf("Task after concurrent Teardowns = %s, %v", current.State, err)
+	}
+	if intent, err := fixture.db.IntentByTask(ctx, task.ID); !store.IsNotFound(err) {
+		t.Fatalf("Teardown intent stayed active: %#v, %v", intent, err)
 	}
 }
