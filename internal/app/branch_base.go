@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -56,4 +59,55 @@ func taskCheckoutBase(ctx context.Context, root string, task store.Task, member,
 		}
 	}
 	return commit, nil
+}
+
+// requireDefaultBranchBase refuses a Task before admission when its Sandbox
+// could not start from the default branch, so the failure breaks no Sandbox.
+func requireDefaultBranchBase(ctx context.Context, project store.Project) error {
+	ref := "refs/heads/" + project.DefaultBranch
+	_, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err == nil || defaultBranchUnborn(ctx, projectRepoTarget(project)) {
+		return nil
+	}
+	if !gitRefMissing(err) {
+		return err
+	}
+	return axi.Failure("default_branch_missing", fmt.Sprintf("Project %s has no branch %s to start Tasks from", project.Name, project.DefaultBranch), false,
+		"Create it in "+project.Root+" with `git branch "+project.DefaultBranch+" <commit>`, then retry")
+}
+
+// commitsAheadOfBase counts the commits on HEAD that base lacks. While base is
+// a branch with no commit yet, every commit on HEAD is ahead of it.
+func commitsAheadOfBase(ctx context.Context, worktree, base string) (string, error) {
+	_, err := gitOutput(ctx, worktree, "rev-parse", "--verify", "--quiet", base+"^{commit}")
+	if err == nil {
+		return gitOutput(ctx, worktree, "rev-list", "--count", base+"..HEAD")
+	}
+	if !gitRefMissing(err) {
+		return "", err
+	}
+	if _, err := gitOutput(ctx, worktree, "rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
+		if gitRefMissing(err) {
+			return "0", nil
+		}
+		return "", err
+	}
+	return gitOutput(ctx, worktree, "rev-list", "--count", "HEAD")
+}
+
+// revisionOrEmptyTree returns rev, or the empty tree while rev names a branch
+// with no commit yet, so a diff before the first commit lists every file.
+func revisionOrEmptyTree(ctx context.Context, dir, rev string) (string, error) {
+	_, err := gitOutput(ctx, dir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err == nil || !gitRefMissing(err) {
+		return rev, err
+	}
+	return gitOutput(ctx, dir, "hash-object", "-t", "tree", "/dev/null")
+}
+
+// gitRefMissing reports whether `git rev-parse --verify --quiet` failed only
+// because the revision does not exist.
+func gitRefMissing(err error) bool {
+	var exit *exec.ExitError
+	return errors.As(err, &exit) && exit.ExitCode() == 1
 }

@@ -120,7 +120,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 	if err != nil {
 		return taskplan.Plan{}, err
 	}
-	delivery := cfg.Defaults.MergeMode
+	delivery := projectMergeMode(ctx, project, cfg)
 	review := cfg.Defaults.Review
 	if project.IsWorkspace() {
 		delivery = task.MergeMode

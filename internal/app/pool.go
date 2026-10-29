@@ -532,18 +532,24 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 		if err != nil {
 			return sandbox, err
 		}
+		unborn := defaultBranchUnborn(ctx, projectRepoTarget(project))
 		if _, statErr := os.Stat(filepath.Join(sandbox.Path, ".git")); os.IsNotExist(statErr) {
 			if err := os.MkdirAll(filepath.Dir(sandbox.Path), 0o700); err != nil {
 				return sandbox, err
 			}
-			ref, remote := sandboxDefaultRef(ctx, projectRepoTarget(project))
-			if remote {
-				if _, err := gitFetch(ctx, project.Root, "origin"); err != nil {
-					return sandbox, err
+			lock := []string{"--lock", "--reason", fmt.Sprintf("posse: held by t%d", task.Seq)}
+			args := append(append([]string{"worktree", "add", "--orphan", "-b", task.Branch}, lock...), sandbox.Path)
+			if !unborn {
+				ref, remote := sandboxDefaultRef(ctx, projectRepoTarget(project))
+				if remote {
+					if _, err := gitFetch(ctx, project.Root, "origin"); err != nil {
+						return sandbox, err
+					}
+					ref = "refs/remotes/origin/" + project.DefaultBranch
 				}
-				ref = "refs/remotes/origin/" + project.DefaultBranch
+				args = append(append([]string{"worktree", "add", "--detach"}, lock...), sandbox.Path, ref)
 			}
-			if _, err := gitOutput(ctx, project.Root, "worktree", "add", "--detach", "--lock", "--reason", fmt.Sprintf("posse: held by t%d", task.Seq), sandbox.Path, ref); err != nil {
+			if _, err := gitOutput(ctx, project.Root, args...); err != nil {
 				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Git could not create the Sandbox worktree", err); breakErr != nil {
 					return sandbox, errors.Join(err, breakErr)
 				}
@@ -555,18 +561,29 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 		}); err != nil {
 			return sandbox, err
 		}
-		if err := resetSandbox(ctx, sandbox.Path, project, cleanMode); err != nil {
-			if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state", err); breakErr != nil {
-				return sandbox, errors.Join(err, breakErr)
+		if unborn {
+			// With no commit to branch from, the Task branch starts as an
+			// orphan; its first commit becomes the default branch's first.
+			if err := resetUnbornWorktree(ctx, sandbox.Path, task.Branch, cleanMode); err != nil {
+				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state", err); breakErr != nil {
+					return sandbox, errors.Join(err, breakErr)
+				}
+				continue
 			}
-			continue
-		}
-		base, err := taskCheckoutBase(ctx, project.Root, task, "", task.BaseRef)
-		if err != nil {
-			return sandbox, err
-		}
-		if _, err := gitOutput(ctx, sandbox.Path, "checkout", "-b", task.Branch, base); err != nil {
-			return sandbox, err
+		} else {
+			if err := resetSandbox(ctx, sandbox.Path, project, cleanMode); err != nil {
+				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state", err); breakErr != nil {
+					return sandbox, errors.Join(err, breakErr)
+				}
+				continue
+			}
+			base, err := taskCheckoutBase(ctx, project.Root, task, "", task.BaseRef)
+			if err != nil {
+				return sandbox, err
+			}
+			if _, err := gitOutput(ctx, sandbox.Path, "checkout", "-b", task.Branch, base); err != nil {
+				return sandbox, err
+			}
 		}
 		if err := db.UpdateTaskSandboxPath(ctx, task.ID, sandbox.ID, sandbox.Path); err != nil {
 			return sandbox, err
@@ -606,6 +623,40 @@ func sandboxDefaultRef(ctx context.Context, target repoTarget) (string, bool) {
 	return "refs/heads/" + target.DefaultBranch, false
 }
 
+// unbornIdleBranch is the unborn branch an idle Sandbox waits on while the
+// default branch has no commit. Git cannot detach HEAD without a commit, and
+// waiting on the default branch would check it out in the Sandbox once it
+// gains its first commit.
+const unbornIdleBranch = "posse/unborn"
+
+// defaultBranchUnborn reports whether the repository's default branch has no
+// commit yet: its checkout is on that branch, and neither the branch nor
+// origin's copy exists.
+func defaultBranchUnborn(ctx context.Context, target repoTarget) bool {
+	head, err := gitOutput(ctx, target.Root, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil || head != "refs/heads/"+target.DefaultBranch {
+		return false
+	}
+	for _, ref := range []string{"refs/heads/" + target.DefaultBranch, "refs/remotes/origin/" + target.DefaultBranch} {
+		if _, err := gitOutput(ctx, target.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// resetUnbornWorktree empties a worktree of a repository whose default branch
+// has no commit and leaves it on the unborn branch named branch.
+func resetUnbornWorktree(ctx context.Context, path, branch, clean string) error {
+	if _, err := gitOutput(ctx, path, "switch", "--discard-changes", "--orphan", branch); err != nil {
+		return err
+	}
+	if _, err := gitOutput(ctx, path, "read-tree", "--empty"); err != nil {
+		return err
+	}
+	return cleanWorktree(ctx, path, clean)
+}
+
 func sandboxResetRef(ctx context.Context, target repoTarget, fetch bool) (string, bool, error) {
 	remoteRef := "refs/remotes/origin/" + target.DefaultBranch
 	localRef := "refs/heads/" + target.DefaultBranch
@@ -637,6 +688,9 @@ func resetSandbox(ctx context.Context, path string, project store.Project, clean
 // and cleans it. Teardown and unrequested workspace Members use the last fetched
 // ref; acquisition fetches before new work starts.
 func resetWorktree(ctx context.Context, path string, target repoTarget, clean string, fetch bool) error {
+	if defaultBranchUnborn(ctx, target) {
+		return resetUnbornWorktree(ctx, path, unbornIdleBranch, clean)
+	}
 	ref, remote, err := sandboxResetRef(ctx, target, fetch)
 	if err != nil {
 		return err
@@ -652,6 +706,12 @@ func resetWorktree(ctx context.Context, path string, target repoTarget, clean st
 	if _, err := gitOutput(ctx, path, "reset", "--hard", ref); err != nil {
 		return err
 	}
+	return cleanWorktree(ctx, path, clean)
+}
+
+// cleanWorktree removes untracked files, and ignored ones for a pristine clean,
+// and verifies that nothing remains.
+func cleanWorktree(ctx context.Context, path, clean string) error {
 	if err := makeSandboxUntrackedWritable(ctx, path, clean); err != nil {
 		return err
 	}

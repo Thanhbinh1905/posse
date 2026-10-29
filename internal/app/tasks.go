@@ -249,7 +249,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		// Workspace members tighten one by one in planTaskMembers.
 		tightening.MergeMode = ""
 	}
-	deliveryDefault := cfg.Defaults.MergeMode
+	deliveryDefault := projectMergeMode(ctx.Context, project, cfg)
 	mode, autonomy, err := dispatch.ResolveDelivery(tightening, deliveryDefault, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
@@ -258,7 +258,8 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		return briefError(&dispatch.BriefError{Field: "base", Reason: "a Change Task after a landed prerequisite must start from the default branch"})
 	}
 	if !project.IsWorkspace() && brief.Type == "change" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
-		return axi.Failure("brief_invalid", "a repository without origin can only Merge locally", false)
+		return axi.Failure("remote_missing", "Project "+project.Name+" has no origin remote to open a pull request against", false,
+			"Add one with `git remote add origin <url>` and push "+project.DefaultBranch+", or remove `merge_mode: pr` from the Brief to Merge locally")
 	}
 	baseRef := project.DefaultBranch
 	var reviewsTaskID int64
@@ -368,6 +369,10 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if project.IsWorkspace() {
 		// Each member records its own base, target branch and Merge Mode; the Task keeps the strictest.
 		baseRef, mode = "", workspaceMode
+	} else if baseRef == project.DefaultBranch {
+		if err := requireDefaultBranchBase(ctx.Context, project); err != nil {
+			return err
+		}
 	}
 	if from := parsed.Flags["from-orphan"]; from != "" {
 		id, parseErr := strconv.ParseInt(from, 10, 64)
@@ -3226,7 +3231,7 @@ func validateChangeSignal(ctx context.Context, task store.Task) error {
 	if task.WorktreePath == "" || task.BaseRef == "" {
 		return fmt.Errorf("change Task has no worktree or base ref")
 	}
-	count, err := gitOutput(ctx, task.WorktreePath, "rev-list", "--count", task.BaseRef+"..HEAD")
+	count, err := commitsAheadOfBase(ctx, task.WorktreePath, task.BaseRef)
 	if err != nil {
 		return err
 	}

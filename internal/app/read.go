@@ -154,7 +154,7 @@ func (s *Service) home(ctx *axi.Context, args []string) error {
 			summaries = append(summaries, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 			continue
 		}
-		summary := summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project))
+		summary := summarizeProject(ctx.Context, project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project))
 		home, homeErr := s.homePath()
 		if homeErr == nil {
 			summary.Watch = s.watchRuntimeSummary(ctx.Context, db, home, project)
@@ -239,7 +239,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	}
 	help := homeHelp(project, tasks, openNotices)
 	result := axi.Object{
-		{Key: "project", Value: summarizeHomeProject(project, cfg, s.leadStatus(ctx.Context, project))},
+		{Key: "project", Value: summarizeHomeProject(ctx.Context, project, cfg, s.leadStatus(ctx.Context, project))},
 		{Key: "watch", Value: s.watchRuntimeRow(ctx.Context, db, home, project)},
 	}
 	if project.IsWorkspace() {
@@ -306,7 +306,7 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	return ctx.PrintWithoutHelp(result)
 }
 
-func summarizeHomeProject(project store.Project, cfg config.Config, leadStatus string) axi.Row {
+func summarizeHomeProject(ctx context.Context, project store.Project, cfg config.Config, leadStatus string) axi.Row {
 	autonomy := cfg.Autonomy
 	if autonomy.Review == "" {
 		autonomy.Review = "ask"
@@ -319,7 +319,7 @@ func summarizeHomeProject(project store.Project, cfg config.Config, leadStatus s
 	}
 	return axi.Row{
 		{Key: "name", Value: project.Name},
-		{Key: "mode", Value: projectMergeMode(project, cfg)},
+		{Key: "mode", Value: projectMergeMode(ctx, project, cfg)},
 		{Key: "autonomy", Value: "review=" + autonomy.Review + " merge=" + autonomy.Merge},
 		{Key: "lead", Value: leadStatus},
 	}
@@ -386,7 +386,7 @@ func shortReportingRule(lowkey bool) string {
 	return "Report every Notice and ack it."
 }
 
-func summarizeProject(project store.Project, cfg config.Config, tasks []store.Task, noticeCount int, leadStatus string) projectSummary {
+func summarizeProject(ctx context.Context, project store.Project, cfg config.Config, tasks []store.Task, noticeCount int, leadStatus string) projectSummary {
 	autonomy := cfg.Autonomy
 	if autonomy.Review == "" {
 		autonomy.Review = "ask"
@@ -405,7 +405,7 @@ func summarizeProject(project store.Project, cfg config.Config, tasks []store.Ta
 		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 		rows = append(rows, row)
 	}
-	return projectSummary{Name: project.Name, Mode: projectMergeMode(project, cfg), Autonomy: "review=" + autonomy.Review + " merge=" + autonomy.Merge, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
+	return projectSummary{Name: project.Name, Mode: projectMergeMode(ctx, project, cfg), Autonomy: "review=" + autonomy.Review + " merge=" + autonomy.Merge, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
 }
 
 func (s *Service) ls(ctx *axi.Context, args []string) error {
@@ -450,7 +450,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 				rows = append(rows, projectSummary{Name: projectName, Lead: "error", Error: err.Error()})
 				continue
 			}
-			rows = append(rows, summarizeProject(project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project)))
+			rows = append(rows, summarizeProject(ctx.Context, project, cfg, tasks, len(notices), s.leadStatus(ctx.Context, project)))
 		}
 		if len(rows) == 0 {
 			return ctx.Print(axi.Object{{Key: "projects", Value: []any{}}, {Key: "state", Value: "No Projects registered"}, {Key: "help", Value: []any{"Run `posse up` inside a Herdr pane to register the first Project"}}})

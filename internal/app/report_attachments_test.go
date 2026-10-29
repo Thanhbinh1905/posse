@@ -14,7 +14,7 @@ import (
 )
 
 func TestReportAttachmentGitArgsOmitEmptyBaseRef(t *testing.T) {
-	got := reportAttachmentGitArgs("")
+	got := reportAttachmentGitArgs("", "HEAD")
 	want := [][]string{
 		{"diff", "--name-only", "-z", "HEAD"},
 		{"ls-files", "--others", "--exclude-standard", "-z"},

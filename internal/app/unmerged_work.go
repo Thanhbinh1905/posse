@@ -25,7 +25,7 @@ func (s *Service) unmergedWork(ctx context.Context, db *store.DB, project store.
 		}
 		return "", err
 	}
-	count, err := gitOutput(ctx, task.WorktreePath, "rev-list", "--count", task.BaseRef+"..HEAD")
+	count, err := commitsAheadOfBase(ctx, task.WorktreePath, task.BaseRef)
 	if err != nil {
 		return "", err
 	}
