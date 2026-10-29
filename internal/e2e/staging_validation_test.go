@@ -495,6 +495,7 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	}
 	recordReviewRound(t, f, "t1", "pass", `{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`)
 	audit("Review Round 1")
+	deliverReviewPassNextStep(t, f, f.leadEnv, f.repo, change)
 
 	// staging advances without changing its tree: the refreshed candidate
 	// carries Review Round 1 but none of its local stages.

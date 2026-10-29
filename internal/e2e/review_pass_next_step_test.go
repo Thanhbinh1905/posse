@@ -33,6 +33,14 @@ func requireReviewPassNextStep(t *testing.T, f *prLifecycleFixture, leadEnv []st
 	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='candidate_validation_queued' AND json_extract(data_json,'$.message_id')=?`, change.ID, messageID).Scan(&notices); err != nil || notices != 1 {
 		t.Fatalf("candidate_validation_queued Notices = %d, %v; want 1", notices, err)
 	}
+	deliverQueuedInstruction(t, f, leadEnv, dir, change, messageID)
+}
+
+// deliverQueuedInstruction delivers a queued instruction to the idle Worker of
+// change with one Watch poll.
+func deliverQueuedInstruction(t *testing.T, f *prLifecycleFixture, leadEnv []string, dir string, change store.Task, messageID int64) {
+	t.Helper()
+	ctx := context.Background()
 	if _, err := herdr.NewWithEnv("herdr", f.env).Run(ctx, "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +49,19 @@ func requireReviewPassNextStep(t *testing.T, f *prLifecycleFixture, leadEnv []st
 	}
 	var status string
 	if err := f.db.QueryRowContext(ctx, `SELECT status FROM messages WHERE id=?`, messageID).Scan(&status); err != nil || status != "delivered" {
-		t.Fatalf("next-step message %d is %q (%v) after one Watch poll, want delivered", messageID, status, err)
+		t.Fatalf("message %d is %q (%v) after one Watch poll, want delivered", messageID, status, err)
 	}
+}
+
+// deliverReviewPassNextStep delivers the instruction the last passing Review
+// Round queued to change, as the Watch does for an idle done Worker.
+func deliverReviewPassNextStep(t *testing.T, f *prLifecycleFixture, leadEnv []string, dir string, change store.Task) {
+	t.Helper()
+	var messageID int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT CAST(json_extract(data_json,'$.message_id') AS INTEGER) FROM notices WHERE task_id=? AND kind='candidate_validation_queued' ORDER BY id DESC LIMIT 1`, change.ID).Scan(&messageID); err != nil {
+		t.Fatalf("no candidate_validation_queued Notice for %s: %v", taskIDOf(change), err)
+	}
+	deliverQueuedInstruction(t, f, leadEnv, dir, change, messageID)
 }
 
 // A done full-pipeline Worker that requested Review needs no Lead nudge to
