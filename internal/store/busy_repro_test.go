@@ -33,7 +33,30 @@ func TestOpenMigrationLockWaitDoesNotConsumeMigrationBudget(t *testing.T) {
 		t.Fatalf("contended store open error = %v, want retryable ErrBusy", err)
 	}
 	if elapsed >= storeOpenMigrationBudget/2 {
-		t.Fatalf("migration lock contention waited %s, want the separate %s lock budget rather than the %s migration budget", elapsed, migrationLockWaitBudget, storeOpenMigrationBudget)
+		t.Fatalf("migration lock contention waited %s, want the separate %s lock budget rather than the %s migration budget", elapsed, migrationLockStallBudget, storeOpenMigrationBudget)
+	}
+}
+
+// A migration that outlasts the stall budget must not fail its waiters while
+// the holder keeps its heartbeat going.
+func TestOpenWaitsForMigrationHolderThatKeepsBeating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "posse.db")
+	lock, err := acquireMigrationLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopBeat := beatMigrationLock(path)
+	go func() {
+		time.Sleep(migrationLockStallBudget + 2*migrationHeartbeatInterval)
+		stopBeat()
+		_ = lock.Close()
+	}()
+	db, err := openAt(path, storeOpenMigrationBudget)
+	if err != nil {
+		t.Fatalf("open behind a beating migration holder failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
