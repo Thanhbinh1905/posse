@@ -63,7 +63,7 @@ The User's choice of review evidence, frozen into each Change Task's plan: `none
 _Avoid_: Review level, review gate
 
 **Private Candidate**:
-The unpublished checkout of one exact submitted Change head that `full-pipeline` validates before promotion pushes it or fast-forwards its Task branch; any later commit needs a fresh candidate.
+The unpublished checkout of one exact submitted Change head that `full-pipeline` validates before promotion pushes it or fast-forwards its Task branch; any later commit needs a fresh candidate, and abandoning a pending candidate returns the lane to its last promoted head.
 _Avoid_: Draft PR, staging branch
 
 **Review Loop**:

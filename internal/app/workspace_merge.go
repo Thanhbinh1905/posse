@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -859,6 +860,10 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			observation.Mergeable = previous.Mergeable
 		}
 		effect := prObservationEffect(project, member.task, observation, result.checks, previous, hasPrevious)
+		// A Member head is not merge-ready while any Member has a pending candidate.
+		if pendingCandidateFailure(ctx, db, task) != nil {
+			effect.Notices = slices.DeleteFunc(effect.Notices, func(notice store.Notice) bool { return notice.Kind == "merge_ready" })
+		}
 		memberEffect := store.MemberPREffect{Notices: effect.Notices, MergedRef: effect.MergedRef}
 		for index := range memberEffect.Notices {
 			memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
