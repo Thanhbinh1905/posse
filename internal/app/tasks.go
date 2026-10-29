@@ -1873,7 +1873,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 		}
 	}
-	if _, err := s.prepareProject(maintenanceCtx, db, project); err != nil {
+	if _, err := s.prepareTaskProject(maintenanceCtx, db, project, task.ID); err != nil {
 		if store.IsOnlyBusy(err) {
 			// Watch retries deferred maintenance and logs its own contention.
 			return ctx.Print(signalResult)
@@ -1933,7 +1933,7 @@ func (s *Service) brief(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
+	if _, err := s.prepareTaskProject(ctx.Context, db, project, task.ID); err != nil {
 		return err
 	}
 	path := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "launch.md")
@@ -2346,12 +2346,15 @@ func (s *Service) peek(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	_, err = s.prepareProject(ctx.Context, db, project)
+	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
+	if err != nil {
+		return err
+	}
+	_, err = s.prepareTaskProject(ctx.Context, db, project, task.ID)
 	if err = deferObservationContention(ctx, err, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
-	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
-	if err != nil {
+	if task, err = s.currentTask(ctx.Context, db, project, parsed.Positionals[0]); err != nil {
 		return err
 	}
 	var output string
@@ -2382,11 +2385,14 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	if _, err := s.prepareProject(ctx.Context, db, project); err != nil {
-		return err
-	}
 	task, err := s.currentTask(ctx.Context, db, project, args[0])
 	if err != nil {
+		return err
+	}
+	if _, err := s.prepareTaskProject(ctx.Context, db, project, task.ID); err != nil {
+		return err
+	}
+	if task, err = s.currentTask(ctx.Context, db, project, args[0]); err != nil {
 		return err
 	}
 	if task.State != store.StateBlocked {
@@ -2434,12 +2440,15 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
-	cfg, err := s.prepareProject(ctx.Context, db, project)
+	task, err := s.currentTask(ctx.Context, db, project, args[0])
 	if err != nil {
 		return err
 	}
-	task, err := s.currentTask(ctx.Context, db, project, args[0])
+	cfg, err := s.prepareTaskProject(ctx.Context, db, project, task.ID)
 	if err != nil {
+		return err
+	}
+	if task, err = s.currentTask(ctx.Context, db, project, args[0]); err != nil {
 		return err
 	}
 	outcome, err := s.interruptTask(ctx.Context, task, cfg)

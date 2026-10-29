@@ -19,6 +19,14 @@ func isTeardownInProgress(err error) bool {
 // A second CLI must not display a half-torn-down merged Task while another
 // process owns its teardown intent. Wait for its outcome or report progress.
 func waitForActiveTeardowns(ctx context.Context, db *store.DB, projectID int64) error {
+	return waitForTeardowns(ctx, db, projectID, func(int64) bool { return true })
+}
+
+func waitForTaskTeardown(ctx context.Context, db *store.DB, projectID, taskID int64) error {
+	return waitForTeardowns(ctx, db, projectID, func(id int64) bool { return id == taskID })
+}
+
+func waitForTeardowns(ctx context.Context, db *store.DB, projectID int64, covers func(taskID int64) bool) error {
 	deadline := time.NewTimer(teardownWaitTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(40 * time.Millisecond)
@@ -30,7 +38,7 @@ func waitForActiveTeardowns(ctx context.Context, db *store.DB, projectID int64) 
 		}
 		active := false
 		for _, intent := range intents {
-			if intent.Command != "teardown" {
+			if intent.Command != "teardown" || !covers(intent.TaskID) {
 				continue
 			}
 			task, err := db.TaskByID(ctx, projectID, intent.TaskID)
