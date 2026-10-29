@@ -61,23 +61,29 @@ func taskCheckoutBase(ctx context.Context, root string, task store.Task, member,
 	return commit, nil
 }
 
-// requireDefaultBranchBase refuses a Task before admission when its Sandbox
-// could not start from the default branch, so the failure breaks no Sandbox.
-func requireDefaultBranchBase(ctx context.Context, project store.Project) error {
-	ref := "refs/heads/" + project.DefaultBranch
-	_, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	if err == nil || defaultBranchUnborn(ctx, projectRepoTarget(project)) {
-		return nil
+// defaultBranchBase returns the ref a Task starting from the default branch
+// branches from: the local branch, else origin's copy. It refuses before
+// admission when neither exists, so the failure breaks no Sandbox.
+func defaultBranchBase(ctx context.Context, project store.Project) (string, error) {
+	if defaultBranchUnborn(ctx, projectRepoTarget(project)) {
+		return project.DefaultBranch, nil
 	}
-	if !gitRefMissing(err) {
-		return err
+	for _, ref := range []string{"refs/heads/" + project.DefaultBranch, "refs/remotes/origin/" + project.DefaultBranch} {
+		_, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+		if err == nil {
+			return strings.TrimPrefix(ref, "refs/heads/"), nil
+		}
+		if !gitRefMissing(err) {
+			return "", err
+		}
 	}
-	return axi.Failure("default_branch_missing", fmt.Sprintf("Project %s has no branch %s to start Tasks from", project.Name, project.DefaultBranch), false,
+	return "", axi.Failure("default_branch_missing", fmt.Sprintf("Project %s has no branch %s to start Tasks from", project.Name, project.DefaultBranch), false,
 		"Create it in "+project.Root+" with `git branch "+project.DefaultBranch+" <commit>`, then retry")
 }
 
 // commitsAheadOfBase counts the commits on HEAD that base lacks. While base is
-// a branch with no commit yet, every commit on HEAD is ahead of it.
+// the repository's default branch with no commit yet, every commit on HEAD is
+// ahead of it; any other missing base is an error.
 func commitsAheadOfBase(ctx context.Context, worktree, base string) (string, error) {
 	_, err := gitOutput(ctx, worktree, "rev-parse", "--verify", "--quiet", base+"^{commit}")
 	if err == nil {
@@ -85,6 +91,13 @@ func commitsAheadOfBase(ctx context.Context, worktree, base string) (string, err
 	}
 	if !gitRefMissing(err) {
 		return "", err
+	}
+	common, err := gitOutput(ctx, worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if !defaultBranchUnborn(ctx, repoTarget{Root: common, DefaultBranch: base}) {
+		return "", fmt.Errorf("base ref %s does not exist", base)
 	}
 	if _, err := gitOutput(ctx, worktree, "rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
 		if gitRefMissing(err) {

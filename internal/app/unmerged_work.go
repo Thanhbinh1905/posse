@@ -46,3 +46,18 @@ func (s *Service) unmergedWork(ctx context.Context, db *store.DB, project store.
 	}
 	return "", nil
 }
+
+// failedStartEmpty reports whether a failed Task never reached working and its
+// held Sandbox proves empty, so Teardown can release it without a discard.
+func (s *Service) failedStartEmpty(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
+	neverStarted, err := taskNeverStarted(ctx, db, task)
+	if err != nil || !neverStarted {
+		return false, err
+	}
+	sandbox, err := db.SandboxByTask(ctx, task.ID)
+	if err != nil || sandbox.State != "held" || sandbox.TaskID != task.ID {
+		return false, nil
+	}
+	work, err := s.unmergedWork(ctx, db, project, task)
+	return work == "", err
+}

@@ -558,6 +558,14 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 			if work, err = s.unmergedWork(ctx.Context, db, project, task); err != nil {
 				return err
 			}
+		} else if task.State == store.StateFailed {
+			empty, err := s.failedStartEmpty(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			if empty {
+				work = ""
+			}
 		}
 		if work != "" {
 			return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, work, "Pass `--discard --user-approved \"<User's words>\"`")
@@ -1195,6 +1203,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 				return axi.Failure("teardown_refused", "unmerged work requires --discard and User approval", false, work)
 			}
 			return db.TransitionWithoutUnmergedWork(ctx, task.ID, task.State, "Task Sandbox released with no unmerged work")
+		}
+		if !inPlace && task.State == store.StateFailed {
+			return db.TransitionNeverStarted(ctx, task.ID, "Task Sandbox released; its Worker never received the Brief")
 		}
 		note := "Task Sandbox released after completion"
 		if inPlace {

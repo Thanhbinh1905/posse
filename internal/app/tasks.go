@@ -361,7 +361,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		// Each member records its own base, target branch and Merge Mode; the Task keeps the strictest.
 		baseRef, mode = "", workspaceMode
 	} else if baseRef == project.DefaultBranch {
-		if err := requireDefaultBranchBase(ctx.Context, project); err != nil {
+		if baseRef, err = defaultBranchBase(ctx.Context, project); err != nil {
 			return err
 		}
 	}

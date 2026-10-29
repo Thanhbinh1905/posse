@@ -116,3 +116,33 @@ esac
 		t.Fatalf("relaunch prompt does not lead to the Brief: %q %v", instructions, err)
 	}
 }
+
+// An agent that exits before its Brief is delivered leaves a failed Task with
+// no work. Teardown releases it without a User discard approval (#687).
+func TestTeardownAfterAgentExitsBeforeBriefNeedsNoDiscard(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	agentPath := filepath.Join(f.root, "bin", "claude")
+	agent, err := os.ReadFile(agentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := `case "$PWD/" in "$POSSE_E2E_WORKTREES/"*)
+  herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+  exit 0
+  ;;
+esac
+`
+	if err := os.WriteFile(agentPath, []byte(strings.Replace(string(agent), "#!/bin/sh\n", "#!/bin/sh\n"+worker, 1)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(f.root, "exited.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Exited agent\ndone_when: the Worker receives its Brief\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runPosseAllowFailure(f, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "exited-agent"); err == nil {
+		t.Fatalf("start succeeded although the agent exited before its Brief: %s", output)
+	}
+	f.reconcileUntilState(t, "t1", store.StateFailed)
+	runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
+	f.waitState(t, "t1", store.StateTornDown)
+}
