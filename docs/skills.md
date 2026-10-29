@@ -57,7 +57,7 @@ Each entry is a bundled skill name or an absolute or `~/` path to a directory ho
 | `review` | Review Round Workers | review one PR per round |
 | `research` | read-only Research Workers | read sources, write a Report |
 
-A Worker's protocol lists its role skills and the step each one belongs to: `posse-tdd` before changing code, `posse-deslop` and `posse-no-comments` before the `done` Signal, and `posse-technical-writing` and `posse-unslop` on PR text, commit messages and Reports before `posse publish` and `done`. `posse publish` and `posse signal done` print a `skill_checklist` of the role skills for that step. For Claude Workers, a Posse `PostToolUse` hook records each Skill call, the checklist marks each skill `yes` or `no`, and `posse show <task>` lists `role_skills` with their use counts. Codex and Pi Workers report `not recorded`.
+A Worker's protocol lists its role skills and the step each one belongs to: `posse-tdd` before changing code, `posse-deslop` and `posse-no-comments` before the `done` Signal, and `posse-technical-writing` and `posse-unslop` on PR text, commit messages and Reports before `posse publish` and `done`. `posse publish` and `posse signal done` print a `skill_checklist` of the role skills for that step. For Claude Workers launched with the Posse `PostToolUse` hook, the hook records each Skill call, the checklist marks each skill `yes` or `no`, and `posse show <task>` lists `role_skills` with their use counts. For Codex and Pi Workers, and for Claude Tasks launched before the hook existed, the checklist shows `not recorded` and `posse show` reports `skill_uses_recorded_by: nothing`.
 
 ## Skills
 

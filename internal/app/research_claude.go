@@ -468,28 +468,38 @@ func writeClaudeResearchPlugin(home, project string) (string, error) {
 		}
 		return []any{entry}
 	}
-	hooks, err := json.MarshalIndent(map[string]any{"hooks": map[string]any{
+	root := filepath.Join(home, "projects", project, "claude-research")
+	hooks := map[string]any{
 		"PreToolUse":    group(""),
 		"SubagentStart": group(""),
 		"SubagentStop":  group(""),
-	}}, "", "  ")
-	if err != nil {
-		return "", err
 	}
-	manifest, err := json.MarshalIndent(map[string]string{"name": "posse-research", "version": "1.0.0", "description": "Posse tracking for bounded read-only research subagents"}, "", "  ")
-	if err != nil {
+	if err := writeClaudeHookPlugin(root, "posse-research", "Posse tracking for bounded read-only research subagents", hooks); err != nil {
 		return "", err
-	}
-	root := filepath.Join(home, "projects", project, "claude-research")
-	for path, data := range map[string][]byte{filepath.Join(root, ".claude-plugin", "plugin.json"): manifest, filepath.Join(root, "hooks", "hooks.json"): hooks} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return "", err
-		}
-		if err := writeFile(path, append(data, '\n')); err != nil {
-			return "", err
-		}
 	}
 	return root, nil
+}
+
+// writeClaudeHookPlugin writes a Posse-owned Claude plugin under root that
+// installs hooks.
+func writeClaudeHookPlugin(root, name, description string, hooks map[string]any) error {
+	hooksJSON, err := json.MarshalIndent(map[string]any{"hooks": hooks}, "", "  ")
+	if err != nil {
+		return err
+	}
+	manifest, err := json.MarshalIndent(map[string]string{"name": name, "version": "1.0.0", "description": description}, "", "  ")
+	if err != nil {
+		return err
+	}
+	for path, data := range map[string][]byte{filepath.Join(root, ".claude-plugin", "plugin.json"): manifest, filepath.Join(root, "hooks", "hooks.json"): hooksJSON} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		if err := writeFile(path, append(data, '\n')); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // researchHarnessVersion reports `<harness> --version`, or "" when the harness

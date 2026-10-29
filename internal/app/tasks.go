@@ -687,7 +687,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
-		argsForAgent, skillErr = appendSkillUseLaunchArgs(home, project, kind, argsForAgent)
+		argsForAgent, skillErr = appendSkillUseLaunchArgs(home, project, sequence, kind, argsForAgent)
 		if skillErr != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
@@ -1855,7 +1855,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		signalResult = append(signalResult, axi.Field{Key: "turn_token", Value: turnToken})
 	}
 	if verb == "done" {
-		if checklist, ok, err := taskSkillChecklist(ctx.Context, db, task, "done"); err != nil {
+		if checklist, ok, err := taskSkillChecklist(ctx.Context, db, home, project, task, "done"); err != nil {
 			return err
 		} else if ok {
 			signalResult = append(signalResult, checklist)
@@ -2969,7 +2969,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if skillErr != nil {
 			return failure(skillErr)
 		}
-		startArgs, skillErr = appendSkillUseLaunchArgs(home, project, kind, startArgs)
+		startArgs, skillErr = appendSkillUseLaunchArgs(home, project, task.Seq, kind, startArgs)
 		if skillErr != nil {
 			return failure(skillErr)
 		}
