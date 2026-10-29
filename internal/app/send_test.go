@@ -1226,3 +1226,89 @@ func TestSendInterruptReportsInstructionsTheAbortedTurnLeftUnfinished(t *testing
 		t.Fatalf("instruction_aborted Notice = %+v, want only #%d with its instruction", reports[0], aborted)
 	}
 }
+
+func TestSendInterruptDoesNotRereportInstructionsAnEarlierNoticeNamed(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.QueueMessage(ctx, taskID, "Run the slow suite", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UnixMilli() - 1000
+	if claimed, err := db.ClaimMessage(ctx, id, "delivery", at, 0); err != nil || !claimed {
+		t.Fatalf("claim message = %v, %v", claimed, err)
+	}
+	if err := db.MarkMessageSubmitting(ctx, id, "delivery"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkClaimedMessageDelivered(ctx, id, "delivery", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
+	fake.BeforeCall = func(method string) {
+		if method == "agent.send_keys" {
+			fake.SnapshotValue.Panes[0].AgentStatus = "idle"
+		}
+	}
+	service := testService(home, fake)
+	t.Chdir(repo)
+	for _, redirect := range []string{"First redirect", "Second redirect"} {
+		fake.SnapshotValue.Panes[0].AgentStatus = "working"
+		var output bytes.Buffer
+		cli := service.CLI()
+		cli.Out, cli.ErrOut = &output, &output
+		if code := cli.Run([]string{"send", "t1", "--interrupt", redirect}); code != 0 {
+			t.Fatalf("send --interrupt %q exit=%d output=%s", redirect, code, output.String())
+		}
+	}
+
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notices, err := db.Notices(ctx, project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports []store.Notice
+	for _, notice := range notices {
+		if notice.Kind == "instruction_aborted" {
+			reports = append(reports, notice)
+		}
+	}
+	if len(reports) != 2 {
+		t.Fatalf("instruction_aborted Notices = %+v, want two", reports)
+	}
+	named := fmt.Sprintf("#%d", id)
+	if !strings.Contains(reports[0].Summary, named) {
+		t.Fatalf("first Notice = %+v, want it to name %s", reports[0], named)
+	}
+	if strings.Contains(reports[1].Summary, named) || strings.Contains(reports[1].DataJSON, "Run the slow suite") {
+		t.Fatalf("second Notice = %+v, re-reports %s already named by the first", reports[1], named)
+	}
+}
