@@ -96,6 +96,21 @@ func roleSkillChecklist(skills []string, step string, uses map[string]int, recor
 	return checks
 }
 
+// roleSkillWarning names the skills the Worker did not invoke, or returns ""
+// when none was skipped or uses are not recorded.
+func roleSkillWarning(checks []roleSkillCheck) string {
+	var skipped []string
+	for _, check := range checks {
+		if check.invoked == "no" {
+			skipped = append(skipped, "`"+check.skill+"`")
+		}
+	}
+	if len(skipped) == 0 {
+		return ""
+	}
+	return "not invoked: " + strings.Join(skipped, ", ") + "; invoke each at its step before the done Signal"
+}
+
 // skillUsesRecorded reports whether Posse records the skill uses of this
 // Task: a claude Worker whose launch installed the Skill hook.
 func skillUsesRecorded(plan *taskplan.Plan, hookInstalled bool) bool {
@@ -103,25 +118,30 @@ func skillUsesRecorded(plan *taskplan.Plan, hookInstalled bool) bool {
 }
 
 // taskSkillChecklist is the `skill_checklist` field of publish and done
-// output, or nil when no loaded role skill applies to step.
-func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, step string) (axi.Field, bool, error) {
+// output, followed by `skill_warning` when a skill was skipped. It returns
+// nil when no loaded role skill applies to step.
+func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, step string) ([]axi.Field, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {
-		return axi.Field{}, false, err
+		return nil, err
 	}
 	uses, err := db.TaskSkillUses(ctx, task.ID)
 	if err != nil {
-		return axi.Field{}, false, err
+		return nil, err
 	}
 	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)))
 	if len(checks) == 0 {
-		return axi.Field{}, false, nil
+		return nil, nil
 	}
 	rows := make([]any, 0, len(checks))
 	for _, check := range checks {
 		rows = append(rows, axi.Object{{Key: "skill", Value: check.skill}, {Key: "when", Value: check.when}, {Key: "invoked", Value: check.invoked}})
 	}
-	return axi.Field{Key: "skill_checklist", Value: rows}, true, nil
+	fields := []axi.Field{{Key: "skill_checklist", Value: rows}}
+	if warning := roleSkillWarning(checks); warning != "" {
+		fields = append(fields, axi.Field{Key: "skill_warning", Value: warning})
+	}
+	return fields, nil
 }
 
 // taskSkillUseView reports how often the Worker invoked each role skill.
