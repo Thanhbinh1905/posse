@@ -12,8 +12,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// runWatchPass runs one full pass of the Project Watch through `posse
-// _watch-pass` and returns once that pass has finished.
 func runWatchPass(t *testing.T, binary, cwd string, env []string) {
 	t.Helper()
 	runPosse(t, binary, cwd, env, "_watch-pass")
@@ -60,8 +58,6 @@ func waitForEvent(t *testing.T, condition func() bool, abandoned func() string) 
 	}
 }
 
-// waitForTaskState waits until the Task reaches want, and gives up as soon as
-// it settles in a state from which want can no longer follow.
 func waitForTaskState(t *testing.T, db *store.DB, projectID int64, ref string, want store.State) (store.Task, bool, string) {
 	t.Helper()
 	var task store.Task
@@ -76,8 +72,6 @@ func waitForTaskState(t *testing.T, db *store.DB, projectID int64, ref string, w
 	return task, ok, reason
 }
 
-// taskStateUnreachable names the state when task has settled where want can
-// no longer follow, and returns "" otherwise.
 func taskStateUnreachable(ref string, task store.Task, want store.State) string {
 	if task.State != want && slices.Contains([]store.State{store.StateFailed, store.StateLost, store.StateStalled, store.StateTornDown}, task.State) {
 		return fmt.Sprintf("Task %s reached %s", ref, task.State)

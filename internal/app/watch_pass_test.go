@@ -35,10 +35,10 @@ func TestWatchServesAPassRequestWithoutWaitingOutTheInterval(t *testing.T) {
 	})
 
 	done := watchPassDonePath(fixture.home, fixture.project)
+	if err := os.MkdirAll(filepath.Dir(done), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, token := range []string{"first", "second"} {
-		if err := os.MkdirAll(filepath.Dir(done), 0o700); err != nil {
-			t.Fatal(err)
-		}
 		if err := writeFile(watchPassRequestPath(fixture.home, fixture.project), []byte(token+"\n")); err != nil {
 			t.Fatal(err)
 		}

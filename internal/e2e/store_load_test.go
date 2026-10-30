@@ -265,7 +265,6 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	if watchBusy > workerCount {
 		t.Fatalf("Watch logged %d contention failures under load:\n%s", watchBusy, watchLog)
 	}
-	// Watch must still complete a whole pass once the load ends.
 	runWatchPass(t, f.binary, f.repo, f.leadEnv)
 	// Watch passes run every two seconds; a third of the stale threshold
 	// leaves room for one slow pass but not for a stalled loop.

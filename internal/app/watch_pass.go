@@ -20,8 +20,11 @@ import (
 // when a pass starts and writes it to the done file when that pass ends, so a
 // matching done token proves a whole pass ran after the request.
 var watchPassInterval = 2 * time.Second
-var watchPassRequestCheck = 50 * time.Millisecond
-var watchPassWaitLimit = 5 * time.Minute
+
+const (
+	watchPassRequestCheck = 50 * time.Millisecond
+	watchPassWaitLimit    = 5 * time.Minute
+)
 
 func watchPassRequestPath(home string, project store.Project) string {
 	return filepath.Join(home, "projects", project.Name, "watch-pass.request")
@@ -39,8 +42,6 @@ func readWatchPassToken(path string) string {
 	return strings.TrimSpace(string(contents))
 }
 
-// waitForWatchPass waits out the pass interval and returns early when a pass
-// request arrives that no pass has served yet.
 func waitForWatchPass(ctx context.Context, home string, project store.Project, served string, stop <-chan os.Signal) (os.Signal, error) {
 	interval := time.NewTimer(watchPassInterval)
 	defer interval.Stop()
