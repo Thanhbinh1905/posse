@@ -571,6 +571,11 @@ func (p Plan) Validate() error {
 				return invalid(err.Error())
 			}
 		}
+		if window := p.ValidationLoops.CI.FlakeWindow; window != "" {
+			if err := config.ValidateSetting("ci_loop.flake_window", window, false); err != nil {
+				return invalid(err.Error())
+			}
+		}
 		if brief.ReviewRounds != p.ValidationLoops.BriefReviewRounds || p.ValidationLoops.BriefReviewRounds > p.ValidationLoops.Review.MaxRounds {
 			return invalid("frozen review_rounds does not match or exceeds the selected config")
 		}

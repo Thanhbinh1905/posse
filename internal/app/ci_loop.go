@@ -18,6 +18,9 @@ import (
 )
 
 func (s *Service) processCIObservation(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation, failures []failedCheck, forge repositoryForge, member string) error {
+	if err := settleCIReruns(ctx, db, forge, task.ID, member, observation); err != nil {
+		return err
+	}
 	if task.Type != "change" || observation.State != "OPEN" || len(failures) == 0 || observation.HeadSHA == "" || !ciTaskCanReceiveFix(task) {
 		return nil
 	}
@@ -92,10 +95,14 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 			fixChecks = append(fixChecks, group.checks...)
 			continue
 		}
-		if err := requestCIRerun(ctx, forge.Root, prURL, forge, group); err != nil {
-			for _, check := range group.checks {
+		requestErr := requestCIRerun(ctx, forge.Root, prURL, forge, group)
+		for _, check := range group.checks {
+			if err := recordCIRerun(ctx, db, store.CIRerun{ProjectID: project.ID, TaskID: task.ID, Repo: member, PRURL: prURL, HeadSHA: observation.HeadSHA, CheckName: check.Name, RunID: check.RunID, JobID: check.JobID, Reason: "cancelled"}, requestErr); err != nil {
+				return err
+			}
+			if requestErr != nil {
 				fixChecks = append(fixChecks, check)
-				rerunFailures[check.Name] = err.Error()
+				rerunFailures[check.Name] = requestErr.Error()
 			}
 		}
 	}
@@ -112,6 +119,10 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 			tail = strings.TrimSpace(tail + "\nRerun command failed: " + rerunFailure)
 		}
 		tails[check.Name] = boundedLogTail(tail, 200)
+	}
+	fixChecks, err = s.rerunKnownFlakes(ctx, db, project, task, plan, observation, forge, member, fixChecks, tails)
+	if err != nil || len(fixChecks) == 0 {
+		return err
 	}
 	return s.queueCIFixRound(ctx, db, project, task, plan, observation, forge, prURL, member, fixChecks, tails)
 }
@@ -134,6 +145,7 @@ func ciPlanAllowsMember(plan *taskplan.Plan, member string) bool {
 
 type ciRerunGroup struct {
 	runID  string
+	jobID  string
 	checks []failedCheck
 }
 
@@ -179,7 +191,11 @@ func requestCIRerun(ctx context.Context, root, prURL string, forge repositoryFor
 	if err != nil {
 		return err
 	}
-	output, err := commandOutputArgs(ctx, root, "gh", "run", "rerun", "--failed", group.runID, "--repo", githubRepositorySelector(ref))
+	args := []string{"run", "rerun", "--failed", group.runID}
+	if group.jobID != "" {
+		args = []string{"run", "rerun", "--job", group.jobID}
+	}
+	output, err := commandOutputArgs(ctx, root, "gh", append(args, "--repo", githubRepositorySelector(ref))...)
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(output))
 	}

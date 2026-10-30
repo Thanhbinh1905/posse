@@ -310,6 +310,14 @@ func (s *Service) printDelivery(ctx *axi.Context, db *store.DB, target stewardTa
 	for _, operation := range operations {
 		operationRows = append(operationRows, axi.Object{{Key: "id", Value: operation.ID}, {Key: "operation", Value: operation.Operation}, {Key: "actor", Value: operation.Actor}, {Key: "head", Value: shortSHA(operation.HeadSHA)}, {Key: "subject", Value: operation.Subject}, {Key: "outcome", Value: operation.Outcome}, {Key: "detail", Value: operation.Detail}, {Key: "at", Value: operation.UpdatedAt}})
 	}
+	reruns, err := db.CIReruns(ctx.Context, target.task.ID, target.member, target.prURL, 10)
+	if err != nil {
+		return err
+	}
+	rerunRows := make([]any, 0, len(reruns))
+	for _, rerun := range reruns {
+		rerunRows = append(rerunRows, axi.Object{{Key: "check", Value: rerun.CheckName}, {Key: "reason", Value: rerun.Reason}, {Key: "tests", Value: strings.Join(rerun.Tests, " ")}, {Key: "head", Value: shortSHA(rerun.HeadSHA)}, {Key: "outcome", Value: rerun.Outcome}, {Key: "at", Value: rerun.RequestedAt}})
+	}
 	var confirmed int64
 	if observation.ID != 0 {
 		if confirmed, err = db.PRObservationConfirmedAt(ctx.Context, observation.ID); err != nil {
@@ -327,6 +335,7 @@ func (s *Service) printDelivery(ctx *axi.Context, db *store.DB, target stewardTa
 		{Key: "observation", Value: axi.Row{{Key: "head", Value: observation.HeadSHA}, {Key: "state", Value: observation.State}, {Key: "checks", Value: checks.State}, {Key: "review", Value: observation.Review}, {Key: "mergeable", Value: observation.Mergeable}, {Key: "confirmed_at", Value: confirmed}}},
 		{Key: "failures", Value: failureRows},
 		{Key: "operations", Value: operationRows},
+		{Key: "reruns", Value: rerunRows},
 		{Key: "help", Value: help},
 	})
 }
@@ -491,6 +500,14 @@ func (s *Service) prRerun(ctx *axi.Context, args []string) error {
 		}
 		if err := requestStewardRerun(ctx.Context, target, id, failed.RunID); err != nil {
 			return uncertainOperation(ctx.Context, db, target, operation, err)
+		}
+		tail, _ := failedCILogTail(ctx.Context, target.forge.Root, target.forge, target.prURL, *failed)
+		tests := []string{}
+		for _, failure := range parseGoTestFailures(tail).Tests {
+			tests = append(tests, failure.Test)
+		}
+		if _, _, err := db.RecordCIRerun(ctx.Context, store.CIRerun{ProjectID: target.project.ID, TaskID: target.task.ID, Repo: target.member, PRURL: target.prURL, HeadSHA: observation.HeadSHA, CheckName: defaultValue(failed.Name, "required check rollup"), RunID: failed.RunID, JobID: failed.JobID, Reason: "steward", Tests: tests}); err != nil {
+			return err
 		}
 		if err := db.ResolveDeliveryOperation(ctx.Context, operation.ID, "succeeded", failed.Name); err != nil {
 			return err
