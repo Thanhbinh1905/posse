@@ -14,9 +14,10 @@ env:
   GOPROXY: https://proxy.golang.org|direct
 
 # One group per workflow and ref: a new push to the same PR cancels its superseded run,
-# while runs for different PRs and for main do not cancel each other.
+# while runs for different PRs do not cancel each other. A push to main is keyed on its
+# commit SHA, so a later push never replaces the run of an earlier commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
