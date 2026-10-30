@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -341,7 +342,12 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateBlocked, "herdr", "Herdr reports Worker blocked"); err != nil {
 			return notices, err
 		}
-		notice, err := createNotice(ctx, db, project.ID, task.ID, "worker_blocked", task.Title+" is blocked", now)
+		summary, data := task.Title+" is blocked", "{}"
+		if dialog := blockedDialogFromContext(ctx, pane.PaneID); dialog != "" {
+			encoded, _ := json.Marshal(map[string]string{"dialog": dialog})
+			summary, data = summary+" on:\n"+dialog, string(encoded)
+		}
+		notice, err := createNoticeWithData(ctx, db, project.ID, task.ID, "worker_blocked", summary, data, now)
 		if err != nil {
 			return notices, err
 		}
@@ -352,6 +358,36 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		}
 	}
 	return notices, nil
+}
+
+const blockedDialogLines = 15
+
+func blockedDialogFromContext(ctx context.Context, paneID string) string {
+	detector, _ := ctx.Value(backgroundJobsKey{}).(*backgroundJobDetector)
+	if detector == nil {
+		return ""
+	}
+	return BlockedDialog(ctx, detector.adapter, paneID)
+}
+
+// BlockedDialog returns the last lines of the blocked pane's screen, which
+// hold the dialog prompt and the command it asks about. A failed read
+// yields no text so the Notice still reports the block.
+func BlockedDialog(ctx context.Context, adapter herdr.Adapter, paneID string) string {
+	screen, err := (SystemProgress{}).ReadScreen(ctx, adapter, paneID)
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, line := range strings.Split(screen, "\n") {
+		if line = strings.TrimRight(line, " \t\r"); strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > blockedDialogLines {
+		lines = lines[len(lines)-blockedDialogLines:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // agentStatusSince keeps the time Posse first observed status while it holds.

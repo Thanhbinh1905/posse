@@ -362,6 +362,29 @@ func TestBlockedMappingUsesHerdrTransitions(t *testing.T) {
 	}
 }
 
+func TestBlockedNoticeCarriesDialogText(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{
+		PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "blocked",
+	}}}
+	fake.Results["pane.read"] = json.RawMessage(`{"text":"\n Bash command\n\n   rm -rf /tmp/build/*\n\n Do you want to proceed?\n 1. Yes\n 2. No\n\n"}`)
+	result, err := Run(context.Background(), db, fake, project.ID, 0, 0, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Notices) != 1 || result.Notices[0].Kind != "worker_blocked" {
+		t.Fatalf("reconcile Notices = %#v", result.Notices)
+	}
+	notice := result.Notices[0]
+	for _, want := range []string{"rm -rf /tmp/build/*", "Do you want to proceed?"} {
+		if !strings.Contains(notice.Summary, want) || !strings.Contains(notice.DataJSON, want) {
+			t.Fatalf("worker_blocked Notice lacks %q: %#v", want, notice)
+		}
+	}
+}
+
 func TestMissedEventStateIsRecoveredByReconcile(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
