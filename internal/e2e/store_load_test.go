@@ -35,8 +35,8 @@ func TestStoreLoadWithProjectHistoryKeepsWatchAndLeadFree(t *testing.T) {
 func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
-	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) > 0 }) {
-		t.Fatalf("isolated Watch runtime did not start: pids=%v", watchPIDs(f.root))
+	if ok, reason := waitForEvent(t, func() bool { return len(watchPIDs(f.root)) > 0 }, nil); !ok {
+		t.Fatalf("isolated Watch runtime did not start: %s", reason)
 	}
 	const workerCount = 6
 	if withHistory {

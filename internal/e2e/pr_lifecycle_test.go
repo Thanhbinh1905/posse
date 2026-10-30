@@ -1030,10 +1030,11 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 		}
 		fixture.requireNotice(t, "t1", "pr_merged")
 		// Watch can claim a poll before the old URL is exposed, then read
-		// only pr1. Allow the next poll to see the old URL before checking the
-		// invalid PR Decision; it must still be raised, not skipped.
+		// only pr1, and a pass can find the poll claimed by a foreground
+		// command. Allow a few more Watch passes before checking the invalid
+		// PR Decision; it must still be raised, not skipped.
 		var decisions []store.Decision
-		if !waitForCondition(10*time.Second, func() bool {
+		if !waitForWatchPasses(t, fixture.binary, fixture.repo, fixture.leadEnv, 3, func() bool {
 			var err error
 			decisions, err = fixture.db.Decisions(context.Background(), fixture.project.ID, true)
 			if err != nil {
@@ -1044,7 +1045,6 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 					return true
 				}
 			}
-			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
 			return false
 		}) {
 			calls, _ := os.ReadFile(fixture.ghLog)
