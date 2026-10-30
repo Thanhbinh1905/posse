@@ -27,7 +27,7 @@ const guardExitBlocked = 2
 // everything. In a Worker it refuses a shell command that could change the
 // Herdr session the Worker runs in, or run a posse build other than the
 // installed one against the Worker's posse home, and a shell command or file
-// tool that writes that home outside the Worker's Sandbox and Task scratch.
+// tool that writes that home outside the Worker's Sandbox, Task scratch and Task candidate checkouts.
 // ADR 0007 states what it covers and what it cannot.
 func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	data, err := io.ReadAll(io.LimitReader(stdin, 4<<20))
@@ -91,7 +91,7 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 var fileWriteTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true}
 
 // workerWritable returns the places in home the calling Worker may write: its
-// Task's Sandbox and scratch, or every Sandbox and scratch directory when
+// Task's Sandbox, scratch and candidate checkouts, or every Sandbox and scratch directory when
 // posse cannot tell which Task the Worker runs.
 func (s *Service) workerWritable(home string) []string {
 	fallback := []string{filepath.Join(home, "pool"), filepath.Join(home, "scratch")}
@@ -113,7 +113,8 @@ func (s *Service) workerWritable(home string) []string {
 	if err != nil {
 		return fallback
 	}
-	return []string{task.WorktreePath, scratch}
+	candidates := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "candidates")
+	return []string{task.WorktreePath, scratch, candidates}
 }
 
 type guardReason struct {
@@ -744,7 +745,7 @@ func (g *guard) homeWrite(e *shellEnv, raw, name string) (bool, guardReason) {
 			return false, guardReason{}
 		}
 	}
-	return refuse(ruleWorkerHomeWrite, raw, "it writes "+path+" in the live posse home "+g.workerHome+", and a Worker writes there only in its Sandbox and Task scratch")
+	return refuse(ruleWorkerHomeWrite, raw, "it writes "+path+" in the live posse home "+g.workerHome+", and a Worker writes there only in its Sandbox, Task scratch and Task candidate checkouts")
 }
 
 // resolvedNewPath resolves the symlinks of the longest existing ancestor of a
