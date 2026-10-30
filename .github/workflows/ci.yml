@@ -635,7 +635,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          tests=$(scripts/stress-changed-tests.sh --list "$BASE_SHA" | awk '$1 == "unit"')
+          listing=$(scripts/stress-changed-tests.sh --list "$BASE_SHA")
+          tests=$(printf '%s\n' "$listing" | awk '$1 == "unit"')
           printf '%s\n' "$tests"
           if [ -n "$tests" ]; then echo "any=true" >> "$GITHUB_OUTPUT"; fi
       - name: Stress changed unit tests with the race detector
@@ -695,7 +696,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          tests=$(scripts/stress-changed-tests.sh --list "$BASE_SHA" | awk '$1 == "e2e"')
+          listing=$(scripts/stress-changed-tests.sh --list "$BASE_SHA")
+          tests=$(printf '%s\n' "$listing" | awk '$1 == "e2e"')
           printf '%s\n' "$tests"
           if [ -n "$tests" ]; then echo "any=true" >> "$GITHUB_OUTPUT"; fi
       - name: Install pinned Herdr release
