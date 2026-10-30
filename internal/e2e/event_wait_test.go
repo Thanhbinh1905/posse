@@ -32,16 +32,23 @@ func waitForWatchPasses(t *testing.T, binary, cwd string, env []string, passes i
 }
 
 // eventWaitMargin keeps time to report a failure and clean up the fixture
-// before the test binary's own deadline.
-const eventWaitMargin = time.Minute
+// before the test binary's own deadline. eventWaitLimit bounds a wait when the
+// binary runs with -timeout 0.
+const (
+	eventWaitMargin = time.Minute
+	eventWaitLimit  = 30 * time.Minute
+)
 
 // waitForEvent polls condition until it holds. It has no wall-clock budget of
 // its own: it gives up when abandoned returns a reason the event can no longer
 // happen, such as the process that would cause it having exited, or when the
-// test binary's deadline is near.
+// test binary's deadline, or eventWaitLimit without one, is near.
 func waitForEvent(t *testing.T, condition func() bool, abandoned func() string) (bool, string) {
 	t.Helper()
 	deadline, bounded := t.Deadline()
+	if !bounded {
+		deadline = time.Now().Add(eventWaitLimit)
+	}
 	for {
 		if condition() {
 			return true, ""
@@ -51,8 +58,8 @@ func waitForEvent(t *testing.T, condition func() bool, abandoned func() string) 
 				return condition(), reason
 			}
 		}
-		if bounded && time.Until(deadline) < eventWaitMargin {
-			return condition(), "the test deadline is near"
+		if time.Until(deadline) < eventWaitMargin {
+			return condition(), "the wait deadline is near"
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
