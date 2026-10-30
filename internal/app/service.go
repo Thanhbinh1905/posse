@@ -330,7 +330,26 @@ func (s *Service) projectForCWD(ctx context.Context, db *store.DB) (store.Projec
 			return db.ProjectByID(ctx, task.ProjectID)
 		}
 	}
-	return store.Project{}, axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run `posse up` here to register it and start its Lead, or `posse project add` for a Git repository or Workspace")
+	if project, found, err := s.projectForHomeFolder(ctx, db, dir); err != nil || found {
+		return project, err
+	}
+	return store.Project{}, axi.Failure("project_unknown", "this folder is not registered as a Project", false, "Run the command from the Project root or from its Posse home folder (`~/.posse/projects/<name>/`)", "Run `posse up` here to register it and start its Lead, or `posse project add` for a Git repository or Workspace")
+}
+
+func (s *Service) projectForHomeFolder(ctx context.Context, db *store.DB, dir string) (store.Project, bool, error) {
+	home, err := s.homePath()
+	if err != nil {
+		return store.Project{}, false, err
+	}
+	rel, err := filepath.Rel(filepath.Join(resolvedPath(home), "projects"), dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return store.Project{}, false, nil
+	}
+	project, err := db.ProjectByName(ctx, strings.SplitN(rel, string(filepath.Separator), 2)[0])
+	if store.IsNotFound(err) {
+		return store.Project{}, false, nil
+	}
+	return project, err == nil, err
 }
 
 func (s *Service) projectByName(ctx context.Context, db *store.DB, name string) (store.Project, error) {
