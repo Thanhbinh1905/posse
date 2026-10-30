@@ -108,7 +108,7 @@ func roleSkillWarning(checks []roleSkillCheck) string {
 	if len(skipped) == 0 {
 		return ""
 	}
-	return "not invoked: " + strings.Join(skipped, ", ") + "; invoke each at its step before relying on this output"
+	return "not invoked: " + strings.Join(skipped, ", ") + "; invoke each at its step before the done Signal"
 }
 
 // skillUsesRecorded reports whether Posse records the skill uses of this
