@@ -143,7 +143,11 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 			return axi.Failure("validation_docs_disposition_required", "docs needs an owner-document change or --no-owner-doc-change <reason>", false)
 		}
 		if missing := candidateDescriptionGaps(candidate); len(missing) > 0 {
-			return axi.Failure("validation_pr_description_incomplete", "the candidate PR description is incomplete: "+strings.Join(missing, "; "), false, "Resubmit the unchanged head from the Sandbox with `posse publish \"<summary>\"` and the corrected flags; they update the stored description without a new candidate")
+			repoFlag := ""
+			if lane.repo != "" {
+				repoFlag = " --repo " + lane.repo
+			}
+			return axi.Failure("validation_pr_description_incomplete", "the candidate PR description is incomplete: "+strings.Join(missing, "; "), false, "Resubmit the unchanged head from the Sandbox with `posse publish"+repoFlag+" \"<summary>\"` and the corrected flags, then rerun docs and lint; the flags update the stored description without a new candidate")
 		}
 	} else if stage == "lint" {
 		if _, err := db.ValidationStage(out.Context, candidate.ID, "docs", candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256()); err != nil {

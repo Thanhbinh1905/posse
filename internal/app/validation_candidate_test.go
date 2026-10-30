@@ -881,3 +881,42 @@ func TestPublishOnUnchangedCandidateAppliesNewDescriptionFlags(t *testing.T) {
 		t.Fatalf("flags that were not supplied must keep their stored values: %+v err=%v", partial, err)
 	}
 }
+
+func TestResubmittedDescriptionInvalidatesDocsAndLint(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	for _, args := range [][]string{
+		{"validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent verified"},
+		{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "none warranted", "--proof", "reviewed"},
+		{"validate", "lint", "--proof", "Gates passed", "--coverage", "no local workflows configured"},
+	} {
+		if code, output, stderr := runCandidateCLI(t, fixture, candidate, args...); code != 0 {
+			t.Fatalf("%v: exit=%d output=%s stderr=%s", args, code, output, stderr)
+		}
+	}
+	if code, output, stderr := fixture.run("publish", "Candidate summary", "--risk", "Risk: low"); code != 0 {
+		t.Fatalf("resubmit exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	stages, err := fixture.db.ValidationStages(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range stages {
+		want := "invalidated"
+		if stage.Stage == "test" {
+			want = "passed"
+		}
+		if stage.Status != want {
+			t.Fatalf("%s status=%s, want %s after the description changed", stage.Stage, stage.Status, want)
+		}
+	}
+	if code, output, _ := runCandidateCLI(t, fixture, candidate, "publish"); code == 0 {
+		t.Fatalf("promotion accepted a description whose docs and lint results were invalidated: %s", output)
+	}
+}
