@@ -112,8 +112,9 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 	logs := make(map[string]string, len(fixChecks))
 	tails := make(map[string]string, len(fixChecks))
 	for _, check := range fixChecks {
-		tail, err := failedCILog(ctx, forge.Root, forge, prURL, check)
-		logs[check.Name] = tail
+		log, err := failedCILog(ctx, forge.Root, forge, prURL, check)
+		logs[check.Name] = log
+		tail := log
 		if err != nil {
 			tail = strings.TrimSpace(tail + "\nCould not fetch the failed-log tail: " + err.Error())
 		}
