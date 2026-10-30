@@ -137,3 +137,17 @@ func TestRoleSkillChecklistNamesOnlyTheSkillsOfThatStep(t *testing.T) {
 		t.Fatalf("unrecorded checklist = %+v", unrecorded)
 	}
 }
+
+func TestRoleSkillWarningNamesOnlySkippedSkills(t *testing.T) {
+	checks := roleSkillChecklist([]string{"posse-technical-writing", "posse-unslop"}, "publish", map[string]int{"posse-unslop": 1}, true)
+	warning := roleSkillWarning(checks)
+	if !strings.Contains(warning, "posse-technical-writing") || strings.Contains(warning, "posse-unslop") {
+		t.Fatalf("warning = %q", warning)
+	}
+	if roleSkillWarning(roleSkillChecklist([]string{"posse-unslop"}, "publish", map[string]int{"posse-unslop": 1}, true)) != "" {
+		t.Fatal("warning for an invoked skill")
+	}
+	if roleSkillWarning(roleSkillChecklist([]string{"posse-unslop"}, "publish", nil, false)) != "" {
+		t.Fatal("warning when uses are not recorded")
+	}
+}

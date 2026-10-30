@@ -1855,10 +1855,10 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		signalResult = append(signalResult, axi.Field{Key: "turn_token", Value: turnToken})
 	}
 	if verb == "done" {
-		if checklist, ok, err := taskSkillChecklist(ctx.Context, db, home, project, task, "done"); err != nil {
+		if checklist, err := taskSkillChecklist(ctx.Context, db, home, project, task, "done"); err != nil {
 			return err
-		} else if ok {
-			signalResult = append(signalResult, checklist)
+		} else {
+			signalResult = append(signalResult, checklist...)
 		}
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)

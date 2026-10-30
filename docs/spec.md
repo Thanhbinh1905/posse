@@ -1224,6 +1224,8 @@ CI fixes, review fixes and target merges are author changes, never rounds. They 
 
 Autonomy never answers a `review_cap` Decision.
 
+Once the cap is spent, `posse review dispose` refuses any action that would leave an introduced blocking finding unfixed (`accept`, `defer`, `withdraw`, or a `reclassify` below `block_at`) with `review_cap_decision_required`, even with `--user-approved`. Such a head merges only after the User answers its `review_cap` Decision with `accept-head`.
+
 Under `full-pipeline`, a spent cap also blocks republication: a CI repair that exhausts it queues no further fix, a later CI failure raises `review_cap_reached` for that head, or `ci_fix_exhausted` once the User has answered its `review_cap` Decision, and publishing or recording a later stage for an unreviewed candidate is refused with `review_cap_reached` until the User's Decision is applied.
 
 ### 25.3 Scope
@@ -1302,6 +1304,8 @@ The Change done Signal is refused with `review_resolution_missing` until every p
 - With `autonomy.review = "lead"`, the Lead may `fix`, `defer` (with `--issue`), `withdraw` (with `--reason`) or reclassify non-blocking findings. With `ask`, the Lead raises the existing `review` Decision with the round summary.
 - `--issue` records the follow-up URL. The Lead files the issue; Posse never creates forge issues.
 
+**Rolling follow-up issues.** Non-blocking findings are deferred to one rolling follow-up issue per area, not one issue each. An area is a repository and the directory of the finding's `path` (a Go package, for example). `posse review followups` lists, across every Change Task of the Project, the findings that still need an issue: non-blocking, in state `open` or `deferred`, not inherited, and with no `follow_up_url`. Each area shows the last issue one of its findings was deferred to. The Lead lists the area's findings in that issue, or files a new one when it is closed, then runs `posse review followups defer --area <dir> [--repo <repository>] --issue <url>`, which defers each listed finding of that area and records the URL on it. The Lead clears the issue in a later Change Task.
+
 ### 25.7 Severity and blocking
 
 A finding blocks while its state is `open`, `fix_claimed`, `unverified`, `disputed` or `regressed`, its origin is `introduced`, it is in scope, and its severity is `unclassified` or at or above the frozen `block_at`. `pre_existing` and out-of-scope findings never block. Non-blocking findings stay `open` until deferred, fixed or withdrawn. `merge_ready` lists any still undisposed.
@@ -1356,6 +1360,8 @@ Finding IDs (`F-<seq>`) and pattern IDs (`P-<seq>`) are per Change Task and neve
 | `posse review fix <change> [--pattern P-n]...` | Lead | queue one fix round |
 | `posse review dispose <change> <ids>... <action> [...]` | Lead, User | record a disposition (25.6) |
 | `posse review merge <change> <P-n> <P-n>...` | Lead | merge patterns |
+| `posse review followups` | Lead, User | non-blocking findings with no follow-up issue, grouped by area (25.6) |
+| `posse review followups defer --area <dir> [--repo r] --issue <url>` | Lead, User | defer an area's listed findings to its rolling issue |
 | `posse signal done ... --findings <file>` | Review Worker | loop round findings (25.4) |
 | `posse signal done ... --resolutions <file>` | Change Worker | answers to a fix round (25.5) |
 | `posse validate <stage> [--repo <member>]` | Change Worker | inspect or record ordered local validation; `test` needs repeated `--verify` and `--proof`, `docs` needs `--no-comments passed` and `--proof`, plus `--no-owner-doc-change` when no owner docs changed; `lint` needs `--proof` and `--coverage` |
