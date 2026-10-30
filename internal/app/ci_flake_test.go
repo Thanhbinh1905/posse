@@ -240,3 +240,20 @@ func TestStewardRerunIsRecordedWithTestsAndOutcome(t *testing.T) {
 		t.Fatalf("pr inspect exit=%d output=%s error=%s, want the steward rerun with its test and outcome", code, output, errOutput)
 	}
 }
+
+func TestPRWatchFindsFlakyTestAboveTheInstructionTail(t *testing.T) {
+	f := newFlakeFixture(t)
+	lines := strings.SplitN(flakyShardLog, "\n", 3)
+	passing := strings.Repeat("e2e shard 3\tRun E2E shard\t2026-10-30T02:53:00.0Z --- PASS: TestOther (0.10s)\n", 250)
+	t.Setenv("POSSE_TEST_GH_RUN_LOG", lines[0]+"\n"+lines[1]+"\n"+passing+lines[2])
+	f.freeze(t, "168h")
+	f.recordElsewhere(t, "TestFlaky", time.Hour)
+	f.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", f.headSHA)
+	f.poll(t)
+	if log := f.ghLogText(t); strings.Count(log, "run rerun --job 456 --repo acme/shop") != 1 {
+		t.Fatalf("a flaky test named more than 200 lines above the log end was not rerun: %q", log)
+	}
+	if fixes := f.count(t, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`); fixes != 0 {
+		t.Fatalf("CI fix rounds = %d, want none", fixes)
+	}
+}

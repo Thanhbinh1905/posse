@@ -501,9 +501,9 @@ func (s *Service) prRerun(ctx *axi.Context, args []string) error {
 		if err := requestStewardRerun(ctx.Context, target, id, failed.RunID); err != nil {
 			return uncertainOperation(ctx.Context, db, target, operation, err)
 		}
-		tail, _ := failedCILogTail(ctx.Context, target.forge.Root, target.forge, target.prURL, *failed)
+		log, _ := failedCILog(ctx.Context, target.forge.Root, target.forge, target.prURL, *failed)
 		tests := []string{}
-		for _, failure := range parseGoTestFailures(tail).Tests {
+		for _, failure := range parseGoTestFailures(log).Tests {
 			tests = append(tests, failure.Test)
 		}
 		if _, _, err := db.RecordCIRerun(ctx.Context, store.CIRerun{ProjectID: target.project.ID, TaskID: target.task.ID, Repo: target.member, PRURL: target.prURL, HeadSHA: observation.HeadSHA, CheckName: defaultValue(failed.Name, "required check rollup"), RunID: failed.RunID, JobID: failed.JobID, Reason: "steward", Tests: tests}); err != nil {

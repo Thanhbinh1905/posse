@@ -109,9 +109,11 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 	if len(fixChecks) == 0 {
 		return nil
 	}
+	logs := make(map[string]string, len(fixChecks))
 	tails := make(map[string]string, len(fixChecks))
 	for _, check := range fixChecks {
-		tail, err := failedCILogTail(ctx, forge.Root, forge, prURL, check)
+		tail, err := failedCILog(ctx, forge.Root, forge, prURL, check)
+		logs[check.Name] = tail
 		if err != nil {
 			tail = strings.TrimSpace(tail + "\nCould not fetch the failed-log tail: " + err.Error())
 		}
@@ -120,7 +122,7 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 		}
 		tails[check.Name] = boundedLogTail(tail, 200)
 	}
-	fixChecks, err = s.rerunKnownFlakes(ctx, db, project, task, plan, observation, forge, member, fixChecks, tails)
+	fixChecks, err = s.rerunKnownFlakes(ctx, db, project, task, plan, observation, forge, member, fixChecks, logs, tails)
 	if err != nil || len(fixChecks) == 0 {
 		return err
 	}
@@ -202,16 +204,12 @@ func requestCIRerun(ctx context.Context, root, prURL string, forge repositoryFor
 	return nil
 }
 
-func failedCILogTail(ctx context.Context, root string, forge repositoryForge, prURL string, check failedCheck) (string, error) {
+func failedCILog(ctx context.Context, root string, forge repositoryForge, prURL string, check failedCheck) (string, error) {
 	if forge.Kind == "gitlab" {
 		if check.JobID == "" {
 			return "", fmt.Errorf("GitLab failed check has no job ID")
 		}
-		output, err := gitlabAPI(ctx, forge, "jobs/"+check.JobID+"/trace")
-		if err != nil {
-			return output, err
-		}
-		return boundedLogTail(output, 200), nil
+		return gitlabAPI(ctx, forge, "jobs/"+check.JobID+"/trace")
 	}
 	ref, err := pullRequestReferenceFromURL(prURL)
 	if err != nil {
@@ -226,11 +224,7 @@ func failedCILogTail(ctx context.Context, root string, forge repositoryForge, pr
 		return "", fmt.Errorf("GitHub failed check has no run or job ID")
 	}
 	args = append(args, "--log-failed", "--repo", githubRepositorySelector(ref))
-	output, err := commandOutputArgs(ctx, root, "gh", args...)
-	if err != nil {
-		return output, err
-	}
-	return boundedLogTail(output, 200), nil
+	return commandOutputArgs(ctx, root, "gh", args...)
 }
 
 func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project store.Project, task store.Task, plan *taskplan.Plan, observation store.PRObservation, forge repositoryForge, prURL, member string, checks []failedCheck, tails map[string]string) error {

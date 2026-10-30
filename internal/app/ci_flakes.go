@@ -63,12 +63,12 @@ func parseGoTestFailures(log string) goTestFailures {
 
 // rerunKnownFlakes records the parsed test failures, reruns each known flaky
 // check once per head and returns the checks that still need a fix round.
-func (s *Service) rerunKnownFlakes(ctx context.Context, db *store.DB, project store.Project, task store.Task, plan *taskplan.Plan, observation store.PRObservation, forge repositoryForge, member string, checks []failedCheck, tails map[string]string) ([]failedCheck, error) {
+func (s *Service) rerunKnownFlakes(ctx context.Context, db *store.DB, project store.Project, task store.Task, plan *taskplan.Plan, observation store.PRObservation, forge repositoryForge, member string, checks []failedCheck, logs, tails map[string]string) ([]failedCheck, error) {
 	now := time.Now()
 	parsed := make(map[string]goTestFailures, len(checks))
 	history := []store.CITestFailure{}
 	for _, check := range checks {
-		failures := parseGoTestFailures(tails[check.Name])
+		failures := parseGoTestFailures(logs[check.Name])
 		parsed[check.Name] = failures
 		for _, failure := range failures.Tests {
 			history = append(history, store.CITestFailure{ProjectID: project.ID, TaskID: task.ID, Repo: member, PRURL: observation.PRURL, HeadSHA: observation.HeadSHA, CheckName: check.Name, JobID: check.JobID, Package: failure.Package, Test: failure.Test, ObservedAt: now.UnixMilli()})
