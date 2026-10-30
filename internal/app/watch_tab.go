@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -16,7 +19,11 @@ func watchTabLabel(project store.Project) string { return "posse:" + project.Nam
 // phases, and alternating summaries must not raise a Notice every pass.
 func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFailures map[string]string, phase string, err error) {
 	if store.IsOnlyBusy(err) {
-		summary := "Watch " + phase + " deferred due to transient store contention; will retry"
+		summary := "Watch " + phase + " deferred due to transient store contention"
+		if cause := watchContentionCause(err); cause != "" {
+			summary += " (" + cause + ")"
+		}
+		summary += "; will retry"
 		if summary != lastFailures[phase] {
 			fmt.Fprintln(ctx.ErrOut, summary)
 			lastFailures[phase] = summary
@@ -32,6 +39,18 @@ func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFai
 		_, _ = db.CreateNotice(ctx.Context, store.Notice{ProjectID: projectID, Kind: "pr_watch_failing", Summary: summary, DataJSON: `{}`})
 		lastFailures[phase] = summary
 	}
+}
+
+func watchContentionCause(err error) string {
+	var causes []string
+	var lockWait *fileLockWaitError
+	if errors.As(err, &lockWait) {
+		causes = append(causes, "timed out waiting for "+filepath.Base(lockWait.path))
+	}
+	if store.IsSQLiteBusy(err) {
+		causes = append(causes, "SQLite busy")
+	}
+	return strings.Join(causes, "; ")
 }
 
 // watchReconcileBlockNoticeAfter is how long the watch's reconcile pass may

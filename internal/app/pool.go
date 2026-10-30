@@ -1065,26 +1065,42 @@ func unlockSandbox(ctx context.Context, repo, path string) error {
 var errSandboxNotRegistered = errors.New("sandbox is missing from git worktree list")
 
 func sandboxLockReason(ctx context.Context, repo, path string) (string, error) {
-	listing, err := gitOutput(ctx, repo, "worktree", "list", "--porcelain")
+	reasons, err := worktreeLockReasons(ctx, repo)
 	if err != nil {
 		return "", err
 	}
+	reason, registered := reasons[path]
+	if !registered {
+		return "", fmt.Errorf("%w: %s", errSandboxNotRegistered, path)
+	}
+	return reason, nil
+}
+
+func worktreeLockReasons(ctx context.Context, repo string) (map[string]string, error) {
+	listing, err := gitOutput(ctx, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	reasons := map[string]string{}
 	for _, block := range strings.Split(listing, "\n\n") {
 		lines := strings.Split(block, "\n")
-		if len(lines) == 0 || lines[0] != "worktree "+path {
+		path, ok := strings.CutPrefix(lines[0], "worktree ")
+		if !ok {
 			continue
 		}
+		reasons[path] = ""
 		for _, line := range lines {
 			if line == "locked" {
-				return "locked", nil
+				reasons[path] = "locked"
+				break
 			}
-			if strings.HasPrefix(line, "locked ") {
-				return strings.TrimPrefix(line, "locked "), nil
+			if reason, locked := strings.CutPrefix(line, "locked "); locked {
+				reasons[path] = reason
+				break
 			}
 		}
-		return "", nil
 	}
-	return "", fmt.Errorf("%w: %s", errSandboxNotRegistered, path)
+	return reasons, nil
 }
 
 func unlockRegisteredSandbox(ctx context.Context, repo, path string, seq int) error {

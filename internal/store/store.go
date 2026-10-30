@@ -58,6 +58,12 @@ func IsBusy(err error) bool {
 	return errors.Is(err, ErrBusy) || isBusyErr(err)
 }
 
+// IsSQLiteBusy reports whether err contains a SQLite lock wait that timed
+// out, as opposed to a Posse file lock or an exhausted budget.
+func IsSQLiteBusy(err error) bool {
+	return isBusyErr(err)
+}
+
 // IsOnlyBusy reports whether every constituent error represents transient
 // store contention. Unlike IsBusy, it does not classify a joined error as
 // transient when any constituent failure is non-contention.

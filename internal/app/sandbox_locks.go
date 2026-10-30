@@ -23,6 +23,7 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 		if err != nil {
 			return err
 		}
+		var lockReasons map[string]string
 		for _, sandbox := range sandboxes {
 			if sandbox.State == "releasing" && sandbox.TaskID != 0 {
 				task, err := db.TaskByID(ctx, project.ID, sandbox.TaskID)
@@ -69,6 +70,14 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 			}
 			if err := recordSandboxRecoveredNotice(ctx, db, project, task, sandbox); err != nil {
 				return err
+			}
+			if lockReasons == nil {
+				if lockReasons, err = worktreeLockReasons(ctx, project.Root); err != nil {
+					return err
+				}
+			}
+			if reason, registered := lockReasons[sandbox.Path]; registered && reason == fmt.Sprintf("posse: held by t%d", task.Seq) {
+				continue
 			}
 			if err := lockSandbox(ctx, project.Root, sandbox.Path, task.Seq); err != nil {
 				return err

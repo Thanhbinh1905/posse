@@ -1159,6 +1159,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	query, targets := pullRequestGraphQLQuery(targets)
 	pulls := make(map[int64]*ghPullRequest, len(targets))
 	var response ghQueryResponse
+	forgeAnswered := false
 	if query != "" {
 		output, stderr, commandErr := graphQLCommandOutput(ctx, project.Root, query)
 		if err := json.Unmarshal([]byte(output), &response); err != nil {
@@ -1175,6 +1176,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			globalFailure = truncate(strings.TrimSpace(stderr+" "+commandErr.Error()), 300)
 		}
 		hasRepositoryData := len(response.Data.Repositories) > 0
+		forgeAnswered = hasRepositoryData
 		if !hasRepositoryData {
 			globalFailure = truncate(strings.TrimSpace(globalFailure+" GraphQL response omitted repository data"), 300)
 		}
@@ -1226,12 +1228,13 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		}
 		gitlabObservations[task.ID] = observation
 		gitlabFailures[task.ID] = failures
+		forgeAnswered = true
 	}
 	if globalFailure != "" {
 		if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), globalFailure); err != nil {
 			return err
 		}
-	} else if len(failedTasks) > 0 {
+	} else if len(failedTasks) > 0 && !forgeAnswered {
 		if err := db.RecordPRPollAttempt(ctx, project.ID, now.UnixMilli()); err != nil {
 			return err
 		}

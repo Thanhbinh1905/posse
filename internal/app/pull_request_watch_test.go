@@ -1538,10 +1538,12 @@ pr_poll = "1ms"
 
 func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.T) {
 	for _, test := range []struct {
-		name, alias string
-		global      bool
+		name, alias  string
+		global       bool
+		priorFailure bool
 	}{
 		{name: "missing old PR", alias: "pr2"},
+		{name: "missing old PR after project failure", alias: "pr2", priorFailure: true},
 		{name: "unattributed error", alias: "unknown", global: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1593,6 +1595,11 @@ func TestPRWatchAttributesPartialGraphQLErrorsAndKeepsGlobalFailures(t *testing.
 			cfg, err := config.Load(fixture.home, fixture.project.Name)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if test.priorFailure {
+				if _, err := fixture.db.RecordPRPoll(ctx, fixture.project.ID, time.Now().UnixMilli(), "earlier forge outage"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			for i := 0; i < 3; i++ {
 				if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
