@@ -640,7 +640,7 @@ func TestWorkerProtocolGuidesFullPipelineLanes(t *testing.T) {
 	}
 	brief := dispatch.Brief{Type: "change", DoneWhen: "candidate is promoted"}
 	local := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 1, Type: "change", MergeMode: "local", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none")
-	for _, want := range []string{"Full-pipeline validation", "`posse publish \"<summary>\" --verify", "`posse validate test --verify", "local delivery only fast-forwards the Task branch", "To request a Review Round, run `posse signal done", "Never use needs-decision to ask for Review"} {
+	for _, want := range []string{"Full-pipeline validation", "`posse publish \"<summary>\" --verify", "`posse validate test --verify", "local delivery only fast-forwards the Task branch", "To request a Review Round, run `posse signal done", "Never use needs-decision to ask for Review", "Risk that states how to roll back", "without a new candidate"} {
 		if !strings.Contains(local, want) {
 			t.Fatalf("local full-pipeline protocol lacks %q: %s", want, local)
 		}
@@ -813,5 +813,71 @@ func TestRequireSubmittedCandidateKeepsStoreErrorsDistinctFromMissing(t *testing
 	_, err = requireSubmittedCandidate(ctx, db, task, candidateLane{})
 	if err == nil || errors.As(err, &refusal) {
 		t.Fatalf("store error = %v, want it returned unchanged", err)
+	}
+}
+
+func TestDocsStageNamesEachIncompleteDescriptionField(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE validation_candidates SET verification='',risk='Risk: low' WHERE id=?`, candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	docs := []string{"validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "none warranted", "--proof", "reviewed"}
+	code, output, _ := runCandidateCLI(t, fixture, candidate, docs...)
+	if code != 1 || !strings.Contains(output, "validation_pr_description_incomplete") {
+		t.Fatalf("docs accepted an incomplete description: exit=%d output=%s", code, output)
+	}
+	for _, want := range []string{"--verify", "Risk must state how to roll back", "posse publish"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("refusal lacks %q: %s", want, output)
+		}
+	}
+	for _, phrasing := range []string{"Rollback: revert", "we can roll back by reverting", "roll-back: revert", "Rolling back is a revert"} {
+		if _, err := fixture.db.ExecContext(context.Background(), `UPDATE validation_candidates SET verification='go test -> passed',risk=? WHERE id=?`, "Risk: low\n"+phrasing, candidate.ID); err != nil {
+			t.Fatal(err)
+		}
+		if code, output, stderr := runCandidateCLI(t, fixture, candidate, docs...); code != 0 {
+			t.Fatalf("docs refused risk phrasing %q: exit=%d output=%s stderr=%s", phrasing, code, output, stderr)
+		}
+	}
+}
+
+func TestPublishOnUnchangedCandidateAppliesNewDescriptionFlags(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	before, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, output, stderr := fixture.run("publish", "Better summary", "--verify", "go vet ./... -> clean", "--proof", "New proof", "--risk", "Risk: none\nRollback: git revert")
+	if code != 0 || !strings.Contains(output, "resumed") {
+		t.Fatalf("resubmit exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	after, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ID != before.ID || after.CandidateSHA != before.CandidateSHA {
+		t.Fatalf("resubmission replaced the candidate: before=%+v after=%+v", before, after)
+	}
+	if after.Summary != "Better summary" || after.Verification != "go vet ./... -> clean" || after.Proof != "New proof" || after.Risk != "Risk: none\nRollback: git revert" {
+		t.Fatalf("description not updated: %+v", after)
+	}
+	if code, output, stderr := fixture.run("publish", "Better summary", "--risk", "Risk: none\nRollback: git revert"); code != 0 {
+		t.Fatalf("partial resubmit exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	partial, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || partial.Verification != after.Verification || partial.Proof != after.Proof {
+		t.Fatalf("flags that were not supplied must keep their stored values: %+v err=%v", partial, err)
 	}
 }

@@ -162,6 +162,25 @@ func (db *DB) CreateValidationCandidate(ctx context.Context, candidate Validatio
 	return candidate, nil
 }
 
+// UpdateValidationCandidateDescription rewrites the PR description fields of a
+// candidate that has not been promoted. An empty field keeps its stored value.
+func (db *DB) UpdateValidationCandidateDescription(ctx context.Context, id int64, summary, verification, proof, risk string) error {
+	result, err := db.ExecContext(ctx, `UPDATE validation_candidates SET
+		summary=CASE WHEN ?<>'' THEN ? ELSE summary END,
+		verification=CASE WHEN ?<>'' THEN ? ELSE verification END,
+		proof=CASE WHEN ?<>'' THEN ? ELSE proof END,
+		risk=CASE WHEN ?<>'' THEN ? ELSE risk END,
+		updated_at=? WHERE id=? AND state IN ('preparing','active')`,
+		summary, summary, verification, verification, proof, proof, risk, risk, time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrStateRace
+	}
+	return nil
+}
+
 func (db *DB) ActivateValidationCandidate(ctx context.Context, id int64, candidateSHA string) error {
 	result, err := db.ExecContext(ctx, `UPDATE validation_candidates SET state='active',candidate_sha=?,updated_at=? WHERE id=? AND state='preparing' AND candidate_sha=?`, candidateSHA, time.Now().UnixMilli(), id, candidateSHA)
 	if err != nil {
