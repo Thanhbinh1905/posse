@@ -130,7 +130,7 @@ func TestRunGuardRefusesWorkerFileToolWritesToTheLivePosseHome(t *testing.T) {
 	}
 }
 
-func TestRunGuardLimitsWritesToTheWorkerTaskSandboxAndScratch(t *testing.T) {
+func TestRunGuardLimitsWritesToTheWorkerTaskSandboxScratchAndCandidates(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
@@ -164,12 +164,12 @@ func TestRunGuardLimitsWritesToTheWorkerTaskSandboxAndScratch(t *testing.T) {
 		var stderr bytes.Buffer
 		return service.RunGuard(strings.NewReader(`{"tool_name":"Write","tool_input":{"file_path":"`+path+`","content":"x"}}`), &stderr)
 	}
-	for _, path := range []string{filepath.Join(sandbox, "notes.txt"), filepath.Join(home, "scratch", "shop", "t1", "notes.txt")} {
+	for _, path := range []string{filepath.Join(sandbox, "notes.txt"), filepath.Join(home, "scratch", "shop", "t1", "notes.txt"), filepath.Join(home, "projects", "shop", "tasks", "t1", "candidates", "shop", "g1", "app.yaml")} {
 		if code := write(path); code != 0 {
 			t.Errorf("guard refused a write in the Worker's own Task place %s: code=%d", path, code)
 		}
 	}
-	for _, path := range []string{filepath.Join(home, "pool", "shop", "sandbox-2", "notes.txt"), filepath.Join(home, "scratch", "shop", "t2", "notes.txt")} {
+	for _, path := range []string{filepath.Join(home, "pool", "shop", "sandbox-2", "notes.txt"), filepath.Join(home, "scratch", "shop", "t2", "notes.txt"), filepath.Join(home, "projects", "shop", "tasks", "t2", "candidates", "shop", "g1", "app.yaml"), filepath.Join(home, "projects", "shop", "tasks", "t1", "launch.md")} {
 		if code := write(path); code != guardExitBlocked {
 			t.Errorf("guard let a Worker write another Task's place %s: code=%d", path, code)
 		}
