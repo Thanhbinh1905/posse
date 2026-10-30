@@ -363,3 +363,27 @@ func TestFullJSONHomeCarriesBoardFields(t *testing.T) {
 		t.Errorf("t1 age = %#v, want about 2h", row["age"])
 	}
 }
+
+func TestShowIncludesBlockedDialog(t *testing.T) {
+	fixture := newRelaunchFixture(t, store.StateBlocked)
+	fixture.fake.SnapshotValue.Panes[0].AgentStatus = "blocked"
+	fixture.fake.Results["pane.read"] = json.RawMessage(`{"text":"\n Bash command\n   rm -rf build/*\n Do you want to proceed?\n"}`)
+	t.Chdir(filepath.Join(filepath.Dir(fixture.home), "repo"))
+	var output bytes.Buffer
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"--json", "show", "t1"}); code != 0 {
+		t.Fatalf("show failed: code=%d output=%s", code, output.String())
+	}
+	var result struct {
+		Dialog string `json:"blocked_dialog"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatalf("decode show output: %v: %s", err, output.String())
+	}
+	for _, want := range []string{"rm -rf build/*", "Do you want to proceed?"} {
+		if !strings.Contains(result.Dialog, want) {
+			t.Fatalf("blocked_dialog lacks %q: %s", want, output.String())
+		}
+	}
+}

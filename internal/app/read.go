@@ -17,6 +17,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 	"github.com/thanhbinh1905/posse/internal/usage"
@@ -809,6 +810,11 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			"kind": modelEpisode.Kind, "attempts": modelEpisode.Attempts, "max_attempts": modelStreamRetryLimit,
 			"status": modelEpisode.Status, "started_at": modelEpisode.StartedAt,
 			"next_attempt_at": modelEpisode.NextAttemptAt,
+		}
+	}
+	if task.State == store.StateBlocked && task.PaneID != "" {
+		if dialog := runtime.BlockedDialog(ctx.Context, s.Herdr, task.PaneID); dialog != "" {
+			view["blocked_dialog"] = dialog
 		}
 	}
 	issues, refs, err := taskIssueReferences(home, project, task)
