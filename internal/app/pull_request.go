@@ -1260,8 +1260,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	behind := []behindPR{}
 	moved := false
-	// Without the current-target rule only conflicting PRs ask the Worker to
-	// merge the target, and they bypass the merge queue.
+	// Without the current-target rule only conflicting PRs, and full-pipeline
+	// PRs whose validation a target move stales, ask the Worker to refresh,
+	// and they bypass the merge queue.
 	conflicts := []behindPR{}
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
@@ -1304,7 +1305,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			continue
 		}
-		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING") {
+		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || fullPipelineSelected(task, "")) {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
 			var beforeQuery prTargetFreshness
 			if freshnessErr == nil && !freshness.Fresh && cfg.Defaults.RequireCurrentTarget {
@@ -1764,7 +1765,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			noticed = nil
 		}
 		if len(failures) > 0 && (len(noticed) == 0 || !checks.Running && !sameFailures(noticed, failures)) {
-			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), or raises ci_fix_exhausted or review_cap_reached, and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
+			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), or raises ci_fix_exhausted, and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
 		}
 		if current.Review == "CHANGES_REQUESTED" && (newHead || previous.Review != "CHANGES_REQUESTED") {
 			addNotice("pr_changes_requested", task.Title+": review requests changes", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "review": current.Review})

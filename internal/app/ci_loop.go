@@ -18,6 +18,9 @@ import (
 )
 
 func (s *Service) processCIObservation(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation, failures []failedCheck, forge repositoryForge, member string) error {
+	if err := settleCIReruns(ctx, db, forge, task.ID, member, observation); err != nil {
+		return err
+	}
 	if task.Type != "change" || observation.State != "OPEN" || len(failures) == 0 || observation.HeadSHA == "" || !ciTaskCanReceiveFix(task) {
 		return nil
 	}
@@ -92,19 +95,26 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 			fixChecks = append(fixChecks, group.checks...)
 			continue
 		}
-		if err := requestCIRerun(ctx, forge.Root, prURL, forge, group); err != nil {
-			for _, check := range group.checks {
+		requestErr := requestCIRerun(ctx, forge.Root, prURL, forge, group)
+		for _, check := range group.checks {
+			if err := recordCIRerun(ctx, db, store.CIRerun{ProjectID: project.ID, TaskID: task.ID, Repo: member, PRURL: prURL, HeadSHA: observation.HeadSHA, CheckName: check.Name, RunID: check.RunID, JobID: check.JobID, Reason: "cancelled"}, requestErr); err != nil {
+				return err
+			}
+			if requestErr != nil {
 				fixChecks = append(fixChecks, check)
-				rerunFailures[check.Name] = err.Error()
+				rerunFailures[check.Name] = requestErr.Error()
 			}
 		}
 	}
 	if len(fixChecks) == 0 {
 		return nil
 	}
+	logs := make(map[string]string, len(fixChecks))
 	tails := make(map[string]string, len(fixChecks))
 	for _, check := range fixChecks {
-		tail, err := failedCILogTail(ctx, forge.Root, forge, prURL, check)
+		log, err := failedCILog(ctx, forge.Root, forge, prURL, check)
+		logs[check.Name] = log
+		tail := log
 		if err != nil {
 			tail = strings.TrimSpace(tail + "\nCould not fetch the failed-log tail: " + err.Error())
 		}
@@ -112,6 +122,10 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 			tail = strings.TrimSpace(tail + "\nRerun command failed: " + rerunFailure)
 		}
 		tails[check.Name] = boundedLogTail(tail, 200)
+	}
+	fixChecks, err = s.rerunKnownFlakes(ctx, db, project, task, plan, observation, forge, member, fixChecks, logs, tails)
+	if err != nil || len(fixChecks) == 0 {
+		return err
 	}
 	return s.queueCIFixRound(ctx, db, project, task, plan, observation, forge, prURL, member, fixChecks, tails)
 }
@@ -134,6 +148,7 @@ func ciPlanAllowsMember(plan *taskplan.Plan, member string) bool {
 
 type ciRerunGroup struct {
 	runID  string
+	jobID  string
 	checks []failedCheck
 }
 
@@ -179,23 +194,23 @@ func requestCIRerun(ctx context.Context, root, prURL string, forge repositoryFor
 	if err != nil {
 		return err
 	}
-	output, err := commandOutputArgs(ctx, root, "gh", "run", "rerun", "--failed", group.runID, "--repo", githubRepositorySelector(ref))
+	args := []string{"run", "rerun", "--failed", group.runID}
+	if group.jobID != "" {
+		args = []string{"run", "rerun", "--job", group.jobID}
+	}
+	output, err := commandOutputArgs(ctx, root, "gh", append(args, "--repo", githubRepositorySelector(ref))...)
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(output))
 	}
 	return nil
 }
 
-func failedCILogTail(ctx context.Context, root string, forge repositoryForge, prURL string, check failedCheck) (string, error) {
+func failedCILog(ctx context.Context, root string, forge repositoryForge, prURL string, check failedCheck) (string, error) {
 	if forge.Kind == "gitlab" {
 		if check.JobID == "" {
 			return "", fmt.Errorf("GitLab failed check has no job ID")
 		}
-		output, err := gitlabAPI(ctx, forge, "jobs/"+check.JobID+"/trace")
-		if err != nil {
-			return output, err
-		}
-		return boundedLogTail(output, 200), nil
+		return gitlabAPI(ctx, forge, "jobs/"+check.JobID+"/trace")
 	}
 	ref, err := pullRequestReferenceFromURL(prURL)
 	if err != nil {
@@ -210,11 +225,7 @@ func failedCILogTail(ctx context.Context, root string, forge repositoryForge, pr
 		return "", fmt.Errorf("GitHub failed check has no run or job ID")
 	}
 	args = append(args, "--log-failed", "--repo", githubRepositorySelector(ref))
-	output, err := commandOutputArgs(ctx, root, "gh", args...)
-	if err != nil {
-		return output, err
-	}
-	return boundedLogTail(output, 200), nil
+	return commandOutputArgs(ctx, root, "gh", args...)
 }
 
 func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project store.Project, task store.Task, plan *taskplan.Plan, observation store.PRObservation, forge repositoryForge, prURL, member string, checks []failedCheck, tails map[string]string) error {
@@ -227,13 +238,7 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	checkSetKey := hex.EncodeToString(digest[:])
 	dedupeKey := "ci:" + observation.HeadSHA + ":" + checkSetKey
 	instruction := renderCIFixInstruction(task, plan, observation, forge, prURL, member, checks, tails)
-	var result store.QueueValidationFixResult
-	var err error
-	if fullPipelineSelected(task, member) {
-		result, err = db.QueueCIFixInstructionWithSharedBudget(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds, plan.ValidationLoops.MaxReviewRounds())
-	} else {
-		result, err = db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
-	}
+	result, err := db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
 	if errors.Is(err, store.ErrStaleValidationHead) || errors.Is(err, store.ErrStateRace) {
 		return nil
 	}
@@ -255,32 +260,6 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	}
 	if err != nil {
 		return err
-	}
-	if result.SharedExhausted {
-		usage, err := db.ReviewCapUsage(ctx, task.ID)
-		if err != nil {
-			return err
-		}
-		if usage.Total() < plan.ValidationLoops.MaxReviewRounds() {
-			return nil
-		}
-		var binding reviewCapBinding
-		if member == "" {
-			binding, err = newReviewCapBinding([]store.ReviewTarget{{Repository: project.Name, Commit: observation.HeadSHA}})
-		} else {
-			binding, err = reviewCapHead(ctx, db, project, task)
-		}
-		if err != nil {
-			return err
-		}
-		var capDecidedForHead bool
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND origin=? AND answered_at<>0)`, task.ID, reviewCapOrigin(task, binding.Head)).Scan(&capDecidedForHead); err != nil {
-			return err
-		}
-		if capDecidedForHead {
-			return exhausted("Review and repair cap already decided")
-		}
-		return createReviewCapNotice(ctx, db, project, task, binding, usage.Total(), plan.ValidationLoops.MaxReviewRounds())
 	}
 	if result.Queued {
 		data := marshalJSON(map[string]any{"url": prURL, "head_sha": observation.HeadSHA, "check_set": checkSetKey, "checks": names, "repository": member})

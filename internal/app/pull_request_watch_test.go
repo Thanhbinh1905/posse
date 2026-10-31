@@ -724,6 +724,9 @@ func TestPRWatchRerunsCancelledCheckOnceThenQueuesOneCIFixRound(t *testing.T) {
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queuedNotices); err != nil || queuedNotices != 1 {
 		t.Fatalf("CI fix notices=%d err=%v, want one", queuedNotices, err)
 	}
+	if reruns, err := fixture.db.CIReruns(ctx, fixture.task.ID, "", "https://github.com/acme/shop/pull/17", 10); err != nil || len(reruns) != 1 || reruns[0].Reason != "cancelled" || reruns[0].Outcome != "failed" {
+		t.Fatalf("recorded cancelled reruns = %#v err=%v, want one that failed again", reruns, err)
+	}
 	var body string
 	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
 		t.Fatal(err)
@@ -864,52 +867,46 @@ func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 	}
 }
 
-func TestPRWatchRaisesCIExhaustedAfterAcceptHeadOnSpentReviewCap(t *testing.T) {
+// t731: a flaky CI failure after the final Review pass raised review_cap.
+func TestPRWatchCIRepairsUseCIBudgetNotSpentReviewCap(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateMerging)
 	ctx := context.Background()
 	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
 		t.Fatal(err)
 	}
-	freezeCILoopWithReview(t, fixture, 3, 0, "full-pipeline")
+	freezeCILoopWithReview(t, fixture, 1, 0, "full-pipeline")
 	seedHistoricalValidationFixRounds(t, fixture, 3)
-	if err := createReviewCapNotice(ctx, fixture.db, fixture.project, fixture.task, reviewCapBinding{Head: fixture.headSHA}, 3, 3); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
-		t.Fatal(err)
-	}
-	var decisionID int64
-	if err := fixture.db.QueryRowContext(ctx, `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, fixture.task.ID).Scan(&decisionID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.db.AnswerDecision(ctx, fixture.project.ID, decisionID, "accept-head", "accept-head"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='merging' WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
-	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
+	count := func(kind string) int {
+		t.Helper()
+		var n int
+		if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind=?`, fixture.task.ID, kind).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	poll := func() {
+		t.Helper()
+		fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
 		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
 			t.Fatal(err)
 		}
-		if err := fixture.service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
-			t.Fatal(err)
-		}
 	}
-	var exhausted, openDecisions int
-	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, fixture.task.ID).Scan(&exhausted); err != nil {
-		t.Fatal(err)
+	poll()
+	if queued, capped := count("ci_fix_queued"), count("review_cap_reached"); queued != 1 || capped != 0 {
+		t.Fatalf("CI failure with a spent Review cap: ci_fix_queued=%d review_cap_reached=%d, want one CI fix round", queued, capped)
 	}
-	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decisions WHERE task_id=? AND answered_at=0 AND obsolete_at=0`, fixture.task.ID).Scan(&openDecisions); err != nil {
-		t.Fatal(err)
-	}
-	if exhausted != 1 || openDecisions != 0 {
-		t.Fatalf("CI failure after accept-head on a spent cap: ci_fix_exhausted notices=%d open Decisions=%d, want one Notice", exhausted, openDecisions)
+	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+	poll()
+	if exhausted, capped := count("ci_fix_exhausted"), count("review_cap_reached"); exhausted != 1 || capped != 0 {
+		t.Fatalf("CI budget exhaustion: ci_fix_exhausted=%d review_cap_reached=%d, want ci_fix_exhausted only", exhausted, capped)
 	}
 }
 
