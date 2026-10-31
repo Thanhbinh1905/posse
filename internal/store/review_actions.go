@@ -310,16 +310,8 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 		return err
 	}
 	defer tx.Rollback()
-	for _, head := range heads {
-		var existing bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
-			return err
-		}
-		if !existing {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
-				return err
-			}
-		}
+	if err := insertReviewDispositionsTx(ctx, tx, taskID, decisionID, heads, quote); err != nil {
+		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.seq,f.severity,f.origin,f.in_scope,f.state FROM review_findings f WHERE f.ship_task_id=? ORDER BY f.seq`, taskID)
 	if err != nil {
@@ -364,6 +356,39 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_finding_events(finding_id,round,event,actor,note,user_quote,at) VALUES(?,0,?,'user','accepted at review cap',?,?)`, value.id, event, quote, time.Now().UnixMilli()); err != nil {
 			return err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
+func insertReviewDispositionsTx(ctx context.Context, tx *writeTx, taskID, decisionID int64, heads []string, quote string) error {
+	for _, head := range heads {
+		var existing bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
+			return err
+		}
+		if !existing {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// RecordReviewHeadDisposition binds the current heads to a disposition that
+// left no blocking finding, without touching any finding. The next step needs
+// no User quote because no blocking finding was accepted.
+func (db *DB) RecordReviewHeadDisposition(ctx context.Context, taskID int64, heads []string, note string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertReviewDispositionsTx(ctx, tx, taskID, 0, heads, note); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
