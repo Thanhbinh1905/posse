@@ -429,3 +429,64 @@ func stopSandboxProcess(t *testing.T, command *exec.Cmd) {
 		}
 	}
 }
+
+type staleAgentRecordAdapter struct {
+	*herdr.Fake
+	snapshot   herdr.Snapshot
+	shellPID   int
+	foreground int
+}
+
+func (adapter *staleAgentRecordAdapter) Snapshot(context.Context) (herdr.Snapshot, error) {
+	return adapter.snapshot, nil
+}
+
+func (adapter *staleAgentRecordAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method != "pane.process_info" {
+		return adapter.Fake.Call(ctx, method, params)
+	}
+	paneID, _ := params["pane_id"].(string)
+	return json.Marshal(map[string]any{"process_info": map[string]any{
+		"pane_id":                     paneID,
+		"shell_pid":                   adapter.shellPID,
+		"foreground_process_group_id": adapter.foreground,
+		"foreground_processes":        []map[string]any{{"pid": adapter.foreground, "name": "zsh", "cwd": ""}},
+	}})
+}
+
+func TestTeardownIgnoresStaleHerdrAgentRecordOnceForegroundIsTheShell(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	attachPRFixtureSandbox(t, fixture)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.worktree, "w2", "w2:p1", "posse:shop:t1", agentName("shop", fixture.task.Seq, 1)); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := startSandboxProcess(t, fixture.worktree)
+	pane := herdr.Pane{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, TabID: "w2:t1", Label: task.PaneLabel, CWD: fixture.worktree, Agent: "claude"}
+	adapter := &staleAgentRecordAdapter{
+		Fake:       fixture.service.Herdr.(*herdr.Fake),
+		snapshot:   herdr.Snapshot{Panes: []herdr.Pane{pane}, Agents: []herdr.Agent{{Name: agentName("shop", task.Seq, 1), PaneID: task.PaneID, Kind: "claude"}}},
+		shellPID:   shell.Process.Pid,
+		foreground: shell.Process.Pid,
+	}
+	fixture.service.Herdr = adapter
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if _, err := authorization.bind(shell.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+
+	err = fixture.service.verifyTaskPaneShellAfterForegroundExit(ctx, fixture.project, task, fixture.worktree, pane, shell.Process.Pid, shell.Process.Pid+1, authorization)
+	if err != nil && strings.Contains(err.Error(), "still exposes a foreground agent") {
+		t.Fatalf("stale Herdr agent record refused teardown although the shell is the foreground: %v", err)
+	}
+
+	adapter.foreground = shell.Process.Pid + 1
+	if err := fixture.service.verifyTaskPaneShellAfterForegroundExit(ctx, fixture.project, task, fixture.worktree, pane, shell.Process.Pid, shell.Process.Pid+1, authorization); err == nil {
+		t.Fatal("teardown was authorized while a non-shell foreground process owns the pane")
+	}
+}
