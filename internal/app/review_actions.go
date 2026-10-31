@@ -412,6 +412,9 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 		}
 		return axi.Failure("review_disposition_refused", err.Error(), false)
 	}
+	if err := settleReviewDisposition(ctx.Context, db, project, change, action); err != nil {
+		return err
+	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "action", Value: action}, {Key: "findings", Value: appliedFindings}, {Key: "patterns", Value: len(patterns)}, {Key: "state", Value: "recorded"}})
 }
 

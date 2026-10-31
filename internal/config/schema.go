@@ -71,6 +71,7 @@ var keySpecs = []KeySpec{
 	{Key: "review_loop.profile", Type: TypeString, Default: "", Meaning: "Profile every Review Task launches with when `posse review start` names none; empty leaves the choice to the review Dispatch Rules. A Review Task always runs in its own session, so this Profile may match the author's.", UserOnly: true},
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
+	{Key: "ci_loop.flake_window", Type: TypeDuration, Default: "168h", Meaning: "Rerun a failed check once instead of queueing a CI fix round when every failing test is outside the packages the PR changes and failed on another PR within this window; 0 disables.", UserOnly: true},
 	{Key: "full_pipeline.run_workflows", Type: TypeBoolean, Default: false, Meaning: "Explicitly allow locally executing repository CI workflow shell steps in the private full-pipeline candidate; unsupported jobs remain visible and cannot be inferred from repository files.", UserOnly: true},
 	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
@@ -234,7 +235,7 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 		}
 		if spec.Type == TypeDuration {
 			parsed, err := time.ParseDuration(text)
-			if err != nil || parsed <= 0 {
+			if err != nil || parsed < 0 || parsed == 0 && key != "ci_loop.flake_window" {
 				return fmt.Errorf("%s must be a positive duration", key)
 			}
 		}

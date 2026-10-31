@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func gitlabStewardFixture(t *testing.T) (stewardTarget, string) {
@@ -91,5 +93,62 @@ func TestStewardReplyMarkerIsFoundAmongGitLabNotes(t *testing.T) {
 		if found, err := forgeCommentHasMarker(ctx, target, stewardOperationMarker(id)); err != nil || found {
 			t.Fatalf("operation %d matched another reply: found=%v err=%v", id, found, err)
 		}
+	}
+}
+
+func stewardPollFixture(t *testing.T) (*prMergeFixture, string) {
+	t.Helper()
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	ctx := context.Background()
+	f.setGHHead(t, f.headSHA)
+	if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	prURL := "https://github.com/acme/shop/pull/17"
+	if err := f.db.UpdateTaskMerge(ctx, f.task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
+	return f, prURL
+}
+
+// #805: `posse pr inspect` gave up after about a second while the Project
+// watch still held the poll claim, and named no cause.
+func TestPRInspectWaitsForAProjectPollHeldByAnotherProcess(t *testing.T) {
+	f, _ := stewardPollFixture(t)
+	defer f.db.Close()
+	ctx := context.Background()
+	holder, err := f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), time.Minute, true)
+	if err != nil || holder == "" {
+		t.Fatalf("watch claim=%q err=%v", holder, err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		released <- f.db.ReleasePRPoll(ctx, f.project.ID, holder)
+	}()
+	code, output, stderr := f.run("pr", "inspect", "t1")
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("pr inspect: %d %s %s", code, output, stderr)
+	}
+}
+
+func TestForgeUnavailableNamesAProjectPollClaimThatIsNeverReleased(t *testing.T) {
+	f, _ := stewardPollFixture(t)
+	defer f.db.Close()
+	ctx := context.Background()
+	if holder, err := f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), time.Minute, true); err != nil || holder == "" {
+		t.Fatalf("watch claim=%q err=%v", holder, err)
+	}
+	previous := stewardObserveBudget
+	stewardObserveBudget = 300 * time.Millisecond
+	defer func() { stewardObserveBudget = previous }()
+	code, output, stderr := f.run("pr", "inspect", "t1")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "forge_unavailable") || !strings.Contains(combined, "poll claim") {
+		t.Fatalf("pr inspect: %d %s; want forge_unavailable naming the poll claim", code, combined)
 	}
 }
