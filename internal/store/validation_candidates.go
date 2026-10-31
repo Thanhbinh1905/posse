@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 )
@@ -160,6 +161,47 @@ func (db *DB) CreateValidationCandidate(ctx context.Context, candidate Validatio
 		return candidate, err
 	}
 	return candidate, nil
+}
+
+// UpdateValidationCandidateDescription rewrites the PR description fields of a
+// candidate that has not been promoted. An empty field keeps its stored value.
+// A changed description invalidates the docs and lint results, which vouched
+// for the previous text.
+func (db *DB) UpdateValidationCandidateDescription(ctx context.Context, id int64, summary, verification, proof, risk string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current [4]string
+	var sha string
+	var taskID int64
+	if err := tx.QueryRowContext(ctx, `SELECT summary,verification,proof,risk,candidate_sha,task_id FROM validation_candidates WHERE id=? AND state IN ('preparing','active')`, id).
+		Scan(&current[0], &current[1], &current[2], &current[3], &sha, &taskID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrStateRace
+		}
+		return err
+	}
+	next := current
+	for i, value := range []string{summary, verification, proof, risk} {
+		if value != "" {
+			next[i] = value
+		}
+	}
+	if next == current {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET summary=?,verification=?,proof=?,risk=?,updated_at=? WHERE id=?`, next[0], next[1], next[2], next[3], time.Now().UnixMilli(), id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND stage IN ('docs','lint') AND status IN ('passed','failed')`, sha, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) ActivateValidationCandidate(ctx context.Context, id int64, candidateSHA string) error {

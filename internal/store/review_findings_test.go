@@ -174,3 +174,35 @@ func TestReviewFindingsResolutionsMarkFixedOrUnverified(t *testing.T) {
 		t.Fatalf("missing resolution state=%s err=%v", state, err)
 	}
 }
+
+func TestReviewFindingsResolutionsCloseUnclaimedAndIgnoreDisposed(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	firstReview := addFindingsReviewRound(t, f, 2, 1, reviewShaA)
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, firstReview), "done", "finding", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewChangesRequested, ReportSHA256: reportHash, Findings: findingsInput("unchecked-write", "P1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ApplyReviewDisposition(f.ctx, f.change, nil, []int{1}, "withdraw", "", "", "not a defect", "quote", "user", "P1", false); err != nil {
+		t.Fatal(err)
+	}
+	secondReview := addFindingsReviewRound(t, f, 3, 2, reviewShaB)
+	stale := &ReviewFindingsInput{BlockAt: "P1", Patterns: []ReviewFindingPatternInput{}, Resolutions: []ReviewFindingResolutionInput{{Finding: "F-1", Status: "unresolved"}}}
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, secondReview), "done", "pass", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash, Findings: stale}); err != nil {
+		t.Fatalf("pass with a resolution for a withdrawn finding: %v", err)
+	}
+	var state string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT state FROM review_findings WHERE ship_task_id=? AND seq=1`, f.change).Scan(&state); err != nil || state != "withdrawn" {
+		t.Fatalf("withdrawn finding state=%s err=%v", state, err)
+	}
+
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE review_findings SET state='open' WHERE ship_task_id=? AND seq=1`, f.change); err != nil {
+		t.Fatal(err)
+	}
+	thirdReview := addFindingsReviewRound(t, f, 4, 3, reviewShaC)
+	verified := &ReviewFindingsInput{BlockAt: "P1", Patterns: []ReviewFindingPatternInput{}, Resolutions: []ReviewFindingResolutionInput{{Finding: "F-1", Status: "resolved", Note: "fixed without a claim"}}}
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, thirdReview), "done", "pass", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash, Findings: verified}); err != nil {
+		t.Fatalf("resolving an open finding without a fix claim: %v", err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT state FROM review_findings WHERE ship_task_id=? AND seq=1`, f.change).Scan(&state); err != nil || state != "fixed" {
+		t.Fatalf("open finding verified fixed state=%s err=%v", state, err)
+	}
+}

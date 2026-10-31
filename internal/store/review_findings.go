@@ -197,6 +197,10 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 		ledgerByFingerprint[row.Fingerprint] = row
 		ledgerBySequence[row.Seq] = row
 	}
+	priorStates := map[int]string{}
+	for seq, row := range ledgerBySequence {
+		priorStates[seq] = row.State
+	}
 	if err := ledgerRows.Err(); err != nil {
 		_ = ledgerRows.Close()
 		return result, err
@@ -325,7 +329,7 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 		}
 	}
 
-	if err := resolveClaimedFindingsTx(ctx, tx, changeTaskID, round, ledgerBySequence, input.Resolutions); err != nil {
+	if err := resolveClaimedFindingsTx(ctx, tx, changeTaskID, round, ledgerBySequence, priorStates, input.Resolutions); err != nil {
 		return result, err
 	}
 	blocking, err := hasBlockingReviewFindingTx(ctx, tx, changeTaskID, input.BlockAt)
@@ -344,32 +348,32 @@ func appendReviewFindingEventTx(ctx context.Context, tx *writeTx, findingID int6
 	return err
 }
 
-func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, changeTaskID int64, round int, ledger map[int]reviewFindingLedgerRow, resolutions []ReviewFindingResolutionInput) error {
-	claimed := map[int]bool{}
-	for _, row := range ledger {
-		if row.State == "fix_claimed" {
-			claimed[row.Seq] = true
-		}
-	}
+func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, changeTaskID int64, round int, ledger map[int]reviewFindingLedgerRow, priorStates map[int]string, resolutions []ReviewFindingResolutionInput) error {
 	answered := map[int]ReviewFindingResolutionInput{}
 	for _, resolution := range resolutions {
 		seq, _ := findingSequence(resolution.Finding)
-		if !claimed[seq] {
-			return fmt.Errorf("%w: resolution %s does not name a finding claimed fixed in this round", ErrReviewFindingsInvalid, resolution.Finding)
+		if _, known := priorStates[seq]; !known {
+			return fmt.Errorf("%w: resolution %s does not name a ledger finding", ErrReviewFindingsInvalid, resolution.Finding)
 		}
 		if _, duplicate := answered[seq]; duplicate {
 			return fmt.Errorf("%w: duplicate resolution for %s", ErrReviewFindingsInvalid, resolution.Finding)
 		}
 		answered[seq] = resolution
 	}
-	sequences := make([]int, 0, len(claimed))
-	for seq := range claimed {
-		sequences = append(sequences, seq)
+	sequences := make([]int, 0, len(priorStates))
+	for seq, state := range priorStates {
+		if oneOf(state, "open", "fix_claimed", "unverified", "disputed", "regressed") {
+			sequences = append(sequences, seq)
+		}
 	}
 	sort.Ints(sequences)
 	for _, seq := range sequences {
 		row := ledger[seq]
 		resolution, found := answered[seq]
+		claimed := priorStates[seq] == "fix_claimed"
+		if !found && !claimed {
+			continue
+		}
 		event, state, note := "unverified", "unverified", ""
 		if found {
 			note = resolution.Note
@@ -377,6 +381,9 @@ func resolveClaimedFindingsTx(ctx context.Context, tx *writeTx, changeTaskID int
 				event, state = "resolved", "fixed"
 			} else {
 				event, state = "unresolved", "open"
+				if !claimed {
+					state = priorStates[seq]
+				}
 			}
 		}
 		if err := appendReviewFindingEventTx(ctx, tx, row.ID, round, event, "reviewer", note); err != nil {

@@ -339,7 +339,8 @@ func TestStagingFullPipelineTargetAndAuthorRacesRefusePublication(t *testing.T) 
 		t.Fatal("staging movement did not require a fresh candidate")
 	}
 	audit("refreshed submission")
-	passCandidateReview(t, f, f.repo, change, "t3")
+	// Only the target changed, so the pass carries without a Review Round.
+	requireReviewCarry(t, f, change, candidate.CandidateSHA, refreshed.CandidateSHA)
 	recordCandidateStages(t, f, workerEnv, refreshed, audit)
 
 	// Author race: the Worker commits after submission and validation.
@@ -352,7 +353,7 @@ func TestStagingFullPipelineTargetAndAuthorRacesRefusePublication(t *testing.T) 
 	if final.Generation != refreshed.Generation+1 || final.SubmittedSHA != author {
 		t.Fatalf("author resubmission=%+v, want generation %d at %s", final, refreshed.Generation+1, author)
 	}
-	passCandidateReview(t, f, f.repo, change, "t4")
+	passCandidateReview(t, f, f.repo, change, "t3")
 	recordCandidateStages(t, f, workerEnv, final, audit)
 	if code, output := runReleaseCLI(t, f.binary, final.WorktreePath, workerEnv, "publish", "Staging candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
 		t.Fatalf("promote the fresh staging candidate: %d %s", code, output)
