@@ -1241,6 +1241,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	} else if _, err := db.RecordPRPoll(ctx, project.ID, now.UnixMilli(), ""); err != nil {
 		return err
 	}
+	if forgeErr == nil && forge.Kind != "gitlab" {
+		s.recordTargetBranchCIFailures(ctx, db, project, forge, watched, now)
+	}
 	type pendingObservation struct {
 		task       store.Task
 		current    store.PRObservation
