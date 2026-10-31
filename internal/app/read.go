@@ -207,6 +207,10 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		return err
 	}
 	now := time.Now()
+	idleSlots, err := idleSlotReasons(ctx.Context, db, project.ID, cfg, now)
+	if err != nil {
+		return err
+	}
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
@@ -223,10 +227,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 				return err
 			}
 		}
-		if taskWaitsOnUser(task, decisions) {
+		if taskWaitsOnUser(task, decisions, idleSlots) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
 				return err
+			}
+			if idle, ok := idleSlots[task.ID]; ok {
+				row.Reason = idle
 			}
 			row.Decisions = decisions[task.ID]
 			needsYou = append(needsYou, row)
@@ -266,10 +273,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		active := make([]activeTaskSummary, 0, len(tasks))
 		attention := make([]taskSummary, 0)
 		for _, task := range tasks {
-			if taskWaitsOnUser(task, decisions) {
+			if taskWaitsOnUser(task, decisions, idleSlots) {
 				reason, reasonErr := taskFailureReason(ctx.Context, db, task)
 				if reasonErr != nil {
 					return reasonErr
+				}
+				if idle, ok := idleSlots[task.ID]; ok {
+					reason = idle
 				}
 				row := taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason, Decisions: decisions[task.ID]}
 				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
@@ -1070,9 +1080,33 @@ func taskNeedsUser(task store.Task) bool {
 }
 
 // taskWaitsOnUser reports whether needs_you lists the Task: it failed, was
-// lost, asked a question, or has a pending Decision.
-func taskWaitsOnUser(task store.Task, decisions map[int64][]int64) bool {
-	return taskNeedsUser(task) || task.State == store.StateNeedsDecision || len(decisions[task.ID]) > 0
+// lost, asked a question, has a pending Decision, or holds a Pool slot idle
+// while another Task waits for one.
+func taskWaitsOnUser(task store.Task, decisions map[int64][]int64, idleSlots map[int64]string) bool {
+	_, idle := idleSlots[task.ID]
+	return taskNeedsUser(task) || task.State == store.StateNeedsDecision || len(decisions[task.ID]) > 0 || idle
+}
+
+// idleSlotReasons maps each Task that holds a Pool slot with nothing pending,
+// past defaults.stall_after, to the reason needs_you shows for it.
+func idleSlotReasons(ctx context.Context, db *store.DB, projectID int64, cfg config.Config, now time.Time) (map[int64]string, error) {
+	idleFor := duration(cfg.Defaults.StallAfter)
+	if idleFor <= 0 {
+		return nil, nil
+	}
+	idle, waiting, err := db.IdleSlotTasks(ctx, projectID, idleFor, now)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(waiting))
+	for i, task := range waiting {
+		names[i] = taskIDString(task.Seq)
+	}
+	reasons := make(map[int64]string, len(idle))
+	for _, task := range idle {
+		reasons[task.ID] = "Holds a Pool slot with nothing pending while " + strings.Join(names, ", ") + " wait for a slot"
+	}
+	return reasons, nil
 }
 
 // pendingDecisionsByTask maps each Task ID to its pending Decision IDs.
