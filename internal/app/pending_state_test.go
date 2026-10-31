@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -147,5 +148,40 @@ func TestUpAllFromLiveLeadRestoresProject(t *testing.T) {
 	cli.Out, cli.ErrOut = output, output
 	if code := cli.Run([]string{"up", "--all"}); code != 0 || !strings.Contains(output.String(), "state: restored") || strings.Contains(output.String(), "runs in the Lead pane") {
 		t.Fatalf("up --all from a running Lead = %d: %s", code, output)
+	}
+}
+
+func TestNeedsYouListsIdleSlotHolderWhileAnotherTaskWaits(t *testing.T) {
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	held, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Held", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, held, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, held, store.StateWorking, store.StateDone, "worker", "committed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "change", Title: "Waiting", State: store.StateQueued, MergeMode: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().Add(-3 * time.Hour).UnixMilli()
+	for _, statement := range []string{`UPDATE transitions SET at=?`, `UPDATE tasks SET created_at=?`} {
+		if _, err := db.ExecContext(ctx, statement, long); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(project.Root)
+	t.Setenv("HERDR_PANE_ID", "")
+	result := runJSON(t, home)
+	rows, _ := result["needs_you"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("needs_you = %v, want the idle holder t1", result["needs_you"])
+	}
+	row := rows[0].(map[string]any)
+	if row["id"] != "t1" || !strings.Contains(row["reason"].(string), "t2") {
+		t.Fatalf("idle holder row = %v", row)
 	}
 }
