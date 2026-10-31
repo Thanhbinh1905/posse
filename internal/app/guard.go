@@ -83,9 +83,12 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	if !refused {
 		return 0
 	}
-	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker by guard rule %s: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server`, with your isolated Herdr binary on PATH.\n", reason.command, reason.rule, reason.why)
+	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker by guard rule %s: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `%s`, with your isolated Herdr binary on PATH.\n", reason.command, reason.rule, reason.why, guardIsolatedRecipe)
 	return guardExitBlocked
 }
+
+// guardIsolatedRecipe is the isolated Herdr setup a refusal tells a Worker to use.
+const guardIsolatedRecipe = "env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server"
 
 // fileWriteTools are the agent tools that write the file their input names.
 var fileWriteTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true}

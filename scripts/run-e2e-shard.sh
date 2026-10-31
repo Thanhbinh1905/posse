@@ -11,9 +11,11 @@ set -eu
 # every shard within target_percent of budget_seconds, and --matrix prints it
 # as the CI matrix. budget_seconds caps each shard's planned test time at 40%
 # of the 15m go test timeout, leaving room for compilation and runner variance
-# so a shard stays under about 60% of the timeout.
+# so a shard stays under about 60% of the timeout. target_percent leaves
+# headroom of at least default_seconds, so one newly added test with no
+# recorded duration cannot push a planned shard over budget_seconds.
 budget_seconds=480
-target_percent=85
+target_percent=75
 target_seconds=$((budget_seconds * target_percent / 100))
 # default_seconds is about twice the 95th percentile of recorded durations.
 default_seconds=60
