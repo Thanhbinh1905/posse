@@ -96,3 +96,25 @@ func TestFailedSpecReadyCheckRetriesOnLaterPolls(t *testing.T) {
 		t.Fatalf("spec_ready_to_deliver Notices = %d, want 1 after the failed check was retried: %#v", got, notices)
 	}
 }
+
+func TestSpecReadyRetrySkipsMergedTaskWithoutPullRequest(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerged, "cli", "merged locally"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	checked, err := fixture.db.SpecReadyChecked(ctx, fixture.task.ID)
+	if err != nil || checked {
+		t.Fatalf("spec-ready check ran for a merged Task without a pull request: checked=%v err=%v", checked, err)
+	}
+}

@@ -1479,7 +1479,7 @@ func (s *Service) retrySpecReadyChecks(ctx context.Context, db *store.DB, projec
 		if err != nil {
 			return err
 		}
-		if checked {
+		if checked || task.PRURL == "" {
 			continue
 		}
 		if !resolved {
