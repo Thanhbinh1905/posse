@@ -308,7 +308,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				if err != nil {
 					return err
 				}
-				return printCandidateSubmission(out, lane, candidate, true)
+				return printCandidateSubmission(out, lane, candidate, true, submittedReviewCarry(ctx, db, lane))
 			}
 		case store.ValidationCandidatePromoting:
 			return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate for t%d is being promoted", task.Seq), true, "Resume its internal promotion before submitting another candidate")
@@ -385,7 +385,22 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 	if err != nil {
 		return err
 	}
-	return printCandidateSubmission(out, lane, candidate, false)
+	return printCandidateSubmission(out, lane, candidate, false, submittedReviewCarry(ctx, db, lane))
+}
+
+// submittedReviewCarry records a Review carry to a freshly submitted
+// single-repository candidate and names it with the next step. A failed proof
+// leaves the submission intact; done Signals and validation retry it.
+func submittedReviewCarry(ctx context.Context, db *store.DB, lane candidateLane) axi.Object {
+	if lane.repo != "" {
+		return nil
+	}
+	targets, err := changeCandidateTargets(ctx, db, lane.project, lane.task)
+	if err != nil || ensureReviewCarry(ctx, db, lane.project, lane.task, targets) != nil {
+		return nil
+	}
+	step, _ := reviewCarryNextStep(ctx, db, lane.project, lane.task, false)
+	return step
 }
 
 // mergeCandidateTarget merges the frozen target into the private candidate
@@ -425,7 +440,7 @@ func mergeCandidateTarget(ctx context.Context, lane candidateLane, candidate sto
 	return nil
 }
 
-func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate store.ValidationCandidate, resumed bool) error {
+func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate store.ValidationCandidate, resumed bool, carry axi.Object) error {
 	task := lane.task
 	message := fmt.Sprintf("submitted: candidate %s at %s; validation required before publication", taskIDString(task.Seq), shortSHA(candidate.CandidateSHA))
 	if resumed {
@@ -440,13 +455,14 @@ func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate st
 	if lane.repo != "" {
 		result = append(result, axi.Field{Key: "repo", Value: lane.repo})
 	}
-	return out.Print(append(result,
+	result = append(result,
 		axi.Field{Key: "submitted_head", Value: candidate.SubmittedSHA},
 		axi.Field{Key: "candidate_head", Value: candidate.CandidateSHA}, axi.Field{Key: "target_head", Value: candidate.TargetSHA},
 		axi.Field{Key: "expected_remote_head", Value: candidate.ExpectedRemoteSHA}, axi.Field{Key: "candidate_checkout", Value: candidate.WorktreePath},
 		axi.Field{Key: "result", Value: message},
-		axi.Field{Key: "help", Value: []any{help, ignoredHelp}},
-	))
+	)
+	result = append(result, carry...)
+	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help, ignoredHelp}}))
 }
 
 func printPromotedCandidate(out *axi.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -52,44 +54,121 @@ func ensureReviewCarry(ctx context.Context, db *store.DB, project store.Project,
 	if _, err := gitOutput(ctx, root, "merge-base", "--is-ancestor", targetSHA, target.Commit); err != nil {
 		return nil
 	}
-	verdicts, err := db.ReviewVerdictsFor(ctx, task.ID)
+	sources, err := reviewCarrySources(ctx, db, task.ID, target.Repository)
 	if err != nil {
 		return err
 	}
-	var passedHead string
-	for _, verdict := range verdicts {
-		if verdict.Verdict != store.ReviewPass || len(verdict.Targets) != 1 || verdict.Targets[0].Repository != target.Repository {
-			continue
-		}
-		passedHead = verdict.Targets[0].Commit
-		descends, err := descendsThroughRewrites(ctx, db, root, task.ID, passedHead, target.Commit)
-		if err != nil {
-			return err
-		}
-		if descends {
-			break
-		}
-		passedHead = ""
-	}
-	if passedHead == "" || passedHead == target.Commit {
-		return nil
-	}
-	mergedTree, err := gitOutput(ctx, root, "merge-tree", "--write-tree", passedHead, targetSHA)
-	if err != nil {
-		return nil
-	}
-	fields := strings.Fields(mergedTree)
-	if len(fields) == 0 {
+	if slices.Contains(sources, target.Commit) {
 		return nil
 	}
 	candidateTree, err := gitOutput(ctx, root, "rev-parse", target.Commit+"^{tree}")
-	if err != nil || fields[0] != candidateTree {
+	if err != nil {
 		return nil
 	}
-	return db.RecordReviewCarry(ctx, store.ReviewCarry{
-		ChangeTaskID: task.ID, Repository: target.Repository, FromHead: passedHead,
-		ToHead: target.Commit, TargetCommitSHA: targetSHA, Tree: candidateTree,
-	})
+	for _, source := range sources {
+		proved, err := reviewCarryProved(ctx, db, root, task.ID, source, targetSHA, target.Commit, candidateTree)
+		if err != nil {
+			return err
+		}
+		if proved {
+			return db.RecordReviewCarry(ctx, store.ReviewCarry{
+				ChangeTaskID: task.ID, Repository: target.Repository, FromHead: source,
+				ToHead: target.Commit, TargetCommitSHA: targetSHA, Tree: candidateTree,
+			})
+		}
+	}
+	return nil
+}
+
+// reviewCarrySources lists the heads whose Review a target refresh may carry:
+// single-repository passes, then exact heads the User accepted.
+func reviewCarrySources(ctx context.Context, db *store.DB, taskID int64, repository string) ([]string, error) {
+	verdicts, err := db.ReviewVerdictsFor(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	var sources []string
+	for _, verdict := range verdicts {
+		if verdict.Verdict == store.ReviewPass && len(verdict.Targets) == 1 && verdict.Targets[0].Repository == repository {
+			sources = append(sources, verdict.Targets[0].Commit)
+		}
+	}
+	accepted, err := db.ReviewDispositionHeads(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return append(sources, accepted...), nil
+}
+
+// reviewCarryProved reports whether head is source plus a clean merge of
+// targetSHA: either head descends from source and has the tree of that merge,
+// or head's patch against targetSHA equals source's patch against its merge
+// base with targetSHA.
+func reviewCarryProved(ctx context.Context, db *store.DB, root string, taskID int64, source, targetSHA, head, headTree string) (bool, error) {
+	merged, err := gitOutput(ctx, root, "merge-tree", "--write-tree", source, targetSHA)
+	if err != nil {
+		return false, nil
+	}
+	fields := strings.Fields(merged)
+	if len(fields) == 0 {
+		return false, nil
+	}
+	if fields[0] == headTree {
+		descends, err := descendsThroughRewrites(ctx, db, root, taskID, source, head)
+		if err != nil || descends {
+			return descends, err
+		}
+	}
+	sourcePatch, err := patchID(ctx, root, targetSHA+"..."+source)
+	if err != nil || sourcePatch == "" {
+		return false, nil
+	}
+	headPatch, err := patchID(ctx, root, targetSHA+"..."+head)
+	return err == nil && headPatch == sourcePatch, nil
+}
+
+// patchID identifies the diff of a revision range by content, ignoring line
+// numbers but not whitespace. An empty diff has no ID.
+func patchID(ctx context.Context, root, revisions string) (string, error) {
+	diff, err := gitOutputRaw(ctx, root, "diff", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", revisions)
+	if err != nil || diff == "" {
+		return "", err
+	}
+	command := exec.CommandContext(ctx, "git", "-C", root, "patch-id", "--verbatim")
+	command.Stdin = strings.NewReader(diff)
+	output, err := command.Output()
+	if err != nil {
+		return "", err
+	}
+	id, _, _ := strings.Cut(strings.TrimSpace(string(output)), " ")
+	return id, nil
+}
+
+// reviewCarryNextStep names a carry to the active single-repository
+// full-pipeline candidate and the validation that follows it.
+func reviewCarryNextStep(ctx context.Context, db *store.DB, project store.Project, task store.Task, reopen bool) (axi.Object, error) {
+	if project.IsWorkspace() || !fullPipelineSelected(task, "") {
+		return nil, nil
+	}
+	candidate, err := db.LatestValidationCandidate(ctx, task.ID, "")
+	if store.IsNotFound(err) || err == nil && candidate.State != store.ValidationCandidateActive {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	from, carried, err := db.ReviewCarrySource(ctx, task.ID, project.Name, candidate.CandidateSHA)
+	if err != nil || !carried {
+		return nil, err
+	}
+	step := "The Review of " + shortSHA(from) + " carries to candidate " + shortSHA(candidate.CandidateSHA) + " because it differs only by a clean merge of the target; no Review Round is due."
+	if reopen {
+		step += " Run `posse signal working`, then"
+	} else {
+		step += " Next,"
+	}
+	step += " in the candidate checkout run `posse validate test`, `posse validate docs` and `posse validate lint`, then `posse publish \"<summary>\"` to promote."
+	return axi.Object{{Key: "review_carried_from", Value: from}, {Key: "next_step", Value: step}}, nil
 }
 
 func (s *Service) reviewCarry(ctx *axi.Context, args []string) error {
