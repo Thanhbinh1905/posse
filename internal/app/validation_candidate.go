@@ -301,6 +301,9 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
 					return err
 				}
+				if err := db.UpdateValidationCandidateDescription(ctx, candidate.ID, summary, verification, proof, risk); err != nil {
+					return err
+				}
 				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
 				if err != nil {
 					return err
