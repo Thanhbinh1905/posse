@@ -1394,8 +1394,22 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		// merge_ready tells the Lead to merge, so it waits for the review
 		// gate `posse merge` applies to the same head.
 		mergeReady := func(notice store.Notice) bool { return notice.Kind == "merge_ready" }
-		if slices.ContainsFunc(effect.Notices, mergeReady) && (requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA) != nil || pendingCandidateFailure(ctx, db, observed.task) != nil) {
-			effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
+		if slices.ContainsFunc(effect.Notices, mergeReady) {
+			gateErr := requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA)
+			if gateErr == nil {
+				gateErr = pendingCandidateFailure(ctx, db, observed.task)
+			}
+			switch {
+			case gateErr == nil:
+			case reviewGateRefusal(gateErr):
+				effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
+			default:
+				// Unrecorded, the observation retries the gate on the next pass.
+				if err := recordPRTaskWatchFailure(ctx, db, project, observed.task, fmt.Errorf("merge_ready review gate: %w", gateErr), now); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
 			if notice, violated := reviewPolicyViolation(ctx, db, project, cfg, observed.task, observed.current); violated {
@@ -1463,11 +1477,18 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	return nil
 }
 
+// reviewGateRefusal tells the gate's policy answer, such as missing evidence,
+// from an operational failure to evaluate it.
+func reviewGateRefusal(err error) bool {
+	var failure *axi.Error
+	return errors.As(err, &failure) && !failure.Retryable
+}
+
 // reviewPolicyViolation evaluates the selected evidence for the head the forge
 // merged. A merge Posse did not guard still Merges (ADR 0011), but it never gains
 // a fabricated pass: the missing evidence is reported as a policy violation.
 func reviewPolicyViolation(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merged store.PRObservation) (store.Notice, bool) {
-	err := requireSelectedReviewAt(ctx, db, project, cfg, task, merged.HeadSHA)
+	err := requireSelectedReviewForMerge(ctx, db, project, cfg, task, merged.HeadSHA, merged.MergeCommit)
 	if err == nil {
 		return store.Notice{}, false
 	}

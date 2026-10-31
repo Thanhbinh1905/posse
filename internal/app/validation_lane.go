@@ -19,6 +19,9 @@ type candidateLane struct {
 	project   store.Project // the lane's repository: its root and default branch
 	task      store.Task    // the Task seen in the lane: worktree, target, Merge Mode and PR
 	member    store.TaskRepo
+
+	mergeCommit string // the forge merge of the lane's PR; "" before it merges
+	mergeMethod string
 }
 
 func resolveCandidateLane(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo string) (candidateLane, error) {
@@ -102,6 +105,32 @@ func (l candidateLane) targetHead(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return gitOutput(ctx, l.project.Root, "rev-parse", "--verify", ref+"^{commit}")
+}
+
+// gatedTargetHead is the target tip the candidate must have been validated
+// against for its merge: the current tip before the merge, and afterwards the
+// tip the merge landed on, which the merge itself has since moved.
+func (l candidateLane) gatedTargetHead(ctx context.Context, candidate store.ValidationCandidate) (string, error) {
+	if l.mergeCommit == "" {
+		return l.targetHead(ctx)
+	}
+	root := l.task.WorktreePath
+	if _, err := gitOutput(ctx, root, "cat-file", "-e", l.mergeCommit+"^{commit}"); err != nil {
+		if _, err := gitFetch(ctx, root, "origin", "refs/heads/"+l.targetBranch()); err != nil {
+			return "", err
+		}
+	}
+	// A merge or squash adds one first-parent commit; a rebase adds one per
+	// candidate commit.
+	landed := "1"
+	if l.mergeMethod == "rebase" {
+		count, err := gitOutput(ctx, root, "rev-list", "--count", candidate.TargetSHA+".."+candidate.CandidateSHA)
+		if err != nil {
+			return "", err
+		}
+		landed = count
+	}
+	return gitOutput(ctx, root, "rev-parse", "--verify", l.mergeCommit+"~"+landed+"^{commit}")
 }
 
 // remoteTaskHead reads the published Task branch. Local delivery never

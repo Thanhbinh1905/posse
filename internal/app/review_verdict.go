@@ -216,6 +216,13 @@ func requireSelectedReview(ctx context.Context, db *store.DB, project store.Proj
 // pull request head a Posse merge will merge. An empty commit uses the Task
 // branch tip, which is the candidate of local integration.
 func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit string) error {
+	return requireSelectedReviewForMerge(ctx, db, project, cfg, task, commit, "")
+}
+
+// requireSelectedReviewForMerge is the one evidence check before and after a
+// forge merge. After it, mergeCommit names the merge, and full-pipeline
+// evidence is checked against the target tip that merge landed on.
+func requireSelectedReviewForMerge(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, mergeCommit string) error {
 	policies, err := selectedReviewPolicies(ctx, db, project, cfg, task)
 	if err != nil {
 		return err
@@ -237,7 +244,7 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 	// A mixed workspace needs both: full-pipeline Members their barrier and
 	// quick Members their own exact-head review.
 	if fullPipeline {
-		if err := requireFullPipelineValidationAt(ctx, db, project, cfg, task, commit); err != nil {
+		if err := requireFullPipelineValidationAt(ctx, db, project, cfg, task, commit, mergeCommit); err != nil {
 			return err
 		}
 	}
