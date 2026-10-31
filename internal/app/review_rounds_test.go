@@ -1074,3 +1074,52 @@ auto_start = false
 		t.Fatalf("rounds = %#v, %v", rounds, err)
 	}
 }
+
+func TestReviewDispositionRefreshesAdmittedReviewerLedger(t *testing.T) {
+	f := newStartFixture(t)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	reviewID, err := db.CreateTask(ctx, change.ProjectID, store.Task{Seq: change.Seq + 1, Type: "review", ReviewsTaskID: change.ID, Title: "Review round", MergeMode: "local", ReviewTargets: []store.ReviewTarget{{Repository: "shop", Commit: strings.Repeat("b", 40)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,2,?,'shop','full',?,?,?,?,?,'[]','admitted',NULL,1)`, change.ID, reviewID, strings.Repeat("b", 40), strings.Repeat("b", 40), strings.Repeat("b", 40), strings.Repeat("b", 40), strings.Repeat("c", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(1,?,1,'dropped-error','t','r','c','g',1)`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,1,?,1,'shop','x.go','f','e',1,?,'P1','introduced',1,'disputed')`, change.ID, strings.Repeat("a", 64), strings.Repeat("b", 40)); err != nil {
+		t.Fatal(err)
+	}
+	reviewTask, err := db.TaskByID(ctx, change.ProjectID, reviewID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(f.home, "projects", f.project.Name, "tasks", taskIDString(reviewTask.Seq), "review", "ledger.md")
+	stale, err := reviewLedgerMarkdown(ctx, db, change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeReviewRoundFiles(filepath.Dir(filepath.Dir(ledgerPath)), map[string][]byte{"review/ledger.md": []byte(stale)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ApplyReviewDisposition(ctx, change.ID, []int{1}, nil, "withdraw", "", "", "not a defect", "approved", "user", "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshAdmittedReviewLedgers(ctx, db, f.home, f.project, change); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(ledgerPath)
+	if err != nil || !strings.Contains(string(contents), "| F-1 | P-1 `dropped-error` | withdrawn | P1 |") {
+		t.Fatalf("running reviewer ledger = %q, %v", contents, err)
+	}
+}
