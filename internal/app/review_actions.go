@@ -317,7 +317,7 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 	if !oneOfString(action, "fix", "accept", "defer", "withdraw", "reclassify") {
 		return axi.Usage("review dispose action must be fix, accept, defer, withdraw or reclassify")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -411,6 +411,9 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 			return axi.Failure("review_disposition_requires_user", err.Error(), false)
 		}
 		return axi.Failure("review_disposition_refused", err.Error(), false)
+	}
+	if err := refreshAdmittedReviewLedgers(ctx.Context, db, home, project, change); err != nil {
+		return err
 	}
 	if err := settleReviewDisposition(ctx.Context, db, project, change, action); err != nil {
 		return err
