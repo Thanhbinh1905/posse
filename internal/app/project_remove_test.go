@@ -281,6 +281,9 @@ func seedProjectReference(t *testing.T, db *store.DB, table string, foreignKeys 
 		values["harness"] = "codex"
 		values["state"] = "completed"
 	}
+	if table == "ci_reruns" {
+		values["reason"] = "flake"
+	}
 	if table == "task_target_changes" {
 		values["status"] = "pending"
 		values["from_branch"] = "posse/lower"
