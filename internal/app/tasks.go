@@ -1239,7 +1239,7 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 				repoFlag = " --repo <member>"
 				requestFrom = "after submitting every changed Member"
 			}
-			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints; it is a fresh worktree, so copy any gitignored local files that validation needs (for example local configuration) from the Sandbox into it. To request a Review Round, run `posse signal done \"<summary>\" --turn <token>` " + requestFrom + " and end the turn; the Task stays reviewable, and Review fixes or, after a pass, the validate-and-promote step arrive as instructions. Never use needs-decision to ask for Review. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
+			work += "\n\nFull-pipeline validation: nothing reaches the target before validation. Run `posse publish" + repoFlag + " \"<summary>\" --verify \"<command> -> <result>\" --proof \"<markdown>\" --risk \"<risk and rollback>\"` in the Sandbox to submit a private candidate; it pushes nothing. Make every further commit in the private candidate checkout it prints; it is a fresh worktree, so copy any gitignored local files that validation needs (for example local configuration) from the Sandbox into it. To request a Review Round, run `posse signal done \"<summary>\" --turn <token>` " + requestFrom + " and end the turn; the Task stays reviewable, and Review fixes or, after a pass, the validate-and-promote step arrive as instructions. Never use needs-decision to ask for Review. After an independent Review passes on that exact candidate, run there, in order, `posse validate test" + repoFlag + " --verify \"<command> -> <result>\" --proof \"<intent/E2E evidence>\"`, `posse validate docs" + repoFlag + " --no-comments passed --proof \"<documentation review>\"` (add `--no-owner-doc-change \"<reason>\"` when no owner docs change) and `posse validate lint" + repoFlag + " --proof \"<result>\" --coverage \"<workflow jobs and gaps>\"`, then `posse publish" + repoFlag + " \"<summary>\"` to promote it. The docs stage requires non-empty summary, verification and proof, and a Risk that states how to roll back (for example a `Rollback: <how to revert>` line); fix a miss by running `posse publish` again on the unchanged head with corrected flags, which updates the stored description without a new candidate. A new candidate commit repeats Review -> test -> docs -> lint. PR delivery pushes and opens the PR on promotion; local delivery only fast-forwards the Task branch for Merge. Signal done after every changed full-pipeline repository is promoted."
 		}
 	}
 	if task.Type == "change" {
@@ -1855,10 +1855,10 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		signalResult = append(signalResult, axi.Field{Key: "turn_token", Value: turnToken})
 	}
 	if verb == "done" {
-		if checklist, ok, err := taskSkillChecklist(ctx.Context, db, home, project, task, "done"); err != nil {
+		if checklist, err := taskSkillChecklist(ctx.Context, db, home, project, task, "done"); err != nil {
 			return err
-		} else if ok {
-			signalResult = append(signalResult, checklist)
+		} else {
+			signalResult = append(signalResult, checklist...)
 		}
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
