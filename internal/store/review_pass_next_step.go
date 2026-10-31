@@ -63,3 +63,17 @@ func queueReviewPassNextStepTx(ctx context.Context, tx *writeTx, projectID, chan
 	_, err = tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'candidate_validation_queued',?,?,?)`, projectID, changeTaskID, step.Summary, string(data), now)
 	return err
 }
+
+// QueueReviewNextStep queues step for a Change Task whose reviewed heads were
+// settled outside a Review verdict, such as by a disposition.
+func (db *DB) QueueReviewNextStep(ctx context.Context, projectID int64, step ReviewPassNextStep) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := queueReviewPassNextStepTx(ctx, tx, projectID, step.ChangeTaskID, step); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

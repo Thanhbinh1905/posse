@@ -724,6 +724,9 @@ func TestPRWatchRerunsCancelledCheckOnceThenQueuesOneCIFixRound(t *testing.T) {
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queuedNotices); err != nil || queuedNotices != 1 {
 		t.Fatalf("CI fix notices=%d err=%v, want one", queuedNotices, err)
 	}
+	if reruns, err := fixture.db.CIReruns(ctx, fixture.task.ID, "", "https://github.com/acme/shop/pull/17", 10); err != nil || len(reruns) != 1 || reruns[0].Reason != "cancelled" || reruns[0].Outcome != "failed" {
+		t.Fatalf("recorded cancelled reruns = %#v err=%v, want one that failed again", reruns, err)
+	}
 	var body string
 	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
 		t.Fatal(err)

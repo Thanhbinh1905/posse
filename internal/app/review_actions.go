@@ -415,6 +415,9 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 	if err := refreshAdmittedReviewLedgers(ctx.Context, db, home, project, change); err != nil {
 		return err
 	}
+	if err := settleReviewDisposition(ctx.Context, db, project, change, action); err != nil {
+		return err
+	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "action", Value: action}, {Key: "findings", Value: appliedFindings}, {Key: "patterns", Value: len(patterns)}, {Key: "state", Value: "recorded"}})
 }
 
