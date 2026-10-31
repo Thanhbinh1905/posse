@@ -1112,7 +1112,7 @@ func TestReviewDispositionRefreshesAdmittedReviewerLedger(t *testing.T) {
 	if err := writeReviewRoundFiles(filepath.Dir(filepath.Dir(ledgerPath)), map[string][]byte{"review/ledger.md": []byte(stale)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ApplyReviewDisposition(ctx, change.ID, []int{1}, nil, "withdraw", "", "", "not a defect", "approved", "user", "P1"); err != nil {
+	if err := db.ApplyReviewDisposition(ctx, change.ID, []int{1}, nil, "withdraw", "", "", "not a defect", "approved", "user", "P1", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := refreshAdmittedReviewLedgers(ctx, db, f.home, f.project, change); err != nil {

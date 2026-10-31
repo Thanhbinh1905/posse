@@ -181,7 +181,7 @@ func TestReviewFindingsResolutionsCloseUnclaimedAndIgnoreDisposed(t *testing.T) 
 	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, firstReview), "done", "finding", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewChangesRequested, ReportSHA256: reportHash, Findings: findingsInput("unchecked-write", "P1", true)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.ApplyReviewDisposition(f.ctx, f.change, nil, []int{1}, "withdraw", "", "", "not a defect", "quote", "user", "P1"); err != nil {
+	if err := f.db.ApplyReviewDisposition(f.ctx, f.change, nil, []int{1}, "withdraw", "", "", "not a defect", "quote", "user", "P1", false); err != nil {
 		t.Fatal(err)
 	}
 	secondReview := addFindingsReviewRound(t, f, 3, 2, reviewShaB)
