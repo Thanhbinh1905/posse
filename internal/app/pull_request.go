@@ -1082,6 +1082,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		watched = append(watched, task)
 	}
 	if len(watched) == 0 {
+		if err := s.retrySpecReadyChecks(ctx, db, project, cfg, now); err != nil {
+			return err
+		}
 		return db.RecordPRPollAttempt(ctx, project.ID, now.UnixMilli())
 	}
 	targets := make([]prWatchTarget, 0, len(watched))
@@ -1441,12 +1444,10 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 					return noticeErr
 				}
 			}
-			if err := s.raiseSpecReadyToDeliver(ctx, db, project, observed.task, forge); err != nil {
-				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
-					return noticeErr
-				}
-			}
 		}
+	}
+	if err := s.retrySpecReadyChecks(ctx, db, project, cfg, now); err != nil {
+		return err
 	}
 	for _, observed := range observations {
 		if observed.current.State != "MERGED" {
@@ -1458,6 +1459,43 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	if err := s.processPendingStackedTargetChanges(ctx, db, project, cfg, ""); err != nil {
 		return err
+	}
+	return nil
+}
+
+// retrySpecReadyChecks runs the spec_ready_to_deliver check for merged Tasks
+// until it has completed once, so a failed check is retried on later polls.
+func (s *Service) retrySpecReadyChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, now time.Time) error {
+	merged, err := db.TasksInState(ctx, project.ID, store.StateMerged)
+	if err != nil {
+		return err
+	}
+	var forge repositoryForge
+	var forgeErr error
+	resolved := false
+	for _, task := range merged {
+		checked, err := db.SpecReadyChecked(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if checked {
+			continue
+		}
+		if !resolved {
+			forge, forgeErr = forgeForRepository(ctx, project.Root, cfg, "")
+			resolved = true
+		}
+		err = forgeErr
+		if err == nil {
+			err = s.raiseSpecReadyToDeliver(ctx, db, project, task, forge)
+		}
+		if err != nil {
+			if noticeErr := recordPRTaskWatchFailure(ctx, db, project, task, err, now); noticeErr != nil {
+				return noticeErr
+			}
+		} else if err := db.MarkSpecReadyChecked(ctx, task.ID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

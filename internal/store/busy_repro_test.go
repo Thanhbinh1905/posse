@@ -380,3 +380,54 @@ func TestEnsuringExistingSandboxLeaseDoesNotWaitForWriter(t *testing.T) {
 		t.Fatalf("ensured lease = %#v, want existing %#v", ensured, created)
 	}
 }
+
+func TestDeferralEndsOnlyAtSendClaims(t *testing.T) {
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Deferral", MergeMode: "local", AutonomyReview: "ask", AutonomyMerge: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(ctx, taskID, "go", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred := WithDeferrableWrites(ctx)
+	if _, err := db.ExecContext(deferred, `UPDATE projects SET last_activity_at=? WHERE id=?`, 1, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	holdWriter := func(hold time.Duration) {
+		writer, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.ExecContext(ctx, `UPDATE projects SET name=name WHERE id=?`, project.ID); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			time.Sleep(hold)
+			_ = writer.Rollback()
+		}()
+	}
+	holdWriter(4 * ObservationWriteBusyTimeout)
+	if _, err := db.ExecContext(deferred, `UPDATE projects SET last_activity_at=? WHERE id=?`, 2, project.ID); !errors.Is(err, ErrBusy) {
+		t.Fatalf("observation write after an unrelated write = %v, want ErrBusy after one short wait", err)
+	}
+	time.Sleep(4 * ObservationWriteBusyTimeout)
+
+	if claimed, err := db.ClaimMessage(deferred, messageID, "token", time.Now().UnixMilli(), 0); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	holdWriter(3 * ObservationWriteBusyTimeout)
+	if _, err := db.ExecContext(deferred, `UPDATE projects SET last_activity_at=? WHERE id=?`, 3, project.ID); err != nil {
+		t.Fatalf("write after a send claim must wait for the lock: %v", err)
+	}
+}

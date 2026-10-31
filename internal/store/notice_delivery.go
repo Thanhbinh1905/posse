@@ -163,6 +163,7 @@ func (db *DB) ClaimNoticeDelivery(ctx context.Context, projectID int64, ids []in
 	if err := tx.Commit(); err != nil {
 		return NoticeDelivery{}, false, err
 	}
+	endDeferrableWrites(ctx)
 	if err := db.PersistNoticeDeliverySnapshot(ctx, projectID); err != nil {
 		return delivery, false, err
 	}
