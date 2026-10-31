@@ -459,7 +459,8 @@ func checkReviewFixHeadTx(ctx context.Context, tx *writeTx, taskID int64, input 
 
 // checkReviewFixMemberHeadsTx requires one answer head for every Member the
 // workspace fix instruction named. A Member bound to a private candidate must
-// answer from that same active candidate at its current head.
+// answer from an active candidate at its current head, either the bound one or
+// a newer submission that superseded it.
 func checkReviewFixMemberHeadsTx(ctx context.Context, tx *writeTx, taskID int64, expected []ValidationFixMemberHead, actual []ReviewFixMemberHead) error {
 	if len(expected) == 0 || len(actual) != len(expected) {
 		return fmt.Errorf("%w: Review fix Member heads changed", ErrReviewResolutionsInvalid)
@@ -470,14 +471,14 @@ func checkReviewFixMemberHeadsTx(ctx context.Context, tx *writeTx, taskID int64,
 	}
 	for _, member := range expected {
 		answer, found := answers[member.Repository]
-		if !found || answer.CandidateID != member.CandidateID || !validValidationSHA(answer.ActualHead) {
+		if !found || answer.CandidateID < member.CandidateID || (member.CandidateID == 0 && answer.CandidateID != 0) || !validValidationSHA(answer.ActualHead) {
 			return fmt.Errorf("%w: Review fix binding changed for Member %s", ErrReviewResolutionsInvalid, member.Repository)
 		}
 		if member.CandidateID == 0 {
 			continue
 		}
 		var candidateHead, candidateState string
-		err := tx.QueryRowContext(ctx, `SELECT candidate_sha,state FROM validation_candidates WHERE id=? AND task_id=? AND repo=?`, member.CandidateID, taskID, member.Repository).Scan(&candidateHead, &candidateState)
+		err := tx.QueryRowContext(ctx, `SELECT candidate_sha,state FROM validation_candidates WHERE id=? AND task_id=? AND repo=?`, answer.CandidateID, taskID, member.Repository).Scan(&candidateHead, &candidateState)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: Member %s private candidate is missing", ErrReviewResolutionsInvalid, member.Repository)
 		}
