@@ -117,6 +117,11 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 	if err != nil || plan == nil {
 		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
 	}
+	if stage == "docs" || stage == "lint" {
+		if err := requireRoleSkillsUsed(out.Context, db, home, project, task); err != nil {
+			return err
+		}
+	}
 	var workflowFailure error
 	var workflowCoverage string
 	if stage == "test" {

@@ -241,7 +241,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if err := runMergeStep("notice.create", func() error {
-			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: task.Title + " is ready to merge head " + shortSHA(task.GatedSHA) + " locally", DataJSON: marshalJSON(map[string]any{"head_sha": task.GatedSHA})})
+			_, noticeErr := db.CreateNotice(ctx.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: s.unusedRoleSkillsSummary(ctx.Context, db, project, task, task.Title+" is ready to merge head "+shortSHA(task.GatedSHA)+" locally"), DataJSON: marshalJSON(map[string]any{"head_sha": task.GatedSHA})})
 			return noticeErr
 		}); err != nil {
 			return err
