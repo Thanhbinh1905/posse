@@ -347,7 +347,7 @@ func ciLogCommand(forge repositoryForge, prURL string, check failedCheck) string
 		if check.JobID == "" {
 			return ""
 		}
-		return "glab ci trace " + check.JobID
+		return "glab ci trace " + check.JobID + " --repo https://" + forge.Host + "/" + forge.Path
 	}
 	ref, err := pullRequestReferenceFromURL(prURL)
 	if err != nil {

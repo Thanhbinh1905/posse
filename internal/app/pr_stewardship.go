@@ -778,7 +778,7 @@ func forgeRerunBaseline(ctx context.Context, target stewardTarget, id, head stri
 		return "", axi.Failure("pr_rerun_refused", "run "+id+" ran on "+run.HeadSHA+", not the current head "+head, false)
 	}
 	if !strings.EqualFold(run.Status, "completed") {
-		return "", axi.Failure("pr_rerun_refused", "run "+id+" is "+strings.ToLower(run.Status)+", not completed", false, "Wait for the PR watch to report the result")
+		return "", axi.Failure("pr_rerun_refused", "run "+id+" is "+strings.ToLower(run.Status)+", not completed", true, "GitHub reruns failed jobs only once every job of the run has finished; retry `posse pr rerun "+target.taskLabel()+" "+rerunFlag(target.forge)+" "+id+"` after the run completes")
 	}
 	return strconv.Itoa(run.Attempt), nil
 }
