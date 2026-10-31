@@ -313,7 +313,7 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID).Scan(&reviews); err != nil {
 			return QueueValidationFixResult{}, err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','ci')`, taskID).Scan(&repairs); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, taskID).Scan(&repairs); err != nil {
 			return QueueValidationFixResult{}, err
 		}
 		if reviews+repairs >= *sharedMax {
