@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -141,8 +142,12 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		if !hasOwnerDocs && strings.TrimSpace(parsed.Flags["no-owner-doc-change"]) == "" {
 			return axi.Failure("validation_docs_disposition_required", "docs needs an owner-document change or --no-owner-doc-change <reason>", false)
 		}
-		if !candidateHasCompleteDescription(candidate) {
-			return axi.Failure("validation_pr_description_incomplete", "the candidate PR description needs summary, verification, proof, risk and rollback details", false)
+		if missing := candidateDescriptionGaps(candidate); len(missing) > 0 {
+			repoFlag := ""
+			if lane.repo != "" {
+				repoFlag = " --repo " + lane.repo
+			}
+			return axi.Failure("validation_pr_description_incomplete", "the candidate PR description is incomplete: "+strings.Join(missing, "; "), false, "Resubmit the unchanged head from the Sandbox with `posse publish"+repoFlag+" \"<summary>\"` and the corrected flags, then rerun docs and lint; the flags update the stored description without a new candidate")
 		}
 	} else if stage == "lint" {
 		if _, err := db.ValidationStage(out.Context, candidate.ID, "docs", candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256()); err != nil {
@@ -474,9 +479,26 @@ func candidateHasOwnerDocs(ctx context.Context, candidate store.ValidationCandid
 	return false, nil
 }
 
-func candidateHasCompleteDescription(candidate store.ValidationCandidate) bool {
-	return strings.TrimSpace(candidate.Summary) != "" && strings.TrimSpace(candidate.Verification) != "" &&
-		strings.TrimSpace(candidate.Proof) != "" && strings.TrimSpace(candidate.Risk) != "" && strings.Contains(strings.ToLower(candidate.Risk), "rollback")
+var rollbackPhrase = regexp.MustCompile(`(?i)\broll(?:s|ed|ing)?[ -]?back\b`)
+
+func candidateDescriptionGaps(candidate store.ValidationCandidate) []string {
+	var gaps []string
+	if strings.TrimSpace(candidate.Summary) == "" {
+		gaps = append(gaps, "summary is empty; pass a non-empty <summary> to `posse publish`")
+	}
+	if strings.TrimSpace(candidate.Verification) == "" {
+		gaps = append(gaps, "verification is empty; pass --verify \"<command> -> <result>\"")
+	}
+	if strings.TrimSpace(candidate.Proof) == "" {
+		gaps = append(gaps, "proof is empty; pass --proof \"<markdown>\"")
+	}
+	risk := strings.TrimSpace(candidate.Risk)
+	if risk == "" {
+		gaps = append(gaps, "risk is empty; pass --risk with the risk and how to roll back, for example a `Rollback: <how to revert>` line")
+	} else if !rollbackPhrase.MatchString(risk) {
+		gaps = append(gaps, "Risk must state how to roll back, for example a `Rollback: <how to revert>` line")
+	}
+	return gaps
 }
 
 func (s *Service) printCandidateValidationStatus(out *axi.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {

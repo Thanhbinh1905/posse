@@ -1043,6 +1043,11 @@ func freezeCILoop(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCanc
 
 func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCancelled int, review string) {
 	t.Helper()
+	freezeCILoopConfig(t, fixture, config.CILoop{MaxFixRounds: maxFixRounds, RerunCancelled: rerunCancelled}, review)
+}
+
+func freezeCILoopConfig(t *testing.T, fixture *prMergeFixture, ci config.CILoop, review string) {
+	t.Helper()
 	brief := []byte("---\ntype: change\ntitle: CI loop test\ndone_when: checks are resolved\n---\n## Intent\nUser words (verbatim): \"Retain this exact request.\"\nGoal: keep the request.\nLead assumptions: none.\n")
 	plan, err := taskplan.Resolve(taskplan.Request{
 		Brief:     taskplan.Select("brief", "change.md", brief),
@@ -1052,7 +1057,7 @@ func freezeCILoopWithReview(t *testing.T, fixture *prMergeFixture, maxFixRounds,
 		Paths: taskplan.Paths{Scratch: filepath.Join(fixture.home, "scratch", "shop", "t1"), Output: filepath.Join(fixture.home, "projects", "shop", "tasks", "t1")},
 		ValidationLoops: &taskplan.ValidationLoops{
 			Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"},
-			CI:     config.CILoop{MaxFixRounds: maxFixRounds, RerunCancelled: rerunCancelled},
+			CI:     ci,
 		},
 	})
 	if err != nil {
@@ -1268,7 +1273,9 @@ printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 if [ "${POSSE_TEST_GH_FAIL:-}" != "" ]; then printf 'fake gh unavailable\n' >&2; exit 1; fi
 case "$1 $2" in
   "run rerun") printf 'rerun requested\n' ;;
-  "run view") printf 'unit failed log\n' ;;
+  "run view")
+    if [ "${4:-}" = "--repo" ] && [ "${6:-}" = "--json" ]; then printf '{"attempt":1,"status":"completed","headSha":"%s"}\n' "$(cat "$POSSE_TEST_GH_HEAD")"
+    elif [ -n "${POSSE_TEST_GH_RUN_LOG:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_RUN_LOG"; else printf 'unit failed log\n'; fi ;;
   "api graphql")
     if [ -n "${POSSE_TEST_GH_ADVANCE_SHA:-}" ]; then
       git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_ADVANCE_SHA:refs/heads/${POSSE_TEST_GH_ADVANCE_BRANCH:-main}" >/dev/null
@@ -1352,6 +1359,8 @@ esac
 	t.Setenv("POSSE_TEST_GH_VIEW_FAIL", "")
 	t.Setenv("POSSE_TEST_GH_LEGACY_REPOSITORY", "")
 	t.Setenv("POSSE_TEST_GH_CANCELLED", "")
+	t.Setenv("POSSE_TEST_GH_RUN_LOG", "")
+	t.Setenv("POSSE_TEST_GH_FAILURE_JOB", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "")
 	t.Setenv("POSSE_TEST_GH_ADVANCE_SHA", "")
@@ -1378,6 +1387,11 @@ func (fixture *prMergeFixture) setGraphQLState(t *testing.T, state, checks, revi
 		conclusion, detailsURL := "FAILURE", defaultValue(os.Getenv("POSSE_TEST_GH_FAILURE_URL"), "https://checks.example/unit")
 		checkName := defaultValue(os.Getenv("POSSE_TEST_GH_FAILURE_NAME"), "unit")
 		checkRun := map[string]any{"__typename": "CheckRun", "name": checkName, "status": "COMPLETED", "conclusion": conclusion, "detailsUrl": detailsURL}
+		if job := os.Getenv("POSSE_TEST_GH_FAILURE_JOB"); job != "" {
+			checkRun["detailsUrl"] = "https://github.com/acme/shop/actions/runs/123/job/" + job
+			checkRun["databaseId"] = job
+			checkRun["checkSuite"] = map[string]any{"workflowRun": map[string]any{"databaseId": 123}}
+		}
 		if os.Getenv("POSSE_TEST_GH_CANCELLED") == "1" {
 			checkRun["conclusion"] = "CANCELLED"
 			checkRun["detailsUrl"] = "https://github.com/acme/shop/actions/runs/123/job/456"

@@ -146,7 +146,7 @@ func (db *DB) InheritReviewLedger(ctx context.Context, sourceTaskID, destination
 // ReviewFindingsForTask returns the immutable pattern descriptions and current
 // finding states used to prepare a whole-pattern fix instruction.
 func (db *DB) ReviewFindingsForTask(ctx context.Context, taskID int64) ([]ReviewFindingDetail, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),COALESCE(parent.title,p.title),COALESCE(parent.rule,p.rule),COALESCE(parent.root_cause,p.root_cause),COALESCE(parent.fix_guidance,p.fix_guidance),f.repository,f.path,f.symbol,f.excerpt,f.severity,f.origin,f.in_scope,f.state,COALESCE(f.inherited_from,0)
+	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),COALESCE(parent.title,p.title),COALESCE(parent.rule,p.rule),COALESCE(parent.root_cause,p.root_cause),COALESCE(parent.fix_guidance,p.fix_guidance),f.repository,f.path,f.symbol,f.excerpt,f.severity,f.origin,f.in_scope,f.state,COALESCE(f.inherited_from,0),COALESCE(f.follow_up_url,'')
 FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into
 WHERE f.ship_task_id=? ORDER BY COALESCE(parent.seq,p.seq),f.seq`, taskID)
 	if err != nil {
@@ -158,7 +158,7 @@ WHERE f.ship_task_id=? ORDER BY COALESCE(parent.seq,p.seq),f.seq`, taskID)
 		var detail ReviewFindingDetail
 		var inScope int
 		if err := rows.Scan(&detail.FindingSeq, &detail.PatternSeq, &detail.PatternKey, &detail.Title, &detail.Rule, &detail.RootCause, &detail.FixGuidance,
-			&detail.Repository, &detail.Path, &detail.Symbol, &detail.Excerpt, &detail.Severity, &detail.Origin, &inScope, &detail.State, &detail.InheritedFrom); err != nil {
+			&detail.Repository, &detail.Path, &detail.Symbol, &detail.Excerpt, &detail.Severity, &detail.Origin, &inScope, &detail.State, &detail.InheritedFrom, &detail.FollowUpURL); err != nil {
 			return nil, err
 		}
 		detail.InScope = inScope == 1
@@ -294,6 +294,34 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(ship_task_id,repository,from_head,to_head) DO 
 	return db.PersistTask(ctx, carry.ChangeTaskID)
 }
 
+// ReviewCarrySource returns the passed or accepted head a carry maps to head.
+func (db *DB) ReviewCarrySource(ctx context.Context, taskID int64, repository, head string) (string, bool, error) {
+	var from string
+	err := db.QueryRowContext(ctx, `SELECT from_head FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=? ORDER BY created_at LIMIT 1`, taskID, repository, head).Scan(&from)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return from, err == nil, err
+}
+
+// ReviewDispositionHeads lists the heads a User accepted, newest first.
+func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT head_sha FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var heads []string
+	for rows.Next() {
+		var head string
+		if err := rows.Scan(&head); err != nil {
+			return nil, err
+		}
+		heads = append(heads, head)
+	}
+	return heads, rows.Err()
+}
+
 // RecordReviewDisposition binds an explicit User acceptance to exact heads,
 // one per changed repository, and appends its finding-state events atomically.
 func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID int64, heads []string, quote, blockAt string) error {
@@ -310,16 +338,8 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 		return err
 	}
 	defer tx.Rollback()
-	for _, head := range heads {
-		var existing bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
-			return err
-		}
-		if !existing {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
-				return err
-			}
-		}
+	if err := insertReviewDispositionsTx(ctx, tx, taskID, decisionID, heads, quote); err != nil {
+		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.seq,f.severity,f.origin,f.in_scope,f.state FROM review_findings f WHERE f.ship_task_id=? ORDER BY f.seq`, taskID)
 	if err != nil {
@@ -364,6 +384,39 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_finding_events(finding_id,round,event,actor,note,user_quote,at) VALUES(?,0,?,'user','accepted at review cap',?,?)`, value.id, event, quote, time.Now().UnixMilli()); err != nil {
 			return err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
+func insertReviewDispositionsTx(ctx context.Context, tx *writeTx, taskID, decisionID int64, heads []string, quote string) error {
+	for _, head := range heads {
+		var existing bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
+			return err
+		}
+		if !existing {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// RecordReviewHeadDisposition binds the current heads to a disposition that
+// left no blocking finding, without touching any finding. The next step needs
+// no User quote because no blocking finding was accepted.
+func (db *DB) RecordReviewHeadDisposition(ctx context.Context, taskID int64, heads []string, note string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertReviewDispositionsTx(ctx, tx, taskID, 0, heads, note); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -459,7 +512,8 @@ func checkReviewFixHeadTx(ctx context.Context, tx *writeTx, taskID int64, input 
 
 // checkReviewFixMemberHeadsTx requires one answer head for every Member the
 // workspace fix instruction named. A Member bound to a private candidate must
-// answer from that same active candidate at its current head.
+// answer from an active candidate at its current head, either the bound one or
+// a newer submission that superseded it.
 func checkReviewFixMemberHeadsTx(ctx context.Context, tx *writeTx, taskID int64, expected []ValidationFixMemberHead, actual []ReviewFixMemberHead) error {
 	if len(expected) == 0 || len(actual) != len(expected) {
 		return fmt.Errorf("%w: Review fix Member heads changed", ErrReviewResolutionsInvalid)
@@ -470,14 +524,14 @@ func checkReviewFixMemberHeadsTx(ctx context.Context, tx *writeTx, taskID int64,
 	}
 	for _, member := range expected {
 		answer, found := answers[member.Repository]
-		if !found || answer.CandidateID != member.CandidateID || !validValidationSHA(answer.ActualHead) {
+		if !found || answer.CandidateID < member.CandidateID || (member.CandidateID == 0 && answer.CandidateID != 0) || !validValidationSHA(answer.ActualHead) {
 			return fmt.Errorf("%w: Review fix binding changed for Member %s", ErrReviewResolutionsInvalid, member.Repository)
 		}
 		if member.CandidateID == 0 {
 			continue
 		}
 		var candidateHead, candidateState string
-		err := tx.QueryRowContext(ctx, `SELECT candidate_sha,state FROM validation_candidates WHERE id=? AND task_id=? AND repo=?`, member.CandidateID, taskID, member.Repository).Scan(&candidateHead, &candidateState)
+		err := tx.QueryRowContext(ctx, `SELECT candidate_sha,state FROM validation_candidates WHERE id=? AND task_id=? AND repo=?`, answer.CandidateID, taskID, member.Repository).Scan(&candidateHead, &candidateState)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: Member %s private candidate is missing", ErrReviewResolutionsInvalid, member.Repository)
 		}

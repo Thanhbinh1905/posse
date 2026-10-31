@@ -151,6 +151,7 @@ type ReviewFindingDetail struct {
 	InScope       bool
 	State         string
 	InheritedFrom int64
+	FollowUpURL   string
 }
 
 type ReviewFixResolution struct {
