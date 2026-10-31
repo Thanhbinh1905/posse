@@ -63,8 +63,11 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 
 	// A recorded generation that differs from Herdr's holds the Project for
 	// an explicit restore.
-	recovery := runPosse(t, f.binary, f.repo, f.env, "_herdr_started")
-	if !strings.Contains(recovery, "held_projects") || !strings.Contains(recovery, "shop") {
+	var recovery string
+	if !waitForCondition(10*time.Second, func() bool {
+		recovery = runPosse(t, f.binary, f.repo, f.env, "_herdr_started")
+		return strings.Contains(recovery, "held_projects[1]: shop")
+	}) {
 		t.Fatalf("the startup hook did not hold the Project: %s", recovery)
 	}
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
