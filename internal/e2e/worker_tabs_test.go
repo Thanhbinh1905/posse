@@ -842,16 +842,21 @@ func (f *workerTabsFixture) task(t *testing.T, taskID string) store.Task {
 
 func (f *workerTabsFixture) waitState(t *testing.T, taskID string, want store.State) {
 	t.Helper()
-	if !waitForCondition(30*time.Second, func() bool {
+	var task store.Task
+	if ok, reason := waitForEvent(t, func() bool {
 		db, err := store.OpenReadOnly(f.home)
 		if err != nil {
 			return false
 		}
 		defer db.Close()
-		task, err := db.Task(context.Background(), f.projectID, taskID)
-		return err == nil && task.State == want
-	}) {
-		t.Fatalf("%s did not reach %s: %#v", taskID, want, f.task(t, taskID))
+		current, err := db.Task(context.Background(), f.projectID, taskID)
+		if err != nil {
+			return false
+		}
+		task = current
+		return task.State == want
+	}, func() string { return taskStateUnreachable(taskID, task, want) }); !ok {
+		t.Fatalf("%s did not reach %s: %s: %#v", taskID, want, reason, f.task(t, taskID))
 	}
 }
 
