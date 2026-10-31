@@ -128,4 +128,19 @@ func TestKeysReachFocusedBlockedWorker(t *testing.T) {
 		t.Fatalf("focused keys command: code=%d output=%s calls=%#v", code, output.String(), fake.Calls)
 	}
 	requireInterventions(t, home, project.ID, store.InterventionKeys, "")
+
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER reject_interventions BEFORE INSERT ON interventions BEGIN SELECT RAISE(ABORT, 'record failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"keys", "t1", "enter"}); code != 0 || fake.CallCount("agent.send_keys") != 2 || !strings.Contains(output.String(), "state: sent") {
+		t.Fatalf("keys after the intervention record failed: code=%d output=%s calls=%#v", code, output.String(), fake.Calls)
+	}
 }

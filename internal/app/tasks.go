@@ -2405,9 +2405,7 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, ""); err != nil {
-		return err
-	}
+	_ = db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, "")
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "keys", Value: args[1:]}, {Key: "state", Value: "sent"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the pane"}}})
 }
 

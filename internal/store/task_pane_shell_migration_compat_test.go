@@ -18,6 +18,7 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_notice_raised`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_block_cause`,
 		`ALTER TABLE project_watch_state DROP COLUMN reconcile_blocked_since`,
+		`DROP TABLE task_spec_checks`,
 		`DROP TABLE ci_reruns`,
 		`DROP TABLE ci_test_failures`,
 		`DROP TABLE task_skill_uses`,
