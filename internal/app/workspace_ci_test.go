@@ -119,7 +119,11 @@ esac
 	poll()
 	var rounds, reruns int
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&rounds); err != nil || rounds != 1 {
-		t.Fatalf("workspace CI fix rounds=%d err=%v", rounds, err)
+		// #682: name the poll failure that left no fix round.
+		memberErrors, memberErr := fixture.db.MemberWatchErrors(ctx, fixture.project.ID)
+		taskFailures, taskErr := fixture.db.PRTaskWatchFailuresForTask(ctx, fixture.task.ID)
+		calls, _ := os.ReadFile(logPath)
+		t.Fatalf("workspace CI fix rounds=%d err=%v member_watch_errors=%#v (%v) pr_task_watch_failures=%#v (%v) gh calls=%q", rounds, err, memberErrors, memberErr, taskFailures, taskErr, calls)
 	}
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_rerun_requested'`, fixture.task.ID).Scan(&reruns); err != nil || reruns != 1 {
 		t.Fatalf("workspace CI rerun notices=%d err=%v", reruns, err)

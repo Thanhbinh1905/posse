@@ -903,8 +903,14 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
 	lastFailures := map[string]string{}
+	servedPass := readWatchPassToken(watchPassDonePath(home, project))
 	for {
+		passRequest := readWatchPassToken(watchPassRequestPath(home, project))
 		if watch != nil {
 			ok, err := db.HeartbeatWatchRuntime(loopCtx, project.ID, watch.PID, watch.Token, currentTime())
 			if err != nil {
@@ -939,21 +945,25 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "maintenance", err)
 		}
+		if passRequest != "" && passRequest != servedPass {
+			if err := writeFile(watchPassDonePath(home, project), []byte(passRequest+"\n")); err != nil {
+				fmt.Fprintf(ctx.ErrOut, "Watch pass completion record failed for %s: %v\n", project.Name, err)
+			}
+			servedPass = passRequest
+		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil
 		}
-		select {
-		case sig := <-stopSignals:
-			if sig == syscall.SIGTERM {
-				return s.reportWatchStopped(ctx, project, true)
-			}
-		case <-ctx.Context.Done():
-			return ctx.Context.Err()
-		case <-time.After(2 * time.Second):
-			if watch == nil {
-				if err := s.handleLeadWatchUpdate(ctx, project); err != nil {
-					return err
-				}
+		sig, err := waitForWatchPass(ctx.Context, home, project, servedPass, stopSignals)
+		if err != nil {
+			return err
+		}
+		if sig == syscall.SIGTERM {
+			return s.reportWatchStopped(ctx, project, true)
+		}
+		if sig == nil && watch == nil {
+			if err := s.handleLeadWatchUpdate(ctx, project); err != nil {
+				return err
 			}
 		}
 	}

@@ -205,6 +205,9 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, heads, decision.UserQuote, userDispositionBlockAt(task)); err != nil {
 				return err
 			}
+			if err := queueSettledReviewStep(out.Context, db, project, task, "User accepted the candidate head at the Review cap of Task "+taskIDString(task.Seq)); err != nil {
+				return err
+			}
 			if len(actual.Targets) > 1 {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "heads", Value: actual.Targets}})
 			}

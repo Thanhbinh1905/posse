@@ -165,4 +165,7 @@ func TestSchemaDrivesUserOnlyAndNewKeys(t *testing.T) {
 			t.Errorf("accepted negative %s", key)
 		}
 	}
+	if !IsUserOnly("ci_loop.flake_window") || ValidateSetting("ci_loop.flake_window", "0", false) != nil || ValidateSetting("ci_loop.flake_window", "-1h", false) == nil {
+		t.Error("ci_loop.flake_window must be User-only, accept 0 to disable and refuse a negative window")
+	}
 }
