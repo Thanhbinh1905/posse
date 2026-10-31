@@ -146,7 +146,7 @@ func (db *DB) InheritReviewLedger(ctx context.Context, sourceTaskID, destination
 // ReviewFindingsForTask returns the immutable pattern descriptions and current
 // finding states used to prepare a whole-pattern fix instruction.
 func (db *DB) ReviewFindingsForTask(ctx context.Context, taskID int64) ([]ReviewFindingDetail, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),COALESCE(parent.title,p.title),COALESCE(parent.rule,p.rule),COALESCE(parent.root_cause,p.root_cause),COALESCE(parent.fix_guidance,p.fix_guidance),f.repository,f.path,f.symbol,f.excerpt,f.severity,f.origin,f.in_scope,f.state,COALESCE(f.inherited_from,0)
+	rows, err := db.QueryContext(ctx, `SELECT f.seq,COALESCE(parent.seq,p.seq),COALESCE(parent.key,p.key),COALESCE(parent.title,p.title),COALESCE(parent.rule,p.rule),COALESCE(parent.root_cause,p.root_cause),COALESCE(parent.fix_guidance,p.fix_guidance),f.repository,f.path,f.symbol,f.excerpt,f.severity,f.origin,f.in_scope,f.state,COALESCE(f.inherited_from,0),COALESCE(f.follow_up_url,'')
 FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into
 WHERE f.ship_task_id=? ORDER BY COALESCE(parent.seq,p.seq),f.seq`, taskID)
 	if err != nil {
@@ -158,7 +158,7 @@ WHERE f.ship_task_id=? ORDER BY COALESCE(parent.seq,p.seq),f.seq`, taskID)
 		var detail ReviewFindingDetail
 		var inScope int
 		if err := rows.Scan(&detail.FindingSeq, &detail.PatternSeq, &detail.PatternKey, &detail.Title, &detail.Rule, &detail.RootCause, &detail.FixGuidance,
-			&detail.Repository, &detail.Path, &detail.Symbol, &detail.Excerpt, &detail.Severity, &detail.Origin, &inScope, &detail.State, &detail.InheritedFrom); err != nil {
+			&detail.Repository, &detail.Path, &detail.Symbol, &detail.Excerpt, &detail.Severity, &detail.Origin, &inScope, &detail.State, &detail.InheritedFrom, &detail.FollowUpURL); err != nil {
 			return nil, err
 		}
 		detail.InScope = inScope == 1
