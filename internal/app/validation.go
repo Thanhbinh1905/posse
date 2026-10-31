@@ -262,7 +262,7 @@ func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, l
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && candidate.State != store.ValidationCandidatePromoting {
 		return axi.Failure("candidate_not_active", lane.memberLabel("candidate is not eligible for full-pipeline promotion"), false)
 	}
-	targetHead, err := lane.targetHead(ctx)
+	targetHead, err := lane.gatedTargetHead(ctx, candidate)
 	if err != nil {
 		return err
 	}
@@ -370,7 +370,7 @@ func (s *Service) workspaceCandidateReviewRequest(ctx context.Context, db *store
 // Merge fast-forwards to it. A Member already integrated under this barrier
 // (recorded merged, or its PR merged at the validated head before the PR poll
 // recorded it) is not rechecked, since its own integration moved its target.
-func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit string) error {
+func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, mergeCommit string) error {
 	lanes, err := changedCandidateLanes(ctx, db, project, task)
 	if err != nil {
 		return err
@@ -380,6 +380,9 @@ func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project 
 		if lane.member.State == store.TaskRepoMerged {
 			validated++
 			continue
+		}
+		if lane.repo == "" && !lane.localDelivery() {
+			lane.mergeCommit, lane.mergeMethod = mergeCommit, defaultValue(cfg.Defaults.MergeMethod, "squash")
 		}
 		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
 		if err != nil {
