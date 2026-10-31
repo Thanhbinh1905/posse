@@ -154,18 +154,18 @@ func TestMergeReadyReviewGateOperationalErrorIsSurfaced(t *testing.T) {
 	installFullPipelinePlan(t, fixture)
 	head := promoteFullPipelineCandidateForTest(t, fixture)
 	markTaskDone(t, fixture)
-	gitTest(t, fixture.repo, "config", "url.file://"+filepath.Join(fixture.root, "unreachable.git")+".insteadOf", "https://github.com/acme/shop.git")
-	gitTest(t, fixture.repo, "config", "--unset", "url.file://"+fixture.remote+".insteadOf")
+	// Only the Task worktree, where the gate reads the target, loses origin.
+	gitTest(t, fixture.repo, "config", "extensions.worktreeConfig", "true")
+	gitTest(t, fixture.worktree, "config", "--worktree", "remote.origin.uploadpack", "false")
 	notices := pollOpenPRNotices(t, fixture, head, 3)
 	if len(notices["merge_ready"]) != 0 {
 		t.Fatalf("merge_ready raised although the review gate could not run: %q", notices["merge_ready"])
 	}
 	failing := notices["pr_watch_failing"]
-	if len(failing) != 1 || !strings.Contains(failing[0], "review gate") {
-		t.Fatalf("operational review gate error not surfaced: %v", notices)
+	if len(failing) != 1 || !strings.Contains(failing[0], "merge_ready review gate") || !strings.Contains(failing[0], "ls-remote") {
+		t.Fatalf("operational review gate error not surfaced with its cause: %v", notices)
 	}
-	gitTest(t, fixture.repo, "config", "url.file://"+fixture.remote+".insteadOf", "https://github.com/acme/shop.git")
-	gitTest(t, fixture.repo, "config", "--unset", "url.file://"+filepath.Join(fixture.root, "unreachable.git")+".insteadOf")
+	gitTest(t, fixture.worktree, "config", "--worktree", "--unset", "remote.origin.uploadpack")
 	if notices := pollOpenPRNotices(t, fixture, head, 1); len(notices["merge_ready"]) != 1 {
 		t.Fatalf("merge_ready not raised once the review gate recovered: %v", notices)
 	}
