@@ -294,6 +294,34 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(ship_task_id,repository,from_head,to_head) DO 
 	return db.PersistTask(ctx, carry.ChangeTaskID)
 }
 
+// ReviewCarrySource returns the passed or accepted head a carry maps to head.
+func (db *DB) ReviewCarrySource(ctx context.Context, taskID int64, repository, head string) (string, bool, error) {
+	var from string
+	err := db.QueryRowContext(ctx, `SELECT from_head FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=? ORDER BY created_at LIMIT 1`, taskID, repository, head).Scan(&from)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return from, err == nil, err
+}
+
+// ReviewDispositionHeads lists the heads a User accepted, newest first.
+func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT head_sha FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var heads []string
+	for rows.Next() {
+		var head string
+		if err := rows.Scan(&head); err != nil {
+			return nil, err
+		}
+		heads = append(heads, head)
+	}
+	return heads, rows.Err()
+}
+
 // RecordReviewDisposition binds an explicit User acceptance to exact heads,
 // one per changed repository, and appends its finding-state events atomically.
 func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID int64, heads []string, quote, blockAt string) error {
