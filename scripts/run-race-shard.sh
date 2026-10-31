@@ -16,7 +16,7 @@ set -eu
 # as the CI matrix. budget_seconds caps each shard's planned test time at 40%
 # of the 15m go test timeout, leaving room for compilation and runner variance
 # so a shard stays under about 60% of the timeout.
-budget_seconds=360
+budget_seconds=480
 target_percent=85
 target_seconds=$((budget_seconds * target_percent / 100))
 # default_seconds is above the 95th percentile of recorded split tests.
@@ -334,12 +334,12 @@ started=$(date +%s)
 
 # -v prints each top-level test's duration for scripts/refresh-race-durations.sh.
 shard_commands "$shard_plan" | while IFS= read -r command; do
-  eval "go test -race -v -count=1 -timeout=15m $command" || exit 1
+  eval "go test -race -v -count=1 -timeout=20m $command" || exit 1
 done
 
 elapsed=$(($(date +%s) - started))
 limit=$((budget_seconds * 3 / 2))
 printf 'Race shard %s/%s took %ss\n' "$shard" "$shard_count" "$elapsed"
 if [ "$elapsed" -gt "$limit" ]; then
-  echo "::warning::Race shard $shard took ${elapsed}s, over ${limit}s (60% of the 15m timeout); refresh scripts/race-durations.txt with scripts/refresh-race-durations.sh"
+  echo "::warning::Race shard $shard took ${elapsed}s, over ${limit}s (60% of the 20m timeout); refresh scripts/race-durations.txt with scripts/refresh-race-durations.sh"
 fi

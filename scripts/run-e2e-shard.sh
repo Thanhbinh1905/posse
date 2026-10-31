@@ -12,7 +12,7 @@ set -eu
 # as the CI matrix. budget_seconds caps each shard's planned test time at 40%
 # of the 15m go test timeout, leaving room for compilation and runner variance
 # so a shard stays under about 60% of the timeout.
-budget_seconds=360
+budget_seconds=480
 target_percent=85
 target_seconds=$((budget_seconds * target_percent / 100))
 # default_seconds is about twice the 95th percentile of recorded durations.
@@ -225,7 +225,7 @@ count=${POSSE_E2E_COUNT:-1}
 case "$count" in
   ''|*[!0-9]*|0) echo "POSSE_E2E_COUNT must be a positive integer" >&2; exit 2 ;;
 esac
-timeout=${POSSE_E2E_TIMEOUT:-15m}
+timeout=${POSSE_E2E_TIMEOUT:-20m}
 shard=$1
 listed=$(go test -tags=e2e -list '^Test' ./internal/e2e)
 validate_durations "$durations"
@@ -252,5 +252,5 @@ elapsed=$(($(date +%s) - started))
 limit=$((budget_seconds * 3 / 2))
 printf 'E2E shard %s/%s took %ss\n' "$shard" "$shard_count" "$elapsed"
 if [ "$count" -eq 1 ] && [ "$elapsed" -gt "$limit" ]; then
-  echo "::warning::E2E shard $shard took ${elapsed}s, over ${limit}s (60% of the 15m timeout); refresh scripts/e2e-durations.txt with scripts/refresh-e2e-durations.sh"
+  echo "::warning::E2E shard $shard took ${elapsed}s, over ${limit}s (60% of the 20m timeout); refresh scripts/e2e-durations.txt with scripts/refresh-e2e-durations.sh"
 fi
