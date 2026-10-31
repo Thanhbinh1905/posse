@@ -119,8 +119,11 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 			t.Errorf("Worker protocol omitted %q:\n%s", want, launch)
 		}
 	}
-	if code, output := runSignalAt(research, filepath.Join(research.WorktreePath, "nested"), "signal", "done", "Research complete", "--report", "report.md"); code != 0 {
-		t.Fatalf("worktree-relative --report from a Worker subdirectory failed: code=%d output=%s", code, output)
+	if code, output := runSignalAt(research, filepath.Join(research.WorktreePath, "nested"), "signal", "done", "Research complete", "--report", "report.md"); code == 0 {
+		t.Fatalf("--report relative to the worktree root was accepted from a subdirectory: output=%s", output)
+	}
+	if code, output := runSignalAt(research, filepath.Join(research.WorktreePath, "nested"), "signal", "done", "Research complete", "--report", "../report.md"); code != 0 {
+		t.Fatalf("cwd-relative --report from a Worker subdirectory failed: code=%d output=%s", code, output)
 	}
 	if !waitForCondition(10*time.Second, func() bool {
 		contents, err := os.ReadFile(filepath.Join(fixture.home, "projects", "shop", "tasks", "t3", "report.md"))
@@ -131,7 +134,7 @@ func TestSignalFilesAcceptOwnTaskScratchAndRejectOtherRoots(t *testing.T) {
 	fixture.waitState(t, "t3", store.StateReported)
 
 	// Keep the own-scratch done Report coverage as well as the subdirectory
-	// worktree-relative Report case above. Reports belong to Research/Review.
+	// cwd-relative Report case above. Reports belong to Research/Review.
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "start", "--brief", researchBrief, "--name", "research-scratch-report")
 	fixture.waitState(t, "t4", store.StateWorking)
 	scratchResearch := fixture.task(t, "t4")
