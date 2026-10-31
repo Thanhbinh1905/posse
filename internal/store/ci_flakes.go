@@ -56,6 +56,14 @@ func (db *DB) RecordCITestFailures(ctx context.Context, failures []CITestFailure
 	return nil
 }
 
+// CITestFailureRecorded reports whether a job's failures were already kept for
+// head under prURL.
+func (db *DB) CITestFailureRecorded(ctx context.Context, projectID int64, prURL, headSHA, checkName, jobID string) (bool, error) {
+	var found bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ci_test_failures WHERE project_id=? AND pr_url=? AND head_sha=? AND check_name=? AND job_id=?)`, projectID, prURL, headSHA, checkName, jobID).Scan(&found)
+	return found, err
+}
+
 // CITestFailedElsewhere reports whether test in pkg failed on a PR other
 // than prURL at or after since.
 func (db *DB) CITestFailedElsewhere(ctx context.Context, projectID int64, prURL, pkg, test string, since int64) (bool, error) {
