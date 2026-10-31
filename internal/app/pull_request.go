@@ -1397,6 +1397,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		if slices.ContainsFunc(effect.Notices, mergeReady) && (requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA) != nil || pendingCandidateFailure(ctx, db, observed.task) != nil) {
 			effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
 		}
+		s.annotateMergeReadyNotices(ctx, db, project, observed.task, effect.Notices)
 		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
 			if notice, violated := reviewPolicyViolation(ctx, db, project, cfg, observed.task, observed.current); violated {
 				effect.Notices = append(effect.Notices, notice)

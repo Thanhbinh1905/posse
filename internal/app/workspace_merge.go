@@ -318,7 +318,7 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 		return err
 	}
 	if len(localReady) > 0 {
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: task.Title + ": " + strings.Join(localHeads, ", ") + " ready to merge locally", DataJSON: marshalJSON(map[string]any{"repos": localReady, "head_shas": localHeadSHAs})}); err != nil {
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "merge_ready", Summary: s.unusedRoleSkillsSummary(ctx, db, project, task, task.Title+": "+strings.Join(localHeads, ", ")+" ready to merge locally"), DataJSON: marshalJSON(map[string]any{"repos": localReady, "head_shas": localHeadSHAs})}); err != nil {
 			return err
 		}
 	}
@@ -886,6 +886,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 		if pendingCandidateFailure(ctx, db, task) != nil {
 			effect.Notices = slices.DeleteFunc(effect.Notices, func(notice store.Notice) bool { return notice.Kind == "merge_ready" })
 		}
+		s.annotateMergeReadyNotices(ctx, db, project, task, effect.Notices)
 		memberEffect := store.MemberPREffect{Notices: effect.Notices, MergedRef: effect.MergedRef}
 		for index := range memberEffect.Notices {
 			memberEffect.Notices[index].DataJSON = withRepo(memberEffect.Notices[index].DataJSON, member.repo.Repo)
