@@ -93,3 +93,34 @@ func TestStewardReplyMarkerIsFoundAmongGitLabNotes(t *testing.T) {
 		}
 	}
 }
+
+func TestStewardRerunOfAnInProgressRunIsRetryableAndNamesTheState(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.Repeat("a", 40)
+	script := "#!/bin/sh\nprintf '%s' '{\"attempt\":1,\"status\":\"in_progress\",\"headSha\":\"" + head + "\"}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	target := stewardTarget{
+		forge: repositoryForge{Kind: "github", Root: root},
+		prURL: "https://github.com/acme/shop/pull/7",
+	}
+	var refusal *axi.Error
+	_, err := forgeRerunBaseline(context.Background(), target, "41", head)
+	if !errors.As(err, &refusal) || !refusal.Retryable || !strings.Contains(refusal.Message, "in_progress") {
+		t.Fatalf("an in-progress run must give a retryable error naming its state: %v", err)
+	}
+}
+
+func TestCILogCommandForGitLabNamesTheRepository(t *testing.T) {
+	forge := repositoryForge{Kind: "gitlab", Host: "git.example.com", Path: "acme/shop"}
+	got := ciLogCommand(forge, "https://git.example.com/acme/shop/-/merge_requests/7", failedCheck{JobID: "55"})
+	if want := "glab ci trace 55 --repo https://git.example.com/acme/shop"; got != want {
+		t.Fatalf("log command = %q, want %q", got, want)
+	}
+}
