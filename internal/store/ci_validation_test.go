@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestReviewAndCIFixesShareTheFrozenReviewCap(t *testing.T) {
+func TestCIFixesDoNotConsumeTheFrozenReviewCap(t *testing.T) {
 	fixture := newReviewVerdictFixture(t, nil)
 	if err := fixture.db.Transition(fixture.ctx, fixture.change, StateSpawning, StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
@@ -18,20 +18,20 @@ func TestReviewAndCIFixesShareTheFrozenReviewCap(t *testing.T) {
 	if _, err := fixture.db.ExecContext(fixture.ctx, `UPDATE tasks SET landing_mode='pr',gated_sha=?,pr_url='https://github.com/acme/shop/pull/1' WHERE id=?`, reviewShaA, fixture.change); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ExecContext(fixture.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','verdict','changes_requested',1)`, fixture.change, fixture.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, reportHash); err != nil {
+	if _, err := fixture.db.ExecContext(fixture.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','verdict','pass',1)`, fixture.change, fixture.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, reportHash); err != nil {
 		t.Fatal(err)
 	}
 	review, err := fixture.db.QueueValidationFixInstructionWithSharedBudget(fixture.ctx, fixture.change, "review", reviewShaA, "review:shared", "Fix review findings", 3, 2)
 	if err != nil || !review.Queued {
 		t.Fatalf("queue Review repair: %+v %v", review, err)
 	}
-	ci, err := fixture.db.QueueCIFixInstructionWithSharedBudget(fixture.ctx, fixture.change, reviewShaA, "https://github.com/acme/shop/pull/1", "ci:shared", "Fix CI", "", 3, 2)
-	if err != nil || !ci.SharedExhausted || ci.Queued {
-		t.Fatalf("CI repair did not hit shared cap: %+v %v", ci, err)
+	ci, err := fixture.db.QueueCIFixInstruction(fixture.ctx, fixture.change, reviewShaA, "https://github.com/acme/shop/pull/1", "ci:flake", "Fix CI", "", 3)
+	if err != nil || !ci.Queued {
+		t.Fatalf("CI repair after the Review cap was spent: %+v %v", ci, err)
 	}
 	usage, err := fixture.db.ReviewCapUsage(fixture.ctx, fixture.change)
 	if err != nil || usage.Total() != 2 || usage.RepairRounds != 1 || usage.ReviewRounds != 1 {
-		t.Fatalf("shared cap accounting=%+v err=%v", usage, err)
+		t.Fatalf("CI repair consumed the Review cap: %+v err=%v", usage, err)
 	}
 }
 
