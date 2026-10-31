@@ -1296,7 +1296,7 @@ The Change done Signal is refused with `review_resolution_missing` until every p
 
 ### 25.6 Dispositions
 
-`posse review dispose <change> <F-n|P-n>... <action> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]`, where `action` is `fix`, `accept`, `defer`, `withdraw` or `reclassify`. `posse review merge <change> <P-n> <P-n>...` merges patterns into the first. Each is a ledger event with actor and quote.
+`posse review dispose <change> <F-n|P-n>... <action> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]`, where `action` is `fix`, `accept`, `defer`, `withdraw` or `reclassify`. `posse review merge <change> <P-n> <P-n>...` merges patterns into the first. Each is a ledger event with actor and quote. When a disposition leaves no blocking finding on a done full-pipeline Task whose last round requested changes, or when `accept-head` is applied at the review cap, the current heads count as reviewed and the Worker is queued the same validate-and-promote step as after a pass, with a `candidate_validation_queued` Notice.
 
 - Any action that leaves a blocking finding unfixed (`accept`, `defer`, `withdraw`, or a `reclassify` below `block_at`) needs a User quote under every Autonomy (`review_disposition_requires_user`).
 - With `autonomy.review = "lead"`, the Lead may `fix`, `defer` (with `--issue`), `withdraw` (with `--reason`) or reclassify non-blocking findings. With `ask`, the Lead raises the existing `review` Decision with the round summary.

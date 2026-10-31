@@ -234,6 +234,27 @@ func TestReviewPatternMergeAndDispositionRecordWholePatternEvents(t *testing.T) 
 	}
 }
 
+// A disposition that leaves no blocking finding on a done Task whose last
+// round requested changes continues like a pass instead of idling (#798).
+func TestReviewDispositionWithoutBlockingFindingQueuesValidation(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "3")
+	recordBlockingReviewFinding(t, f, changeSeq)
+	change := f.mustTask(t, changeSeq)
+	if code, output := runReviewIdentityCLI(t, f, "review", "dispose", changeSeq, "P-1", "withdraw", "--reason", "False positive", "--user-approved", "Withdraw this finding."); code != 0 {
+		t.Fatalf("withdraw the only blocking finding: %d %s", code, output)
+	}
+	requireReviewPassNextStep(t, f, f.leadEnv, f.repo, change, candidatePath)
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "signal", "working", "Resume local validation"); code != 0 {
+		t.Fatalf("resume validation: %d %s", code, output)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent behavior verified"); code != 0 {
+		t.Fatalf("validate test after withdrawal: %d %s", code, output)
+	}
+}
+
 func TestFullPipelineReviewCarryIsReviewOnlyAtPublication(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	changePath, candidatePath, changeSeq := startPrivateReviewChange(t, f, "3")
@@ -339,6 +360,7 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	if err := f.db.QueryRowContext(context.Background(), `SELECT head_sha,user_quote FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC LIMIT 1`, change.ID).Scan(&dispositionHead, &recordedQuote); err != nil || dispositionHead != candidate.CandidateSHA || recordedQuote != quote {
 		t.Fatalf("accepted-head disposition=(%s,%q), want (%s,%q), err=%v", dispositionHead, recordedQuote, candidate.CandidateSHA, quote, err)
 	}
+	requireReviewPassNextStep(t, f, f.leadEnv, f.repo, change, candidatePath)
 	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "signal", "working", "Resume local validation"); code != 0 {
 		t.Fatalf("resume validation: %d %s", code, output)
 	}
