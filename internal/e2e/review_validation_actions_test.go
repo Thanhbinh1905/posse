@@ -123,6 +123,64 @@ func TestLeadCanDeferP2FindingWithIssue(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupsDefersAnAreasNonBlockingFindingsToOneIssue(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, _, changeSeq := startPrivateReviewChange(t, f, "3")
+	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start Review Round: %d %s", code, output)
+	}
+	review := f.mustTask(t, "t2")
+	waitForReviewIdentityAgent(t, f, review.PaneID)
+	report := filepath.Join(f.home, "scratch", "shop", "t2", "report.md")
+	findings := filepath.Join(f.home, "scratch", "shop", "t2", "findings.json")
+	if err := os.WriteFile(report, []byte("One blocking and two low-priority patterns.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	instance := func(symbol string) string {
+		return `{"repository":"shop","path":"review-issue.txt","line":1,"symbol":"` + symbol + `","excerpt":"unsafe operation","description":"` + symbol + `"}`
+	}
+	pattern := func(key, severity, symbol string) string {
+		return `{"key":"` + key + `","title":"` + key + `","rule":"rule","root_cause":"cause","fix_guidance":"guidance","severity":"` + severity + `","origin":"introduced","instances":[` + instance(symbol) + `]}`
+	}
+	content := `{"schema":"posse.review-findings.v1","patterns":[` + pattern("blocking-operation", "P1", "blocking") + `,` + pattern("minor-operation", "P2", "minor") + `,` + pattern("style-operation", "P3", "style") + `],"resolutions":[]}`
+	if err := os.WriteFile(findings, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "changes_requested")
+	code, output := runReviewIdentityCLI(t, f, "review", "followups")
+	if code != 0 || !strings.Contains(output, "F-2") || !strings.Contains(output, "F-3") || strings.Contains(output, "F-1") {
+		t.Fatalf("followups must list the unlinked P2 and P3 findings and not the blocking P1: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "review", "followups", "defer", "--area", ".", "--issue", ""); code == 0 {
+		t.Fatalf("followups defer accepted an empty issue: %s", output)
+	}
+	const issue = "https://github.com/acme/shop/issues/301"
+	if code, output := runReviewIdentityCLI(t, f, "review", "followups", "defer", "--area", ".", "--issue", issue); code != 0 || !strings.Contains(output, "deferred: 2") {
+		t.Fatalf("defer the area's findings to one issue: %d %s", code, output)
+	}
+	rows, err := f.db.QueryContext(context.Background(), `SELECT seq,state,follow_up_url FROM review_findings WHERE ship_task_id=(SELECT id FROM tasks WHERE seq=1 AND type='change') ORDER BY seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var seq int
+		var state, url string
+		if err := rows.Scan(&seq, &state, &url); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("F-%d %s %s", seq, state, url))
+	}
+	want := []string{"F-1 open ", "F-2 deferred " + issue, "F-3 deferred " + issue}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("ledger after area deferral:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if code, output := runReviewIdentityCLI(t, f, "review", "followups"); code != 0 || strings.Contains(output, "F-2") || strings.Contains(output, "F-3") {
+		t.Fatalf("linked findings are still listed as unlinked: %d %s", code, output)
+	}
+}
+
 func TestFullPipelineWholePatternFixRequiresPrivateCandidateResolutions(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "3")
@@ -361,6 +419,29 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	}
 	if published := gitRef(t, f, f.remote, "refs/heads/"+change.Branch); published != candidate.CandidateSHA {
 		t.Fatalf("bare origin published %s, want accepted candidate %s", published, candidate.CandidateSHA)
+	}
+}
+
+func TestReviewCapBlockingFindingNeedsTheUsersCapDecision(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
+	recordBlockingReviewFinding(t, f, changeSeq)
+	change := f.mustTask(t, changeSeq)
+	const quote = "ok làm hết"
+	for _, args := range [][]string{
+		{"accept", "--user-approved", quote},
+		{"defer", "--issue", "https://github.com/acme/shop/issues/300", "--user-approved", quote},
+		{"withdraw", "--reason", "not a real problem", "--user-approved", quote},
+		{"reclassify", "--severity", "P2", "--user-approved", quote},
+	} {
+		command := append([]string{"review", "dispose", changeSeq, "F-1"}, args...)
+		if code, output := runReviewIdentityCLI(t, f, command...); code != 1 || !strings.Contains(output, "review_cap_decision_required") || !strings.Contains(output, "review_cap") {
+			t.Fatalf("%s cleared an introduced P1 at the spent cap without the User's cap Decision: %d %s", args[0], code, output)
+		}
+	}
+	var state, severity string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT state,severity FROM review_findings WHERE ship_task_id=?`, change.ID).Scan(&state, &severity); err != nil || state != "open" || severity != "P1" {
+		t.Fatalf("finding=(%s,%s) err=%v, want open P1", state, severity, err)
 	}
 }
 
