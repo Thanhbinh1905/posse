@@ -168,11 +168,12 @@ func (s *Service) commands() *axi.Command {
 			{Name: "abandon", Usage: "$ candidate abandon <task> [--repo <member>] --reason <why>", Summary: "Discard the pending unpromoted candidate and return to the promoted head the Task branch is reset to; recorded in Task history.", Handler: s.abandonCandidate},
 		}},
 		{Name: "retitle", Usage: "$ retitle <task> \"<conventional title>\"", Summary: "Set the PR title that the Worker's next publish will use.", Handler: s.retitle},
-		{Name: "pr", Summary: "Steward a Task's PR/MR as the Lead: inspect it, reply, refresh Posse-owned metadata or rerun an existing failed CI run. Each operation is recorded; merge keeps its own approval.", Subcommands: []*axi.Command{
+		{Name: "pr", Summary: "Steward a Task's PR/MR as the Lead: inspect, reply, refresh metadata, rerun failed CI or set executor retention. Operations are recorded; merge keeps its own approval.", Subcommands: []*axi.Command{
 			{Name: "inspect", Usage: "$ pr inspect <task> [--repo <member>]", Summary: "Read the current PR/MR state, failed checks, authors and recent steward operations.", Handler: s.prInspect},
 			{Name: "reply", Usage: "$ pr reply <task> --body <text> [--repo <member>]", Summary: "Post a reply on the PR/MR once; an unconfirmed reply is checked on the forge before any repeat.", Handler: s.prReply},
 			{Name: "refresh", Usage: "$ pr refresh <task> [--repo <member>]", Summary: "Rewrite the Posse-owned title and Validation block; other PR/MR text is unchanged.", Handler: s.prRefresh},
 			{Name: "rerun", Usage: "$ pr rerun <task> (--run <id>|--job <id>) [--repo <member>]", Summary: "Rerun an existing failed CI run (GitHub) or job (GitLab) on the current head, at most twice per run and head.", Handler: s.prRerun},
+			{Name: "release", Usage: "$ pr release <task> --policy retain|suspend|release", Summary: "Set executor retention for a repository PR delivery. Release frees the Sandbox only after preservation is verified.", Handler: s.prRelease},
 		}},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
 		{Name: "status", Summary: "Read this Worker's recorded status, admitted plan and open Review findings without maintenance.", Handler: s.status},

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -164,6 +166,151 @@ func TestPRInspectWaitsForAProjectPollHeldByAnotherProcess(t *testing.T) {
 	}
 	if code != 0 {
 		t.Fatalf("pr inspect: %d %s %s", code, output, stderr)
+	}
+}
+
+func TestPRExecutorPoliciesAreRecordedSeparatelyFromMergeAndTeardown(t *testing.T) {
+	for _, policy := range []string{"retain", "suspend"} {
+		t.Run(policy, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			defer fixture.db.Close()
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR: %d %s %s", code, output, stderr)
+			}
+			attachPRFixtureSandbox(t, fixture)
+			deliveries, err := fixture.db.TaskDeliveries(context.Background(), fixture.task.ID)
+			if err != nil || len(deliveries) != 1 {
+				t.Fatalf("Task deliveries = %#v err=%v", deliveries, err)
+			}
+			defaultPolicy, err := fixture.db.DeliveryExecutorPolicy(context.Background(), deliveries[0].ID)
+			if err != nil || defaultPolicy != "retain" {
+				t.Fatalf("default executor policy = %q err=%v", defaultPolicy, err)
+			}
+
+			if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", policy); code != 0 {
+				t.Fatalf("set %s policy: %d %s %s", policy, code, output, stderr)
+			}
+			var operation, subject, outcome string
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT operation,subject,outcome FROM delivery_operations ORDER BY id DESC LIMIT 1`).Scan(&operation, &subject, &outcome); err != nil {
+				t.Fatal(err)
+			}
+			if operation != "executor_policy" || subject != policy || outcome != "succeeded" {
+				t.Fatalf("policy history = %q/%q/%q", operation, subject, outcome)
+			}
+			sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID)
+			if err != nil || sandbox.State != "held" {
+				t.Fatalf("%s changed Sandbox custody: %#v err=%v", policy, sandbox, err)
+			}
+			task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+			if err != nil || task.State != store.StateMerging {
+				t.Fatalf("%s changed Land state: %#v err=%v", policy, task, err)
+			}
+			fake := fixture.service.Herdr.(*herdr.Fake)
+			cleared := fake.CallCount("pane.clear_agent_authority") > 0
+			if (policy == "suspend") != cleared {
+				t.Fatalf("%s changed executor state: clear_agent_authority=%t", policy, cleared)
+			}
+		})
+	}
+}
+
+func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release executor: %d %s %s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerging {
+		t.Fatalf("release changed Land state: %#v err=%v", task, err)
+	}
+	if policy, err := fixture.db.DeliveryExecutorPolicy(context.Background(), fixture.task.ID); err != nil || policy != "release" {
+		t.Fatalf("effective executor policy = %q err=%v", policy, err)
+	}
+	if sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID); !store.IsNotFound(err) {
+		t.Fatalf("released Task still owns Sandbox %#v err=%v", sandbox, err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("PR watch after release: %v", err)
+	}
+	observation, err := fixture.db.LatestPRObservation(context.Background(), fixture.task.ID)
+	if err != nil || observation.State != "OPEN" || observation.HeadSHA != fixture.headSHA {
+		t.Fatalf("release lost PR watch custody: %#v err=%v", observation, err)
+	}
+}
+
+func TestPRReleaseRefusesWhenDeliveryPreservationIsUncertain(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	if err := os.WriteFile(fixture.ghState, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "pr_release_refused") || !strings.Contains(combined, "preservation") {
+		t.Fatalf("uncertain release exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerging {
+		t.Fatalf("refused release changed Task state: %#v err=%v", task, err)
+	}
+	snapshot, err := fixture.service.snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := findTaskPane(snapshot.Panes, task); !found {
+		t.Fatal("refused release changed the executor pane")
+	}
+	var operations int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM delivery_operations WHERE operation='executor_policy'`).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("refused release recorded %d applied policy operations", operations)
+	}
+	if cleared := fixture.service.Herdr.(*herdr.Fake).CallCount("pane.clear_agent_authority"); cleared != 0 {
+		t.Fatalf("refused release changed executor authority %d times", cleared)
+	}
+}
+
+func TestPRReleaseRefusesWhenRemoteHeadDiffersFromPRHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "advance Task branch")
+	gitTest(t, fixture.worktree, "push", "origin", "posse/t1")
+
+	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "pr_release_refused") || !strings.Contains(combined, "PR head") {
+		t.Fatalf("mismatched-head release exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerging {
+		t.Fatalf("refused release changed Task state: %#v err=%v", task, err)
+	}
+	if cleared := fixture.service.Herdr.(*herdr.Fake).CallCount("pane.clear_agent_authority"); cleared != 0 {
+		t.Fatalf("refused release changed executor authority %d times", cleared)
 	}
 }
 
