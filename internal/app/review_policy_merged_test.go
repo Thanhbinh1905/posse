@@ -79,6 +79,24 @@ func TestFullPipelineGatedMergeIsNotReportedAsPolicyViolation(t *testing.T) {
 	}
 }
 
+func TestFullPipelineGatedMergeAfterPRTextRefreshIsNotReportedAsPolicyViolation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	head := promoteFullPipelineCandidateForTest(t, fixture)
+	marker, err := fixture.db.GetPRBodyMarker(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_BODY", managedPublishBody("Earlier summary", marker.Token))
+	if code, output, stderr := fixture.run("publish", "--refresh", "Refreshed summary", "--verify", "go test ./internal/app -run TestFullPipelineGatedMergeAfterPRTextRefreshIsNotReportedAsPolicyViolation -count=1 -> passed", "--proof", "The promoted candidate passed Review, test, docs and lint", "--risk", "Risk: low\nRollback: revert"); code != 0 || !strings.Contains(output, "refreshed: PR/MR text for promoted candidate") {
+		t.Fatalf("refresh promoted candidate PR text: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	merge := mergeOnOrigin(t, fixture, candidateTarget(t, fixture), head, false)
+	if violations := pollMergedPR(t, fixture, head, merge); len(violations) != 0 {
+		t.Fatalf("refreshed Posse-validated merge reported as a review policy violation: %q", violations)
+	}
+}
+
 func TestFullPipelineGatedRebaseMergeIsNotReportedAsPolicyViolation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
