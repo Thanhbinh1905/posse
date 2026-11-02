@@ -495,7 +495,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	candidates := make([]herdr.Pane, 0)
 	for _, pane := range snapshot.Panes {
-		if _, named := leadAgentPanes[pane.PaneID]; pane.Label == label || named {
+		_, named := leadAgentPanes[pane.PaneID]
+		recorded := project.LeadPaneID != "" && pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID
+		if pane.Label == label || named || recorded {
 			candidates = append(candidates, pane)
 		}
 	}

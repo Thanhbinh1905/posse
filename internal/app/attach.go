@@ -96,8 +96,19 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 	if _, ok := cfg.Kinds[kind]; !ok {
 		return unsupportedAttachedSession(kind)
 	}
-	if paneID, running := projectLeadPane(snapshot, project); running {
-		return axi.Failure("lead_running", fmt.Sprintf("Project %s already has a Lead running in pane %s", project.Name, paneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
+	leadPaneID, running := projectLeadPane(snapshot, project)
+	recovering := running && leadPaneID == pane.PaneID && project.LeadPaneID == pane.PaneID && project.HerdrWorkspaceID == pane.WorkspaceID
+	if running && !recovering {
+		return axi.Failure("lead_running", fmt.Sprintf("Project %s already has a Lead running in pane %s", project.Name, leadPaneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
+	}
+	if recovering {
+		lead, err := db.ProjectLeadAgent(ctx.Context, project.ID)
+		if err != nil {
+			return err
+		}
+		if (lead.Kind != "" && lead.Kind != kind) || (lead.Session != "" && lead.Session != parsed.SessionID) {
+			return axi.Failure("lead_running", fmt.Sprintf("Project %s already records a different Lead session in pane %s", project.Name, pane.PaneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
+		}
 	}
 	now := time.Now()
 	claimed, err := db.ClaimLeadStart(ctx.Context, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "attach", os.Getpid())
@@ -126,11 +137,11 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		return axi.Failure("lead_instructions_too_large", fmt.Sprintf("Lead instructions exceed the %d-token budget: %d bytes (maximum %d bytes at %d bytes per token)", leadInstructionTokenBudget, len(instructions.Text), leadInstructionMaxBytes, leadInstructionBytesPerToken), false)
 	}
 	prompt := "You are now the Lead for Project " + project.Name + ". Keep this conversation and follow these Posse Lead instructions. Do not start work until the User speaks again.\n\n" + instructions.Text
-	if err := s.safePromptWhen(ctx.Context, pane.PaneID, prompt, func(current herdr.Snapshot) error {
+	verify := func(current herdr.Snapshot) error {
 		if current.ServerStartedAt != snapshot.ServerStartedAt {
 			return axi.Failure("attach_generation_changed", "Herdr restarted while the session was being verified", false, "Inspect the target session, then retry `posse attach`")
 		}
-		if paneID, running := projectLeadPane(current, project); running {
+		if paneID, running := projectLeadPane(current, project); running && !(recovering && paneID == pane.PaneID) {
 			return axi.Failure("lead_running", fmt.Sprintf("Project %s already has a Lead running in pane %s", project.Name, paneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
 		}
 		currentPane, currentKind, verifyErr := attachedSession(current, parsed.PaneID, parsed.SessionID)
@@ -138,7 +149,16 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("attach_session_changed", "the selected pane or session changed during verification", false, "Inspect the target session, then retry `posse attach`")
 		}
 		return refuseAttachForeignLeadWorkspace(current, project, currentPane.WorkspaceID)
-	}); err != nil {
+	}
+	if recovering {
+		current, err := s.snapshot(ctx.Context)
+		if err != nil {
+			return err
+		}
+		if err := verify(current); err != nil {
+			return err
+		}
+	} else if err := s.safePromptWhen(ctx.Context, pane.PaneID, prompt, verify); err != nil {
 		return err
 	}
 	label := "posse:" + project.Name + ":lead"
@@ -240,7 +260,8 @@ func projectLeadPane(snapshot herdr.Snapshot, project store.Project) (string, bo
 	label := "posse:" + project.Name + ":lead"
 	namePrefix := "posse-" + project.Name + "-lead-"
 	for _, pane := range snapshot.Panes {
-		ownsLead := pane.Label == label || (project.LeadLabel != "" && pane.Label == project.LeadLabel)
+		recordedLead := project.LeadPaneID != "" && pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID
+		ownsLead := recordedLead || pane.Label == label || (project.LeadLabel != "" && pane.Label == project.LeadLabel)
 		hasAgent := pane.Agent != ""
 		for _, agent := range snapshot.Agents {
 			if agent.PaneID != pane.PaneID {

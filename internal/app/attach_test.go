@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +205,199 @@ func TestAttachRefusesForeignProjectLeadInTargetWorkspace(t *testing.T) {
 		t.Fatalf("attach changed a session in a conflicting workspace: %#v", fake.Calls)
 	}
 	assertAttachUnbound(t, home, project.ID)
+}
+
+func TestAttachBindingFailureCanBeRetriedBeforeHerdrLabeling(t *testing.T) {
+	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `CREATE TRIGGER fail_attach_binding BEFORE UPDATE OF lead_pane_id ON projects BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 {
+		t.Fatalf("attach ignored the injected binding failure: %s", output.String())
+	}
+	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("pane.rename") != 0 {
+		t.Fatalf("binding failure crossed into Herdr labeling: %#v", fake.Calls)
+	}
+	assertAttachUnbound(t, home, project.ID)
+
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DROP TRIGGER fail_attach_binding`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	cli = service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code != 0 {
+		t.Fatalf("attach did not recover after the binding failure: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.prompt") != 2 || fake.CallCount("pane.rename") != 1 {
+		t.Fatalf("retry did not bind and label the verified session: %#v", fake.Calls)
+	}
+}
+
+func TestAttachRecoversAfterPaneBindingBeforeSessionBinding(t *testing.T) {
+	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, trigger := range []string{
+		`CREATE TRIGGER fail_attach_agent_insert BEFORE INSERT ON project_runtime WHEN NEW.lead_agent_session != '' BEGIN SELECT RAISE(ABORT, 'injected session binding failure'); END`,
+		`CREATE TRIGGER fail_attach_agent_update BEFORE UPDATE OF lead_agent_session ON project_runtime BEGIN SELECT RAISE(ABORT, 'injected session binding failure'); END`,
+	} {
+		if _, err := db.ExecContext(context.Background(), trigger); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 {
+		t.Fatalf("attach ignored the injected session-binding failure: %s", output.String())
+	}
+	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("pane.rename") != 0 {
+		t.Fatalf("session-binding failure crossed into Herdr labeling: %#v", fake.Calls)
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached, err := db.ProjectByID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead, err := db.ProjectLeadAgent(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DROP TRIGGER fail_attach_agent_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DROP TRIGGER fail_attach_agent_update`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if attached.LeadPaneID != "w1:p2" || attached.HerdrWorkspaceID != "w1" || lead.Session != "" {
+		t.Fatalf("failure did not leave the expected partial binding: project=%#v lead=%#v", attached, lead)
+	}
+
+	output.Reset()
+	cli = service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code != 0 {
+		t.Fatalf("attach did not recover the partial session binding: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("pane.rename") != 1 {
+		t.Fatalf("recovery resent instructions or failed to label the pane: %#v", fake.Calls)
+	}
+}
+
+func TestAttachPartialBindingBlocksUpAndCanRetry(t *testing.T) {
+	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+	fake.Errors["pane.rename"] = errors.New("injected pane rename failure")
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 {
+		t.Fatalf("attach ignored the injected pane-label failure: %s", output.String())
+	}
+	if fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("attach instruction delivery count = %d, want 1", fake.CallCount("agent.prompt"))
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached, err := db.ProjectByID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if attached.LeadPaneID != "w1:p2" || attached.HerdrWorkspaceID != "w1" {
+		t.Fatalf("partial attachment was not durably recorded: %#v", attached)
+	}
+
+	fake.Errors["pane.rename"] = nil
+	output.Reset()
+	cli = service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"up"}); code == 0 || !strings.Contains(output.String(), "lead_running") {
+		t.Fatalf("up did not refuse the partially attached live session: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.start") != 0 {
+		t.Fatalf("up started a replacement agent for the partially attached session: %#v", fake.Calls)
+	}
+	promptsBeforeRecovery := fake.CallCount("agent.prompt")
+
+	output.Reset()
+	cli = service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code != 0 {
+		t.Fatalf("attach did not recover its partial binding: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.prompt") != promptsBeforeRecovery {
+		t.Fatalf("recovery sent another prompt: before=%d after=%d", promptsBeforeRecovery, fake.CallCount("agent.prompt"))
+	}
+	if fake.CallCount("pane.rename") != 2 || fake.CallCount("workspace.rename") != 1 {
+		t.Fatalf("recovery did not finish Herdr labeling: %#v", fake.Calls)
+	}
+}
+
+func TestAttachRecoversAfterWorkspaceLabelFailure(t *testing.T) {
+	_, _, fake, service := newAttachTestService(t, "claude", "session-claude")
+	fake.Errors["workspace.rename"] = errors.New("injected workspace rename failure")
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 {
+		t.Fatalf("attach ignored the injected workspace-label failure: %s", output.String())
+	}
+	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("pane.rename") != 1 {
+		t.Fatalf("workspace-label failure happened before the binding and pane label: %#v", fake.Calls)
+	}
+
+	fake.Errors["workspace.rename"] = nil
+	output.Reset()
+	cli = service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code != 0 {
+		t.Fatalf("attach did not recover after the workspace-label failure: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("workspace.rename") != 2 {
+		t.Fatalf("recovery repeated instructions or skipped workspace labeling: %#v", fake.Calls)
+	}
 }
 
 func newAttachTestService(t *testing.T, kind, sessionID string) (string, store.Project, *herdr.Fake, *Service) {
