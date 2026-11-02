@@ -126,10 +126,12 @@ func TestBudgetCrossingsRaiseOneNoticeAndDecisionPerScopeWithoutStoppingWorker(t
 		t.Fatalf("budget crossing notices=%#v decisions=%#v", notices, decisions)
 	}
 	hasTaskBudget, hasDailyBudget := false, false
+	hasDailySummary := false
 	for _, notice := range notices {
 		if notice.Kind != "budget_exceeded" {
 			t.Fatalf("unexpected Notice kind %q", notice.Kind)
 		}
+		hasDailySummary = hasDailySummary || strings.Contains(notice.Summary, "Project daily token budget")
 	}
 	for _, decision := range decisions {
 		if decision.Kind != "budget" || len(decision.Options) != 2 || decision.Options[0] != "continue" || decision.Options[1] != "interrupt" {
@@ -138,8 +140,8 @@ func TestBudgetCrossingsRaiseOneNoticeAndDecisionPerScopeWithoutStoppingWorker(t
 		hasTaskBudget = hasTaskBudget || strings.HasPrefix(decision.Origin, "budget:task:")
 		hasDailyBudget = hasDailyBudget || strings.HasPrefix(decision.Origin, "budget:daily:")
 	}
-	if !hasTaskBudget || !hasDailyBudget {
-		t.Fatalf("budget decisions by scope: task=%t daily=%t", hasTaskBudget, hasDailyBudget)
+	if !hasTaskBudget || !hasDailyBudget || !hasDailySummary {
+		t.Fatalf("budget crossings by scope: task=%t daily=%t daily_summary=%t", hasTaskBudget, hasDailyBudget, hasDailySummary)
 	}
 	secondID := "budget-relaunch"
 	secondPath := filepath.Join(sessionRoot, "sessions", "session_"+secondID+".jsonl")

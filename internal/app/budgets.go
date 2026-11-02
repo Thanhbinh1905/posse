@@ -65,7 +65,10 @@ func recordBudgetCrossing(ctx context.Context, db *store.DB, project store.Proje
 	if err != nil {
 		return err
 	}
-	summary := fmt.Sprintf("%s exceeded its %s token budget (%d of %d tokens)", taskIDString(task.Seq), scope, usage, limit)
+	summary := fmt.Sprintf("Task %s exceeded its token budget (%d of %d tokens)", taskIDString(task.Seq), usage, limit)
+	if scope == "daily" {
+		summary = fmt.Sprintf("Project daily token budget exceeded (%d of %d tokens; observed while tracking Task %s)", usage, limit, taskIDString(task.Seq))
+	}
 	_, err = db.CreateBudgetCrossingNotice(ctx, project.ID, task.ID, scope, key, summary, string(data))
 	return err
 }
