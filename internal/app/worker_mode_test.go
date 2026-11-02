@@ -440,7 +440,7 @@ func TestWorkingSignalRejectsTerminalTaskStates(t *testing.T) {
 	}
 }
 
-func TestBriefShowsCurrentTurnTokenAfterWorkingSignal(t *testing.T) {
+func TestBriefShowsAcceptedTurnTokenAfterWorkingAndReviewFixInstructions(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	t.Setenv(workerHomeEnv, fixture.home)
 	t.Setenv("HERDR_ENV", "1")
@@ -484,9 +484,6 @@ func TestBriefShowsCurrentTurnTokenAfterWorkingSignal(t *testing.T) {
 	if !strings.Contains(signal, `turn_token: "signal:1"`) {
 		t.Fatalf("working Signal did not return the refreshed token: %s", signal)
 	}
-	if code, output := runCLI(t, service, "brief"); code != 0 || !strings.Contains(output, "Current Worker turn token: `signal:1`") {
-		t.Fatalf("brief did not advertise current turn token signal:1: code=%d output=%s", code, output)
-	}
 	db, err = store.Open(fixture.home)
 	if err != nil {
 		t.Fatal(err)
@@ -495,11 +492,78 @@ func TestBriefShowsCurrentTurnTokenAfterWorkingSignal(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
+	head, err := gitOutput(context.Background(), fixture.sandbox, "rev-parse", "HEAD")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	pattern, err := db.ExecContext(context.Background(), `INSERT INTO review_patterns(ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(?,1,'turn-token','Refresh turn token','brief shows current token','The launch file is stale','Refresh the launch protocol',1)`, task.ID)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	patternID, err := pattern.LastInsertId()
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,?,?,1,'shop','internal/app/tasks.go','brief','Current Worker turn token',1,?,'P1','introduced',1,'open')`, task.ID, patternID, strings.Repeat("a", 64), head); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	queued, err := db.QueueReviewFixInstruction(context.Background(), task.ID, head, nil, "review:"+head+":P-1", "Fix pattern P-1", nil, nil)
+	if err != nil || !queued.Queued {
+		db.Close()
+		t.Fatalf("queue Review fix: %#v, %v", queued, err)
+	}
+	claimed, err := db.ClaimMessage(context.Background(), queued.MessageID, "delivery", 100, 0)
+	if err != nil || !claimed {
+		db.Close()
+		t.Fatalf("claim Review fix instruction = %v, %v", claimed, err)
+	}
+	if err := db.MarkMessageSubmitting(context.Background(), queued.MessageID, "delivery"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.MarkClaimedMessageDelivered(context.Background(), queued.MessageID, "delivery", 101); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	turnToken, err := db.TaskTurnToken(context.Background(), task.ID)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if code, output := runCLI(t, service, "signal", "done", "Review fix complete", "--turn", "signal:1"); code != 0 || !strings.Contains(output, "state: done") {
-		t.Fatalf("done Signal with the token from brief was rejected: code=%d output=%s", code, output)
+	if code, output := runCLI(t, service, "brief"); code != 0 || !strings.Contains(output, "Current Worker turn token: `"+turnToken+"`") {
+		t.Fatalf("brief did not advertise the delivered Review fix turn token %q: code=%d output=%s", turnToken, code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE id=?`, task.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scratch, err := taskScratchPath(fixture.home, fixture.project, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolutions := filepath.Join(scratch, "resolutions.json")
+	if err := os.WriteFile(resolutions, []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runCLI(t, service, "signal", "done", "Review fix complete", "--turn", turnToken, "--resolutions", resolutions); code != 0 || !strings.Contains(output, "state: done") {
+		t.Fatalf("done Signal with the token from brief and required resolutions was rejected: code=%d output=%s", code, output)
 	}
 }
 
