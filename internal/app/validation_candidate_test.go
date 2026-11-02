@@ -291,6 +291,34 @@ func TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate(t *testing.T)
 	}
 }
 
+func TestFullPipelineTargetRefreshRefusesUnrecordedPrivateFix(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, "unrecorded-fix.txt"), []byte("private fix\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, candidate.WorktreePath, "add", "unrecorded-fix.txt")
+	gitTest(t, candidate.WorktreePath, "commit", "-m", "apply unrecorded Review fix")
+	fixSHA := strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target-change.txt"), []byte("target advanced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "add", "target-change.txt")
+	gitTest(t, fixture.repo, "commit", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "fetch", "origin")
+	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
+	code, output, stderr := fixture.run("publish", "Refresh candidate with unrecorded fix", "--verify", "go test ./internal/app -run TestFullPipelineTargetRefreshRefusesUnrecordedPrivateFix -count=1 -> passed", "--proof", "Private candidate fix commit retained", "--risk", "Risk: low\nRollback: revert")
+	if code == 0 || !strings.Contains(output+stderr, fixSHA) || !strings.Contains(output+stderr, "candidate_review_fix_unmerged") {
+		t.Fatalf("publish did not name the unrecorded private fix: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestFullPipelineStaleCandidateAllowsNeedsDecisionSignal(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
