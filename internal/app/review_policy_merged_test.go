@@ -97,6 +97,57 @@ func TestFullPipelineGatedMergeAfterPRTextRefreshIsNotReportedAsPolicyViolation(
 	}
 }
 
+func TestFullPipelineGatedMergeAfterCarriedReviewPassIsNotReportedAsPolicyViolation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	submitThroughCLI(t, fixture)
+	original, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, original.CandidateSHA)
+
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance target without changing reviewed code")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.ID == original.ID || candidate.TargetSHA == original.TargetSHA {
+		t.Fatalf("target refresh did not create a new candidate: original=%+v refreshed=%+v", original, candidate)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./internal/app -run TestFullPipelineGatedMergeAfterCarriedReviewPassIsNotReportedAsPolicyViolation -count=1 -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("validate candidate with carried Review: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if source, carried, err := fixture.db.ReviewCarrySource(context.Background(), fixture.task.ID, fixture.project.Name, candidate.CandidateSHA); err != nil || !carried || source != original.CandidateSHA {
+		t.Fatalf("candidate Review carry source=%s carried=%t err=%v, want original candidate %s", source, carried, err, original.CandidateSHA)
+	}
+	for _, stage := range []struct {
+		name string
+		args []string
+	}{
+		{"docs", []string{"--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "No unnecessary comments; complete PR description prepared"}},
+		{"lint", []string{"--proof", "Configured Gates passed", "--coverage", "No repository workflow jobs are configured locally"}},
+	} {
+		args := append([]string{"validate", stage.name}, stage.args...)
+		if code, output, stderr := runCandidateCLI(t, fixture, candidate, args...); code != 0 {
+			t.Fatalf("%s stage: code=%d output=%s stderr=%s", stage.name, code, output, stderr)
+		}
+	}
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	fixture.setGHHead(t, candidate.CandidateSHA)
+	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidate.CandidateSHA)
+	if err := runCandidatePromotionForTest(t, fixture); err != nil {
+		t.Fatalf("promote carried-pass candidate: %v (%s)", err, fixture.output.String())
+	}
+	merge := mergeOnOrigin(t, fixture, candidate.TargetSHA, candidate.CandidateSHA, false)
+	if violations := pollMergedPR(t, fixture, candidate.CandidateSHA, merge); len(violations) != 0 {
+		t.Fatalf("Posse-validated merge with a carried Review pass reported as a policy violation: %q", violations)
+	}
+}
+
 func TestFullPipelineGatedRebaseMergeIsNotReportedAsPolicyViolation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
