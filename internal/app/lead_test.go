@@ -17,6 +17,50 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestUpRefusesWorkspaceWithAnotherProjectsLead(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[lead]\nkind = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateProject(ctx, "shop", repo, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	t.Chdir(repo)
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{
+		{PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", Focused: true},
+		{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:other:lead", Agent: "claude", AgentStatus: "working"},
+	}}
+	service := testService(home, fake)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"up", "--name", "shop"}); code == 0 || !strings.Contains(output.String(), "lead_workspace_conflict") || !strings.Contains(output.String(), "Project other") || !strings.Contains(output.String(), "new Herdr workspace") || !strings.Contains(output.String(), "posse up") {
+		t.Fatalf("up did not explain the foreign Lead conflict: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("pane.rename") != 0 || fake.CallCount("agent.start") != 0 {
+		t.Fatalf("up changed a workspace containing another Project's Lead: %#v", fake.Calls)
+	}
+}
+
 func TestConcurrentUpStartsAtMostOneLead(t *testing.T) {
 	installFakeLeadAgents(t, "claude")
 	root := t.TempDir()

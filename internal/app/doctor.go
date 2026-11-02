@@ -314,6 +314,19 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 				}
 			}
 		} else {
+			leadsByWorkspace := make(map[string][]string)
+			for _, pane := range snapshot.Panes {
+				if strings.HasPrefix(pane.Label, "posse:") && strings.HasSuffix(pane.Label, ":lead") {
+					name := strings.TrimSuffix(strings.TrimPrefix(pane.Label, "posse:"), ":lead")
+					leadsByWorkspace[pane.WorkspaceID] = append(leadsByWorkspace[pane.WorkspaceID], name)
+				}
+			}
+			for workspaceID, names := range leadsByWorkspace {
+				if len(names) > 1 {
+					sort.Strings(names)
+					addCheck("Lead panes in workspace "+workspaceID, "warn", "multiple Project Leads share one Herdr workspace: "+strings.Join(names, ", "), "Use one Herdr workspace per Project; open a new workspace for each Project and run `posse up` there")
+				}
+			}
 			for _, project := range registeredProjects {
 				if project.IsWorkspace() {
 					continue
