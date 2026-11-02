@@ -3,14 +3,74 @@ package app
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func writeTestHandoff(t *testing.T, home string, project store.Project, body string) string {
+	t.Helper()
+	path := handoffPath(home, project.Name)
+	contents := fmt.Sprintf("<!-- posse-handoff\nwritten_at: %s\nharness: %q\nsession: %q\ngeneration: 1\n-->\n\n%s", time.Now().UTC().Format(time.RFC3339Nano), "claude", "test-session", body)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestPromptOnlyLeadReceivesHandoffThroughPosseLead(t *testing.T) {
+	for _, kind := range []string{"opencode", "custom"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newPreferenceSetFixture(t)
+			t.Chdir(f.repo)
+			cfg, err := config.Load(f.home, "shop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "custom" {
+				cfg.Kinds[kind] = config.Kind{}
+			}
+			const note = "Prompt-only handoff must survive until posse lead returns it.\n"
+			pending := writeTestHandoff(t, f.home, f.project, note)
+			launch, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.HandoffLoaded {
+				t.Fatal("prompt-only launch marked the handoff consumed before posse lead returned it")
+			}
+			if strings.Contains(strings.Join(launch.Args, " "), "developer_instructions") {
+				t.Fatalf("%s unexpectedly received direct system-prompt instructions: %#v", kind, launch.Args)
+			}
+			userOutput := runPreferenceSetCLI(t, f.service, 0, "lead")
+			if !strings.Contains(userOutput, strings.TrimSpace(note)) {
+				t.Fatalf("posse lead did not show the pending handoff to the User: %s", userOutput)
+			}
+			if _, err := os.Stat(pending); err != nil {
+				t.Fatalf("User invocation consumed the Lead handoff: %v", err)
+			}
+			t.Setenv("HERDR_PANE_ID", "w1:p1")
+			t.Setenv("HERDR_WORKSPACE_ID", "w1")
+			output := runPreferenceSetCLI(t, f.service, 0, "lead")
+			if !strings.Contains(output, strings.TrimSpace(note)) {
+				t.Fatalf("posse lead did not return the handoff: %s", output)
+			}
+			if _, err := os.Stat(pending); !os.IsNotExist(err) {
+				t.Fatalf("posse lead returned but did not consume the handoff: %v", err)
+			}
+			archive := filepath.Join(handoffArchiveDir(f.home, f.project.Name), "handoff-0001.md")
+			if archived, err := os.ReadFile(archive); err != nil || !strings.Contains(string(archived), note) {
+				t.Fatalf("posse lead did not archive the returned handoff: %q, %v", archived, err)
+			}
+		})
+	}
+}
 
 func TestHandoffWriteLoadsOnceAndArchivesOnLeadStartup(t *testing.T) {
 	f := newPreferenceSetFixture(t)

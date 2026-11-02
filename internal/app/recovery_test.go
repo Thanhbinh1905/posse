@@ -371,6 +371,7 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	project.HerdrWorkspaceID = "w1"
 	project.LeadPaneID = "w1:p1"
 	project.LeadLabel = "posse:shop:lead"
+	pendingHandoff := writeTestHandoff(t, home, project, "Recovery must retain the prompt-only handoff.\n")
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "working"}}}
 	fake.Results["agent.get"] = []byte(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
@@ -386,6 +387,9 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	defer db.Close()
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(pendingHandoff); err != nil {
+		t.Fatalf("recovery consumed the handoff before posse lead returned it: %v", err)
 	}
 	found, restartedWithBypass := false, false
 	for _, call := range fake.Calls {
