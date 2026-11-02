@@ -147,15 +147,16 @@ type decisionSnapshot struct {
 }
 
 type noticeSnapshot struct {
-	ID          int64  `toml:"id"`
-	ProjectID   int64  `toml:"project_id"`
-	TaskID      int64  `toml:"task_id"`
-	Kind        string `toml:"kind"`
-	Summary     string `toml:"summary"`
-	DataJSON    string `toml:"data_json"`
-	CreatedAt   int64  `toml:"created_at"`
-	DeliveredAt int64  `toml:"delivered_at"`
-	AckedAt     int64  `toml:"acked_at"`
+	ID                int64  `toml:"id"`
+	ProjectID         int64  `toml:"project_id"`
+	TaskID            int64  `toml:"task_id"`
+	Kind              string `toml:"kind"`
+	Summary           string `toml:"summary"`
+	DataJSON          string `toml:"data_json"`
+	CreatedAt         int64  `toml:"created_at"`
+	DeliveredAt       int64  `toml:"delivered_at"`
+	AckedAt           int64  `toml:"acked_at"`
+	CommandNotifiedAt int64  `toml:"command_notified_at"`
 }
 
 func sameProjectIdentity(a, b Project) bool {
@@ -640,9 +641,9 @@ func (db *DB) readProjectHistorySnapshot(ctx context.Context, projectID int64, s
 		sql  string
 		args []any
 	}{
-		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at,command_notified_at
 			FROM notices INDEXED BY notices_open_idx WHERE project_id=? AND acked_at IS NULL`, []any{projectID}},
-		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at,command_notified_at
 			FROM notices INDEXED BY notices_project_id_idx WHERE project_id=? ORDER BY id DESC LIMIT ?`, []any{projectID, projectSnapshotHistoryLimit}},
 	} {
 		noticeRows, err := db.QueryContext(ctx, query.sql, query.args...)
@@ -652,7 +653,7 @@ func (db *DB) readProjectHistorySnapshot(ctx context.Context, projectID int64, s
 		for noticeRows.Next() {
 			var notice Notice
 			var taskID, deliveredAt, ackedAt sql.NullInt64
-			if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt); err != nil {
+			if err := noticeRows.Scan(&notice.ID, &notice.ProjectID, &taskID, &notice.Kind, &notice.Summary, &notice.DataJSON, &notice.CreatedAt, &deliveredAt, &ackedAt, &notice.CommandNotifiedAt); err != nil {
 				_ = noticeRows.Close()
 				return err
 			}
@@ -1407,9 +1408,9 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, notice := range state.Notices {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO notices(id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO notices(id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at,command_notified_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 				notice.ID, notice.ProjectID, nullableID(notice.TaskID), notice.Kind, notice.Summary, notice.DataJSON, notice.CreatedAt,
-				nullableTime(notice.DeliveredAt), nullableTime(notice.AckedAt)); err != nil {
+				nullableTime(notice.DeliveredAt), nullableTime(notice.AckedAt), notice.CommandNotifiedAt); err != nil {
 				return err
 			}
 		}

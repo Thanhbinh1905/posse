@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/execgroup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -68,13 +69,48 @@ func runNoticeCommandWithLogger(command string, notices []store.Notice, mergeAut
 	}()
 }
 
+func (s *Service) dispatchNoticeCommand(ctx context.Context, db *store.DB, project store.Project, notices []store.Notice) {
+	home, err := s.homePath()
+	if err != nil {
+		log.Printf("posse: could not resolve notify command config for Project %s: %v", project.Name, err)
+		return
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		log.Printf("posse: could not load notify command config for Project %s: %v", project.Name, err)
+		return
+	}
+	if strings.TrimSpace(cfg.Notify.Command) == "" {
+		return
+	}
+	var actionable []store.Notice
+	for _, notice := range notices {
+		if noticeNeedsUser(notice, cfg.Autonomy.Merge) {
+			actionable = append(actionable, notice)
+		}
+	}
+	if len(actionable) == 0 {
+		return
+	}
+	claimed, err := db.ClaimNoticeCommandNotifications(ctx, project.ID, actionable, currentTime())
+	if err != nil {
+		log.Printf("posse: could not record notify command Notices for Project %s: %v", project.Name, err)
+	}
+	runNoticeCommand(cfg.Notify.Command, claimed, cfg.Autonomy.Merge)
+}
+
 func noticeNeedsUser(notice store.Notice, mergeAutonomy string) bool {
 	switch notice.Kind {
 	case "needs_decision", "message_delivery_uncertain", "notice_delivery_uncertain",
 		"task_failed", "task_lost", "quota_exhausted", "pr_closed",
 		"pr_merged_ungated", "review_policy_violation", "head_discontinuity",
-		"root_fetch_failing", "pr_watch_failing", "task_done", "pr_merged":
+		"task_done", "pr_merged":
 		return true
+	case "root_fetch_failing", "pr_watch_failing":
+		var data struct {
+			ConsecutiveFailures int `json:"consecutive_failures"`
+		}
+		return json.Unmarshal([]byte(notice.DataJSON), &data) == nil && data.ConsecutiveFailures >= 3
 	case "merge_ready":
 		return mergeAutonomy == "" || mergeAutonomy == "ask"
 	default:

@@ -162,6 +162,7 @@ func TestNotifyCommandTimeoutIsLoggedWithoutWaiting(t *testing.T) {
 func TestNoticeNeedsUserUsesLowkeyReportingKinds(t *testing.T) {
 	for _, testCase := range []struct {
 		kind           string
+		dataJSON       string
 		mergeAutonomy  string
 		wantUserAction bool
 	}{
@@ -171,8 +172,13 @@ func TestNoticeNeedsUserUsesLowkeyReportingKinds(t *testing.T) {
 		{kind: "merge_ready", mergeAutonomy: "auto", wantUserAction: false},
 		{kind: "pr_opened", wantUserAction: false},
 		{kind: "quota_fallback", wantUserAction: false},
+		{kind: "pr_watch_failing", dataJSON: `{"consecutive_failures":1}`, wantUserAction: false},
+		{kind: "pr_watch_failing", dataJSON: `{"consecutive_failures":3}`, wantUserAction: true},
+		{kind: "pr_watch_failing", dataJSON: `{"watch_episode":"stale"}`, wantUserAction: false},
+		{kind: "root_fetch_failing", dataJSON: `{"consecutive_failures":2}`, wantUserAction: false},
+		{kind: "root_fetch_failing", dataJSON: `{"consecutive_failures":3}`, wantUserAction: true},
 	} {
-		if got := noticeNeedsUser(store.Notice{Kind: testCase.kind}, testCase.mergeAutonomy); got != testCase.wantUserAction {
+		if got := noticeNeedsUser(store.Notice{Kind: testCase.kind, DataJSON: testCase.dataJSON}, testCase.mergeAutonomy); got != testCase.wantUserAction {
 			t.Errorf("noticeNeedsUser(%q, %q) = %v, want %v", testCase.kind, testCase.mergeAutonomy, got, testCase.wantUserAction)
 		}
 	}
@@ -194,4 +200,99 @@ func TestNotifyCommandSchemaAndHelpDescribeTheKey(t *testing.T) {
 	if !strings.Contains(reportingRule(true), "notify.command") {
 		t.Fatal("Lead help does not describe notify.command")
 	}
+}
+
+func TestNotifyCommandDispatchesNewNoticesDuringHerdrThrottle(t *testing.T) {
+	home := t.TempDir()
+	command := filepath.Join(t.TempDir(), "notify.sh")
+	payloadPath := filepath.Join(t.TempDir(), "payload.jsonl")
+	script := "#!/bin/sh\ncat >> " + payloadPath + "\nprintf '\\n' >> " + payloadPath + "\n"
+	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.SetFile(config.ConfigPath(home, "shop"), "notify.command", command, true); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(context.Background(), "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	project, err = db.ProjectByID(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "task_failed", Summary: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{FocusedPaneID: "w1:p1", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle", Focused: true}}}
+	service := testService(home, fake)
+	if err := service.deliverNotices(context.Background(), db, project); err != nil {
+		t.Fatal(err)
+	}
+	waitForNotifyLines(t, payloadPath, 1)
+	secondID, err := db.CreateNotice(context.Background(), store.Notice{ProjectID: project.ID, Kind: "task_lost", Summary: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.deliverNotices(context.Background(), db, project); err != nil {
+		t.Fatal(err)
+	}
+	if fake.CallCount("notification.show") != 1 {
+		t.Fatalf("Herdr popup count during throttle = %d, want 1", fake.CallCount("notification.show"))
+	}
+	if err := service.deliverNotices(context.Background(), db, project); err != nil {
+		t.Fatal(err)
+	}
+	lines := waitForNotifyLines(t, payloadPath, 2)
+	var payloads [][]noticeCommandItem
+	for _, line := range lines {
+		var payload []noticeCommandItem
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			t.Fatalf("invalid JSON payload %q: %v", line, err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if len(payloads) != 2 || len(payloads[0]) != 1 || len(payloads[1]) != 1 ||
+		payloads[0][0].ID != firstID || payloads[1][0].ID != secondID {
+		t.Fatalf("notification payloads = %#v, want Notice ids %d and %d exactly once", payloads, firstID, secondID)
+	}
+	if _, err := db.RebuildFromSnapshots(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.UndeliveredNotices(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := db.ClaimNoticeCommandNotifications(context.Background(), project.ID, notices, currentTime())
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("command notification state after snapshot rebuild = %#v, %v", claimed, err)
+	}
+}
+
+func waitForNotifyLines(t *testing.T, path string, count int) []string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lines := strings.Fields(string(data))
+			if len(lines) >= count {
+				return lines
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(path)
+	t.Fatalf("received fewer than %d notify payloads: %q", count, data)
+	return nil
 }
