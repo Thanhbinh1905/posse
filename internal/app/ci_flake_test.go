@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,82 @@ func TestPRWatchRerunsUntouchedFlakyTestOnceInsteadOfQueueingTheWorker(t *testin
 
 	if code, output, errOutput := f.run("pr", "inspect", "t1"); code != 0 || !strings.Contains(output, "reruns") || !strings.Contains(output, "TestFlaky") || !strings.Contains(output, "flake") || !strings.Contains(output, "failed") {
 		t.Fatalf("pr inspect exit=%d output=%s error=%s, want the flake rerun with its test and outcome", code, output, errOutput)
+	}
+}
+
+func TestOmitRerunShardAggregatesRequiresEveryFailedShard(t *testing.T) {
+	all := []failedCheck{
+		{Name: "e2e shard 7", RunID: "123", JobID: "456"},
+		{Name: "e2e shard 8", RunID: "123", JobID: "458"},
+		{Name: "e2e", RunID: "123", JobID: "457"},
+		{Name: "unit", RunID: "123", JobID: "459"},
+	}
+	candidates := all[:2]
+	remaining := append([]failedCheck(nil), all[1:]...)
+	got := omitRerunShardAggregates(all, candidates, remaining)
+	if failedCheckNames(got) != "e2e shard 8, e2e, unit" {
+		t.Fatalf("remaining failures after only one shard rerun = %#v, want the failed shard and aggregate kept", got)
+	}
+	remaining = remaining[1:]
+	got = omitRerunShardAggregates(all, candidates, remaining)
+	if failedCheckNames(got) != "unit" {
+		t.Fatalf("remaining failures after every shard rerun = %#v, want only the unrelated check", got)
+	}
+}
+
+func TestPRWatchDoesNotQueueAggregateFixWhenEveryFailedShardIsRerunAsFlake(t *testing.T) {
+	f := newFlakeFixture(t)
+	f.freeze(t, "168h")
+	f.recordElsewhere(t, "TestFlaky", time.Hour)
+	f.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", f.headSHA)
+
+	state, err := os.ReadFile(f.ghState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(state, &response); err != nil {
+		t.Fatal(err)
+	}
+	pr := response["data"].(map[string]any)["repo1"].(map[string]any)["pr1"].(map[string]any)
+	rollup := pr["statusCheckRollup"].(map[string]any)
+	contexts := rollup["contexts"].(map[string]any)
+	nodes := contexts["nodes"].([]any)
+	nodes = append(nodes, map[string]any{
+		"__typename": "CheckRun", "name": "e2e", "status": "COMPLETED", "conclusion": "FAILURE",
+		"detailsUrl": "https://github.com/acme/shop/actions/runs/123/job/457", "databaseId": "457",
+		"checkSuite": map[string]any{"workflowRun": map[string]any{"databaseId": 123}},
+	})
+	contexts["nodes"] = nodes
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.ghState, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_RUN_LOG_JOB", "457")
+	t.Setenv("POSSE_TEST_GH_RUN_LOG_FOR_JOB", "E2E shard matrix result: failure")
+
+	f.poll(t)
+	if fixes := f.count(t, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`); fixes != 0 {
+		t.Fatalf("aggregate failure queued %d CI fix rounds after its only failed shard was rerun as a flake", fixes)
+	}
+	if log := f.ghLogText(t); strings.Count(log, "run rerun --job 456 --repo acme/shop") != 1 || strings.Contains(log, "run rerun --job 457") {
+		t.Fatalf("rerun commands = %q, want only the failed shard rerun", log)
+	}
+	if notices := f.count(t, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`); notices != 0 {
+		t.Fatalf("aggregate failure queued %d CI fix Notices", notices)
+	}
+
+	f.setGraphQLState(t, "OPEN", "SUCCESS", "REVIEW_REQUIRED", "MERGEABLE", "", f.headSHA)
+	f.poll(t)
+	if fixes := f.count(t, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`); fixes != 0 {
+		t.Fatalf("CI fix rounds after the shard rerun passed = %d, want none", fixes)
+	}
+	reruns, err := f.db.CIReruns(context.Background(), f.task.ID, "", "https://github.com/acme/shop/pull/17", 10)
+	if err != nil || len(reruns) != 1 || reruns[0].Outcome != "passed" {
+		t.Fatalf("reruns after the aggregate was re-evaluated = %#v err=%v, want one passed flake rerun", reruns, err)
 	}
 }
 
