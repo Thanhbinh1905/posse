@@ -544,10 +544,14 @@ func (s *Service) printCandidateValidationStatus(out *axi.Context, db *store.DB,
 		if err != nil {
 			return err
 		}
-		_, reviewPass, err = reviewPassFor(out.Context, db, task, targets)
+		if err := ensureReviewCarry(out.Context, db, project, task, targets); err != nil {
+			return err
+		}
+		evidence, err := db.ReviewEvidenceFor(out.Context, task.ID, targets)
 		if err != nil {
 			return err
 		}
+		reviewPass = evidence.Complete
 	}
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}}
 	if lane.repo != "" {
