@@ -375,7 +375,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				if err != nil {
 					return err
 				}
-				if err := s.archiveCandidateAtHead(ctx, db, task, candidate); err != nil {
+				if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
 					return err
 				}
 			} else {
@@ -401,7 +401,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 					if err != nil {
 						return err
 					}
-					if err := s.archiveCandidateAtHead(ctx, db, task, candidate); err != nil {
+					if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
 						return err
 					}
 				} else {
@@ -461,7 +461,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 			if err := refuseUnmergedCandidateFixes(ctx, candidate, submittedSHA); err != nil {
 				return err
 			}
-			if err := s.archiveCandidateAtHead(ctx, db, task, candidate); err != nil {
+			if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
 				return err
 			}
 		}
@@ -770,17 +770,6 @@ func promotedPullRequestURL(ctx context.Context, db *store.DB, lane candidateLan
 	return "", nil
 }
 
-func (s *Service) archiveCandidateAtHead(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) error {
-	if candidate.State != store.ValidationCandidateStale && candidate.State != store.ValidationCandidatePromoted {
-		return axi.Failure("candidate_archive_refused", "only a stale or promoted candidate can be superseded", false)
-	}
-	archiveRef, candidateHead, err := archiveCandidateRefAtHead(ctx, db, task, candidate, candidate.CandidateSHA)
-	if err != nil {
-		return err
-	}
-	return db.SupersedeValidationCandidate(ctx, candidate.ID, candidate.State, archiveRef, candidateHead)
-}
-
 func (s *Service) archiveCandidate(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) error {
 	if candidate.State != store.ValidationCandidateStale && candidate.State != store.ValidationCandidatePromoted {
 		return axi.Failure("candidate_archive_refused", "only a stale or promoted candidate can be superseded", false)
@@ -796,18 +785,12 @@ func (s *Service) archiveCandidate(ctx context.Context, db *store.DB, task store
 // archive ref and returns that ref and the archived head. A retry after a
 // crash finds the archive already in place.
 func archiveCandidateRef(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) (string, string, error) {
-	return archiveCandidateRefAtHead(ctx, db, task, candidate, "")
-}
-
-func archiveCandidateRefAtHead(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate, expectedHead string) (string, string, error) {
 	candidateHead, found, err := readGitRef(ctx, task.WorktreePath, candidate.RefName)
 	if err != nil {
 		return "", "", err
 	}
 	if !found {
 		candidateHead = candidate.CandidateSHA
-	} else if expectedHead != "" && candidateHead != expectedHead {
-		return "", "", axi.Failure("candidate_ref_moved", "private candidate ref moved after the preservation check", false, candidate.RefName)
 	} else if candidateHead != candidate.CandidateSHA {
 		if !gitAncestor(ctx, task.WorktreePath, candidate.CandidateSHA, candidateHead) {
 			return "", "", axi.Failure("candidate_ref_moved", "private candidate ref no longer descends from its recorded head", false, candidate.RefName)
@@ -861,9 +844,6 @@ func archiveCandidateRefAtHead(ctx context.Context, db *store.DB, task store.Tas
 	if current, ok, err := readGitRef(ctx, task.WorktreePath, candidate.RefName); err != nil {
 		return "", "", err
 	} else if ok {
-		if expectedHead != "" && current != expectedHead {
-			return "", "", axi.Failure("candidate_ref_moved", "private candidate ref moved after the preservation check", false, candidate.RefName)
-		}
 		if err := deleteGitRef(ctx, task.WorktreePath, candidate.RefName, current); err != nil {
 			return "", "", err
 		}
