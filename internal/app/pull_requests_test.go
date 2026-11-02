@@ -87,6 +87,31 @@ func TestPRMergePushesGatedBranchAndOpensPullRequest(t *testing.T) {
 	}
 }
 
+func TestPRDescriptionChangesUseRemoteDefaultBranchWhenLocalDefaultIsBehind(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	localBase := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "main"))
+	gitTest(t, fixture.repo, "checkout", "--detach", localBase)
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "upstream change")
+	gitTest(t, fixture.repo, "push", "origin", "HEAD:main")
+	gitTest(t, fixture.worktree, "fetch", "origin")
+	gitTest(t, fixture.worktree, "rebase", "--onto", "origin/main", localBase)
+
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "main")); got != localBase {
+		t.Fatalf("local main moved to %s, want stale base %s", got, localBase)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/remotes/origin/main")); got == localBase {
+		t.Fatalf("origin/main did not advance beyond stale local main %s", localBase)
+	}
+	_, body, err := prDetails(context.Background(), fixture.db, fixture.project, fixture.task, fixture.service.homePath, "", "Worker completion summary", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := strings.SplitN(strings.SplitN(body, "## Changes\n\n", 2)[1], "\n\n## Verification", 2)[0]
+	if strings.Contains(changes, "upstream change") || !strings.Contains(changes, "worker change") {
+		t.Fatalf("PR Changes should list only commits beyond origin/main, got %q", changes)
+	}
+}
+
 func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	brief := "---\ntype: change\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12]\nrefs: [14]\n---\nE2E intent\n"
