@@ -245,6 +245,16 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			}
 			unconfigured := startWorker("t2", "no-skills-block")
 			assertReadSkills(t, kind+" Worker without a [skills] block", filepath.Join(skillReads, filepath.Base(unconfigured.WorktreePath)), platform)
+
+			directConfig := "[lead]\nkind = \"" + kind + "\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 2\n\n[pool]\nkeep_idle = 1\n"
+			if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(directConfig), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			direct := startWorker("t3", "unconfigured-direct-path")
+			directPlan, err := direct.AdmittedPlan()
+			if err != nil || directPlan == nil || directPlan.Workflow != nil || directPlan.Launch.ProfileName != "implicit:"+kind || directPlan.Launch.Profile.Kind != kind || directPlan.Launch.Profile.Model != "" || directPlan.Launch.Profile.Effort != "" || len(directPlan.Launch.Profile.Args) != 0 {
+				t.Fatalf("unconfigured %s path did not freeze its implicit launch identity: %#v %v", kind, directPlan, err)
+			}
 			for _, path := range []string{
 				filepath.Join(root, "home", ".agents", "skills"),
 				filepath.Join(repo, ".agents"), filepath.Join(repo, ".claude"), filepath.Join(repo, ".pi"), filepath.Join(repo, ".codex"),
