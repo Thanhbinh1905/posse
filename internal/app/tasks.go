@@ -265,44 +265,58 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	var reviewsTaskID int64
 	var reviewedTask *store.Task
 	var reviewTargets []store.ReviewTarget
+	var reportReview *reportReviewTarget
 	if brief.Type == "review" {
 		reviewed, err := s.currentTask(ctx.Context, db, project, brief.ReviewOf)
 		if err != nil {
 			return err
 		}
-		if reviewed.Type != "change" {
-			return axi.Failure("brief_invalid", "review_of must identify a Change Task", false)
-		}
-		if reviewed.Branch == "" {
-			return axi.Failure("brief_invalid", "the reviewed Task has no branch to inspect", false)
-		}
-		reviewPlan, planErr := reviewed.AdmittedPlan()
-		if planErr != nil {
-			return admittedPlanFailure(planErr)
-		}
-		candidateReview := reviewPlan != nil && (reviewPlan.Review == "full-pipeline" || workspaceHasFullPipeline(reviewPlan)) &&
-			(reviewed.State == store.StateWorking || reviewed.State == store.StateStalled || reviewed.State == store.StateDone || reviewed.State == store.StateMerging)
-		if !candidateReview {
-			if err := reviewableChange(reviewed); err != nil {
-				return err
+		if reviewed.Type == "research" {
+			if reviewed.ReportKind != "spec" && reviewed.ReportKind != "tickets" {
+				return axi.Failure("brief_invalid", "review_of must identify a Change Task or publication-bound Report", false)
 			}
-		}
-		reviewTargets, err = changeCandidateTargets(ctx.Context, db, project, reviewed)
-		if err != nil {
-			return axi.Failure("review_target_unresolved", "cannot pin the reviewed Change revision: "+err.Error(), false)
-		}
-		if generated != nil && (generated.Admission.ChangeTaskID != reviewed.ID || !store.SameReviewTargets(reviewTargets, generated.Targets)) {
-			return axi.Failure("review_head_changed", "Change head changed while the Review Round was being admitted", true, "Retry `posse review start`; Posse will recompute its scope")
+			if reviewed.State != store.StateTornDown {
+				return axi.Failure("report_review_target_incomplete", "Report review requires a completed Research Task sealed by Teardown", false)
+			}
+			if err := verifyReportBundle(home, project, reviewed); err != nil {
+				return axi.Failure("report_bundle_invalid", err.Error(), false)
+			}
+			reportReview = &reportReviewTarget{ReportTaskID: reviewed.ID, ReportDigest: reviewed.ReportDigest, ManifestJSON: reviewed.ReportManifestJSON}
+			baseRef = project.DefaultBranch
+		} else if reviewed.Type == "change" {
+			if reviewed.Branch == "" {
+				return axi.Failure("brief_invalid", "the reviewed Task has no branch to inspect", false)
+			}
+			reviewPlan, planErr := reviewed.AdmittedPlan()
+			if planErr != nil {
+				return admittedPlanFailure(planErr)
+			}
+			candidateReview := reviewPlan != nil && (reviewPlan.Review == "full-pipeline" || workspaceHasFullPipeline(reviewPlan)) &&
+				(reviewed.State == store.StateWorking || reviewed.State == store.StateStalled || reviewed.State == store.StateDone || reviewed.State == store.StateMerging)
+			if !candidateReview {
+				if err := reviewableChange(reviewed); err != nil {
+					return err
+				}
+			}
+			reviewTargets, err = changeCandidateTargets(ctx.Context, db, project, reviewed)
+			if err != nil {
+				return axi.Failure("review_target_unresolved", "cannot pin the reviewed Change revision: "+err.Error(), false)
+			}
+			if generated != nil && (generated.Admission.ChangeTaskID != reviewed.ID || !store.SameReviewTargets(reviewTargets, generated.Targets)) {
+				return axi.Failure("review_head_changed", "Change head changed while the Review Round was being admitted", true, "Retry `posse review start`; Posse will recompute its scope")
+			}
+			baseRef = reviewed.Branch
+			if candidateReview && !project.IsWorkspace() {
+				candidate, err := db.LatestValidationCandidate(ctx.Context, reviewed.ID, "")
+				if err != nil {
+					return axi.Failure("candidate_missing", "private candidate disappeared before Review admission", false)
+				}
+				baseRef = candidate.RefName
+			}
+		} else {
+			return axi.Failure("brief_invalid", "review_of must identify a Change Task or publication-bound Report", false)
 		}
 		reviewsTaskID = reviewed.ID
-		baseRef = reviewed.Branch
-		if candidateReview && !project.IsWorkspace() {
-			candidate, err := db.LatestValidationCandidate(ctx.Context, reviewed.ID, "")
-			if err != nil {
-				return axi.Failure("candidate_missing", "private candidate disappeared before Review admission", false)
-			}
-			baseRef = candidate.RefName
-		}
 		reviewedTask = &reviewed
 		kindConfig, found := cfg.Kinds[resolution.Resolved.Kind]
 		if !found {
@@ -461,6 +475,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice, workflow)
 	if err != nil {
 		return admittedPlanFailure(err)
+	}
+	if reportReview != nil {
+		reportInputs, err := reportReviewPlanInputs(home, project, *reviewedTask)
+		if err != nil {
+			return axi.Failure("report_bundle_invalid", err.Error(), false)
+		}
+		plan.Inputs = append(plan.Inputs, reportInputs...)
+		briefInput := plan.Inputs[0]
+		briefInput = taskplan.Select("brief", briefInput.Source, append(append([]byte(nil), briefInput.Bytes...), []byte(reportReviewInstructions(*reportReview))...))
+		plan.Inputs[0] = briefInput
 	}
 	plan.Dependencies = append([]dispatch.Dependency(nil), brief.After...)
 	if generated != nil {
@@ -1481,6 +1505,35 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["plan_sha256"] = plan.SHA256()
 		rootContext = plan.Execution.RootContext
 	}
+	var reportReview *reportReviewTarget
+	if task.Type == "review" && task.ReviewsTaskID != 0 {
+		isReport, err := isReportReviewTask(ctx.Context, db, task)
+		if err != nil {
+			return err
+		}
+		if isReport {
+			reportReview, err = reportReviewTargetFromPlan(admittedPlan, task.ReviewsTaskID)
+			if err != nil {
+				return axi.Failure("report_review_target_invalid", err.Error(), false)
+			}
+			if reportReview == nil {
+				return axi.Failure("review_target_unbound", "this Report Review Task has no frozen Report bundle target", false, "Dispatch a new Review Task with `posse review start <report>`")
+			}
+			reportTask, err := db.TaskByID(ctx.Context, task.ProjectID, task.ReviewsTaskID)
+			if err != nil {
+				return err
+			}
+			if err := verifyReportBundle(home, project, reportTask); err != nil {
+				return axi.Failure("report_bundle_invalid", err.Error(), false)
+			}
+			if err := validateReportReviewTarget(*reportReview, reportTask); err != nil {
+				return axi.Failure("report_review_target_stale", err.Error(), false)
+			}
+			if verb == "done" && !verdictGiven {
+				return axi.Failure("signal_invalid", "a Report Review Task requires --verdict <pass|changes_requested|inconclusive>", false)
+			}
+		}
+	}
 	if task.Type == "change" {
 		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, project, task, false, verb != "done"); err != nil {
 			return err
@@ -1801,7 +1854,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["reason"] = note
 	}
 	var verdict *store.ReviewVerdictInput
-	if verdictGiven {
+	if verdictGiven && reportReview == nil {
 		targets, err := db.ReviewTargets(ctx.Context, task.ID)
 		if err != nil {
 			return err
@@ -1836,6 +1889,8 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if noChange {
 		// No candidate or head to validate: the Task changed nothing.
 		state, err = db.RecordWorkerSignalWithVerdict(ctx.Context, task, verb, note, data, noticeKind, nil)
+	} else if verb == "done" && reportReview != nil {
+		state, err = db.RecordWorkerSignalWithReportReview(ctx.Context, task, verb, note, data, noticeKind, reportReview.ReportTaskID, reportReview.ReportDigest, verdictFlag)
 	} else {
 		state, err = s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, false, reviewResolutions)
 	}
