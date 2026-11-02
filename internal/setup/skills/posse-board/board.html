@@ -807,12 +807,15 @@ main {
       render();
       return;
     }
+    const request = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Date.now().toString(36) + Math.random().toString(36).slice(2);
     lavish.queuePrompt(
       "posse-board-start #" + card.number + ": the User confirmed on the board to start issue #" + card.number + " \"" + card.issue.title + "\".",
-      { tag: "posse-board-start", text: "Start #" + card.number, queueKey: "posse-board-start-" + card.number, data: { action: "posse-board-start", issue: card.number, title: card.issue.title } },
+      { tag: "posse-board-start", text: "Start #" + card.number, queueKey: "posse-board-start-" + card.number, data: { action: "posse-board-start", issue: card.number, title: card.issue.title, request } },
     );
     if (typeof lavish.sendQueuedPrompts === "function") lavish.sendQueuedPrompts();
-    state.pending.set(card.number, Date.now());
+    state.pending.set(card.number, request);
     note("sent start #" + card.number + " to the Lead");
     render();
   }
@@ -901,14 +904,14 @@ main {
   }
 
   async function refresh() {
-    let posse, issues;
+    let posse, issues, starts;
     try {
-      [posse, issues] = await Promise.all([load("posse"), load("issues")]);
+      [posse, issues, starts] = await Promise.all([load("posse"), load("issues"), load("starts").catch(() => [])]);
     } catch {
       if (!state.model) $("lanes").replaceChildren(h("div", { class: "empty" }, "Waiting for board data: the Lead writes posse.js and issues.js beside this page."));
       return;
     }
-    const raw = JSON.stringify([posse, issues]);
+    const raw = JSON.stringify([posse, issues, starts]);
     if (raw === state.raw) return;
     state.raw = raw;
     state.model = buildModel(posse, Array.isArray(issues) ? issues : [], Date.now());
@@ -916,6 +919,13 @@ main {
       if (card.kind === "task" && card.number && state.pending.has(card.number)) {
         state.pending.delete(card.number);
         note("started " + card.task.id + " for #" + card.number);
+      }
+    }
+    const completedStarts = new Set(Array.isArray(starts) ? starts : []);
+    for (const [number, request] of state.pending) {
+      if (completedStarts.has(request)) {
+        state.pending.delete(number);
+        note("Lead declined the start for #" + number);
       }
     }
     if (state.selected && !findCard(state.selected)) {
@@ -928,6 +938,7 @@ main {
   }
 
   refresh();
+  window.addEventListener("focus", refresh);
   setInterval(refresh, REFRESH_MS);
 })();
 </script>

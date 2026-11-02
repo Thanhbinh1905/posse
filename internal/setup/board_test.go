@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -155,8 +156,10 @@ type boardRun struct {
 			Data map[string]any `json:"data"`
 		} `json:"options"`
 	} `json:"prompts"`
-	Sends    int    `json:"sends"`
-	Activity string `json:"activity"`
+	Sends          int    `json:"sends"`
+	Activity       string `json:"activity"`
+	RetriedPrompts int    `json:"retriedPrompts"`
+	RetryColumn    string `json:"retryColumn"`
 }
 
 type layoutRun struct {
@@ -223,6 +226,91 @@ func TestBoardMapsFixtureDataAndQueuesOneStartPrompt(t *testing.T) {
 	}
 	if !strings.Contains(run.Activity, "sent start #23 to the Lead") || !strings.Contains(run.Activity, "#23 was already sent") {
 		t.Errorf("activity = %q, want the send and the refused second start", run.Activity)
+	}
+}
+
+func TestBoardDeclinedStartReturnsIssueToReady(t *testing.T) {
+	chrome := chromeBinary(t)
+	boardDir := boardFixture(t)
+	fileServer := http.FileServer(http.Dir(boardDir))
+	base, err := os.ReadFile(filepath.Join(boardDir, "posse.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := strings.TrimSuffix(strings.TrimPrefix(string(base), "posseBoardData(\"posse\", "), ");\n")
+	var data map[string]any
+	if err := json.Unmarshal([]byte(encoded), &data); err != nil {
+		t.Fatal(err)
+	}
+	completed := map[string]bool{}
+	var completedMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/complete":
+			completedMu.Lock()
+			completed[r.URL.Query().Get("token")] = true
+			completedMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case "/posse.js":
+			current := map[string]any{}
+			for key, value := range data {
+				current[key] = value
+			}
+			project := map[string]any{}
+			for key, value := range data["project"].(map[string]any) {
+				project[key] = value
+			}
+			project["lead"] = "working"
+			current["project"] = project
+			encoded, err := json.Marshal(current)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, "posseBoardData(%q, %s);\n", "posse", encoded)
+			return
+		case "/starts.js":
+			completedMu.Lock()
+			var tokens []string
+			for token := range completed {
+				tokens = append(tokens, token)
+			}
+			completedMu.Unlock()
+			encoded, err := json.Marshal(tokens)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, "posseBoardData(%q, %s);\n", "starts", encoded)
+			return
+		default:
+			fileServer.ServeHTTP(w, r)
+		}
+	}))
+	defer server.Close()
+	var run boardRun
+	runHarness(t, chrome, server.URL, 1440, 900, "issue=23&decline=1", &run)
+	if run.RetriedPrompts != 2 {
+		t.Fatalf("prompts after Lead declined the start = %d, column=%q activity=%q, want 2", run.RetriedPrompts, run.RetryColumn, run.Activity)
+	}
+	if request, ok := run.Prompts[0].Options.Data["request"].(string); !ok || request == "" {
+		t.Fatalf("start prompt request = %v, want a unique completion token", run.Prompts[0].Options.Data["request"])
+	}
+	if run.RetryColumn != "ready" {
+		t.Errorf("declined issue is in %q, want Ready", run.RetryColumn)
+	}
+	proof := filepath.Join(os.Getenv("TMPDIR"), "t831-board-declined.png")
+	if err := os.MkdirAll(filepath.Dir(proof), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runChrome(t, chrome, "--window-size=1440,900", "--screenshot="+proof, server.URL+"/harness.html?w=1440&h=900&issue=23&decline=1&snapshot=1")
+	info, err := os.Stat(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("declined-board screenshot is empty")
 	}
 }
 

@@ -65,11 +65,27 @@
   key("s");
   const dialog = !doc.getElementById("confirm").hidden;
   key("Enter");
-  key("s");
-  key("Enter");
+  let retriedPrompts = 0;
+  let retryColumn = "";
+  if (params.has("decline")) {
+    const request = prompts[0]?.options?.data?.request || "missing-request";
+    await fetch("complete?token=" + encodeURIComponent(request), { method: "POST" });
+    win.dispatchEvent(new win.Event("focus"));
+    await sleep(100);
+    const card = doc.querySelector('[data-key="#23"]');
+    retryColumn = card?.dataset.column || "";
+    if (!params.has("snapshot")) {
+      key("s");
+      key("Enter");
+      retriedPrompts = prompts.length;
+    }
+  } else {
+    key("s");
+    key("Enter");
+  }
   const activity = doc.getElementById("activity").textContent;
 
-  document.getElementById("result").textContent = JSON.stringify({ columns, lanes, pageScrollsX, pageScrollsY, selected, dialog, prompts, sends, activity });
+  document.getElementById("result").textContent = JSON.stringify({ columns, lanes, pageScrollsX, pageScrollsY, selected, dialog, prompts, sends, activity, retriedPrompts, retryColumn });
 })();
 </script>
 </body>
