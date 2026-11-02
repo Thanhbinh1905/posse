@@ -387,26 +387,36 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 	return db.PersistProject(ctx, projectID)
 }
 
+const resolvedDecisionPredicate = `
+		(d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode='pr' AND NOT EXISTS(
+			SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url
+			AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url)
+			AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS'
+			AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'))))
+		OR (d.kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>d.task_launches))
+		OR (d.kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>d.task_launches))
+		OR (d.kind='dependency' AND t.state<>'queued')
+		OR (d.kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches))
+		OR (d.kind='pr_closed' AND (
+			(d.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR d.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url))
+			OR (d.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down'
+				OR (t.pr_url<>substr(d.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(d.origin,11)))
+				OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(d.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
+		OR (d.kind='orphan' AND d.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')`
+
 // ObsoleteResolvedDecisions removes unanswered questions whose situation has
 // resolved. Answered Decisions are otherwise retained.
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {
-	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=CASE kind
-		WHEN 'merge_ready' THEN CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE id=decisions.task_id AND state NOT IN ('done','merging')) THEN 'Task left merge-ready state' ELSE 'PR is no longer ready to merge' END
+	result, err := db.ExecContext(ctx, `UPDATE decisions AS d SET obsolete_at=?,obsolete_reason=CASE d.kind
+		WHEN 'merge_ready' THEN CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE id=d.task_id AND state NOT IN ('done','merging')) THEN 'Task left merge-ready state' ELSE 'PR is no longer ready to merge' END
 		WHEN 'worker_exited' THEN 'Task reopened or Worker launch changed'
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
 		WHEN 'orphan' THEN 'Unrecoverable Orphan resolved during Teardown'
 		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
 		WHEN 'dependency' THEN 'Task is no longer queued'
 		ELSE 'Task no longer failed or lost' END
-		WHERE project_id=? AND answered_at=0 AND obsolete_at=0 AND kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','dependency')
-		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=decisions.task_id AND
-		((kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode='pr' AND NOT EXISTS(SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url) AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS' AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'))))
-		OR (kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>decisions.task_launches))
-		OR (kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>decisions.task_launches))
-		OR (kind='dependency' AND t.state<>'queued')
-		OR (kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>decisions.task_launches))
-		OR (kind='pr_closed' AND ((decisions.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR decisions.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url)) OR (decisions.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR (t.pr_url<>substr(decisions.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(decisions.origin,11))) OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(decisions.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
-		OR (kind='orphan' AND decisions.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')))`, time.Now().UnixMilli(), projectID)
+		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','dependency')
+		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=d.task_id AND (`+resolvedDecisionPredicate+`))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
 		return err
 	}
@@ -480,15 +490,7 @@ func (db *DB) Decisions(ctx context.Context, projectID int64, pendingOnly bool) 
 func (db *DB) PendingDecisions(ctx context.Context, projectID int64) ([]Decision, error) {
 	query := decisionSelect + ` d
 		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0
-		AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND NOT (
-			(d.kind='merge_ready' AND t.state NOT IN ('done','merging'))
-			OR (d.kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>d.task_launches))
-			OR (d.kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>d.task_launches))
-			OR (d.kind='dependency' AND t.state<>'queued')
-			OR (d.kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches))
-			OR (d.kind='pr_closed' AND t.state='torn-down')
-			OR (d.kind='orphan' AND d.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')
-		))
+		AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND NOT (` + resolvedDecisionPredicate + `))
 		ORDER BY d.id`
 	rows, err := db.QueryContext(ctx, query, projectID)
 	if err != nil {

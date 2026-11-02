@@ -54,16 +54,86 @@ func TestMergeReadyDecisionIsObsoletedWhenLatestPRObservationIsStale(t *testing.
 	if _, err := db.RecordPRObservation(ctx, observation, PRObservationEffect{}, task); err != nil {
 		t.Fatal(err)
 	}
+	pending, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("stale PR remained in read-only pending Decisions: %#v %v", pending, err)
+	}
+	var obsoleteAt int64
+	if err := db.QueryRowContext(ctx, `SELECT obsolete_at FROM decisions WHERE id=?`, decision.ID).Scan(&obsoleteAt); err != nil || obsoleteAt != 0 {
+		t.Fatalf("pending read wrote obsolete_at=%d, err=%v", obsoleteAt, err)
+	}
 	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "merge", "User approved merge"); err == nil || !strings.Contains(err.Error(), "PR is no longer ready to merge") {
 		t.Fatalf("stale PR Decision accepted or had the wrong reason: %v", err)
 	}
-	pending, err := db.Decisions(ctx, project.ID, true)
+	pending, err = db.Decisions(ctx, project.ID, true)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("stale PR left a merge Decision pending: %#v %v", pending, err)
 	}
 	decision, err = db.Decision(ctx, project.ID, decision.ID)
 	if err != nil || decision.ObsoleteAt == 0 || decision.ObsoleteReason != "PR is no longer ready to merge" {
 		t.Fatalf("stale PR Decision = %#v, %v", decision, err)
+	}
+}
+
+func TestPendingDecisionsExcludeReopenedOrReplacedClosedPRsWithoutWrites(t *testing.T) {
+	for _, scenario := range []string{"reopened", "replaced"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "pr"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, transition := range []struct {
+				from, to State
+				source   string
+			}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateMerging, "cli"}} {
+				if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const oldURL = "https://github.com/acme/shop/pull/1"
+			if err := db.UpdateTaskMerge(ctx, taskID, oldURL, ""); err != nil {
+				t.Fatal(err)
+			}
+			task, err := db.TaskByID(ctx, project.ID, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation := PRObservation{ProjectID: project.ID, TaskID: taskID, PRURL: oldURL, HeadSHA: "head-sha", State: "CLOSED", Checks: `{"state":"SUCCESS"}`, Review: "APPROVED", Mergeable: "MERGEABLE", ObservedAt: 1}
+			if _, err := db.RecordPRObservation(ctx, observation, PRObservationEffect{}, task); err != nil {
+				t.Fatal(err)
+			}
+			decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "pr_closed:" + oldURL, Kind: "pr_closed", Question: "Reopen or discard?", Options: []string{"reopen", "discard"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "reopened" {
+				observation.State = "OPEN"
+				observation.ObservedAt++
+				if _, err := db.RecordPRObservation(ctx, observation, PRObservationEffect{}, task); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := db.UpdateTaskMerge(ctx, taskID, "https://github.com/acme/shop/pull/2", ""); err != nil {
+				t.Fatal(err)
+			}
+			pending, err := db.PendingDecisions(ctx, project.ID)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("%s PR remained in read-only pending Decisions: %#v %v", scenario, pending, err)
+			}
+			var obsoleteAt int64
+			if err := db.QueryRowContext(ctx, `SELECT obsolete_at FROM decisions WHERE id=?`, decision.ID).Scan(&obsoleteAt); err != nil || obsoleteAt != 0 {
+				t.Fatalf("pending read wrote obsolete_at=%d, err=%v", obsoleteAt, err)
+			}
+		})
 	}
 }
 
