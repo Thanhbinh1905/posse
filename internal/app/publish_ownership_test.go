@@ -137,25 +137,28 @@ func TestCandidateValidationAcceptsGitignoredLocalFilesFromSandbox(t *testing.T)
 		t.Fatal(err)
 	}
 	installFullPipelinePlan(t, fixture)
+	if err := os.MkdirAll(filepath.Join(fixture.home, "projects", "shop"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.home, "projects", "shop", "config.toml"), []byte("[pipeline]\ncandidate_files = [\"app.yaml\", \"missing.yaml\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
 	output, _ := submitThroughCLI(t, fixture)
-	if !strings.Contains(output, "copy the ones validation needs from the Sandbox") {
-		t.Fatalf("submission does not explain gitignored files: %s", output)
+	if !strings.Contains(output, "missing.yaml") {
+		t.Fatalf("submission does not report a missing configured file: %s", output)
 	}
 	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	local := filepath.Join(candidate.WorktreePath, "app.yaml")
-	if _, err := os.Stat(local); !os.IsNotExist(err) {
-		t.Fatalf("fresh candidate checkout already has the gitignored file: %v", err)
-	}
-	contents, err := os.ReadFile(filepath.Join(fixture.worktree, "app.yaml"))
+	contents, err := os.ReadFile(local)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("configured gitignored file was not copied: %v", err)
 	}
-	if err := os.WriteFile(local, contents, 0o600); err != nil {
-		t.Fatal(err)
+	if string(contents) != "secret: local\n" {
+		t.Fatalf("candidate file contents = %q", contents)
 	}
 	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
 	recordCandidateStages(t, fixture)

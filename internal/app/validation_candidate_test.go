@@ -55,7 +55,7 @@ func submitCandidateForTest(t *testing.T, fixture *prMergeFixture) error {
 	t.Helper()
 	return fixture.service.submitPrivateCandidate(
 		&axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}, fixture.db, fixture.home,
-		singleCandidateLane(fixture.project, fixture.task), "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
+		singleCandidateLane(fixture.project, fixture.task), config.Config{}, "Candidate summary", "go test ./... -> passed", "Intent proof: verified", "Risk: low\nRollback: revert", false,
 	)
 }
 

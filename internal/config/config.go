@@ -74,6 +74,10 @@ type FullPipeline struct {
 	RunWorkflows bool `toml:"run_workflows" json:"run_workflows"`
 }
 
+type Pipeline struct {
+	CandidateFiles []string `toml:"candidate_files" json:"candidate_files"`
+}
+
 type Pool struct {
 	Clean    string   `toml:"clean" json:"clean"`
 	Setup    []string `toml:"setup" json:"setup"`
@@ -177,10 +181,11 @@ type Autonomy struct {
 
 // Repository is the per-member policy of a workspace Project.
 type Repository struct {
-	Review       string `toml:"review" json:"review"`
-	MergeMode    string `toml:"merge_mode" json:"merge_mode"`
-	TargetBranch string `toml:"target_branch" json:"target_branch"`
-	Forge        string `toml:"forge" json:"forge"`
+	CandidateFiles []string `toml:"candidate_files" json:"candidate_files"`
+	Review         string   `toml:"review" json:"review"`
+	MergeMode      string   `toml:"merge_mode" json:"merge_mode"`
+	TargetBranch   string   `toml:"target_branch" json:"target_branch"`
+	Forge          string   `toml:"forge" json:"forge"`
 	// DeleteBranchOnMerge is nil when the Member inherits the Project value.
 	DeleteBranchOnMerge *bool `toml:"delete_branch_on_merge" json:"delete_branch_on_merge,omitempty"`
 }
@@ -217,6 +222,7 @@ type Config struct {
 	ReviewLoop          ReviewLoop                 `toml:"review_loop" json:"review_loop"`
 	CILoop              CILoop                     `toml:"ci_loop" json:"ci_loop"`
 	FullPipeline        FullPipeline               `toml:"full_pipeline" json:"full_pipeline"`
+	Pipeline            Pipeline                   `toml:"pipeline" json:"pipeline"`
 	Pool                Pool                       `toml:"pool" json:"pool"`
 	Retention           Retention                  `toml:"retention" json:"retention"`
 	Research            Research                   `toml:"research" json:"research"`
@@ -684,6 +690,7 @@ func defaultMap() map[string]any {
 		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}, "profile": ""},
 		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
 		"full_pipeline":   map[string]any{"run_workflows": false},
+		"pipeline":        map[string]any{"candidate_files": []string{}},
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":          map[string]any{"lead": false},
 		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
@@ -763,6 +770,10 @@ func (c Config) Validate(projectFile bool) error {
 	return issues[0]
 }
 
+func validCandidatePath(path string) bool {
+	return path != "" && filepath.IsLocal(path) && filepath.Clean(path) == path && path != "." && !strings.ContainsAny(path, `\\*?[]`)
+}
+
 // ValidationIssues returns all independent semantic config errors in stable
 // order. Validate retains the first error for normal load and setup paths.
 func (c Config) ValidationIssues(projectFile bool) []error {
@@ -827,6 +838,12 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	}
 	for _, name := range sortedMapKeys(c.Repositories) {
 		repo := c.Repositories[name]
+		for _, path := range repo.CandidateFiles {
+			if !validCandidatePath(path) {
+				add("repositories."+name+".candidate_files", "entries must be plain repository-relative paths without glob characters")
+				break
+			}
+		}
 		if repo.Review != "" {
 			if err := ValidateReview(repo.Review); err != nil {
 				addErr("repositories."+name+".review", err)
@@ -834,6 +851,12 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		}
 		if !oneOf(repo.Forge, "", "auto", "github", "gitlab") {
 			add("repositories."+name+".forge", "must be auto, github or gitlab")
+		}
+	}
+	for _, path := range c.Pipeline.CandidateFiles {
+		if !validCandidatePath(path) {
+			add("pipeline.candidate_files", "entries must be plain repository-relative paths without glob characters")
+			break
 		}
 	}
 	if !oneOf(c.Defaults.MergeMethod, "squash", "merge", "rebase") {

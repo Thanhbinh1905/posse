@@ -318,7 +318,7 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 		}
 		return s.promotePrivateCandidate(out, db, home, lane, cfg)
 	}
-	return s.submitPrivateCandidate(out, db, home, lane, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
+	return s.submitPrivateCandidate(out, db, home, lane, cfg, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
 }
 
 // A workspace Signal must account for every changed PR-mode member, not just

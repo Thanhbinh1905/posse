@@ -72,6 +72,8 @@ var keySpecs = []KeySpec{
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
 	{Key: "full_pipeline.run_workflows", Type: TypeBoolean, Default: false, Meaning: "Explicitly allow locally executing repository CI workflow shell steps in the private full-pipeline candidate; unsupported jobs remain visible and cannot be inferred from repository files.", UserOnly: true},
+	{Key: "pipeline.candidate_files", Type: TypeStringArray, Default: []string{}, Meaning: "Repository-relative gitignored paths copied from the Task Sandbox into each private candidate checkout before validation."},
+	{Key: "repositories.<repo>.candidate_files", Type: TypeStringArray, Meaning: "Repository-relative gitignored paths copied from this workspace Member's Task Sandbox into its private candidate checkout before validation."},
 	{Key: "repositories.<repo>.merge_mode", Type: TypeString, Allowed: []string{"local", "pr"}, Meaning: "How this member repository of a workspace Project Merges; defaults to local without an origin, else the Project merge_mode."},
 	{Key: "repositories.<repo>.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for this workspace Member; overrides defaults.target_branch and the Member's default branch."},
 	{Key: "pool.clean", Type: TypeString, Allowed: []string{"warm", "pristine"}, Default: "warm", Meaning: "Whether released Sandboxes keep ignored files."},
