@@ -20,7 +20,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func TestReviewRoundCarriesDeliveredLeadInstructionsThatChangeScope(t *testing.T) {
+func TestReviewRoundCarriesScopeInstructionsThroughThirdCompletion(t *testing.T) {
 	f := newStartFixture(t)
 	if code, output := f.start(t); code != 0 {
 		t.Fatalf("start code=%d %s", code, output)
@@ -31,7 +31,7 @@ func TestReviewRoundCarriesDeliveredLeadInstructionsThatChangeScope(t *testing.T
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, at := range []int64{100, 300} {
+	for _, at := range []int64{100, 300, 500} {
 		if _, err := db.ExecContext(context.Background(), `INSERT INTO signals(task_id,verb,at) VALUES(?,'done',?)`, change.ID, at); err != nil {
 			t.Fatal(err)
 		}
@@ -41,8 +41,10 @@ func TestReviewRoundCarriesDeliveredLeadInstructionsThatChangeScope(t *testing.T
 		createdAt   int64
 		deliveredAt int64
 	}{
+		{body: "Expand scope before the first completion.", createdAt: 20, deliveredAt: 50},
 		{body: "Expand scope to include the reviewed MR findings.", createdAt: 200, deliveredAt: 250},
-		{body: "Instruction delivered after completion.", createdAt: 350, deliveredAt: 400},
+		{body: "Clarify the later scope instruction.", createdAt: 400, deliveredAt: 450},
+		{body: "Instruction delivered after completion.", createdAt: 550, deliveredAt: 600},
 	} {
 		if _, err := db.ExecContext(context.Background(), `INSERT INTO messages(task_id,body,created_at,delivered_at,status) VALUES(?,?,?,?, 'delivered')`, change.ID, message.body, message.createdAt, message.deliveredAt); err != nil {
 			t.Fatal(err)
@@ -52,12 +54,38 @@ func TestReviewRoundCarriesDeliveredLeadInstructionsThatChangeScope(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(instructions) != 1 || instructions[0] != "Expand scope to include the reviewed MR findings." {
+	if len(instructions) != 3 || instructions[0] != "Expand scope before the first completion." || instructions[1] != "Expand scope to include the reviewed MR findings." || instructions[2] != "Clarify the later scope instruction." {
 		t.Fatalf("review scope instructions = %#v", instructions)
 	}
-	brief := string(generatedReviewBrief(change, taskplan.Plan{}, 2, nil, instructions, false))
-	if !strings.Contains(brief, "Lead instructions delivered since the previous completion") || !strings.Contains(brief, instructions[0]) || !strings.Contains(brief, "Judge scope against the instructions below and the Change Brief") {
-		t.Fatalf("Review Brief omits the scope-changing instruction: %s", brief)
+	brief := string(generatedReviewBrief(change, taskplan.Plan{}, 3, nil, instructions, false))
+	if !strings.Contains(brief, "Lead instructions delivered before this Change completion") || !strings.Contains(brief, instructions[0]) || !strings.Contains(brief, instructions[1]) || !strings.Contains(brief, instructions[2]) || !strings.Contains(brief, "Judge scope against these instructions and the Change Brief") {
+		t.Fatalf("Review Brief omits an accumulated scope instruction: %s", brief)
+	}
+}
+
+func TestReviewRoundCarriesScopeInstructionBeforeFirstCompletion(t *testing.T) {
+	f := newStartFixture(t)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO signals(task_id,verb,at) VALUES(?,'done',200)`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO messages(task_id,body,created_at,delivered_at,status) VALUES(?, ?, 100, 150, 'delivered')`, change.ID, "Expand scope before the first completion."); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := reviewScopeInstructions(context.Background(), db, change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instructions) != 1 || instructions[0] != "Expand scope before the first completion." {
+		t.Fatalf("first-completion scope instructions = %#v", instructions)
 	}
 }
 
@@ -200,7 +228,7 @@ guidance = ["docs/review.md"]
 	}
 	launchPath := filepath.Join(plan.Paths.Output, "launch.md")
 	launch, err := os.ReadFile(launchPath)
-	if err != nil || !strings.Contains(string(launch), "## Review Round 1") || !strings.Contains(string(launch), "review/delta.patch") || !strings.Contains(string(launch), "Expand scope to include the reviewed MR findings.") || !strings.Contains(string(launch), "Judge scope against the instructions below and the Change Brief") {
+	if err != nil || !strings.Contains(string(launch), "## Review Round 1") || !strings.Contains(string(launch), "review/delta.patch") || !strings.Contains(string(launch), "Expand scope to include the reviewed MR findings.") || !strings.Contains(string(launch), "Judge scope against these instructions and the Change Brief") {
 		t.Fatalf("launch instructions omit Review Round files: %s err=%v", launch, err)
 	}
 	for _, name := range []string{"delta.patch", "cumulative.patch", "round.json", "conflicts.txt", "ledger.md", "guidance"} {

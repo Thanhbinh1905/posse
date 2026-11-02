@@ -165,27 +165,25 @@ func reviewScopeInstructions(ctx context.Context, db *store.DB, taskID int64) ([
 	if err != nil {
 		return nil, err
 	}
-	var doneTimes []int64
+	var completionAt int64
+	foundCompletion := false
 	for _, signal := range signals {
 		if signal.Verb == "done" {
-			doneTimes = append(doneTimes, signal.At)
-			if len(doneTimes) == 2 {
-				break
-			}
+			completionAt = signal.At
+			foundCompletion = true
+			break
 		}
 	}
-	if len(doneTimes) < 2 {
+	if !foundCompletion {
 		return nil, nil
 	}
-	messages, err := db.TaskMessagesAfter(ctx, taskID, doneTimes[1], 1000)
+	messages, err := db.DeliveredTaskMessagesThrough(ctx, taskID, completionAt)
 	if err != nil {
 		return nil, err
 	}
-	var instructions []string
+	instructions := make([]string, 0, len(messages))
 	for _, message := range messages {
-		if message.DeliveredAt >= doneTimes[1] && message.DeliveredAt <= doneTimes[0] {
-			instructions = append(instructions, message.Body)
-		}
+		instructions = append(instructions, message.Body)
 	}
 	return instructions, nil
 }
@@ -651,7 +649,7 @@ func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scop
 	builder.WriteString("---\n")
 	fmt.Fprintf(&builder, "Review this candidate as a numbered Review Round.\n\n## Review Round %d\n\nReview only findings in `{{review_dir}}/delta.patch`, using `{{review_dir}}/cumulative.patch` for context. An introduced finding at blocking severity on a line `{{review_dir}}/cumulative.patch` adds also counts. The immutable bindings are in `{{review_dir}}/round.json`; conflicts are listed in `{{review_dir}}/conflicts.txt`; the Finding Ledger is in `{{review_dir}}/ledger.md`. Repository guidance is copied into `{{review_dir}}/guidance/` from the frozen target's origin ref, never from the Change branch. Do not modify the checkout.\n\nFinish by writing a JSON file in this Task's scratch directory using this schema, then signal done with `--report <report-file> --verdict <pass|changes_requested|inconclusive> --findings <findings-file>`. A pass must have no blocking open findings; Posse derives and checks the verdict. Use an empty patterns array for no findings.\n\n```json\n{\n  \"schema\": \"posse.review-findings.v1\",\n  \"patterns\": [{\n    \"key\": \"unchecked-error-return\",\n    \"title\": \"Store write errors are dropped\",\n    \"rule\": \"Every store write error reaches the caller\",\n    \"root_cause\": \"New helpers ignore database errors\",\n    \"fix_guidance\": \"Check every new write call in the affected package\",\n    \"severity\": \"P1\",\n    \"origin\": \"introduced\",\n    \"instances\": [{\n      \"repository\": \"posse\", \"path\": \"internal/app/x.go\", \"line\": 42,\n      \"symbol\": \"saveRound\", \"excerpt\": \"db.Exec(ctx, q)\",\n      \"description\": \"The returned error is ignored\", \"cause\": null,\n      \"matches\": null, \"regresses\": null\n    }]\n  }],\n  \"resolutions\": [{\n    \"finding\": \"F-3\", \"status\": \"resolved\",\n    \"note\": \"The error is now returned at x.go:42\"\n  }]\n}\n```\n\nEach excerpt must occur in its repository file at the bound head after whitespace normalization. Use `cause: \"path:line\"` only to cite an added line in `{{review_dir}}/delta.patch` that caused an interaction finding. `matches` and `regresses` use existing IDs such as `F-3`. Include one pattern per root cause, with every located instance. Missing or unknown severity is treated as unclassified and blocks. For every ledger finding claimed fixed, include a resolution (`finding` is the ledger ID, `note` is optional) with status `resolved` or `unresolved`; omitted answers remain unverified. You may also resolve any other open ledger finding you verify fixed. Findings the ledger shows as withdrawn, accepted or deferred are closed and need no resolution.\n\nScope check: every hunk in `{{review_dir}}/delta.patch` must trace to a `done_when` item of the Change Brief below, whatever skills are loaded. Record each hunk that traces to no `done_when` item, including unrelated refactors, separate bug fixes, debug prints, whitespace and docstring churn, as a finding with key `out-of-scope-hunk`, severity `P1` and origin `introduced`.\n\n", round)
 	if len(leadInstructions) > 0 {
-		builder.WriteString("## Lead instructions delivered since the previous completion\n\nThese instructions may change the Change Task's scope. Judge scope against the instructions below and the Change Brief.\n\n")
+		builder.WriteString("## Lead instructions delivered before this Change completion\n\nThese instructions may change the Change Task's scope. Apply them in delivery order; later instructions may supersede earlier ones. Judge scope against these instructions and the Change Brief.\n\n")
 		for _, instruction := range leadInstructions {
 			fmt.Fprintf(&builder, "> %s\n\n", strings.ReplaceAll(instruction, "\n", "\n> "))
 		}

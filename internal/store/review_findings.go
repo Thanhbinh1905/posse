@@ -228,7 +228,7 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 			}
 			patternKey := key
 			if origin == "pre_existing" {
-				patternKey += "-pre-existing"
+				patternKey = "pre-existing:" + key
 			}
 
 			if sequence, claimed := findingSequence(finding.Regresses); claimed {
