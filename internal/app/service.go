@@ -175,7 +175,7 @@ func (s *Service) commands() *axi.Command {
 			{Name: "rerun", Usage: "$ pr rerun <task> (--run <id>|--job <id>) [--repo <member>]", Summary: "Rerun an existing failed CI run (GitHub) or job (GitLab) on the current head, at most twice per run and head.", Handler: s.prRerun},
 		}},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
-		{Name: "status", Summary: "Read only this Worker's recorded status and admitted plan without maintenance.", Handler: s.status},
+		{Name: "status", Summary: "Read this Worker's recorded status, admitted plan and open Review findings without maintenance.", Handler: s.status},
 		{Name: "send", Usage: "$ send <task> <message> [--queue] [--reason <text>] | send <task> --file <path.md> [--queue] [--reason <text>] | send <task> --interrupt <message> [--reason <text>]", Summary: "Send a message or a Markdown instruction file, optionally queueing it or interrupting and redirecting a busy Worker.", Handler: s.send},
 		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Worker message before delivery begins.", Handler: s.unsend},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read the Worker's visible screen; --lines n reads n recent lines and scrolls a fullscreen Worker to the top and back.", Handler: s.peek},
@@ -184,7 +184,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "relaunch", Usage: "$ relaunch <task> [--profile <name>]", Summary: "Restart the Worker in the same execution root, optionally with another Profile.", Handler: s.relaunch},
 		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the recorded head to include the target branch.", Handler: s.merge},
 		{Name: "review", Usage: "$ review <change> [--full]", Summary: "Inspect Review Rounds, findings, carries and remaining budget.", Handler: s.reviewStatus, Subcommands: []*axi.Command{
-			{Name: "start", Usage: "$ review start <change> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round with its frozen delta scope.", Handler: s.reviewStart},
+			{Name: "start", Usage: "$ review start <change> [--profile <name>] [--name <short>]", Summary: "Admit the next numbered Review Round and choose a reviewer Profile when omitted.", Handler: s.reviewStart},
 			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
 			{Name: "carry", Usage: "$ review carry <change> <passed-head> <candidate-head>", Summary: "Record a Review-only carry for a tree-identical private candidate merge.", Handler: s.reviewCarry},
 			{Name: "dispose", Usage: "$ review dispose <change> <F-n|P-n>... <fix|accept|defer|withdraw|reclassify> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]", Summary: "Record a finding disposition or queue a whole-pattern fix.", Handler: s.reviewDispose},

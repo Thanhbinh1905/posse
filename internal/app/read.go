@@ -794,6 +794,19 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			return err
 		}
 		view["validation"] = validation.view()
+		if task.State == store.StateDone && fullPipelineSelected(task, "") {
+			plan, err := task.AdmittedPlan()
+			if err != nil {
+				return admittedPlanFailure(err)
+			}
+			candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
+			if candidateErr != nil && !store.IsNotFound(candidateErr) {
+				return candidateErr
+			}
+			if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled && candidateErr == nil && candidate.State == store.ValidationCandidateActive {
+				view["next_action"] = "posse review start " + taskIDString(task.Seq)
+			}
+		}
 		receipts, err := db.ReviewReceipts(ctx.Context, task.ID)
 		if err != nil {
 			return err
@@ -890,6 +903,9 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	commandName := taskCLIName(task)
 	help := []any{"Run `posse peek " + commandName + "` to read recent Worker output"}
+	if nextAction, ok := view["next_action"].(string); ok {
+		help = append(help, "Run `"+nextAction+"` to start the full-pipeline Review Round")
+	}
 	if modelEpisode.Status != "" && modelEpisode.Status != "resolved" {
 		help = append(help, "Inspect `model_error_recovery` and its Task signals in `posse show "+commandName+" --full`")
 	}
