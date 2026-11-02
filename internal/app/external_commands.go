@@ -115,15 +115,11 @@ const userShellPathFile = "user-shell-path"
 var userShellPathMu sync.Mutex
 var recordedUserShellPath string
 
-// isUserCommandEntry reports whether this process can be shown to run from the
-// User's shell: it has a terminal on stdin, or runs in a Herdr pane such as a
-// Lead or Worker agent's, and carries no watch or plugin marker. A process
-// started by cron, systemd or another service has neither.
 func isUserCommandEntry() bool {
 	if os.Getenv(watchRuntimeTokenEnv) != "" || os.Getenv("HERDR_PLUGIN_ID") != "" {
 		return false
 	}
-	return isatty.IsTerminal(os.Stdin.Fd()) || os.Getenv("HERDR_PANE_ID") != ""
+	return isatty.IsTerminal(os.Stdin.Fd())
 }
 
 // externalCommandPath resolves gh and glab the same way in every posse
