@@ -28,11 +28,20 @@ const (
 )
 
 var watchStartupGracePeriod = 5 * time.Second
-var watchRuntimeHeartbeatInterval = 5 * time.Second
-var watchRuntimeStaleAfter = 30 * time.Second
+var watchRuntimeHeartbeatInterval = watchRuntimeTestDuration("POSSE_TEST_WATCH_RUNTIME_HEARTBEAT_INTERVAL", 5*time.Second)
+var watchRuntimeStaleAfter = watchRuntimeTestDuration("POSSE_TEST_WATCH_RUNTIME_STALE_AFTER", 30*time.Second)
 var watchRuntimeLogMaxBytes int64 = 1 << 20
 
 const watchRuntimeRepairBudget = 2 * time.Second
+
+func watchRuntimeTestDuration(name string, fallback time.Duration) time.Duration {
+	if os.Getenv("POSSE_TEST_HERDR") == "1" {
+		if duration, err := time.ParseDuration(os.Getenv(name)); err == nil && duration > 0 {
+			return duration
+		}
+	}
+	return fallback
+}
 
 func watchRuntimeLogPath(home string, project store.Project) string {
 	return filepath.Join(home, "projects", project.Name, "watch.log")
