@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -15,6 +14,14 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+const (
+	watchFixtureWorkspaceID  = "w1"
+	watchFixtureLeadPaneID   = "w1:p1"
+	watchFixtureLeadTabID    = "w1:t1"
+	watchFixtureWorkerPaneID = "w2:p1"
+	watchFixtureWorkerTabID  = "w2:t1"
 )
 
 func TestWorkerCommandsSkipWatchSupervision(t *testing.T) {
@@ -58,10 +65,10 @@ func newWorkerWatchFixture(t *testing.T, root string) workerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+	if err := db.SetProjectLead(ctx, project.ID, watchFixtureWorkspaceID, watchFixtureLeadPaneID, "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Work", State: store.StateSpawning, MergeMode: "local", PaneID: "w2:p1", WorktreePath: sandbox})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Work", State: store.StateSpawning, MergeMode: "local", PaneID: watchFixtureWorkerPaneID, WorktreePath: sandbox})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,67 +104,6 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 	if _, err := herdr.WriteIsolatedConfig(fixture.root); err != nil {
 		t.Fatal(err)
 	}
-	client := herdr.NewWithEnv("herdr", env)
-	server, err := client.StartIsolatedServer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = client.StopIsolatedServer(ctx)
-		done := make(chan struct{})
-		go func() { _ = server.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = server.Kill()
-			<-done
-		}
-	})
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelStartup()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		status, statusErr := client.Status(startupCtx)
-		if statusErr == nil && status.Running {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("isolated Herdr server did not start: %v", statusErr)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	workspaceRaw, err := client.Call(startupCtx, "workspace.create", map[string]any{"cwd": fixture.repo, "label": "t847-watch", "focus": false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workspaceResult struct {
-		Workspace struct {
-			ID string `json:"workspace_id"`
-		} `json:"workspace"`
-		RootPane struct {
-			ID    string `json:"pane_id"`
-			TabID string `json:"tab_id"`
-		} `json:"root_pane"`
-	}
-	if err := json.Unmarshal(workspaceRaw, &workspaceResult); err != nil || workspaceResult.Workspace.ID == "" || workspaceResult.RootPane.ID == "" {
-		t.Fatalf("isolated workspace response %s: %v", workspaceRaw, err)
-	}
-	tabRaw, err := client.Call(startupCtx, "tab.create", map[string]any{"workspace_id": workspaceResult.Workspace.ID, "cwd": fixture.sandbox, "label": "worker", "focus": false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tabResult struct {
-		RootPane struct {
-			ID    string `json:"pane_id"`
-			TabID string `json:"tab_id"`
-		} `json:"root_pane"`
-	}
-	if err := json.Unmarshal(tabRaw, &tabResult); err != nil || tabResult.RootPane.ID == "" {
-		t.Fatalf("isolated Worker tab response %s: %v", tabRaw, err)
-	}
-	cancelStartup()
 	ctx := context.Background()
 	db, err := store.Open(fixture.home)
 	if err != nil {
@@ -168,18 +114,7 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetProjectLead(ctx, project.ID, workspaceResult.Workspace.ID, workspaceResult.RootPane.ID, "posse:shop:lead"); err != nil {
-		t.Fatal(err)
-	}
 	task, err := db.Task(ctx, project.ID, "t1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET pane_id=? WHERE id=?`, tabResult.RootPane.ID, task.ID); err != nil {
-		t.Fatal(err)
-	}
-	task.PaneID = tabResult.RootPane.ID
-	project, err = db.ProjectByID(ctx, project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,11 +217,11 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 	t.Chdir(fixture.sandbox)
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{
-		Workspaces: []herdr.Workspace{{WorkspaceID: workspaceResult.Workspace.ID, Root: fixture.repo}},
-		Tabs:       []herdr.Tab{{TabID: workspaceResult.RootPane.TabID, WorkspaceID: workspaceResult.Workspace.ID}, {TabID: tabResult.RootPane.TabID, WorkspaceID: workspaceResult.Workspace.ID}},
+		Workspaces: []herdr.Workspace{{WorkspaceID: watchFixtureWorkspaceID, Root: fixture.repo}},
+		Tabs:       []herdr.Tab{{TabID: watchFixtureLeadTabID, WorkspaceID: watchFixtureWorkspaceID}, {TabID: watchFixtureWorkerTabID, WorkspaceID: watchFixtureWorkspaceID}},
 		Panes: []herdr.Pane{
-			{PaneID: workspaceResult.RootPane.ID, WorkspaceID: workspaceResult.Workspace.ID, TabID: workspaceResult.RootPane.TabID, CWD: fixture.repo, Agent: "pi", AgentStatus: "working"},
-			{PaneID: task.PaneID, WorkspaceID: workspaceResult.Workspace.ID, TabID: tabResult.RootPane.TabID, CWD: fixture.sandbox, Agent: "pi", AgentStatus: "working"},
+			{PaneID: watchFixtureLeadPaneID, WorkspaceID: watchFixtureWorkspaceID, TabID: watchFixtureLeadTabID, CWD: fixture.repo, Agent: "pi", AgentStatus: "working"},
+			{PaneID: task.PaneID, WorkspaceID: watchFixtureWorkspaceID, TabID: watchFixtureWorkerTabID, CWD: fixture.sandbox, Agent: "pi", AgentStatus: "working"},
 		},
 	}
 	service = New(fixture.home, fake)
