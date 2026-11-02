@@ -1082,6 +1082,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		watched = append(watched, task)
 	}
 	if len(watched) == 0 {
+		if err := s.retrySpecReadyChecks(ctx, db, project, cfg, now); err != nil {
+			return err
+		}
 		return db.RecordPRPollAttempt(ctx, project.ID, now.UnixMilli())
 	}
 	targets := make([]prWatchTarget, 0, len(watched))
@@ -1257,8 +1260,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	behind := []behindPR{}
 	moved := false
-	// Without the current-target rule only conflicting PRs ask the Worker to
-	// merge the target, and they bypass the merge queue.
+	// Without the current-target rule only conflicting PRs, and full-pipeline
+	// PRs whose validation a target move stales, ask the Worker to refresh,
+	// and they bypass the merge queue.
 	conflicts := []behindPR{}
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
@@ -1301,7 +1305,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			continue
 		}
-		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING") {
+		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || fullPipelineSelected(task, "")) {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
 			var beforeQuery prTargetFreshness
 			if freshnessErr == nil && !freshness.Fresh && cfg.Defaults.RequireCurrentTarget {
@@ -1393,9 +1397,24 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		// merge_ready tells the Lead to merge, so it waits for the review
 		// gate `posse merge` applies to the same head.
 		mergeReady := func(notice store.Notice) bool { return notice.Kind == "merge_ready" }
-		if slices.ContainsFunc(effect.Notices, mergeReady) && (requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA) != nil || pendingCandidateFailure(ctx, db, observed.task) != nil) {
-			effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
+		if slices.ContainsFunc(effect.Notices, mergeReady) {
+			gateErr := requireSelectedReviewAt(ctx, db, project, cfg, observed.task, observed.current.HeadSHA)
+			if gateErr == nil {
+				gateErr = pendingCandidateFailure(ctx, db, observed.task)
+			}
+			switch {
+			case gateErr == nil:
+			case reviewGateRefusal(gateErr):
+				effect.Notices = slices.DeleteFunc(effect.Notices, mergeReady)
+			default:
+				// Unrecorded, the observation retries the gate on the next pass.
+				if err := recordPRTaskWatchFailure(ctx, db, project, observed.task, fmt.Errorf("merge_ready review gate: %w", gateErr), now); err != nil {
+					return err
+				}
+				continue
+			}
 		}
+		s.annotateMergeReadyNotices(ctx, db, project, observed.task, effect.Notices)
 		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
 			if notice, violated := reviewPolicyViolation(ctx, db, project, cfg, observed.task, observed.current); violated {
 				effect.Notices = append(effect.Notices, notice)
@@ -1441,12 +1460,10 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 					return noticeErr
 				}
 			}
-			if err := s.raiseSpecReadyToDeliver(ctx, db, project, observed.task, forge); err != nil {
-				if noticeErr := recordPRTaskWatchFailure(ctx, db, project, observed.task, err, now); noticeErr != nil {
-					return noticeErr
-				}
-			}
 		}
+	}
+	if err := s.retrySpecReadyChecks(ctx, db, project, cfg, now); err != nil {
+		return err
 	}
 	for _, observed := range observations {
 		if observed.current.State != "MERGED" {
@@ -1462,11 +1479,53 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	return nil
 }
 
+func (s *Service) retrySpecReadyChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, now time.Time) error {
+	merged, err := db.TasksInState(ctx, project.ID, store.StateMerged)
+	if err != nil {
+		return err
+	}
+	var forge repositoryForge
+	var forgeErr error
+	resolved := false
+	for _, task := range merged {
+		checked, err := db.SpecReadyChecked(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if checked || task.PRURL == "" {
+			continue
+		}
+		if !resolved {
+			forge, forgeErr = forgeForRepository(ctx, project.Root, cfg, "")
+			resolved = true
+		}
+		err = forgeErr
+		if err == nil {
+			err = s.raiseSpecReadyToDeliver(ctx, db, project, task, forge)
+		}
+		if err != nil {
+			if noticeErr := recordPRTaskWatchFailure(ctx, db, project, task, err, now); noticeErr != nil {
+				return noticeErr
+			}
+		} else if err := db.MarkSpecReadyChecked(ctx, task.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reviewGateRefusal tells the gate's policy answer, such as missing evidence,
+// from an operational failure to evaluate it.
+func reviewGateRefusal(err error) bool {
+	var failure *axi.Error
+	return errors.As(err, &failure) && !failure.Retryable
+}
+
 // reviewPolicyViolation evaluates the selected evidence for the head the forge
 // merged. A merge Posse did not guard still Merges (ADR 0011), but it never gains
 // a fabricated pass: the missing evidence is reported as a policy violation.
 func reviewPolicyViolation(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, merged store.PRObservation) (store.Notice, bool) {
-	err := requireSelectedReviewAt(ctx, db, project, cfg, task, merged.HeadSHA)
+	err := requireSelectedReviewForMerge(ctx, db, project, cfg, task, merged.HeadSHA, merged.MergeCommit)
 	if err == nil {
 		return store.Notice{}, false
 	}
@@ -1726,7 +1785,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			noticed = nil
 		}
 		if len(failures) > 0 && (len(noticed) == 0 || !checks.Running && !sameFailures(noticed, failures)) {
-			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), or raises ci_fix_exhausted or review_cap_reached, and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
+			addNotice("pr_checks_failed", task.Title+": required checks failed: "+failedCheckNames(failures)+"; Posse queues the Worker fix (ci_fix_queued), or raises ci_fix_exhausted, and the Lead sends one only after ci_fix_exhausted", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "checks": failures})
 		}
 		if current.Review == "CHANGES_REQUESTED" && (newHead || previous.Review != "CHANGES_REQUESTED") {
 			addNotice("pr_changes_requested", task.Title+": review requests changes", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "review": current.Review})

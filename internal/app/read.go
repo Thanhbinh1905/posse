@@ -495,7 +495,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 				return err
 			}
 		} else if task.State == store.StateQueued {
-			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task, cfg)
+			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task, cfg, false)
 			if err != nil {
 				return err
 			}
@@ -523,7 +523,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: rows}, {Key: "help", Value: []any{"Run `posse show " + taskCLIName(tasks[0]) + "` to inspect a Task"}}})
 }
 
-func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config) (string, error) {
+func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config, checkBlockers bool) (string, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return "", admittedPlanFailure(err)
@@ -537,7 +537,13 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 			return "waiting for " + strings.Join(unmet, ", "), nil
 		}
 	}
-	blockerReason, err := queuedTaskBlockerWaitReason(ctx, db, project, cfg, plan)
+	var blockerReason string
+	if checkBlockers {
+		blockerReason, err = queuedTaskBlockerWaitReason(ctx, db, project, cfg, plan)
+	}
+	if err == nil && blockerReason == "" {
+		blockerReason, err = db.QueuedTaskDeclineReason(ctx, task.ID)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -569,7 +575,7 @@ func addTaskDetails(ctx context.Context, db *store.DB, home string, project stor
 		row.Age = now.Sub(created).Round(time.Second).String()
 	}
 	if task.State == store.StateQueued {
-		reason, err := queuedTaskWaitReason(ctx, db, project, task, cfg)
+		reason, err := queuedTaskWaitReason(ctx, db, project, task, cfg, false)
 		if err != nil {
 			return err
 		}
@@ -718,7 +724,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
 		view["execution_mode"] = plan.Execution.Mode
 		if task.State == store.StateQueued {
-			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task, cfg)
+			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task, cfg, true)
 			if err != nil {
 				return err
 			}
