@@ -763,7 +763,7 @@ func TestMixedWorkspaceQuickMemberKeepsReviewAfterFullPipelineMembersMerge(t *te
 		t.Fatal(err)
 	}
 	cfg := f.config()
-	if err := requireFullPipelineValidationAt(ctx, f.db, f.project, cfg, task, ""); err != nil {
+	if err := requireFullPipelineValidationAt(ctx, f.db, f.project, cfg, task, "", ""); err != nil {
 		t.Fatalf("forge-merged full-pipeline Member was not admitted: %v", err)
 	}
 	err = requireSelectedReview(ctx, f.db, f.project, cfg, task)
