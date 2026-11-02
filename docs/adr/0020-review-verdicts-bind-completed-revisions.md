@@ -16,7 +16,7 @@ A Review Task is admitted only for a completed Change Task, and Posse pins the b
 - `changes_requested`, `inconclusive`, a missing verdict and a malformed Signal never satisfy Merge.
 - Review Tasks created earlier have no target and cannot record a verdict.
 - Verdicts and targets are part of Task snapshots, so rebuilds keep them.
-- Posse still does not attest the Reviewer's runtime model, and Research Report review is out of scope.
+- Posse still does not attest the Reviewer's runtime model. Research Report reviews bind the Report manifest digest separately, as specified in [spec section 13](../spec.md#13-brief-and-worker-protocol).
 
 ### D02: selected evidence policy, separate from authority
 

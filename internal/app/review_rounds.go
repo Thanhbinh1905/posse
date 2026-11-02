@@ -72,7 +72,7 @@ func (s *Service) reviewStart(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if len(parsed.Positionals) != 1 {
-		return axi.Usage("review start requires one Change Task id")
+		return axi.Usage("review start requires one Task id")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -89,6 +89,9 @@ func (s *Service) reviewStart(ctx *axi.Context, args []string) error {
 	change, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
+	}
+	if change.Type == "research" {
+		return s.startReportReview(ctx, home, project, change, parsed.Flags["profile"], parsed.Flags["name"])
 	}
 	return s.startReviewRound(ctx, db, home, project, change, parsed.Flags["profile"], parsed.Flags["name"])
 }
