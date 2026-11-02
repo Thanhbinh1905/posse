@@ -39,7 +39,7 @@ func reviewCapRule(task store.Task, max int) string {
 	if !taskUsesSharedReviewRepairCap(task) {
 		return fmt.Sprintf("only Review Rounds count toward max_rounds; %d allows %d Review Rounds", max, max)
 	}
-	return fmt.Sprintf("review and repair rounds share max_rounds; %d allows at most %d Review Rounds with a repair round between each", max, (max+1)/2)
+	return fmt.Sprintf("Review fix rounds share max_rounds with Review Rounds, CI fix rounds do not; %d allows at most %d Review Rounds with a Review fix round between each", max, (max+1)/2)
 }
 
 // reviewCapBinding is what a cap Decision binds: the one candidate head of a

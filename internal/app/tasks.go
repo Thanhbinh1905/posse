@@ -1515,7 +1515,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				}
 				candidateFix = reviewRequest
 				if !reviewRequest {
-					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, ""); err != nil {
+					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, "", ""); err != nil {
 						return err
 					}
 				}
