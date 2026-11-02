@@ -18,6 +18,13 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 	fixture := newPRLifecycleFixtureWithLead(t, true)
 	defer fixture.db.Close()
 
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Run(t.Context(), "pane", "wait-output", fixture.project.LeadPaneID, "--match", "POSSE_TEST_CLAUDE_INTERRUPT_READY", "--source", "recent-unwrapped", "--timeout", "30000"); err != nil {
+		snapshot, snapshotErr := client.Snapshot(t.Context())
+		paneOutput, readErr := client.Run(t.Context(), "pane", "read", fixture.project.LeadPaneID, "--source", "recent-unwrapped", "--lines", "40")
+		t.Fatalf("initial Claude Lead did not install its interrupt handler: %v; snapshot=%#v snapshotErr=%v paneOutput=%s readErr=%v", err, snapshot, snapshotErr, paneOutput, readErr)
+	}
+
 	const note = "Open question: should this workflow remain optional?\nNext: compare the User's answer with ADR 0027.\n"
 	const piStarted = "POSSE_TEST_PI_STARTED"
 	source := filepath.Join(fixture.root, "handoff.md")
@@ -39,7 +46,6 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := herdr.NewWithEnv("herdr", fixture.env)
 	startCount := 0
 	startPi := func() {
 		t.Helper()
