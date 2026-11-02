@@ -35,6 +35,22 @@ func TestReviewDefaultsOverridesAndUserControl(t *testing.T) {
 	}
 }
 
+func TestCandidateFileConfigSupportsProjectAndWorkspaceMemberLists(t *testing.T) {
+	home := t.TempDir()
+	path := ConfigPath(home, "shop")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents := "[pipeline]\ncandidate_files = [\"config/local.yaml\"]\n\n[repositories.api]\ncandidate_files = [\"app.yaml\"]\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(home, "shop")
+	if err != nil || len(cfg.Pipeline.CandidateFiles) != 1 || cfg.Pipeline.CandidateFiles[0] != "config/local.yaml" || len(cfg.Repositories["api"].CandidateFiles) != 1 || cfg.Repositories["api"].CandidateFiles[0] != "app.yaml" {
+		t.Fatalf("candidate file config = %#v, err=%v", cfg, err)
+	}
+}
+
 func TestFullPipelineReviewCanBeSelectedWithoutImplicitDefault(t *testing.T) {
 	home := t.TempDir()
 	if _, err := SetFile(ConfigPath(home, "shop"), "defaults.review", "full-pipeline", true); err != nil {
