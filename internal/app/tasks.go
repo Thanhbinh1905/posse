@@ -2945,11 +2945,20 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
 	}
-	if pane.Agent != "" {
+	if pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
 		if err := track("agent.stop", func() error {
 			return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
 		}); err != nil {
 			return failure(err)
+		}
+		if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
+			if err := track("pane.replace", func() error {
+				fresh, replaceErr := s.replaceWorkerPane(ctx, home, project, task, pane, kind)
+				pane = fresh
+				return replaceErr
+			}); err != nil {
+				return failure(err)
+			}
 		}
 	}
 	if prepareChanged {
