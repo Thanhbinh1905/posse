@@ -29,6 +29,7 @@ func signalReviewPolicyTaskAllowFailure(t *testing.T, f *prLifecycleFixture, tas
 	t.Helper()
 	env := setEnv(f.env, "HERDR_PANE_ID", task.PaneID)
 	env = setEnv(env, "POSSE_WORKER_HOME", f.home)
+	env = taskAuthorGenerationEnv(env)
 	// Do not complete a turn before the fake has consumed its launch prompt.
 	// A late prompt must not turn the completed pane back into a working pane.
 	ready := filepath.Join(f.root, "review-working-"+task.PaneID)

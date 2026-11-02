@@ -24,7 +24,7 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 	if err != nil {
 		return 0, err
 	}
-	head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+	head, err := taskBranchAuthorHead(ctx, task.WorktreePath, task.Branch)
 	if err != nil {
 		return 0, err
 	}
@@ -35,8 +35,10 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 	previousHead := head
 	if previousErr == nil {
 		previousHead = previous.HeadSHA
-		if err := requireBranchHeadAncestor(ctx, task.WorktreePath, previousHead, head); err != nil {
-			return 0, err
+		if previousHead != "" {
+			if err := requireBranchHeadAncestor(ctx, task.WorktreePath, previousHead, head); err != nil {
+				return 0, err
+			}
 		}
 		if task.PRURL != "" {
 			remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
@@ -61,7 +63,7 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 			return 0, candidateErr
 		}
 	}
-	confirmedHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+	confirmedHead, err := taskBranchAuthorHead(ctx, task.WorktreePath, task.Branch)
 	if err != nil {
 		return 0, err
 	}
@@ -73,6 +75,19 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 		return 0, err
 	}
 	return claim.Generation, nil
+}
+
+func taskBranchAuthorHead(ctx context.Context, worktree, branch string) (string, error) {
+	head, err := gitOutput(ctx, worktree, "rev-parse", "refs/heads/"+branch)
+	if err == nil {
+		return head, nil
+	}
+	current, currentErr := gitOutput(ctx, worktree, "symbolic-ref", "--quiet", "--short", "HEAD")
+	_, refErr := gitOutput(ctx, worktree, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	if currentErr == nil && current == branch && refErr != nil {
+		return "", nil
+	}
+	return "", err
 }
 
 func requireBranchHeadAncestor(ctx context.Context, worktree, ancestor, head string) error {

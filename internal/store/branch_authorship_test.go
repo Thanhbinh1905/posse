@@ -109,6 +109,34 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	}
 }
 
+func TestBranchAuthorClaimCanStartUnbornAndRecordFirstCommit(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Change", ShortName: "change"}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, "", "", false)
+	if err != nil || claim.Generation != 1 {
+		t.Fatalf("unborn branch claim = %#v, %v", claim, err)
+	}
+	if err := db.UpdateBranchAuthorHead(ctx, "shop", "posse/t1", taskID, claim.Generation, "", branchAuthorTestSHA); err != nil {
+		t.Fatalf("record first commit: %v", err)
+	}
+	updated, err := db.BranchAuthor(ctx, "shop", "posse/t1")
+	if err != nil || updated.HeadSHA != branchAuthorTestSHA {
+		t.Fatalf("branch author after first commit = %#v, %v", updated, err)
+	}
+}
+
 func TestBranchAuthorTransferInvalidatesReviewPass(t *testing.T) {
 	targets := []ReviewTarget{{Repository: "shop", Commit: reviewShaA}}
 	fixture := newReviewVerdictFixture(t, targets)

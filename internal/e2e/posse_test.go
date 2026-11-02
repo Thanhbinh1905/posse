@@ -1881,6 +1881,7 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	workerEnv = setEnv(workerEnv, "HERDR_SOCKET_PATH", herdr.SocketPath(callerEnv))
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", home)
+	workerEnv = taskAuthorGenerationEnv(workerEnv)
 	for _, args := range [][]string{{"project", "add", "--name", "stray"}, {"start", "--brief", filepath.Join(root, "change.md")}, {"config", "set", "defaults.max_workers", "2"}, {"list"}} {
 		command := exec.Command(posseBinary, args...)
 		command.Dir = repo
@@ -2047,8 +2048,44 @@ func killServer(t *testing.T, process *herdr.ServerProcess) {
 	}
 }
 
+func taskAuthorGenerationEnv(env []string) []string {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "POSSE_TASK_GENERATION=") {
+			return env
+		}
+	}
+	paneID := testEnvValue(env, "HERDR_PANE_ID")
+	home := testEnvValue(env, "POSSE_WORKER_HOME")
+	if home == "" {
+		home = testEnvValue(env, "POSSE_HOME")
+	}
+	if paneID == "" || home == "" {
+		return env
+	}
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return env
+	}
+	defer db.Close()
+	task, err := db.TaskByPane(context.Background(), paneID)
+	if err != nil || task.Type != "change" {
+		return env
+	}
+	claims, err := db.BranchAuthorsForTask(context.Background(), task.ID)
+	if err != nil {
+		return env
+	}
+	for _, claim := range claims {
+		if claim.Branch == task.Branch && claim.Attempt == task.Launches {
+			return setEnv(env, "POSSE_TASK_GENERATION", strconv.FormatInt(claim.Generation, 10))
+		}
+	}
+	return env
+}
+
 func runPosse(t *testing.T, binary, cwd string, env []string, args ...string) string {
 	t.Helper()
+	env = taskAuthorGenerationEnv(env)
 	command := exec.Command(binary, args...)
 	command.Dir = cwd
 	command.Env = env

@@ -29,7 +29,7 @@ type BranchAuthorClaim struct {
 func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, taskID int64, attempt int, previousHead, nextHead string, previousWriterStopped bool) (BranchAuthorClaim, error) {
 	repository, branch = strings.TrimSpace(repository), strings.TrimSpace(branch)
 	previousHead, nextHead = strings.TrimSpace(previousHead), strings.TrimSpace(nextHead)
-	if repository == "" || branch == "" || taskID < 1 || attempt < 1 || !validValidationSHA(previousHead) || !validValidationSHA(nextHead) {
+	if repository == "" || branch == "" || taskID < 1 || attempt < 1 || !validBranchAuthorHead(previousHead) || !validBranchAuthorHead(nextHead) {
 		return BranchAuthorClaim{}, fmt.Errorf("repository, branch, task, attempt and valid heads are required")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
@@ -170,8 +170,12 @@ func (db *DB) RequireBranchAuthor(ctx context.Context, repository, branch string
 	return nil
 }
 
+func validBranchAuthorHead(head string) bool {
+	return head == "" || validValidationSHA(head)
+}
+
 func (db *DB) UpdateBranchAuthorHead(ctx context.Context, repository, branch string, taskID int64, generation int64, expectedHead, nextHead string) error {
-	if !validValidationSHA(expectedHead) || !validValidationSHA(nextHead) {
+	if !validBranchAuthorHead(expectedHead) || !validValidationSHA(nextHead) {
 		return ErrBranchAuthorHeadChanged
 	}
 	result, err := db.ExecContext(ctx, `UPDATE branch_authorship SET head_sha=?,updated_at=? WHERE repository=? AND branch=? AND task_id=? AND generation=? AND head_sha=?`, nextHead, time.Now().UnixMilli(), repository, branch, taskID, generation, expectedHead)
