@@ -131,6 +131,7 @@ func (s *Service) commands() *axi.Command {
 	root.Handler = s.home
 	root.Subcommands = []*axi.Command{
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes] | up --all", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead; --all restores the Lead, Workers and Watch of every Project that is not down.", Handler: s.up},
+		{Name: "attach", Usage: "$ attach --pane <pane-id> --session <session-id>", Summary: "Attach a supported existing Herdr session as this Project's Lead without replacing its conversation.", Handler: s.attach},
 		{Name: "down", Usage: "$ down [--plan | --execute --user-approved <quote>]", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`. --plan previews tearing down every Task; --execute does it.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
 		{Name: "knowledge", Summary: "Inspect and curate opt-in User and Project knowledge.", Subcommands: []*axi.Command{
