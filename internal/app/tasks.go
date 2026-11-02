@@ -2948,12 +2948,14 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}); err != nil {
 			return failure(err)
 		}
-		if err := track("pane.replace", func() error {
-			fresh, replaceErr := s.replaceWorkerPane(ctx, home, project, task, pane, kind)
-			pane = fresh
-			return replaceErr
-		}); err != nil {
-			return failure(err)
+		if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
+			if err := track("pane.replace", func() error {
+				fresh, replaceErr := s.replaceWorkerPane(ctx, home, project, task, pane, kind)
+				pane = fresh
+				return replaceErr
+			}); err != nil {
+				return failure(err)
+			}
 		}
 	}
 	if prepareChanged {

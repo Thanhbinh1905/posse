@@ -270,7 +270,8 @@ case " $* " in
     # showing it working, as Claude did during the 2026-10-25 stall.
     case " $* " in *" quota-silent "*) continue_silently=1 ;; *) continue_silently=0 ;; esac
     if [ "$continue_silently" = 1 ]; then while IFS= read -r line; do :; done; exit 0; fi
-    # A quota-exit harness quits after its message, leaving the shell behind.
+    # A quota-exit harness quits after its message once Herdr has detected it,
+    # as a real agent would, leaving the shell behind.
     case " $* " in *" quota-exit "*) i=0; while herdr agent get "$HERDR_PANE_ID" 2>/dev/null | grep -q '"launch_pending":true' && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done; herdr pane release-agent "$HERDR_PANE_ID" --source posse.fake --agent %[1]s >/dev/null 2>&1; exit 0 ;; esac
     report idle
     # Herdr runs plugin hooks outside the Worker's process group.

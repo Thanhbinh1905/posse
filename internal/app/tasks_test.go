@@ -1031,16 +1031,8 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 		t.Fatal(err)
 	}
 	fake := herdr.NewFake()
-	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}, {PaneID: "w1:p0", WorkspaceID: "w1", Label: "posse:shop:lead"}}}
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "claude", AgentStatus: "working"}}}
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
-	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t2","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2"}}`)
-	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p0", "posse:shop:lead"); err != nil {
-		t.Fatal(err)
-	}
-	project, err = db.ProjectByID(ctx, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	service := testService(home, fake)
 	task, err := db.TaskByID(ctx, project.ID, taskID)
 	if err != nil {
