@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -211,6 +212,141 @@ func newPublicationReportFixture(t *testing.T, reportKind string) publicationRep
 		t.Fatal(err)
 	}
 	return publicationReportFixture{home: home, service: testService(home, nil), db: db, project: project, task: task}
+}
+
+func TestReviewStartReviewsPublicationReportAndAllowsAcceptance(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "research", Title: "Publication Report", Profile: "claude", ReportKind: "spec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NextTaskLaunchWithIdentity(ctx, reportID, "claude", "model-a", true); err != nil {
+		t.Fatal(err)
+	}
+	transitionAppTaskToReported(t, ctx, db, fixture.project.ID, reportID)
+	report := store.Task{ID: reportID, Seq: 1}
+	artifactRoot := filepath.Join(fixture.home, "projects", fixture.project.Name, "tasks", "t1")
+	if err := os.MkdirAll(artifactRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactRoot, "report.md"), []byte("Publication spec\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactRoot, "evidence.md"), []byte("Supporting evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByID(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeReportBundle(ctx, db, fixture.home, project, report); err != nil {
+		t.Fatal(err)
+	}
+	report, err = db.TaskByID(ctx, fixture.project.ID, reportID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, reportID, store.StateReported, store.StateTornDown, "cli", "Sandbox released"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	start := func(args ...string) (int, string) {
+		t.Helper()
+		var output bytes.Buffer
+		cli := fixture.service.CLI()
+		cli.Out, cli.ErrOut = &output, &output
+		return cli.Run(args), output.String()
+	}
+	if code, output := start("review", "start", "t1", "--profile", "claude"); code != 0 {
+		t.Fatalf("Report review start code=%d: %s", code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := db.Tasks(ctx, fixture.project.ID, true)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("Tasks after Report review admission = %#v, %v", tasks, err)
+	}
+	review := tasks[1]
+	plan, err := review.AdmittedPlan()
+	if err != nil || plan == nil || plan.ReviewOf != reportID {
+		t.Fatalf("Report Review plan = %#v, %v", plan, err)
+	}
+	if !strings.Contains(string(plan.Inputs[0].Bytes), "Report bundle digest") || !strings.Contains(string(plan.Inputs[0].Bytes), "attachments/") {
+		t.Fatalf("Report Review Brief is not bound to the sealed Report: %s", plan.Inputs[0].Bytes)
+	}
+	target, err := reportReviewTargetFromPlan(plan, reportID)
+	if err != nil || target == nil || target.ReportDigest != report.ReportDigest || target.ManifestJSON != report.ReportManifestJSON {
+		t.Fatalf("frozen Report review target = %#v, err=%v; Report = %#v", target, err, report)
+	}
+	for _, file := range []string{"report.md", "report-manifest.json", "report-target.json", filepath.Join("attachments", "evidence.md")} {
+		if _, err := os.Stat(filepath.Join(plan.Paths.Output, "review", file)); err != nil {
+			t.Fatalf("frozen Report review input %s unavailable: %v", file, err)
+		}
+	}
+	boundReview, err := db.TaskByID(ctx, fixture.project.ID, review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reportPath := filepath.Join(boundReview.WorktreePath, "worker-report.md")
+	if err := os.WriteFile(reportPath, []byte("Report review passed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	if code, output := start("accept", "t1"); code == 0 || !strings.Contains(output, "report_review_required") {
+		t.Fatalf("Report accepted before a Review pass: code=%d: %s", code, output)
+	}
+	evidencePath := filepath.Join(fixture.home, "projects", fixture.project.Name, "tasks", "t1", "evidence.md")
+	if err := os.WriteFile(evidencePath, []byte("changed after admission\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", boundReview.PaneID)
+	if code, output := start("signal", "done", "Reviewed the exact Report", "--report", reportPath, "--verdict", "pass"); code == 0 || !strings.Contains(output, "report_bundle_invalid") {
+		t.Fatalf("changed Report attachment received a verdict: code=%d: %s", code, output)
+	}
+	if err := os.WriteFile(evidencePath, []byte("Supporting evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := start("signal", "done", "Reviewed the exact Report", "--report", reportPath); code == 0 || !strings.Contains(output, "Report Review Task requires --verdict") {
+		t.Fatalf("Report Review without a verdict code=%d: %s", code, output)
+	}
+	if code, output := start("signal", "done", "Reviewed the exact Report", "--report", reportPath, "--verdict", "pass"); code != 0 {
+		t.Fatalf("Report review completion code=%d: %s", code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews, err := db.ReportReviewsForTask(ctx, reportID)
+	if err != nil || len(reviews) != 1 || reviews[0].ReportDigest != report.ReportDigest || reviews[0].Verdict != "pass" || reviews[0].ReviewTaskID != boundReview.ID {
+		t.Fatalf("recorded Report Review = %#v, %v", reviews, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("HERDR_PANE_ID", "")
+	if code, output := start("accept", "t1"); code != 0 || !strings.Contains(output, "accepted_by: user") {
+		t.Fatalf("Report acceptance after CLI Review code=%d: %s", code, output)
+	}
 }
 
 func addPublicationReportReview(t *testing.T, fixture publicationReportFixture) {
