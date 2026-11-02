@@ -145,7 +145,7 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	if err == nil && run.applied && sidebarOffer(run.plan) && !parsed.Bool("no-sidebar-layout") {
 		confirmed := parsed.Bool("sidebar-layout")
 		if !confirmed && !parsed.Bool("human") && setupInputIsTerminal() {
-			fmt.Fprint(ctx.Out, "Add Posse Agents sidebar layout to Herdr config? [y/N] ")
+			fmt.Fprint(ctx.ErrOut, "Add Posse Agents sidebar layout to Herdr config? [y/N] ")
 			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 			confirmed = strings.EqualFold(strings.TrimSpace(answer), "y")
 		}

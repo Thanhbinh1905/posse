@@ -160,6 +160,24 @@ func TestHerdrVersionGatesStyledSidebarRules(t *testing.T) {
 	}
 }
 
+func TestSidebarLayoutDoesNotOfferAnUnworkableLegacyUpgrade(t *testing.T) {
+	original := "[ui.sidebar.agents]\nrows = [[\"state_icon\", \"machine\", { token = \"workspace\", rules = [{ starts_with = \"Lead:\", hide = true }] }, { token = \"$posse_row\", bold = true }], [\"agent\"]]\n"
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := sidebarLayoutState(path); state != "manual" || err != nil {
+		t.Fatalf("reformatted legacy state = %q, %v; want manual", state, err)
+	}
+	if changed, err := installSidebarLayout(path); err != nil || changed {
+		t.Fatalf("reformatted legacy install = %t, %v; want no change", changed, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != original {
+		t.Fatalf("reformatted legacy config changed: %q, %v", data, err)
+	}
+}
+
 func TestSidebarLayoutDoesNotReplaceCustomRows(t *testing.T) {
 	original := "# custom\n[ui.sidebar.agents]\nrows = [[\"tab\"]] # preferred\n"
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -198,6 +216,51 @@ func TestDoctorReportsInstalledHerdrSidebarLayout(t *testing.T) {
 	}
 }
 
+func TestHumanSetupShowsSidebarSnippetForOfferAndUpgrade(t *testing.T) {
+	for _, action := range []string{"offer", "upgrade"} {
+		lines := humanSetupRow(map[string]any{"step": "sidebar_layout", "action": action, "target": "~/.config/herdr/config.toml", "snippet": sidebarLayoutSnippet}, false)
+		rendered := strings.ReplaceAll(strings.Join(lines, "\n"), "\n     ", "\n")
+		if !strings.Contains(rendered, strings.TrimSuffix(sidebarLayoutSnippet, "\n")) {
+			t.Errorf("%s setup row omitted the layout block: %s", action, rendered)
+		}
+	}
+}
+
+func TestDoctorShowsSidebarBlockAndHerdrVersionRequirement(t *testing.T) {
+	service, adapter, userHome := humanSetupFixture(t)
+	configHome := filepath.Join(userHome, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	adapter.RunOut["--version"] = []byte("herdr 0.9.0")
+	code, output := runCLI(t, service, "doctor", "--json")
+	var result struct {
+		Checks []struct {
+			Check  string `json:"check"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+		Help []struct {
+			Check  string `json:"check"`
+			Action string `json:"action"`
+		} `json:"help"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range result.Checks {
+		if check.Check == "Herdr Agents sidebar layout" {
+			if code != 0 || !strings.Contains(check.Detail, sidebarLayoutSnippet) || !strings.Contains(check.Detail, "Herdr 0.9.1 or newer") {
+				t.Fatalf("old Herdr sidebar check = %d %#v", code, check)
+			}
+			for _, help := range result.Help {
+				if help.Check == check.Check && strings.Contains(help.Action, "Upgrade Herdr") {
+					return
+				}
+			}
+			t.Fatalf("doctor action does not explain the Herdr version requirement: %#v", result.Help)
+		}
+	}
+	t.Fatalf("doctor omitted Herdr sidebar check: %s", output)
+}
+
 func TestSetupPreviewLeavesExistingAgentsRowsForManualReview(t *testing.T) {
 	service, _, userHome := humanSetupFixture(t)
 	configHome := filepath.Join(userHome, "xdg")
@@ -230,7 +293,7 @@ func TestSetupReportsSidebarLayoutAndAppliesOnlyWhenConfirmed(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	path := filepath.Join(configHome, "herdr", "config.toml")
 	preview, code := runHumanSetup(t, service, "--check")
-	if code != 0 || !strings.Contains(preview, "Add Posse Agents sidebar layout") {
+	if code != 0 || !strings.Contains(preview, "Add Posse Agents sidebar layout") || !strings.Contains(strings.ReplaceAll(preview, "\n     ", "\n"), strings.TrimSuffix(sidebarLayoutSnippet, "\n")) {
 		t.Fatalf("preview = %d %s", code, preview)
 	}
 	applied, code := runHumanSetup(t, service, "--no-sidebar-layout")
