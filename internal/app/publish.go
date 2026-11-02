@@ -397,7 +397,14 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 		if member.repo.MergeMode != "pr" || candidateFix && isFullPipelineTask(task, member.repo.Repo) {
 			continue
 		}
-		ahead, err := commitsAhead(ctx, member.repo.WorktreePath, member.repo.BaseRef, "refs/heads/"+task.Branch)
+		baseRef := member.repo.BaseRef
+		if baseRef == member.project.DefaultBranch {
+			baseRef, err = defaultBranchBase(ctx, member.project)
+			if err != nil {
+				return memberFailure(member.repo.Repo, err)
+			}
+		}
+		ahead, err := commitsAhead(ctx, member.repo.WorktreePath, baseRef, "refs/heads/"+task.Branch)
 		if err != nil {
 			return memberFailure(member.repo.Repo, err)
 		}
