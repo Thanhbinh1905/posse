@@ -1973,6 +1973,13 @@ func (s *Service) brief(ctx *axi.Context, args []string) error {
 	if _, err := s.prepareTaskProject(ctx.Context, db, project, task.ID); err != nil {
 		return err
 	}
+	turnToken, err := db.TaskTurnToken(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	if err := updateTaskWorkerTurnProtocol(home, project, task, turnToken); err != nil {
+		return err
+	}
 	path := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "launch.md")
 	contents, err := os.ReadFile(path)
 	if err != nil {
