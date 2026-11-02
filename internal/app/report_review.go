@@ -31,7 +31,7 @@ func (s *Service) startReportReview(ctx *axi.Context, home string, project store
 		return axi.Failure("report_bundle_invalid", err.Error(), false)
 	}
 	if name == "" {
-		name = "report-review-of-" + taskIDString(report.Seq)
+		name = defaultTaskName("report review " + taskIDString(report.Seq))
 	}
 	if err := validateWorkerName(name); err != nil {
 		return invalidWorkerNameFailure(name, err)
