@@ -1009,7 +1009,7 @@ func TestLeadInstructionsExplainPRAndCheckoutNoticeActions(t *testing.T) {
 			t.Errorf("Lead instructions omit PR handling for %q: %s", expected, output)
 		}
 	}
-	for _, expected := range []string{"Done and merging Change Tasks accept follow-up instructions through `posse send <task> <message>`", "delivery returns them to working", "merging Task can receive it before those Notices", "After the Worker's next done Signal, run `posse merge` again", "merge `origin/<target>` into the Task branch", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists", "report the affected repositories when the failure persists"} {
+	for _, expected := range []string{"Done and merging Change Tasks accept follow-up instructions through `posse send <task> <message>`", "delivery returns them to working", "merging Task can receive it before those Notices", "After the Worker's next done Signal, run `posse merge` again", "merge `origin/<target>` into the Task branch", "posse publish --rewrite --user-approved", "relay the User's exact words to the Worker", "A `branch_rewritten` Notice is routine", "--verify", "--proof", "--risk", "screenshots/images", "test/log evidence", "rollback details", "--user-approved", "<User's words>", "posse retries automatically", "tell the User if it persists", "report the affected repositories when the failure persists"} {
 		if !strings.Contains(output, expected) {
 			t.Errorf("Lead instructions omit recovery guidance %q: %s", expected, output)
 		}
