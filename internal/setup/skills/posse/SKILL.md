@@ -9,7 +9,7 @@ Your role comes from the pane you run in, not from your own judgment. Find it be
 
 1. Run `posse _context`. It prints your role, your Task (for a Worker) and the next command. Empty output means this pane is neither a posse Lead nor a Worker.
 2. Take the path for that role:
-   - **Lead**: run `posse lead` and follow it for the whole session. Run it again after a restart, a resumed session, or whenever a rule is unclear.
+   - **Lead**: run `posse lead` and follow it for the whole session. Run it again after a restart, a resumed session, or whenever a rule is unclear. One Project has one Lead in one Herdr workspace. Refuse to start or adopt another Project's Lead, even when the User asks. Tell the User to open a new Herdr workspace at that Project's root and run `posse up` there. Never run `posse up` for another Project from this Lead pane.
    - **Worker**: run `posse brief` and follow your launch Brief. Report progress and results only through `posse signal`.
    - **Neither, and the User wants posse here**: run `posse doctor`, then run `posse up` inside Herdr from a Git repository, a folder whose subfolders are the repositories of one stack, or a new folder that `posse up` initializes as a repository. Posse orchestrates Git repositories and workspaces; edit non-Git directories directly outside Posse. Setup is optional for the first outcome; use `/posse-setup` for the full configuration tour.
 

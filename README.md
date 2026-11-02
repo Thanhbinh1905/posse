@@ -47,6 +47,8 @@ Custom scripts and Herdr layouts that consume Posse output must use the renamed 
 
 ## Get started
 
+Use one Project per Herdr workspace. Each Project has one Lead, and each Lead owns a separate Herdr workspace. Do not start or adopt another Project's Lead from an existing Lead pane. To use several Projects, open a separate Herdr workspace at each Project root, then run `posse up` in each workspace.
+
 1. Open a Herdr pane in your repository or workspace folder and run `posse up`. It asks once before registering an unregistered Project.
 2. State the outcome you want, for example: "Fix the CSV export bug; open a PR, don't merge." The Lead raises only missing settings that affect this request, such as forge authentication, then starts work.
 

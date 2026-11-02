@@ -192,6 +192,71 @@ func TestUpAllRestoresRecordedClaudeLeadOverLeadKind(t *testing.T) {
 	}
 }
 
+func upAllWithForeignLeadConflict(t *testing.T, callerIsForeignLead, sameWorkspace bool) (string, *herdr.Fake) {
+	t.Helper()
+	ctx := context.Background()
+	home, db, shop := restoreFixture(t)
+	otherRoot := filepath.Join(t.TempDir(), "other")
+	initRepo(t, otherRoot)
+	other, err := db.CreateProject(ctx, "other", otherRoot, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherWorkspace, otherPane := "w2", "w2:p1"
+	if sameWorkspace {
+		otherWorkspace, otherPane = "w1", "w1:p2"
+	}
+	if err := db.SetProjectLead(ctx, other.ID, otherWorkspace, otherPane, "posse:other:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RememberProjectServerStartedAt(ctx, other.ID, "new-generation"); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{
+		ServerStartedAt: "new-generation",
+		Workspaces:      []herdr.Workspace{{WorkspaceID: "w1"}, {WorkspaceID: "w2"}},
+		Panes: []herdr.Pane{
+			{PaneID: shop.LeadPaneID, WorkspaceID: "w1", Label: shop.LeadLabel},
+			{PaneID: otherPane, WorkspaceID: otherWorkspace, Label: "posse:other:lead", Agent: "pi", AgentStatus: "working"},
+		},
+	}
+	fake.Results["agent.get"] = []byte(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
+	fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fake.SnapshotValue.Panes[0].Agent, fake.SnapshotValue.Panes[0].AgentStatus = "pi", "idle"
+		}
+	}
+	if callerIsForeignLead {
+		t.Setenv("HERDR_PANE_ID", otherPane)
+		t.Setenv("HERDR_WORKSPACE_ID", otherWorkspace)
+	} else {
+		t.Setenv("HERDR_PANE_ID", "")
+		t.Setenv("HERDR_WORKSPACE_ID", "")
+	}
+	output := &bytes.Buffer{}
+	cli := testService(home, fake).CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"up", "--all"}); code != 0 {
+		t.Fatalf("up --all = %d: %s", code, output)
+	}
+	return output.String(), fake
+}
+
+func TestUpAllRefusesRestoreFromAnotherProjectsLeadPane(t *testing.T) {
+	output, fake := upAllWithForeignLeadConflict(t, true, false)
+	if !strings.Contains(output, "Project other") || !strings.Contains(output, "new Herdr workspace") || !strings.Contains(output, "posse up") || fake.CallCount("agent.start") != 0 || fake.CallCount("pane.rename") != 0 {
+		t.Fatalf("up --all restored a Project from another Lead pane: %s; calls=%#v", output, fake.Calls)
+	}
+}
+
+func TestUpAllRefusesRestoreIntoWorkspaceWithAnotherProjectsLead(t *testing.T) {
+	output, fake := upAllWithForeignLeadConflict(t, false, true)
+	if !strings.Contains(output, "Project other") || !strings.Contains(output, "new Herdr workspace") || !strings.Contains(output, "posse up") || fake.CallCount("agent.start") != 0 || fake.CallCount("pane.rename") != 0 {
+		t.Fatalf("up --all restored into a workspace with another Lead: %s; calls=%#v", output, fake.Calls)
+	}
+}
+
 func TestUpAllSkipsDownProjects(t *testing.T) {
 	ctx := context.Background()
 	home, db, project := restoreFixture(t)
