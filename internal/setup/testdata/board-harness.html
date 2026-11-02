@@ -68,8 +68,8 @@
   let retriedPrompts = 0;
   let retryColumn = "";
   if (params.has("decline")) {
-    win.dispatchEvent(new win.Event("focus"));
-    await sleep(100);
+    const request = prompts[0]?.options?.data?.request || "missing-request";
+    await fetch("complete?token=" + encodeURIComponent(request), { method: "POST" });
     win.dispatchEvent(new win.Event("focus"));
     await sleep(100);
     const card = doc.querySelector('[data-key="#23"]');

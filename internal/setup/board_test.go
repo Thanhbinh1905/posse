@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 )
@@ -242,32 +242,51 @@ func TestBoardDeclinedStartReturnsIssueToReady(t *testing.T) {
 	if err := json.Unmarshal([]byte(encoded), &data); err != nil {
 		t.Fatal(err)
 	}
-	var posseReads atomic.Int32
+	completed := map[string]bool{}
+	var completedMu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/posse.js" {
-			fileServer.ServeHTTP(w, r)
+		switch r.URL.Path {
+		case "/complete":
+			completedMu.Lock()
+			completed[r.URL.Query().Get("token")] = true
+			completedMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
 			return
-		}
-		current := map[string]any{}
-		for key, value := range data {
-			current[key] = value
-		}
-		project := map[string]any{}
-		for key, value := range data["project"].(map[string]any) {
-			project[key] = value
-		}
-		if posseReads.Add(1) == 2 {
+		case "/posse.js":
+			current := map[string]any{}
+			for key, value := range data {
+				current[key] = value
+			}
+			project := map[string]any{}
+			for key, value := range data["project"].(map[string]any) {
+				project[key] = value
+			}
 			project["lead"] = "working"
-		} else {
-			project["lead"] = "idle"
-		}
-		current["project"] = project
-		encoded, err := json.Marshal(current)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			current["project"] = project
+			encoded, err := json.Marshal(current)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, "posseBoardData(%q, %s);\n", "posse", encoded)
 			return
+		case "/starts.js":
+			completedMu.Lock()
+			var tokens []string
+			for token := range completed {
+				tokens = append(tokens, token)
+			}
+			completedMu.Unlock()
+			encoded, err := json.Marshal(tokens)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, "posseBoardData(%q, %s);\n", "starts", encoded)
+			return
+		default:
+			fileServer.ServeHTTP(w, r)
 		}
-		fmt.Fprintf(w, "posseBoardData(%q, %s);\n", "posse", encoded)
 	}))
 	defer server.Close()
 	var run boardRun
@@ -275,10 +294,12 @@ func TestBoardDeclinedStartReturnsIssueToReady(t *testing.T) {
 	if run.RetriedPrompts != 2 {
 		t.Fatalf("prompts after Lead declined the start = %d, column=%q activity=%q, want 2", run.RetriedPrompts, run.RetryColumn, run.Activity)
 	}
+	if request, ok := run.Prompts[0].Options.Data["request"].(string); !ok || request == "" {
+		t.Fatalf("start prompt request = %v, want a unique completion token", run.Prompts[0].Options.Data["request"])
+	}
 	if run.RetryColumn != "ready" {
 		t.Errorf("declined issue is in %q, want Ready", run.RetryColumn)
 	}
-	posseReads.Store(0)
 	proof := filepath.Join(os.Getenv("TMPDIR"), "t831-board-declined.png")
 	if err := os.MkdirAll(filepath.Dir(proof), 0o700); err != nil {
 		t.Fatal(err)

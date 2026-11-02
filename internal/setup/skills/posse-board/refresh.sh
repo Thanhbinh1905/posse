@@ -29,4 +29,19 @@ else
 	echo "posse-board: gh issue list failed; the board shows no issues" >&2
 	write issues "[]"
 fi
+
+mkdir -p "$board/start-completions"
+completed_starts='['
+separator=''
+for marker in "$board"/start-completions/*; do
+	[ -f "$marker" ] || continue
+	request=${marker##*/}
+	case "$request" in
+		''|*[!a-zA-Z0-9_-]*) continue ;;
+	esac
+	completed_starts="$completed_starts$separator\"$request\""
+	separator=,
+done
+completed_starts="$completed_starts]"
+write starts "$completed_starts"
 echo "$board/index.html"
