@@ -710,6 +710,11 @@ type TaskSkillUse struct {
 	LastAt  int64
 }
 
+type TaskSpecCheck struct {
+	TaskID    int64
+	CheckedAt int64
+}
+
 type TaskTargetChange struct {
 	ID           int64
 	ProjectID    int64
