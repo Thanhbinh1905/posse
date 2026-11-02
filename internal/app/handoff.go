@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -77,7 +76,10 @@ func (s *Service) handoffWrite(ctx *axi.Context, args []string) error {
 	if len(contents) > handoffMaxBytes {
 		return axi.Failure("handoff_too_large", fmt.Sprintf("handoff note with provenance is %d bytes; the limit is %d bytes", len(contents), handoffMaxBytes), false, "Curate the note and retry `posse handoff write --file <file.md>`")
 	}
-	if err := atomicfile.Write(pending, []byte(contents), 0o600); err != nil {
+	if err := writePendingHandoff(pending, []byte(contents)); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return axi.Failure("handoff_pending", "a handoff note is already waiting at "+pending, false, "Inspect the existing note, then let the next Lead load it before writing another note")
+		}
 		return fmt.Errorf("write pending handoff %s: %w", pending, err)
 	}
 	return ctx.Print(axi.Object{
@@ -86,6 +88,43 @@ func (s *Service) handoffWrite(ctx *axi.Context, args []string) error {
 		{Key: "generation", Value: generation},
 		{Key: "help", Value: []any{"The next Lead start loads and archives this note once"}},
 	})
+}
+
+func writePendingHandoff(path string, contents []byte) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(directory, ".handoff-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(contents); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(temporary, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func nextHandoffGeneration(home, project string) (int, error) {

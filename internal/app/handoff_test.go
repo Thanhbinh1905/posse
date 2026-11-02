@@ -92,6 +92,20 @@ func TestHandoffWriteLoadsOnceAndArchivesOnLeadStartup(t *testing.T) {
 	}
 }
 
+func TestWritePendingHandoffDoesNotOverwriteAnExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "handoff.md")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePendingHandoff(path, []byte("second")); !os.IsExist(err) {
+		t.Fatalf("write to existing handoff error = %v, want file exists", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil || string(contents) != "first" {
+		t.Fatalf("existing handoff was replaced: %q, %v", contents, err)
+	}
+}
+
 func TestHandoffWriteDoesNotOverwriteAnUnconsumedNote(t *testing.T) {
 	f := newPreferenceSetFixture(t)
 	t.Chdir(f.repo)
