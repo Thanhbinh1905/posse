@@ -206,13 +206,13 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
 	}
-	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
-		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
-	}
 	if rewrite {
 		if err := recordBranchRewrite(out.Context, db, project, task, parsed.Flags["repo"], previousRemoteHead, sha, rewriteQuote); err != nil {
 			return err
 		}
+	}
+	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
+		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
