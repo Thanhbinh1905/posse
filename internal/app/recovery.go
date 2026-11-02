@@ -247,6 +247,9 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return 0, err
 	}
+	if err := refuseForeignLeadForProject(snapshot, project, os.Getenv("HERDR_PANE_ID")); err != nil {
+		return 0, err
+	}
 	tasks, serverRestarted, pendingGroupGeneration, err := recoveryWork(ctx, db, project, snapshot, previousGeneration, "")
 	if err != nil {
 		return 0, err
@@ -309,6 +312,9 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 	current, dbErr := db.ProjectByID(ctx, project.ID)
 	if dbErr != nil {
 		return 0, dbErr
+	}
+	if err := refuseForeignLeadForProject(fresh, current, os.Getenv("HERDR_PANE_ID")); err != nil {
+		return 0, err
 	}
 	previousGeneration, err = db.ProjectServerStartedAt(ctx, current.ID)
 	if err != nil {
@@ -615,6 +621,9 @@ func (s *Service) ensureRecoveryWorkspace(ctx context.Context, db *store.DB, pro
 }
 
 func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, snapshot herdr.Snapshot) (returnErr error) {
+	if err := refuseForeignLeadForProject(snapshot, project, os.Getenv("HERDR_PANE_ID")); err != nil {
+		return err
+	}
 	now := time.Now()
 	claimed, err := db.ClaimLeadStart(ctx, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "restore", os.Getpid())
 	if err != nil {

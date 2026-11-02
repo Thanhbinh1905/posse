@@ -11,9 +11,47 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestDoctorReportsMultipleLeadPanesInOneWorkspace(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	for _, name := range []string{"shop", "other"} {
+		repo := filepath.Join(root, name)
+		initRepo(t, repo)
+		db, err := store.Open(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.CreateProject(context.Background(), name, repo, "main"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{
+		{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead"},
+		{PaneID: "w1:p2", WorkspaceID: "w1", Label: "posse:other:lead"},
+	}}
+	result, err := testService(home, fake).collectDoctorChecks(&axi.Context{Context: context.Background()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range result.Checks {
+		if check.Name == "Lead panes in workspace w1" {
+			if check.Status != "warn" || !strings.Contains(check.Detail, "other, shop") || !strings.Contains(check.Action, "one Herdr workspace per Project") {
+				t.Fatalf("duplicate Lead diagnostic = %#v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("doctor omitted the duplicate Lead diagnostic: %#v", result.Checks)
+}
 
 func TestDoctorReportsPosseOwnedDiskAndArtifactRetention(t *testing.T) {
 	home := t.TempDir()

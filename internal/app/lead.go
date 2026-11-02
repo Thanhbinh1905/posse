@@ -232,6 +232,31 @@ func (s *Service) availableLeadKinds(ctx context.Context, cfg config.Config) []s
 	return available
 }
 
+func refuseForeignLeadWorkspace(snapshot herdr.Snapshot, project store.Project, callerPaneID, workspaceID string) error {
+	ownLabel := "posse:" + project.Name + ":lead"
+	for _, pane := range snapshot.Panes {
+		if pane.Label == "" || pane.Label == ownLabel || !strings.HasPrefix(pane.Label, "posse:") || !strings.HasSuffix(pane.Label, ":lead") {
+			continue
+		}
+		other := strings.TrimSuffix(strings.TrimPrefix(pane.Label, "posse:"), ":lead")
+		if pane.PaneID == callerPaneID {
+			return axi.Failure("lead_workspace_conflict", fmt.Sprintf("cannot start Project %s from Project %s's Lead pane in Herdr workspace %s. Open a new Herdr workspace for this Project, then run `posse up` there", project.Name, other, pane.WorkspaceID), false, "Open a new Herdr workspace for this Project, then run `posse up` there")
+		}
+		if pane.WorkspaceID == workspaceID {
+			return axi.Failure("lead_workspace_conflict", fmt.Sprintf("Herdr workspace %s contains the Lead pane for Project %s. Open a new Herdr workspace for this Project, then run `posse up` there", workspaceID, other), false, "Open a new Herdr workspace for this Project, then run `posse up` there")
+		}
+	}
+	return nil
+}
+
+func refuseForeignLeadForProject(snapshot herdr.Snapshot, project store.Project, callerPaneID string) error {
+	workspaceID := project.HerdrWorkspaceID
+	if foundID, found := leadWorkspace(snapshot, project); found {
+		workspaceID = foundID
+	}
+	return refuseForeignLeadWorkspace(snapshot, project, callerPaneID, workspaceID)
+}
+
 func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	parsed, err := parseUpArgs(args)
 	if err != nil {
@@ -337,6 +362,13 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		return herdrError(err)
 	}
 	if !registered {
+		initialSnapshot, snapshotErr := s.Herdr.Snapshot(ctx.Context)
+		if snapshotErr != nil {
+			return herdrError(snapshotErr)
+		}
+		if err := refuseForeignLeadWorkspace(initialSnapshot, store.Project{Name: name}, os.Getenv("HERDR_PANE_ID"), os.Getenv("HERDR_WORKSPACE_ID")); err != nil {
+			return err
+		}
 		if _, lookupErr := db.ProjectByName(ctx.Context, name); lookupErr == nil {
 			return axi.Failure("name_taken", fmt.Sprintf("Project name %q is already in use", name), false, "Retry with `posse up --name <different-name>`")
 		} else if !store.IsNotFound(lookupErr) {
@@ -385,6 +417,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 			if err != nil {
 				return herdrError(err)
 			}
+			if err := refuseForeignLeadWorkspace(current, project, os.Getenv("HERDR_PANE_ID"), workspaceID); err != nil {
+				return err
+			}
 			if _, found := leadWorkspace(current, project); !found {
 				if err := db.SetProjectWorkspace(ctx.Context, project.ID, workspaceID); err != nil {
 					return err
@@ -429,6 +464,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		if err != nil {
 			return herdrError(err)
 		}
+	}
+	if err := refuseForeignLeadWorkspace(snapshot, project, os.Getenv("HERDR_PANE_ID"), os.Getenv("HERDR_WORKSPACE_ID")); err != nil {
+		return err
 	}
 	if err := s.cleanupLegacyWatchTabs(ctx.Context, db, project, snapshot); err != nil {
 		return err
