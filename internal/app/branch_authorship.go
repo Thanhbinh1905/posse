@@ -18,7 +18,7 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 		return 0, nil
 	}
 	if task.WorktreePath == "" || task.Branch == "" {
-		return 0, fmt.Errorf("Task has no author branch checkout")
+		return 0, fmt.Errorf("task has no author branch checkout")
 	}
 	repository, err := gitCommonDir(ctx, task.WorktreePath)
 	if err != nil {
