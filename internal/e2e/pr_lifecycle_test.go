@@ -2106,14 +2106,20 @@ func newPRLifecycleFixtureWithSlowLoginShell(t *testing.T) *prLifecycleFixture {
 
 // Use this fixture for tests that create synthetic Tasks and own their lifecycle.
 func newPRLifecycleFixtureWithManualWatchOwner(t *testing.T) *prLifecycleFixture {
-	return newPRLifecycleFixtureWithOptions(t, false, false, true)
+	return newPRLifecycleFixtureWithOptions(t, false, false, true, "")
 }
 
 func newPRLifecycleFixtureWithLeadAndShell(t *testing.T, liveLead, slowLoginShell bool) *prLifecycleFixture {
-	return newPRLifecycleFixtureWithOptions(t, liveLead, slowLoginShell, false)
+	return newPRLifecycleFixtureWithOptions(t, liveLead, slowLoginShell, false, "")
 }
 
-func newPRLifecycleFixtureWithOptions(t *testing.T, liveLead, slowLoginShell, manualWatchOwner bool) *prLifecycleFixture {
+// newPRLifecycleFixtureWithPaneShell runs the Worker panes in a copy of /bin/sh
+// installed under shellName, so the pane's shell reports that name to Herdr.
+func newPRLifecycleFixtureWithPaneShell(t *testing.T, shellName string) *prLifecycleFixture {
+	return newPRLifecycleFixtureWithOptions(t, false, false, false, shellName)
+}
+
+func newPRLifecycleFixtureWithOptions(t *testing.T, liveLead, slowLoginShell, manualWatchOwner bool, paneShell string) *prLifecycleFixture {
 	t.Helper()
 	root := newFixtureRoot(t, fixturePrefix("pr-"))
 	binDir := filepath.Join(root, "bin")
@@ -2169,6 +2175,22 @@ func newPRLifecycleFixtureWithOptions(t *testing.T, liveLead, slowLoginShell, ma
 		if _, err := herdr.WriteIsolatedConfigWithShell(root, shell); err != nil {
 			t.Fatal(err)
 		}
+	} else if paneShell != "" {
+		sh, err := exec.LookPath("sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		image, err := os.ReadFile(sh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shell := filepath.Join(binDir, paneShell)
+		if err := os.WriteFile(shell, image, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := herdr.WriteIsolatedConfigWithShell(root, shell); err != nil {
+			t.Fatal(err)
+		}
 	} else if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
@@ -2185,6 +2207,11 @@ func newPRLifecycleFixtureWithOptions(t *testing.T, liveLead, slowLoginShell, ma
 	agentScript := `#!/bin/sh
 set -eu
 herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+if [ -e "$POSSE_TEST_ROOT/exit-before-brief" ]; then
+  i=0; while herdr agent get "$HERDR_PANE_ID" 2>/dev/null | grep -q '"launch_pending":true' && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done
+  herdr pane release-agent "$HERDR_PANE_ID" --source posse.fake --agent claude >/dev/null 2>&1
+  exit 0
+fi
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)
     IFS= read -r prompt || exit 0
