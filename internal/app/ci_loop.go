@@ -123,11 +123,54 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 		}
 		tails[check.Name] = boundedLogTail(tail, 200)
 	}
+	flakeCandidates := append([]failedCheck(nil), fixChecks...)
 	fixChecks, err = s.rerunKnownFlakes(ctx, db, project, task, plan, observation, forge, member, fixChecks, logs, tails)
+	fixChecks = omitRerunShardAggregates(checks, flakeCandidates, fixChecks)
 	if err != nil || len(fixChecks) == 0 {
 		return err
 	}
 	return s.queueCIFixRound(ctx, db, project, task, plan, observation, forge, prURL, member, fixChecks, tails)
+}
+
+func omitRerunShardAggregates(all, candidates, remaining []failedCheck) []failedCheck {
+	remainingByID := make(map[string]bool, len(remaining))
+	candidateByID := make(map[string]bool, len(candidates))
+	for _, check := range remaining {
+		remainingByID[check.RunID+"/"+check.JobID] = true
+	}
+	for _, check := range candidates {
+		candidateByID[check.RunID+"/"+check.JobID] = true
+	}
+	omit := make(map[string]bool)
+	for _, aggregate := range remaining {
+		if aggregate.RunID == "" {
+			continue
+		}
+		prefix := aggregate.Name + " shard "
+		found := false
+		allRerunAsFlakes := true
+		for _, shard := range all {
+			if shard.RunID != aggregate.RunID || !strings.HasPrefix(shard.Name, prefix) {
+				continue
+			}
+			found = true
+			id := shard.RunID + "/" + shard.JobID
+			if !candidateByID[id] || remainingByID[id] {
+				allRerunAsFlakes = false
+				break
+			}
+		}
+		if found && allRerunAsFlakes {
+			omit[aggregate.RunID+"/"+aggregate.JobID] = true
+		}
+	}
+	filtered := make([]failedCheck, 0, len(remaining))
+	for _, check := range remaining {
+		if !omit[check.RunID+"/"+check.JobID] {
+			filtered = append(filtered, check)
+		}
+	}
+	return filtered
 }
 
 func ciTaskCanReceiveFix(task store.Task) bool {

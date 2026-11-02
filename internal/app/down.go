@@ -77,7 +77,14 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	project, callerPaneID := request.project, request.callerPaneID
 	var tornDown []any
 	if execute {
-		if tornDown, err = s.teardownTasksForDown(ctx.Context, db, project, quote); err != nil {
+		err := stopProjectWatchesBeforeDownTeardown(ctx.Context, func(stopCtx context.Context) error {
+			return s.stopDownProjectWatches(stopCtx, home, project)
+		}, func() error {
+			var teardownErr error
+			tornDown, teardownErr = s.teardownTasksForDown(ctx.Context, db, project, quote)
+			return teardownErr
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -207,6 +214,31 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		result = append(result, axi.Field{Key: "kept_panes", Value: stringsToAny(kept)})
 	}
 	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse up` here to start the Lead again"}}))
+}
+
+func (s *Service) stopDownProjectWatches(ctx context.Context, home string, project store.Project) error {
+	if s.downWatchStop != nil {
+		return s.downWatchStop(ctx, home, project)
+	}
+	processes, err := s.runningWatches(ctx, home)
+	if err != nil {
+		return err
+	}
+	for _, process := range processes {
+		if process.PollOnly && processBelongsToProject(process, project) {
+			if err := stopStoredWatchRuntimeForDown(ctx, home, process); err != nil {
+				return axi.Failure("watch_stop_failed", "the Project watch is still completing maintenance: "+err.Error(), true, "Retry `posse down --execute` after it stops")
+			}
+		}
+	}
+	return nil
+}
+
+func stopProjectWatchesBeforeDownTeardown(ctx context.Context, stopWatches func(context.Context) error, teardownTasks func() error) error {
+	if err := stopWatches(ctx); err != nil {
+		return err
+	}
+	return teardownTasks()
 }
 
 type downRequest struct {
