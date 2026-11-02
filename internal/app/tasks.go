@@ -1469,8 +1469,8 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["plan_sha256"] = plan.SHA256()
 		rootContext = plan.Execution.RootContext
 	}
-	if task.Type == "change" && verb == "done" {
-		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, project, task, false); err != nil {
+	if task.Type == "change" {
+		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, project, task, false, verb != "done"); err != nil {
 			return err
 		}
 	}

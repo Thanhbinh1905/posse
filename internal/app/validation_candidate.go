@@ -163,7 +163,7 @@ func (s *Service) requireCandidateSubmissionFreshness(ctx context.Context, db *s
 	if candidate.State != store.ValidationCandidateActive {
 		return nil
 	}
-	if err := s.refuseMovedCandidateAuthor(ctx, db, lane.owner, lane.ownerTask, false); err != nil {
+	if err := s.refuseMovedCandidateAuthor(ctx, db, lane.owner, lane.ownerTask, false, false); err != nil {
 		return err
 	}
 	remoteHead, err := lane.remoteTaskHead(ctx)
@@ -183,11 +183,7 @@ func (s *Service) requireCandidateSubmissionFreshness(ctx context.Context, db *s
 	return nil
 }
 
-// refuseMovedCandidateAuthor checks every live candidate of the Task, in each
-// of its lanes. allowResubmission is true only for publish, which archives a
-// stale candidate before creating a fresh one. A Signal must keep refusing
-// until publish.
-func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, project store.Project, task store.Task, allowResubmission bool) error {
+func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, project store.Project, task store.Task, allowResubmission, allowStale bool) error {
 	candidates, err := db.LiveValidationCandidates(ctx, task.ID)
 	if err != nil {
 		return err
@@ -205,10 +201,17 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 		if candidate.State == store.ValidationCandidatePromoting && actual == candidate.CandidateSHA && branch == "refs/heads/"+task.Branch {
 			continue
 		}
-		if candidate.State == store.ValidationCandidateStale && allowResubmission {
+		if candidate.State == store.ValidationCandidateStale && (allowResubmission || allowStale) {
 			continue
 		}
 		if candidate.State == store.ValidationCandidateStale || actual != candidate.SubmittedSHA || branch != "refs/heads/"+task.Branch {
+			refreshAfterTargetMerge := false
+			if allowResubmission && candidate.State == store.ValidationCandidateActive && actual != candidate.SubmittedSHA && branch == "refs/heads/"+task.Branch {
+				refreshAfterTargetMerge, err = candidateAuthorIncludesNewTarget(ctx, lane, candidate, actual)
+				if err != nil {
+					return axi.Failure("candidate_target_head_failed", "could not verify whether the moved Task branch includes the current frozen target", true, err.Error())
+				}
+			}
 			canMarkStale := candidate.State == store.ValidationCandidatePreparing || candidate.State == store.ValidationCandidateActive
 			if candidate.State == store.ValidationCandidatePromoting {
 				remoteHead, err := lane.remoteTaskHead(ctx)
@@ -222,7 +225,7 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 					return err
 				}
 				candidate.State = store.ValidationCandidateStale
-				if allowResubmission {
+				if refreshAfterTargetMerge {
 					continue
 				}
 			}
@@ -239,6 +242,31 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 		}
 	}
 	return nil
+}
+
+func candidateAuthorIncludesNewTarget(ctx context.Context, lane candidateLane, candidate store.ValidationCandidate, authorHead string) (bool, error) {
+	targetHead, err := lane.targetHead(ctx)
+	if err != nil || targetHead == "" {
+		return false, err
+	}
+	if targetHead == candidate.TargetSHA {
+		return false, nil
+	}
+	if !lane.localDelivery() {
+		branch := lane.targetBranch()
+		ref := "refs/remotes/origin/" + branch
+		if _, err := gitFetch(ctx, lane.task.WorktreePath, "origin", "+refs/heads/"+branch+":"+ref); err != nil {
+			return false, err
+		}
+		fetchedHead, err := gitOutput(ctx, lane.task.WorktreePath, "rev-parse", "--verify", ref+"^{commit}")
+		if err != nil {
+			return false, err
+		}
+		if fetchedHead != targetHead {
+			return false, nil
+		}
+	}
+	return gitAncestor(ctx, lane.task.WorktreePath, targetHead, authorHead), nil
 }
 
 func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home string, lane candidateLane, summary, verification, proof, risk string, refresh bool) (returnErr error) {
