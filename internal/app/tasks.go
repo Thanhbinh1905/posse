@@ -2408,9 +2408,7 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, ""); err != nil {
-		return err
-	}
+	_ = db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, "")
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "keys", Value: args[1:]}, {Key: "state", Value: "sent"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the pane"}}})
 }
 
@@ -2945,11 +2943,20 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
 	}
-	if pane.Agent != "" {
+	if pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
 		if err := track("agent.stop", func() error {
 			return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
 		}); err != nil {
 			return failure(err)
+		}
+		if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
+			if err := track("pane.replace", func() error {
+				fresh, replaceErr := s.replaceWorkerPane(ctx, home, project, task, pane, kind)
+				pane = fresh
+				return replaceErr
+			}); err != nil {
+				return failure(err)
+			}
 		}
 	}
 	if prepareChanged {
