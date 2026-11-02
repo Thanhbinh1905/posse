@@ -54,7 +54,7 @@ func (s *Service) handoffWrite(ctx *axi.Context, args []string) error {
 	}
 	pending := handoffPath(home, project.Name)
 	if _, err := os.Lstat(pending); err == nil {
-		return axi.Failure("handoff_pending", "a handoff note is already waiting for the next Lead", false, "Let the next Lead load it before writing another note")
+		return axi.Failure("handoff_pending", "a handoff note is already waiting at "+pending, false, "Inspect the existing note, then let the next Lead load it before writing another note")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect pending handoff %s: %w", pending, err)
 	}
