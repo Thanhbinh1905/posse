@@ -217,21 +217,16 @@ guidance = ["docs/review.md"]
 	if _, err := db.ExecContext(ctx, `DELETE FROM transitions WHERE task_id=? AND to_state='working'`, review.ID); err != nil {
 		t.Fatal(err)
 	}
-	failedReview, err := db.TaskByID(ctx, f.project.ID, review.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(f.home, f.project.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
 	currentProject, err := db.ProjectByID(ctx, f.project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: currentProject.LeadPaneID, WorkspaceID: currentProject.HerdrWorkspaceID, Label: currentProject.LeadLabel, Agent: "claude", AgentStatus: "idle"}}
-	if _, err := f.service.relaunchTask(ctx, db, f.home, currentProject, cfg, failedReview, ""); err != nil {
-		t.Fatalf("relaunch never-started Review Task: %v", err)
+	var relaunchOutput bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &relaunchOutput, &relaunchOutput
+	if code := cli.Run([]string{"relaunch", "t99"}); code != 0 {
+		t.Fatalf("relaunch never-started Review Task: code=%d output=%s", code, relaunchOutput.String())
 	}
 	for _, name := range []string{"brief.md", "launch.md"} {
 		contents, err := os.ReadFile(filepath.Join(plan.Paths.Output, name))
