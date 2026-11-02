@@ -74,9 +74,11 @@
     await sleep(100);
     const card = doc.querySelector('[data-key="#23"]');
     retryColumn = card?.dataset.column || "";
-    key("s");
-    key("Enter");
-    retriedPrompts = prompts.length;
+    if (!params.has("snapshot")) {
+      key("s");
+      key("Enter");
+      retriedPrompts = prompts.length;
+    }
   } else {
     key("s");
     key("Enter");

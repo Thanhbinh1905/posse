@@ -278,6 +278,19 @@ func TestBoardDeclinedStartReturnsIssueToReady(t *testing.T) {
 	if run.RetryColumn != "ready" {
 		t.Errorf("declined issue is in %q, want Ready", run.RetryColumn)
 	}
+	posseReads.Store(0)
+	proof := filepath.Join(os.Getenv("TMPDIR"), "t831-board-declined.png")
+	if err := os.MkdirAll(filepath.Dir(proof), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runChrome(t, chrome, "--window-size=1440,900", "--screenshot="+proof, server.URL+"/harness.html?w=1440&h=900&issue=23&decline=1&snapshot=1")
+	info, err := os.Stat(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("declined-board screenshot is empty")
+	}
 }
 
 func TestBoardNeverScrollsThePageSideways(t *testing.T) {
