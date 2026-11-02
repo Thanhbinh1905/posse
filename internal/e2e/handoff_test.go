@@ -19,6 +19,7 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 	defer fixture.db.Close()
 
 	const note = "Open question: should this workflow remain optional?\nNext: compare the User's answer with ADR 0027.\n"
+	const piStarted = "POSSE_TEST_PI_STARTED"
 	source := filepath.Join(fixture.root, "handoff.md")
 	if err := os.WriteFile(source, []byte(note), 0o600); err != nil {
 		t.Fatal(err)
@@ -31,6 +32,7 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 	piScript := "#!/bin/sh\n" +
 		"trap 'herdr pane release-agent \"$HERDR_PANE_ID\" --source posse.fake --agent pi >/dev/null 2>&1 || true; exit 0' INT\n" +
 		"printf '%s\\n' \"$@\" > \"$POSSE_TEST_ROOT/pi-args.log\"\n" +
+		"printf '%s\\n' '" + piStarted + "'\n" +
 		"herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent pi --state idle >/dev/null 2>&1\n" +
 		"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent pi --state working >/dev/null 2>&1; done\n"
 	if err := os.WriteFile(pi, []byte(piScript), 0o700); err != nil {
@@ -56,14 +58,11 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 			paneOutput, readErr := client.Run(context.Background(), "pane", "read", userWorkspace.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "40")
 			t.Fatalf("replace Lead with Pi: %v\n%s\nreadErr=%v", err, paneOutput, readErr)
 		}
-		if !waitForCondition(10*time.Second, func() bool {
-			_, err := os.Stat(filepath.Join(fixture.root, "pi-args.log"))
-			return err == nil
-		}) {
-			snapshot, snapshotErr := client.Snapshot(context.Background())
-			paneOutput, readErr := client.Run(context.Background(), "pane", "read", userWorkspace.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "40")
+		if _, err := client.Run(t.Context(), "pane", "wait-output", userWorkspace.RootPane.PaneID, "--match", piStarted, "--source", "recent-unwrapped", "--timeout", "30000"); err != nil {
+			snapshot, snapshotErr := client.Snapshot(t.Context())
+			paneOutput, readErr := client.Run(t.Context(), "pane", "read", userWorkspace.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "40")
 			lead, leadErr := fixture.db.ProjectLeadAgent(context.Background(), fixture.project.ID)
-			t.Fatalf("replacement Pi %d did not start: snapshot=%#v snapshotErr=%v lead=%#v leadErr=%v paneOutput=%s readErr=%v", startCount, snapshot, snapshotErr, lead, leadErr, paneOutput, readErr)
+			t.Fatalf("replacement Pi %d did not report its startup marker: %v; snapshot=%#v snapshotErr=%v lead=%#v leadErr=%v paneOutput=%s readErr=%v", startCount, err, snapshot, snapshotErr, lead, leadErr, paneOutput, readErr)
 		}
 	}
 	startPi()
