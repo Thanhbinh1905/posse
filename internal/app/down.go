@@ -75,6 +75,19 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 		return err
 	}
 	project, callerPaneID := request.project, request.callerPaneID
+	if execute {
+		processes, err := s.runningWatches(ctx.Context, home)
+		if err != nil {
+			return err
+		}
+		for _, process := range processes {
+			if process.PollOnly && processBelongsToProject(process, project) {
+				if err := stopStoredWatchRuntimeForDown(ctx.Context, home, process); err != nil {
+					return axi.Failure("watch_stop_failed", "the Project watch is still completing maintenance: "+err.Error(), true, "Retry `posse down --execute` after it stops")
+				}
+			}
+		}
+	}
 	var tornDown []any
 	if execute {
 		if tornDown, err = s.teardownTasksForDown(ctx.Context, db, project, quote); err != nil {
