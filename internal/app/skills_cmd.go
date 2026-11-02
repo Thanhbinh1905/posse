@@ -90,6 +90,15 @@ func (s *Service) skillsAdd(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return configError(err)
 	}
+	projectConfigured := configured
+	inherited := map[string][]string{}
+	if projectName != "" {
+		inherited, err = config.ConfiguredSkills(config.ConfigPath(home, ""))
+		if err != nil {
+			return configError(err)
+		}
+		configured = mergeConfiguredSkills(inherited, projectConfigured)
+	}
 	selection := map[string][]string{}
 	switch {
 	case all:
@@ -111,6 +120,20 @@ func (s *Service) skillsAdd(ctx *axi.Context, args []string) error {
 			return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "file", Value: path}, {Key: "added", Value: []any{}}, {Key: "help", Value: []any{"Nothing was written"}}})
 		}
 		selection = picked
+	}
+	if projectName != "" {
+		for _, role := range config.SkillRoles {
+			addsToProject := false
+			for _, name := range selection[role] {
+				if !slices.Contains(projectConfigured[role], name) {
+					addsToProject = true
+					break
+				}
+			}
+			if addsToProject {
+				selection[role] = append(inherited[role], selection[role]...)
+			}
+		}
 	}
 	added, err := config.AddSkills(path, selection)
 	if err != nil {
@@ -134,6 +157,14 @@ func (s *Service) skillsAdd(ctx *axi.Context, args []string) error {
 		}
 	}
 	return ctx.Print(axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "file", Value: path}, {Key: "added", Value: rows}, {Key: "help", Value: []any{"New Tasks and Leads load the added skills; running ones keep theirs", "Run `posse skills` to inspect the result"}}})
+}
+
+func mergeConfiguredSkills(global, project map[string][]string) map[string][]string {
+	merged := map[string][]string{}
+	for _, role := range config.SkillRoles {
+		merged[role] = append(append([]string(nil), global[role]...), project[role]...)
+	}
+	return merged
 }
 
 func recommendedSkill(recommended map[string][]string, name string) bool {

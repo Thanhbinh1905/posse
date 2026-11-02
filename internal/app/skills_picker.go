@@ -104,15 +104,24 @@ func readPickerKey(reader *bufio.Reader) (string, error) {
 	case 4:
 		return "ctrl-d", nil
 	case 0x1b:
-		if reader.Buffered() == 0 {
-			return "esc", nil
-		}
 		next, err := reader.ReadByte()
-		if err != nil || next != '[' && next != 'O' {
-			return "esc", err
+		if err != nil {
+			if err == io.EOF {
+				return "esc", nil
+			}
+			return "", err
+		}
+		if next != '[' && next != 'O' {
+			if err := reader.UnreadByte(); err != nil {
+				return "", err
+			}
+			return "esc", nil
 		}
 		final, err := reader.ReadByte()
 		if err != nil {
+			if err == io.EOF {
+				return "", nil
+			}
 			return "", err
 		}
 		switch final {

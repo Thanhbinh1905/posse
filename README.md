@@ -70,6 +70,14 @@ Herdr's default Agents panel shows every Worker as `Lead:<project> · <tab>`. Wi
 
 If your Herdr config is a symlink (for example Nix home-manager) or already sets custom Agents `rows`, Posse never writes it. Paste this block into the config's source instead:
 
+The panel shows the Lead followed by its Workers:
+
+```text
+Lead: shop
+├─ t1
+└─ t2
+```
+
 ```toml
 [ui.sidebar.agents]
 rows = [

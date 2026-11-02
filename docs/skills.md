@@ -32,7 +32,7 @@ change
 1 selected, 0 already in config
 ```
 
-Without a terminal it needs `--all` or skill names and prints the added skills per role. It appends to your lists, keeps comments and existing entries, and never removes anything. From a Lead it needs `--user-approved "<User's words>"`. `posse setup` offers the whole set once, and `posse setup --check` and `posse doctor` report what config lacks.
+Without a terminal it needs `--all` or skill names and prints the added skills per role. It appends to your lists, keeps comments and existing entries, and never removes anything. When `--project` adds a skill for a role, the Project list starts with that role's global skills. The Project list then replaces the global list for that role. From a Lead it needs `--user-approved "<User's words>"`. `posse setup` offers the whole set once, and `posse setup --check` and `posse doctor` report what config lacks.
 
 ## The `[skills]` block
 
