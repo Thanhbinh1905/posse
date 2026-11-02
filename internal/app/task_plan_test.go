@@ -77,6 +77,12 @@ func TestWorkerStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(1,?,1,'dropped-error','Dropped write errors','Check writes','Errors are ignored','Check every write',1)`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,1,?,1,'shop','internal/x.go','save','db.Exec(ctx, q)',1,?,'P1','introduced',1,'open')`, task.ID, strings.Repeat("a", 64), strings.Repeat("b", 40)); err != nil {
+		t.Fatal(err)
+	}
 	siblingID, err := db.CreateTask(context.Background(), f.project.ID, store.Task{Seq: 2, Type: "research", Title: "private sibling", Profile: "private-profile"})
 	if err != nil {
 		t.Fatal(err)
@@ -106,15 +112,19 @@ func TestWorkerStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 		t.Fatalf("status triggered preparation: code=%d %s", code, output)
 	}
 	var view struct {
-		Task      string        `json:"task"`
-		Admission string        `json:"admission"`
-		Plan      taskplan.Plan `json:"plan"`
+		Task      string           `json:"task"`
+		Admission string           `json:"admission"`
+		Plan      taskplan.Plan    `json:"plan"`
+		Findings  []map[string]any `json:"open_findings"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
 	if view.Task != "t1" || view.Admission != "admitted" || view.Plan.Version != taskplan.Version || strings.Contains(output.String(), "private sibling") || strings.Contains(output.String(), "private-profile") {
 		t.Fatalf("status exposed wrong Task: %s", output)
+	}
+	if len(view.Findings) != 1 || view.Findings[0]["id"] != "F-1" || view.Findings[0]["state"] != "open" {
+		t.Fatalf("status omitted this Task's open findings: %s", output)
 	}
 	output.Reset()
 	if code := cli.Run([]string{"status", "t2"}); code != 2 {

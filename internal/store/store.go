@@ -2136,6 +2136,13 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	}
 	noticeSummary := note
 	noticeDataJSON := string(encoded)
+	if noticeKind == "task_done" {
+		if noticeData, ok := data.(map[string]any); ok {
+			if nextAction, ok := noticeData["next_action"].(string); ok && nextAction != "" {
+				noticeSummary += ". Next action: " + nextAction
+			}
+		}
+	}
 	if workerResumed {
 		noticeKind = "worker_resumed"
 		noticeSummary = task.Title + ": Worker resumed: " + strconv.Quote(note)
