@@ -30,7 +30,15 @@ func refuseMergedTaskPullRequest(ctx context.Context, db *store.DB, project stor
 	if prURL == "" {
 		return nil
 	}
-	forge, err := forgeForRepository(ctx, project.Root, cfg, repo)
+	root := project.Root
+	if project.IsWorkspace() {
+		target, err := projectTarget(ctx, db, project, repo)
+		if err != nil {
+			return err
+		}
+		root = target.Root
+	}
+	forge, err := forgeForRepository(ctx, root, cfg, repo)
 	if err != nil {
 		return err
 	}
