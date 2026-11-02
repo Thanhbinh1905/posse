@@ -1227,9 +1227,12 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	merge := task.MergeMode
 	work := "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
 	if merge == "pr" && task.Type == "change" && !project.IsWorkspace() {
-		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change the default branch, or merge."
+		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly or force-push outside `posse publish --rewrite --user-approved \"<User's words>\"`; never delete branches, change the default branch, or merge."
 	} else if project.IsWorkspace() && task.Type == "change" {
 		work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
+	}
+	if task.Type == "change" && merge == "pr" && !project.IsWorkspace() {
+		work += " When the User asks you to amend, squash or force-push this published Task branch, use `posse publish --rewrite --user-approved \"<User's words>\"` with the User's exact quote. Never rewrite published history without that quote or force-push outside this command."
 	}
 	if task.Type == "change" {
 		if plan, err := task.AdmittedPlan(); err == nil && plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan)) {
