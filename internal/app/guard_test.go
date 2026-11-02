@@ -94,6 +94,7 @@ func TestGuardAllowsReadsAndIsolatedHerdrServers(t *testing.T) {
 		"HERDR_SOCKET_PATH=$(mktemp) herdr workspace close w1",
 		"env -i HOME=/tmp/posse-e2e-x/home herdr server",
 		"env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/local/bin:/usr/bin:/bin herdr server",
+		"bash -c 'env -i HOME=/tmp/posse-e2e-lab/home XDG_CONFIG_HOME=/tmp/posse-e2e-lab/xdg POSSE_HOME=/tmp/posse-e2e-lab/posse PATH=/usr/bin herdr workspace list'",
 		"if true; then export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; else export HERDR_SOCKET_PATH=/tmp/posse-e2e-x/herdr.sock; fi; herdr workspace close w1",
 	} {
 		if refused, reason := guardHerdrCommand(command, guardEnv); refused {
@@ -342,6 +343,14 @@ func TestRunGuardBlocksOnlyWorkers(t *testing.T) {
 	if code := service.RunGuard(strings.NewReader(read), &stderr); code != 0 {
 		t.Fatalf("guard blocked a read: code=%d stderr=%s", code, stderr.String())
 	}
+	text := `{"tool_name":"Bash","tool_input":{"command":"node -e 'console.log(\"HERDR_SOCKET_PATH\")'"}}`
+	if code := service.RunGuard(strings.NewReader(text), &stderr); code != 0 {
+		t.Fatalf("guard blocked a variable name used as text: code=%d stderr=%s", code, stderr.String())
+	}
+	access := `{"tool_name":"Bash","tool_input":{"command":"node -p process.env.HERDR_SOCKET_PATH"}}`
+	if code := service.RunGuard(strings.NewReader(access), &stderr); code != guardExitBlocked {
+		t.Fatalf("guard allowed access to the Worker Herdr environment: code=%d stderr=%s", code, stderr.String())
+	}
 	if code := service.RunGuard(strings.NewReader(`{"tool_name":"Edit","tool_input":{"file_path":"x"}}`), &stderr); code != 0 {
 		t.Fatalf("guard blocked a tool without a command: code=%d", code)
 	}
@@ -542,6 +551,17 @@ func TestGuardResolvesRelativeHomesAgainstTheWorkingDirectory(t *testing.T) {
 		if refused, reason := guardCommand(command, scope); refused {
 			t.Errorf("guard refused %q: %#v", command, reason)
 		}
+	}
+}
+
+func TestGuardAllowsShellSyntaxChecksThatMentionHerdr(t *testing.T) {
+	scope, dir := guardFixture(t)
+	path := filepath.Join(dir, "check.sh")
+	if err := os.WriteFile(path, []byte("herdr workspace close w1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if refused, reason := guardCommand("sh -n check.sh", scope); refused {
+		t.Fatalf("guard refused a syntax-only check: %#v", reason)
 	}
 }
 

@@ -938,6 +938,8 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 				return g.opaque(e, raw, raw)
 			}
 			return g.check(e.clone(), args[index+1], depth+1, stdinRedirected)
+		case arg == "-n" || arg == "--noexec":
+			return false, guardReason{}
 		case arg == "-o" || arg == "+o" || arg == "--rcfile" || arg == "--init-file":
 			index++
 		case strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+"):
@@ -1034,7 +1036,7 @@ func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (boo
 	if g.namesRealSocket(code) {
 		return refuse(ruleNamesSessionSocket, raw, "it names the socket of the Herdr session this Worker runs in")
 	}
-	if !herdrSocketReference.MatchString(code) && !(startsProcess(interpreter, raw, code) && herdrProgram.MatchString(code)) {
+	if !herdrSocketReference.MatchString(code) && !herdrEnvironmentAccess.MatchString(code) && !(startsProcess(interpreter, raw, code) && herdrProgram.MatchString(code)) {
 		return false, guardReason{}
 	}
 	if socket, known := e.socket(); known && g.realSocket != "" && !sameSocket(socket, g.realSocket) {
@@ -1044,7 +1046,8 @@ func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (boo
 }
 
 var (
-	herdrSocketReference = regexp.MustCompile(`herdr\.sock|HERDR_SOCKET_PATH|HERDR_BIN_PATH`)
+	herdrSocketReference   = regexp.MustCompile(`herdr\.sock`)
+	herdrEnvironmentAccess = regexp.MustCompile(`(?:process\.env|os\.environ|ENVIRON|ENV)\s*(?:\.\s*|\[\s*['"])HERDR_[A-Z0-9_]+|(?:process\.env|os\.environ|ENV)\.get\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|(?:getenv|os\.Getenv)\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|\$ENV\s*\{\s*['"]?HERDR_[A-Z0-9_]+`)
 	// herdrProgram matches herdr as a command word or as an absolute,
 	// home-relative or ./ executable path, not as a package path or identifier.
 	herdrProgram = regexp.MustCompile("(^|[\\s\"'`(\\[,;|&=]|\\$\\()(?:(?:/|~/|\\$\\{?HOME\\}?/|\\./)[^\\s\"'`]*/)?herdr($|[\\s\"'`)\\],;|&])")
