@@ -58,7 +58,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("interrupt help omitted its Task ID: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"publish", "--help"}); code != 0 || !strings.Contains(output.String(), "[--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...") || !strings.Contains(output.String(), "Repeated --verify, --proof and --risk values are retained in order.") {
+	if code := cli.Run([]string{"publish", "--help"}); code != 0 || !strings.Contains(output.String(), "[--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...") || !strings.Contains(output.String(), "Repeated --verify, --proof and --risk values are retained in order.") || !strings.Contains(output.String(), "Risk must state how to roll back") {
 		t.Fatalf("publish help omitted repeatable metadata flags: code=%d output=%s", code, output.String())
 	}
 	output.Reset()

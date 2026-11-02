@@ -128,13 +128,7 @@ func (db *DB) ReserveCIRerunRequests(ctx context.Context, projectID, taskID int6
 // QueueCIFixInstruction records a CI fix round if the gated PR head and frozen
 // per-Task budget still match, and queues or extends its Worker message atomically.
 func (db *DB) QueueCIFixInstruction(ctx context.Context, taskID int64, expectedBaseHead, prURL, dedupeKey, body, member string, maxFixRounds int) (QueueValidationFixResult, error) {
-	return db.QueueCIFixInstructionWithSharedBudget(ctx, taskID, expectedBaseHead, prURL, dedupeKey, body, member, maxFixRounds, 0)
-}
-
-// QueueCIFixInstructionWithSharedBudget includes CI repairs in the shared
-// Review/CI cap while preserving the independent per-CI-round limit.
-func (db *DB) QueueCIFixInstructionWithSharedBudget(ctx context.Context, taskID int64, expectedBaseHead, prURL, dedupeKey, body, member string, maxFixRounds, sharedMax int) (QueueValidationFixResult, error) {
-	if taskID < 1 || !validCommitSHA(expectedBaseHead) || strings.TrimSpace(prURL) == "" || strings.TrimSpace(dedupeKey) == "" || strings.TrimSpace(body) == "" || maxFixRounds < 0 || sharedMax < 0 {
+	if taskID < 1 || !validCommitSHA(expectedBaseHead) || strings.TrimSpace(prURL) == "" || strings.TrimSpace(dedupeKey) == "" || strings.TrimSpace(body) == "" || maxFixRounds < 0 {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid CI fix instruction or budget")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
@@ -177,18 +171,6 @@ func (db *DB) QueueCIFixInstructionWithSharedBudget(ctx context.Context, taskID 
 	}
 	if used >= maxFixRounds {
 		return QueueValidationFixResult{}, ErrValidationFixBudgetExhausted
-	}
-	if sharedMax > 0 {
-		var reviews, repairs int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID).Scan(&reviews); err != nil {
-			return QueueValidationFixResult{}, err
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind IN ('review','ci')`, taskID).Scan(&repairs); err != nil {
-			return QueueValidationFixResult{}, err
-		}
-		if reviews+repairs >= sharedMax {
-			return QueueValidationFixResult{RoundsUsed: reviews + repairs, SharedExhausted: true}, nil
-		}
 	}
 
 	var seq int
