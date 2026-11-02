@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Runs the deterministic checks that have broken main after a merge: the E2E
-# shard assignment self-test, go generate leaving no diff, and a migration
-# number that origin/main already uses. Run it before posse publish.
+# Runs the checks that have broken main after a merge: staticcheck, the E2E
+# shard assignment self-test, go generate leaving no diff, and migration numbers
+# that origin/main already uses. Run it before posse publish.
 cd "$(git rev-parse --show-toplevel)"
 
 migrations_dir=internal/store/migrations
@@ -20,6 +20,9 @@ fail() {
 
 step "E2E shard assignments"
 scripts/run-e2e-shard.sh --self-test || fail "E2E shard self-test failed; record durations with scripts/refresh-e2e-durations.sh"
+
+step "staticcheck"
+scripts/staticcheck.sh || fail "staticcheck failed"
 
 step "go generate"
 before=$(git status --porcelain)
