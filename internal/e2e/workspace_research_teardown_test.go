@@ -158,12 +158,12 @@ esac
 	if _, err := client.Run(context.Background(), "pane", "run", leadPane.RootPane.PaneID, "posse up --yes"); err != nil {
 		t.Fatalf("start workspace Lead: %v", err)
 	}
-	if !waitForCondition(30*time.Second, func() bool {
+	if ok, reason := waitForEvent(t, func() bool {
 		log, _ := os.ReadFile(leadLog)
 		return strings.Contains(string(log), "lead in "+workspace)
-	}) {
+	}, nil); !ok {
 		screen, _ := client.Run(context.Background(), "pane", "read", leadPane.RootPane.PaneID, "--lines", "40")
-		t.Fatalf("workspace Lead did not start: %s", screen)
+		t.Fatalf("workspace Lead did not start: %s: %s", reason, screen)
 	}
 	leadEnv := setEnv(env, "HERDR_ENV", "1")
 	leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", leadPane.RootPane.PaneID)
@@ -222,12 +222,8 @@ esac
 			if err := prepareLegacyWorkspaceResearch(t, db, project, workspace, env, root, current, test.unrequestedMember); err != nil {
 				t.Fatal(err)
 			}
-			if !waitForCondition(60*time.Second, func() bool {
-				task, err := db.Task(context.Background(), project.ID, test.taskID)
-				return err == nil && task.State == store.StateReported
-			}) {
-				task, _ := db.Task(context.Background(), project.ID, test.taskID)
-				t.Fatalf("Research did not report: %#v", task)
+			if task, ok, reason := waitForTaskState(t, db, project.ID, test.taskID, store.StateReported); !ok {
+				t.Fatalf("Research did not report: %s: %#v", reason, task)
 			}
 			task, err := db.Task(context.Background(), project.ID, test.taskID)
 			if err != nil {
@@ -297,11 +293,11 @@ esac
 				if _, err := client.Run(context.Background(), "pane", "run", leadPane.RootPane.PaneID, "posse up --yes"); err != nil {
 					t.Fatalf("restart workspace Lead: %v", err)
 				}
-				if !waitForCondition(30*time.Second, func() bool {
+				if ok, reason := waitForEvent(t, func() bool {
 					currentProject, err := db.ProjectByName(context.Background(), "stack")
 					return err == nil && currentProject.LeadPaneID == leadPane.RootPane.PaneID
-				}) {
-					t.Fatal("restarted private Lead did not register")
+				}, nil); !ok {
+					t.Fatalf("restarted private Lead did not register: %s", reason)
 				}
 				leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", leadPane.RootPane.PaneID)
 				leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", leadPane.Workspace.WorkspaceID)
@@ -388,12 +384,12 @@ esac
 				}
 				// The background Watch can claim the crashed intent first. Retry
 				// only its documented transient conflict, not a discard refusal.
-				settled := waitForCondition(30*time.Second, func() bool {
+				settled, _ := waitForEvent(t, func() bool {
 					apply = exec.Command(binary, "apply", fmt.Sprint(repairDiscardID))
 					apply.Dir, apply.Env = workspace, leadEnv
 					output, err = apply.CombinedOutput()
 					return err == nil || !strings.Contains(string(output), `"intent_active"`)
-				})
+				}, nil)
 				if !settled || err != nil || !strings.Contains(string(output), "torn-down") {
 					t.Fatalf("retry apply after interrupted Report discard: %v\n%s", err, output)
 				}
@@ -447,19 +443,15 @@ esac
 			// A receipt claim can temporarily block ack, so retry the direct ack
 			// until it succeeds.
 			ackOutput := ""
-			if !waitForCondition(15*time.Second, func() bool {
+			if ok, reason := waitForEvent(t, func() bool {
 				ackOutput = runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
 				return strings.Contains(ackOutput, "acknowledged: 1")
-			}) {
-				t.Fatalf("task_done Notice %s was not acknowledged: %s", noticeID, ackOutput)
+			}, nil); !ok {
+				t.Fatalf("task_done Notice %s was not acknowledged: %s: %s", noticeID, reason, ackOutput)
 			}
-			if !waitForCondition(30*time.Second, func() bool {
-				current, err := db.Task(context.Background(), project.ID, test.taskID)
-				return err == nil && current.State == store.StateTornDown
-			}) {
-				current, _ := db.Task(context.Background(), project.ID, test.taskID)
+			if current, ok, reason := waitForTaskState(t, db, project.ID, test.taskID, store.StateTornDown); !ok {
 				sandboxes, _ := db.Sandboxes(context.Background(), project.ID)
-				t.Fatalf("ack did not complete Teardown: ack=%s task=%#v sandboxes=%#v", ackOutput, current, sandboxes)
+				t.Fatalf("ack did not complete Teardown: %s: ack=%s task=%#v sandboxes=%#v", reason, ackOutput, current, sandboxes)
 			}
 			sandboxes, err := db.Sandboxes(context.Background(), project.ID)
 			if err != nil {
@@ -586,12 +578,8 @@ esac
 		if err := prepareLegacyWorkspaceResearch(t, db, project, workspace, env, root, current, false); err != nil {
 			t.Fatal(err)
 		}
-		if !waitForCondition(60*time.Second, func() bool {
-			current, err := db.Task(context.Background(), project.ID, "t7")
-			return err == nil && current.State == store.StateReported
-		}) {
-			current, _ := db.Task(context.Background(), project.ID, "t7")
-			t.Fatalf("Research t7 did not report: %#v", current)
+		if current, ok, reason := waitForTaskState(t, db, project.ID, "t7", store.StateReported); !ok {
+			t.Fatalf("Research t7 did not report: %s: %#v", reason, current)
 		}
 
 		first, err := db.Task(context.Background(), project.ID, "t7")
@@ -629,12 +617,8 @@ esac
 		if err := prepareLegacyWorkspaceResearch(t, db, project, workspace, env, root, current, false); err != nil {
 			t.Fatal(err)
 		}
-		if !waitForCondition(60*time.Second, func() bool {
-			current, err := db.Task(context.Background(), project.ID, "t8")
-			return err == nil && current.State == store.StateReported
-		}) {
-			current, _ := db.Task(context.Background(), project.ID, "t8")
-			t.Fatalf("successor Research t8 did not report: %#v", current)
+		if current, ok, reason := waitForTaskState(t, db, project.ID, "t8", store.StateReported); !ok {
+			t.Fatalf("successor Research t8 did not report: %s: %#v", reason, current)
 		}
 		second, err := db.Task(context.Background(), project.ID, "t8")
 		if err != nil {
@@ -732,12 +716,8 @@ esac
 		if err := prepareLegacyWorkspaceResearch(t, db, project, workspace, env, root, task, false); err != nil {
 			t.Fatal(err)
 		}
-		if !waitForCondition(60*time.Second, func() bool {
-			current, err := db.Task(context.Background(), project.ID, "t9")
-			return err == nil && current.State == store.StateReported
-		}) {
-			current, _ := db.Task(context.Background(), project.ID, "t9")
-			t.Fatalf("repair-baseline Research did not report: %#v", current)
+		if current, ok, reason := waitForTaskState(t, db, project.ID, "t9", store.StateReported); !ok {
+			t.Fatalf("repair-baseline Research did not report: %s: %#v", reason, current)
 		}
 		task, err = db.Task(context.Background(), project.ID, "t9")
 		if err != nil {
@@ -778,24 +758,20 @@ esac
 			t.Fatalf("repair-baseline Task has no task_done Notice: %#v", notices)
 		}
 		ackOutput := ""
-		ackedOrTornDown := waitForCondition(15*time.Second, func() bool {
+		ackedOrTornDown, _ := waitForEvent(t, func() bool {
 			ackOutput = runPosse(t, binary, workspace, leadEnv, "ack", noticeID)
 			if strings.Contains(ackOutput, "acknowledged: 1") {
 				return true
 			}
 			current, err := db.Task(context.Background(), project.ID, "t9")
 			return err == nil && current.State == store.StateTornDown
-		})
+		}, nil)
 		if !ackedOrTornDown {
 			current, _ := db.Task(context.Background(), project.ID, "t9")
 			t.Fatalf("ack or an already-committed acknowledgement did not repair Report Teardown: %s; task=%#v", ackOutput, current)
 		}
-		if !waitForCondition(30*time.Second, func() bool {
-			current, err := db.Task(context.Background(), project.ID, "t9")
-			return err == nil && current.State == store.StateTornDown
-		}) {
-			current, _ := db.Task(context.Background(), project.ID, "t9")
-			t.Fatalf("restored baseline did not allow Teardown retry: %#v", current)
+		if current, ok, reason := waitForTaskState(t, db, project.ID, "t9", store.StateTornDown); !ok {
+			t.Fatalf("restored baseline did not allow Teardown retry: %s: %#v", reason, current)
 		}
 		savedDir := filepath.Join(root, "posse", "projects", "stack", "tasks", "t9")
 		for path, want := range map[string]string{"report.md": "Report for " + task.WorktreePath + "\nSee new-root-evidence.txt\n", "new-root-evidence.txt": "new root evidence\n"} {
@@ -836,8 +812,8 @@ esac
 			t.Fatalf("stop workspace Watch before synthetic review: %v", err)
 		}
 	}
-	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
-		t.Fatalf("workspace Watch did not stop: %v", watchPIDs(root))
+	if ok, reason := waitForEvent(t, func() bool { return len(watchPIDs(root)) == 0 }, nil); !ok {
+		t.Fatalf("workspace Watch did not stop: %s: %v", reason, watchPIDs(root))
 	}
 	recovery, err := db.WatchRecovery(context.Background(), project.ID)
 	if err != nil {

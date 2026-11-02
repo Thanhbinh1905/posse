@@ -1515,7 +1515,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				}
 				candidateFix = reviewRequest
 				if !reviewRequest {
-					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, ""); err != nil {
+					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, "", ""); err != nil {
 						return err
 					}
 				}
@@ -1741,6 +1741,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if pending {
 			return queuedInstructionsPendingFailure(ctx.Context, db, task, time.Now())
 		}
+		if err := requireRoleSkillsUsed(ctx.Context, db, home, project, task); err != nil {
+			return err
+		}
 	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
 		if _, err := copySignalFile(home, project, task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
@@ -1866,6 +1869,8 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if verb == "done" && task.Type == "change" && !noChange {
 		if err := s.checkReviewCapAfterDone(maintenanceCtx, db, home, project, task); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
+		} else if step, err := reviewCarryNextStep(maintenanceCtx, db, project, task, true); err == nil {
+			signalResult = append(signalResult, step...)
 		}
 	}
 	if verb == "done" && task.Type == "review" && verdict != nil {
@@ -2403,9 +2408,7 @@ func (s *Service) keys(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, ""); err != nil {
-		return err
-	}
+	_ = db.RecordIntervention(ctx.Context, project.ID, task.ID, store.InterventionKeys, "")
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "keys", Value: args[1:]}, {Key: "state", Value: "sent"}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the pane"}}})
 }
 
@@ -2940,11 +2943,20 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
 	}
-	if pane.Agent != "" {
+	if pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
 		if err := track("agent.stop", func() error {
 			return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
 		}); err != nil {
 			return failure(err)
+		}
+		if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
+			if err := track("pane.replace", func() error {
+				fresh, replaceErr := s.replaceWorkerPane(ctx, home, project, task, pane, kind)
+				pane = fresh
+				return replaceErr
+			}); err != nil {
+				return failure(err)
+			}
 		}
 	}
 	if prepareChanged {
