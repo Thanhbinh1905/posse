@@ -208,17 +208,18 @@ type ModelErrorEpisode struct {
 }
 
 type Notice struct {
-	ID          int64
-	ProjectID   int64
-	TaskID      sql.NullInt64
-	Kind        string
-	Summary     string
-	DataJson    string
-	CreatedAt   int64
-	DeliveredAt sql.NullInt64
-	AckedAt     sql.NullInt64
-	ClaimToken  string
-	ClaimedAt   int64
+	ID                int64
+	ProjectID         int64
+	TaskID            sql.NullInt64
+	Kind              string
+	Summary           string
+	DataJson          string
+	CreatedAt         int64
+	DeliveredAt       sql.NullInt64
+	AckedAt           sql.NullInt64
+	ClaimToken        string
+	ClaimedAt         int64
+	CommandNotifiedAt int64
 }
 
 type NoticeDeliveryReceipt struct {
