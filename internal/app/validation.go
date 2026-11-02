@@ -111,7 +111,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		if err := db.MarkValidationCandidateStale(out.Context, candidate.ID, targetHead); err != nil {
 			return err
 		}
-		return axi.Failure("candidate_target_moved", "the frozen target moved after candidate submission", false, "Submit a fresh candidate and rerun review -> test -> docs -> lint")
+		return axi.Failure("candidate_target_moved", "the frozen target moved after candidate submission", false, "In the Task Sandbox, merge the latest target into the Task branch; do not rebase. Then submit a fresh candidate and rerun review -> test -> docs -> lint. This preserves the Review carry when the Task change is unchanged")
 	}
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {

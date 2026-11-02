@@ -393,6 +393,21 @@ func TestFullPipelineTargetMovementInvalidatesAndRefreshesCandidate(t *testing.T
 	}
 }
 
+func TestFullPipelineTargetMovedValidationHelpExplainsMergeRefresh(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance frozen target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent verified"); code == 0 || !strings.Contains(output, "merge the latest target") || !strings.Contains(output, "do not rebase") {
+		t.Fatalf("stale candidate help did not explain the carry-preserving refresh: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestFullPipelineDoneChecksCandidateContinuityAgainstFixInstruction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
