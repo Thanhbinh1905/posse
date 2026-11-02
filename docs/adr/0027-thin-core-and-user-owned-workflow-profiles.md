@@ -93,4 +93,13 @@ Skill fields remain opaque placeholders. Skill sets, bundle contents, registries
 
 The core owns dispatch correctness, isolation, selected evidence and ship authority. Users can keep detailed processes in dotfiles without imposing them on every Project. Stage transitions need visible User decisions even when the next action is mechanically ready. The trade-off is deliberate: unattended progression is unavailable until separately designed and opted into.
 
-This ADR records agreed design, not shipped workflow-profile support. [Spec sections 1.1 and 25](../spec.md#11-workflow-boundary) distinguish the direct path and the shipped `full-pipeline` review mode from planned profile behavior. The implementation must preserve existing admitted plans and demonstrate an unconfigured single-Worker path as well as a User-gated profile path.
+Workflow-profile configuration, preview, admission freezing and User-approved stage Decisions are implemented. [Spec sections 1.1 and 25](../spec.md#11-workflow-boundary) describe the shipped direct path, profiles and review modes.
+
+## E2E evidence
+
+The existing fake-agent suite covers these contracts without duplicating their scenarios:
+
+- `TestWorkflowProfileAdmissionAndNoProfileDirectPath` starts the unconfigured direct path and checks its frozen launch identity, then checks that a selected profile is frozen.
+- `TestWorkflowRunsRequireUserApprovedProgressionAndRecoverPosition` refuses unapproved and out-of-order transitions, checks that profile edits do not alter active runs, preserves separate Merge authority, and reconstructs run position and Decisions from snapshots.
+- `TestWorkerGuardAgainstIsolatedHerdr`, `TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary` and related Teardown tests cover isolation and Task-owned teardown.
+- `TestStagingSelectedReviewModesPublishOnlyToStaging` and `TestStagingFullPipelineCIRepairRepublishesAcrossRestart` cover selected review evidence, staging publication and recovery after restart. The complete validation proof is tracked in [#303](https://github.com/Thanhbinh1905/posse/issues/303).
