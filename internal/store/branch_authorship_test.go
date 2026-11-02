@@ -69,6 +69,17 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	if err := db.RequireBranchAuthor(ctx, "shop", "posse/t1", taskID, 2); err != nil {
 		t.Fatalf("current author claim was refused: %v", err)
 	}
+	newTaskID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Maintenance", ShortName: "maintenance"}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", newTaskID, 1, branchAuthorTestSHA, branchAuthorTestSHA, true)
+	if err != nil || third.Generation != 3 {
+		t.Fatalf("cross-Task claim = %#v, %v", third, err)
+	}
+	if err := db.RequireBranchAuthor(ctx, "shop", "posse/t1", newTaskID, 3); err != nil {
+		t.Fatalf("current successor claim was refused: %v", err)
+	}
 	var gated, roundStatus string
 	var approvalCount, observationCount, liveQueueCount int
 	if err := db.QueryRowContext(ctx, `SELECT gated_sha FROM tasks WHERE id=?`, taskID).Scan(&gated); err != nil {
@@ -89,14 +100,6 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	if gated != "" || roundStatus != "void" || approvalCount != 0 || observationCount != 0 || liveQueueCount != 0 {
 		t.Fatalf("author transfer retained old evidence: gated=%q round=%q approvals=%d observations=%d queue=%d", gated, roundStatus, approvalCount, observationCount, liveQueueCount)
 	}
-	newTaskID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Maintenance", ShortName: "maintenance"}, func(int) (bool, error) { return false, nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	third, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", newTaskID, 1, branchAuthorTestSHA, branchAuthorTestSHA, true)
-	if err != nil || third.Generation != 3 {
-		t.Fatalf("cross-Task claim = %#v, %v", third, err)
-	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM branch_authorship`); err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +109,48 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	rebuilt, err := db.BranchAuthor(ctx, "shop", "posse/t1")
 	if err != nil || rebuilt.TaskID != newTaskID || rebuilt.Attempt != 1 || rebuilt.Generation != 3 {
 		t.Fatalf("rebuilt branch author claim = %#v, %v", rebuilt, err)
+	}
+}
+
+func TestBranchAuthorRelaunchPreservesEvidenceAtSameHead(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Change", ShortName: "change"}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, branchAuthorTestSHA, branchAuthorTestSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=?`, branchAuthorTestSHA, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorTestSHA, branchAuthorTestSHA, true); err != nil {
+		t.Fatal(err)
+	}
+	var gated string
+	if err := db.QueryRowContext(ctx, `SELECT gated_sha FROM tasks WHERE id=?`, taskID).Scan(&gated); err != nil {
+		t.Fatal(err)
+	}
+	if gated != branchAuthorTestSHA {
+		t.Fatalf("same-head relaunch cleared gate %q, want %q", gated, branchAuthorTestSHA)
+	}
+	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 3, branchAuthorTestSHA, branchAuthorOtherSHA, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT gated_sha FROM tasks WHERE id=?`, taskID).Scan(&gated); err != nil {
+		t.Fatal(err)
+	}
+	if gated != "" {
+		t.Fatalf("changed-head relaunch retained gate %q", gated)
 	}
 }
 
@@ -153,7 +198,11 @@ func TestBranchAuthorTransferInvalidatesReviewPass(t *testing.T) {
 		_ = fixture.db.QueryRowContext(fixture.ctx, `SELECT COUNT(*) FROM review_verdicts v JOIN tasks t ON t.id=v.task_id JOIN review_rounds r ON r.review_task_id=v.task_id AND r.ship_task_id=t.reviews_task_id AND r.status='verdict' AND r.verdict=v.verdict WHERE t.reviews_task_id=?`, fixture.change).Scan(&joined)
 		t.Fatalf("fresh Review pass = %t, %v; rounds=%d verdicts=%d joined=%d", ok, err, rounds, verdicts, joined)
 	}
-	if _, err := fixture.db.ClaimBranchAuthor(fixture.ctx, "/repo/.git", "posse/change", fixture.change, 2, reviewShaA, reviewShaA, true); err != nil {
+	successorID, _, err := fixture.db.CreateTaskWithSequence(fixture.ctx, fixture.task(t, fixture.change).ProjectID, "shop", Task{Type: "change", Title: "Successor", ShortName: "successor"}, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ClaimBranchAuthor(fixture.ctx, "/repo/.git", "posse/change", successorID, 1, reviewShaA, reviewShaA, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := fixture.db.CurrentReviewPass(fixture.ctx, fixture.change, targets); err != nil || ok {

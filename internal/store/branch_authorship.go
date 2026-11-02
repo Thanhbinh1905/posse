@@ -57,8 +57,10 @@ func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, 
 	case head != previousHead:
 		return BranchAuthorClaim{}, ErrBranchAuthorHeadChanged
 	default:
-		if err := invalidateBranchAuthorEvidenceTx(ctx, tx, ownerTask, nextHead); err != nil {
-			return BranchAuthorClaim{}, err
+		if ownerTask != taskID || head != nextHead {
+			if err := invalidateBranchAuthorEvidenceTx(ctx, tx, ownerTask, nextHead); err != nil {
+				return BranchAuthorClaim{}, err
+			}
 		}
 		claim.Generation = generation + 1
 		_, err = tx.ExecContext(ctx, `UPDATE branch_authorship SET task_id=?,attempt=?,generation=?,head_sha=?,updated_at=? WHERE repository=? AND branch=? AND generation=? AND head_sha=?`, taskID, attempt, claim.Generation, nextHead, time.Now().UnixMilli(), repository, branch, generation, previousHead)

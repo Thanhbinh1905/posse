@@ -35,11 +35,6 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 	previousHead := head
 	if previousErr == nil {
 		previousHead = previous.HeadSHA
-		if previousHead != "" {
-			if err := requireBranchHeadAncestor(ctx, task.WorktreePath, previousHead, head); err != nil {
-				return 0, err
-			}
-		}
 		if task.PRURL != "" {
 			remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
 			if err != nil {
@@ -51,16 +46,23 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 			if err := requireBranchHeadAncestor(ctx, task.WorktreePath, remoteHead, head); err != nil {
 				return 0, err
 			}
-		} else if candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, ""); candidateErr == nil {
-			expectedHead := candidate.SubmittedSHA
-			if candidate.PromotedSHA != "" {
-				expectedHead = candidate.PromotedSHA
+		} else {
+			if previousHead != "" {
+				if err := requireBranchHeadAncestor(ctx, task.WorktreePath, previousHead, head); err != nil {
+					return 0, err
+				}
 			}
-			if err := requireBranchHeadAncestor(ctx, task.WorktreePath, expectedHead, head); err != nil {
-				return 0, err
+			if candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, ""); candidateErr == nil {
+				expectedHead := candidate.SubmittedSHA
+				if candidate.PromotedSHA != "" {
+					expectedHead = candidate.PromotedSHA
+				}
+				if err := requireBranchHeadAncestor(ctx, task.WorktreePath, expectedHead, head); err != nil {
+					return 0, err
+				}
+			} else if candidateErr != store.ErrNotFound {
+				return 0, candidateErr
 			}
-		} else if candidateErr != store.ErrNotFound {
-			return 0, candidateErr
 		}
 	}
 	confirmedHead, err := taskBranchAuthorHead(ctx, task.WorktreePath, task.Branch)
