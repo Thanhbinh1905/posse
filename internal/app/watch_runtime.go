@@ -741,6 +741,33 @@ func reportWatchProgress(ctx context.Context) {
 	}
 }
 
+func startWatchRuntimeHeartbeat(ctx context.Context, db *store.DB, projectID int64, watch store.WatchRuntime, onError func(error)) func() {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(watchRuntimeHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				writeCtx, writeCancel := context.WithTimeout(heartbeatCtx, time.Second)
+				_, err := db.HeartbeatWatchRuntime(writeCtx, projectID, watch.PID, watch.Token, currentTime())
+				writeCancel()
+				if err != nil && onError != nil {
+					onError(err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func (s *Service) watchMaintenanceInFlight() bool {
 	s.maintenanceMu.Lock()
 	defer s.maintenanceMu.Unlock()
@@ -884,6 +911,10 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal, watch *store.WatchRuntime) error {
 	loopCtx := ctx.Context
 	if watch != nil {
+		stopHeartbeat := startWatchRuntimeHeartbeat(loopCtx, db, project.ID, *watch, func(err error) {
+			fmt.Fprintf(ctx.ErrOut, "Watch progress heartbeat failed for %s: %v\n", project.Name, err)
+		})
+		defer stopHeartbeat()
 		progress := &watchProgressReporter{heartbeat: func() {
 			heartbeatCtx, cancel := context.WithTimeout(loopCtx, time.Second)
 			defer cancel()
