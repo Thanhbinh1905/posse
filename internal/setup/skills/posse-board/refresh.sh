@@ -15,7 +15,13 @@ write() {
 	mv -f "$board/$1.js.tmp" "$board/$1.js"
 }
 
-write posse "$(posse --full --json)"
+if posse_data=$(posse --full --json); then
+	:
+else
+	echo "posse-board: posse --full --json failed; board data was not updated" >&2
+	exit 1
+fi
+write posse "$posse_data"
 if issues=$(gh issue list --label ready-for-agent --state all --limit 200 \
 	--json number,title,state,body,url,createdAt,closedAt,labels); then
 	write issues "$issues"

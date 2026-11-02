@@ -812,7 +812,7 @@ main {
       { tag: "posse-board-start", text: "Start #" + card.number, queueKey: "posse-board-start-" + card.number, data: { action: "posse-board-start", issue: card.number, title: card.issue.title } },
     );
     if (typeof lavish.sendQueuedPrompts === "function") lavish.sendQueuedPrompts();
-    state.pending.set(card.number, Date.now());
+    state.pending.set(card.number, { sawWorking: false });
     note("sent start #" + card.number + " to the Lead");
     render();
   }
@@ -918,6 +918,14 @@ main {
         note("started " + card.task.id + " for #" + card.number);
       }
     }
+    const lead = posse.project && posse.project.lead;
+    for (const [number, pending] of state.pending) {
+      if (lead === "working") pending.sawWorking = true;
+      else if (pending.sawWorking) {
+        state.pending.delete(number);
+        note("Lead declined the start for #" + number);
+      }
+    }
     if (state.selected && !findCard(state.selected)) {
       const number = Number(String(state.selected).replace(/^#/, ""));
       const successor = state.model.cards.find((card) => card.kind === "task" && card.number === number);
@@ -928,6 +936,7 @@ main {
   }
 
   refresh();
+  window.addEventListener("focus", refresh);
   setInterval(refresh, REFRESH_MS);
 })();
 </script>
