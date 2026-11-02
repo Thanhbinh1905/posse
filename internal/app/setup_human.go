@@ -79,7 +79,8 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 			}
 			return lines
 		case "upgrade":
-			return []string{humanManual + "  Upgrade Posse Agents sidebar layout in " + displayPath(target) + " (adds dim = false)? Run `posse setup` to confirm."}
+			lines := []string{humanManual + "  Upgrade Posse Agents sidebar layout in " + displayPath(target) + " (adds dim = false)? Run `posse setup` to confirm:"}
+			return append(lines, sidebarSnippetLines(row)...)
 		case "manual":
 			message := "Herdr Agents rows already configured at " + displayPath(target)
 			if reason, ok := row["error"].(string); ok && reason != "" {
@@ -92,7 +93,8 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 			}
 			return lines
 		default:
-			return []string{humanManual + "  Add Posse Agents sidebar layout to " + displayPath(target) + "? Run `posse setup` to confirm."}
+			lines := []string{humanManual + "  Add Posse Agents sidebar layout to " + displayPath(target) + "? Run `posse setup` to confirm:"}
+			return append(lines, sidebarSnippetLines(row)...)
 		}
 	case "integration":
 		switch action {
@@ -201,6 +203,15 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 		}
 	}
 	return change(step+" "+displayPath(target), step+" "+displayPath(target))
+}
+
+func sidebarSnippetLines(row map[string]any) []string {
+	snippet, _ := row["snippet"].(string)
+	lines := make([]string, 0, strings.Count(snippet, "\n"))
+	for _, line := range strings.Split(strings.TrimSuffix(snippet, "\n"), "\n") {
+		lines = append(lines, "     "+line)
+	}
+	return lines
 }
 
 func displayPath(path string) string {

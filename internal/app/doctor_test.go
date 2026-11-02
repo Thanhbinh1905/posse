@@ -11,6 +11,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -360,6 +361,23 @@ func TestDoctorWarnsOnUnresolvableReviewDispatchRules(t *testing.T) {
 				t.Fatalf("review dispatch check = %s %q %q, want %s naming %q", status, detail, action, test.status, test.detail)
 			}
 		})
+	}
+}
+
+func TestDoctorIgnoresPlatformSkillsInGlobalShadowCheck(t *testing.T) {
+	root := t.TempDir()
+	dirs := setupDirs{claude: filepath.Join(root, "claude"), agents: filepath.Join(root, "agents", "skills")}
+	for _, name := range setupassets.PlatformSkillNames() {
+		path := filepath.Join(dirs.agents, name, "SKILL.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("---\nname: "+name+"\n---\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, status, detail, action := globalSkillShadowCheck(dirs); status != "ok" || action != "" {
+		t.Fatalf("platform skills should not shadow role snapshots: %s %q %q", status, detail, action)
 	}
 }
 

@@ -4,7 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"time"
+
+	"golang.org/x/term"
 )
 
 type skillChoice struct {
@@ -24,6 +28,7 @@ type skillPicker struct {
 }
 
 const (
+	pickerEscapeTimeout = 75 * time.Millisecond
 	pickerNameWidth     = 26
 	pickerChromeLines   = 6
 	pickerMinListLines  = 5
@@ -42,6 +47,12 @@ func runSkillPicker(in io.Reader, out io.Writer, picker skillPicker) ([]skillCho
 	}
 	picker.cursor = picker.firstToggleable()
 	reader := bufio.NewReader(in)
+	waitForEscape := func() (bool, error) { return true, nil }
+	if waiter, ok := in.(interface{ waitForPickerEscape() (bool, error) }); ok {
+		waitForEscape = waiter.waitForPickerEscape
+	} else if file, ok := in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		waitForEscape = func() (bool, error) { return waitForPickerByte(file.Fd(), pickerEscapeTimeout) }
+	}
 	frameLines := 0
 	draw := func(final bool) error {
 		var frame strings.Builder
@@ -67,7 +78,7 @@ func runSkillPicker(in io.Reader, out io.Writer, picker skillPicker) ([]skillCho
 		if err := draw(false); err != nil {
 			return nil, false, err
 		}
-		key, err := readPickerKey(reader)
+		key, err := readPickerKey(reader, waitForEscape)
 		if err != nil {
 			if err == io.EOF {
 				return nil, false, draw(true)
@@ -91,7 +102,7 @@ func runSkillPicker(in io.Reader, out io.Writer, picker skillPicker) ([]skillCho
 	}
 }
 
-func readPickerKey(reader *bufio.Reader) (string, error) {
+func readPickerKey(reader *bufio.Reader, waitForEscape func() (bool, error)) (string, error) {
 	b, err := reader.ReadByte()
 	if err != nil {
 		return "", err
@@ -104,16 +115,25 @@ func readPickerKey(reader *bufio.Reader) (string, error) {
 	case 4:
 		return "ctrl-d", nil
 	case 0x1b:
-		if reader.Buffered() == 0 {
+		next, ready, err := readPickerContinuation(reader, waitForEscape)
+		if err != nil {
+			if err == io.EOF {
+				return "esc", nil
+			}
+			return "", err
+		}
+		if !ready || next != '[' && next != 'O' {
 			return "esc", nil
 		}
-		next, err := reader.ReadByte()
-		if err != nil || next != '[' && next != 'O' {
-			return "esc", err
-		}
-		final, err := reader.ReadByte()
+		final, ready, err := readPickerContinuation(reader, waitForEscape)
 		if err != nil {
+			if err == io.EOF {
+				return "", nil
+			}
 			return "", err
+		}
+		if !ready {
+			return "", nil
 		}
 		switch final {
 		case 'A':
@@ -124,6 +144,17 @@ func readPickerKey(reader *bufio.Reader) (string, error) {
 		return "", nil
 	}
 	return string(rune(b)), nil
+}
+
+func readPickerContinuation(reader *bufio.Reader, waitForEscape func() (bool, error)) (byte, bool, error) {
+	if reader.Buffered() == 0 {
+		ready, err := waitForEscape()
+		if err != nil || !ready {
+			return 0, ready, err
+		}
+	}
+	value, err := reader.ReadByte()
+	return value, err == nil, err
 }
 
 func (p *skillPicker) firstToggleable() int {

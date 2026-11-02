@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -116,11 +117,23 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 		detail := "Herdr config is a symlink (managed elsewhere, e.g. Nix home-manager); add this snippet to its source:\n\n" + sidebarLayoutSnippet
 		addCheck("Herdr Agents sidebar layout", "warn", detail, "Add the snippet to the symlink target's source")
 	} else if state == "upgrade" {
-		addCheck("Herdr Agents sidebar layout", "warn", "Posse layout lacks dim = false, so Worker rows render dimmed", "Run `posse setup` to upgrade the layout")
+		detail := "Posse layout lacks dim = false, so Worker rows render dimmed\n\n" + sidebarLayoutSnippet
+		action := "Run `posse setup` to upgrade the layout"
+		if version, err := runHerdrCLI(s.Herdr, ctx.Context, "--version"); err == nil && !herdrSupportsSidebarRules(string(version)) {
+			detail = "Herdr 0.9.1 or newer is required for styled sidebar rules\n\n" + detail
+			action = "Upgrade Herdr to 0.9.1 or newer, then run `posse setup`"
+		}
+		addCheck("Herdr Agents sidebar layout", "warn", detail, action)
 	} else if state == "manual" {
 		addCheck("Herdr Agents sidebar layout", "warn", "custom Agents rows present", "Review the snippet from `posse setup --check` before editing Herdr config")
 	} else {
-		addCheck("Herdr Agents sidebar layout", "warn", "not installed", "Run `posse setup` to add the optional layout")
+		detail := "not installed\n\n" + sidebarLayoutSnippet
+		action := "Run `posse setup` to add the optional layout"
+		if version, err := runHerdrCLI(s.Herdr, ctx.Context, "--version"); err == nil && !herdrSupportsSidebarRules(string(version)) {
+			detail = "Herdr 0.9.1 or newer is required for styled sidebar rules\n\n" + detail
+			action = "Upgrade Herdr to 0.9.1 or newer, then run `posse setup`"
+		}
+		addCheck("Herdr Agents sidebar layout", "warn", detail, action)
 	}
 	if configErr != nil {
 		addCheck("config", "fail", configErr.Error(), configCheckAction(configErr))
@@ -541,6 +554,9 @@ func globalSkillShadowCheck(dirs setupDirs) (name, status, detail, action string
 	var found []string
 	for _, root := range []string{dirs.agents, filepath.Join(dirs.claude, "skills")} {
 		for _, name := range setupassets.SkillNames() {
+			if slices.Contains(setupassets.PlatformSkillNames(), name) {
+				continue
+			}
 			path := filepath.Join(root, name)
 			if _, err := os.Stat(filepath.Join(path, "SKILL.md")); err == nil {
 				found = append(found, path)
