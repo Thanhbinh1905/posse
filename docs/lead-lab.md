@@ -20,9 +20,8 @@ In another terminal, set the same environment and create a workspace in the clon
 
 ```sh
 LAB=/path/from/the/first/terminal
-export HOME="$LAB/home" XDG_CONFIG_HOME="$LAB/xdg" POSSE_HOME="$LAB/posse"
-export PATH="$LAB/bin:$PATH"
-herdr workspace create --cwd "$LAB/project"
+env -i HOME="$LAB/home" XDG_CONFIG_HOME="$LAB/xdg" POSSE_HOME="$LAB/posse" \
+  PATH="$LAB/bin:$PATH" herdr workspace create --cwd "$LAB/project"
 ```
 
 Run commands from the shell pane Herdr opens. Start a Lead with `posse up --yes` and choose an available harness with `--claude`, `--codex`, or `--pi` when needed. You can then exercise Lead-side commands such as `posse lead` and `posse send` from the isolated Project.

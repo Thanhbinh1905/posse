@@ -65,6 +65,8 @@ func TestGuardRefusesInterpreterCodeThatRunsHerdrOrOpensItsSocket(t *testing.T) 
 		// Socket access needs no herdr program.
 		"python3 - <<'EOF'\nimport os, socket\nsocket.socket(socket.AF_UNIX).connect(os.environ['HERDR_SOCKET_PATH'])\nEOF",
 		`python3 -c "import os; print(os.environ.get('HERDR_PANE_ID'))"`,
+		`python3 -c "import os; print(os.environ.__getitem__('HERDR_SOCKET_PATH'))"`,
+		`ruby -e 'puts ENV.fetch("HERDR_SOCKET_PATH")'`,
 		`node -e 'require("net").connect(process.env.HERDR_SOCKET_PATH)'`,
 		`awk 'BEGIN { print ENVIRON["HERDR_SOCKET_PATH"] }'`,
 		"python3 - <<'EOF'\nimport socket\nsocket.socket(socket.AF_UNIX).connect('/home/u/.config/herdr/herdr.sock')\nEOF",

@@ -933,6 +933,9 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 		}
 		start = 2
 	}
+	if shellNoexec(args[start:]) {
+		return false, guardReason{}
+	}
 	for index := start; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -941,9 +944,7 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 				return g.opaque(e, raw, raw)
 			}
 			return g.check(e.clone(), args[index+1], depth+1, stdinRedirected)
-		case arg == "-n" || arg == "--noexec":
-			return false, guardReason{}
-		case arg == "-o" || arg == "+o" || arg == "--rcfile" || arg == "--init-file":
+		case arg == "-o" || arg == "+o" || arg == "-O" || arg == "+O" || arg == "--rcfile" || arg == "--init-file":
 			index++
 		case strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+"):
 		default:
@@ -958,6 +959,43 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 	}
 	// Input that is not a here-document is output posse cannot evaluate.
 	return g.opaque(e, raw, stdin)
+}
+
+func shellNoexec(args []string) bool {
+	noexec := false
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--":
+			return noexec
+		case arg == "-c" || strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg, "c"):
+			return noexec
+		case arg == "-n" || arg == "--noexec":
+			noexec = true
+		case arg == "+n":
+			noexec = false
+		case arg == "-o" || arg == "+o":
+			if index+1 < len(args) && args[index+1] == "noexec" {
+				noexec = arg == "-o"
+			}
+			index++
+		case arg == "-O" || arg == "+O" || arg == "--rcfile" || arg == "--init-file":
+			index++
+		case strings.HasPrefix(arg, "--rcfile=") || strings.HasPrefix(arg, "--init-file="):
+			continue
+		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--"):
+			noexec = noexec || strings.Contains(arg[1:], "n")
+		case strings.HasPrefix(arg, "+"):
+			if strings.Contains(arg[1:], "n") {
+				noexec = false
+			}
+		case strings.HasPrefix(arg, "--"):
+			continue
+		default:
+			return noexec
+		}
+	}
+	return noexec
 }
 
 // script checks a shell script file the command runs.
@@ -1050,7 +1088,7 @@ func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (boo
 
 var (
 	herdrSocketReference   = regexp.MustCompile(`herdr\.sock`)
-	herdrEnvironmentAccess = regexp.MustCompile(`(?:process\.env|os\.environ|ENVIRON|ENV)\s*(?:\.\s*|\[\s*['"])HERDR_[A-Z0-9_]+|(?:process\.env|os\.environ|ENV)\.get\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|(?:getenv|os\.Getenv)\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|\$ENV\s*\{\s*['"]?HERDR_[A-Z0-9_]+`)
+	herdrEnvironmentAccess = regexp.MustCompile(`(?:process\.env|os\.environ|ENVIRON|ENV)\s*(?:\.\s*|\[\s*['"])HERDR_[A-Z0-9_]+|(?:process\.env|os\.environ|ENV)\.get\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|(?:os\.environ\.__getitem__|ENV\.fetch)\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|(?:getenv|os\.Getenv)\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|\$ENV\s*\{\s*['"]?HERDR_[A-Z0-9_]+`)
 	// herdrProgram matches herdr as a command word or as an absolute,
 	// home-relative or ./ executable path, not as a package path or identifier.
 	herdrProgram = regexp.MustCompile("(^|[\\s\"'`(\\[,;|&=]|\\$\\()(?:(?:/|~/|\\$\\{?HOME\\}?/|\\./)[^\\s\"'`]*/)?herdr($|[\\s\"'`)\\],;|&])")
