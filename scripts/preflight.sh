@@ -1,9 +1,6 @@
 #!/bin/sh
 set -eu
 
-# Runs the checks that have broken main after a merge: staticcheck, generated
-# code, E2E shard assignments, and migration numbers that origin/main already
-# uses. Run it before posse publish.
 cd "$(git rev-parse --show-toplevel)"
 
 migrations_dir=internal/store/migrations
