@@ -27,6 +27,9 @@ func TestAdmitClaudeAgentRefusesWriteCapableChildren(t *testing.T) {
 	if agent, err := AdmitClaudeAgent(ClaudeLaunch{SubagentType: "Explore", Prompt: "map the store"}, project, configDir); err != nil || agent.Source != "builtin" || agent.Model != "inherit" {
 		t.Fatalf("builtin Explore: %+v %v", agent, err)
 	}
+	if agent, err := AdmitClaudeAgent(ClaudeLaunch{SubagentType: "web-fetch", Prompt: "fetch the documentation"}, project, configDir); err != nil || agent.Source != "builtin" || strings.Join(agent.Tools, ",") != "WebFetch" {
+		t.Fatalf("builtin web-fetch: %+v %v", agent, err)
+	}
 	for _, launch := range []ClaudeLaunch{
 		{SubagentType: "general-purpose"},
 		{},

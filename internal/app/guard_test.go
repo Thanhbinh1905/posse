@@ -605,3 +605,16 @@ func TestGuardClassifiesATextPosseScriptByItsContents(t *testing.T) {
 		t.Errorf("guard did not refuse a script that runs another posse build: %v %#v", refused, reason)
 	}
 }
+
+func TestGuardAllowsTheIsolatedSetupItsRefusalPrescribes(t *testing.T) {
+	home := "/home/u/.posse"
+	scope := guardScope{env: guardEnv, cwd: home + "/pool/posse/sandbox-1", workerHome: home, writable: []string{home + "/pool/posse/sandbox-1"}}
+	if refused, reason := guardCommand(guardIsolatedRecipe, scope); refused {
+		t.Errorf("guard refused the setup its own refusal prescribes: %#v", reason)
+	}
+	for _, command := range []string{"herdr workspace close w1", "mkdir " + home + "/x"} {
+		if refused, _ := guardCommand(command, scope); !refused {
+			t.Errorf("guard allowed %q", command)
+		}
+	}
+}

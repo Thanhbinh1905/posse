@@ -488,3 +488,57 @@ func TestWorkspaceReviewFixResolutionsBindEveryMemberHead(t *testing.T) {
 		t.Fatalf("answer bound to every Member head: %v", err)
 	}
 }
+
+func TestWorkspaceReviewFixAnswersAgainstSupersedingCandidate(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "api", Commit: reviewShaA}})
+	first, err := f.db.CreateValidationCandidate(f.ctx, ValidationCandidate{
+		TaskID: f.change, Repo: "api", SubmittedSHA: reviewShaA, CandidateSHA: reviewShaA, TargetSHA: reviewShaB,
+		RefName: "refs/posse/candidate/t1", WorktreePath: "/home/test/posse/projects/stack/tasks/t1/candidates/api/g1", Summary: "api candidate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ActivateValidationCandidate(f.ctx, first.ID, reviewShaA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_patterns(id,ship_task_id,seq,key,title,rule,root_cause,fix_guidance,merged_into,created_round) VALUES(801,?,1,'unsafe','Unsafe','Validate','Unchecked','Validate all',NULL,1)`, f.change); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_findings(id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,follow_up_url,inherited_from) VALUES(802,?,1,801,'`+reportHash+`',1,'api','x.go','f','unsafe',1,'`+reviewShaA+`','P1','introduced',1,'open','',NULL)`, f.change); err != nil {
+		t.Fatal(err)
+	}
+	members := []ValidationFixMemberHead{{Repository: "api", ExpectedBaseHead: reviewShaA, CandidateID: first.ID}}
+	digest := ValidationMemberHeadsDigest(members)
+	queued, err := f.db.QueueReviewFixInstruction(f.ctx, f.change, digest, members, "review:"+digest+":P-1", "Fix P-1", nil, nil)
+	if err != nil || !queued.Queued {
+		t.Fatalf("queue workspace Review fix = %#v, %v", queued, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE messages SET status='delivered' WHERE id=?`, queued.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.MarkValidationCandidateStale(f.ctx, first.ID, reviewShaA); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SupersedeValidationCandidate(f.ctx, first.ID, ValidationCandidateStale, "refs/posse/candidate/archive/t1/1", reviewShaA); err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.db.CreateValidationCandidate(f.ctx, ValidationCandidate{
+		TaskID: f.change, Repo: "api", SubmittedSHA: reviewShaC, CandidateSHA: reviewShaC, TargetSHA: reviewShaB,
+		RefName: "refs/posse/candidate/t1", WorktreePath: "/home/test/posse/projects/stack/tasks/t1/candidates/api/g2", Summary: "api resubmission",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ActivateValidationCandidate(f.ctx, second.ID, reviewShaC); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.db.beginTxWithRetry(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	input := &ReviewFixResolutionsInput{ExpectedBaseHead: digest, Members: []ReviewFixMemberHead{{Repository: "api", ActualHead: reviewShaC, CandidateID: second.ID}}, Patterns: []ReviewFixResolution{{Pattern: "P-1", Status: "fixed"}}}
+	if err := applyReviewFixResolutionsTx(f.ctx, tx, f.change, input); err != nil {
+		t.Fatalf("answer against the superseding candidate: %v", err)
+	}
+}

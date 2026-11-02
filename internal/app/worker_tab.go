@@ -127,3 +127,46 @@ func findTaskPane(panes []herdr.Pane, task store.Task) (herdr.Pane, bool) {
 	}
 	return pane, found
 }
+
+// paneKeepsDetectedAgent reports whether Herdr still holds a detected agent
+// record for the pane. After a detected agent exits, Herdr 0.9.1 keeps that
+// record and rejects agent.start in the pane, with no call that removes it. A
+// record still pending its launch does not block a new start.
+func (s *Service) paneKeepsDetectedAgent(ctx context.Context, paneID string) bool {
+	raw, err := s.herdrCall(ctx, "agent.get", map[string]any{"target": paneID})
+	if err != nil {
+		return false
+	}
+	var response struct {
+		Agent struct {
+			Agent         string `json:"agent"`
+			LaunchPending bool   `json:"launch_pending"`
+		} `json:"agent"`
+	}
+	return json.Unmarshal(raw, &response) == nil && response.Agent.Agent != "" && !response.Agent.LaunchPending
+}
+
+// replaceWorkerPane moves a Task whose stopped agent left a detected record
+// into a fresh pane. The old pane is closed only while its shell is still the
+// foreground.
+func (s *Service) replaceWorkerPane(ctx context.Context, home string, project store.Project, task store.Task, old herdr.Pane, kind string) (herdr.Pane, error) {
+	opened, err := s.openWorkerTab(ctx, home, project, task, task.WorktreePath, kind)
+	if err != nil {
+		return herdr.Pane{}, err
+	}
+	fresh := herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
+	group, err := s.paneAgentGroup(ctx, old.PaneID)
+	if err != nil {
+		if missingPaneError(err) {
+			return fresh, nil
+		}
+		return fresh, err
+	}
+	if group != 0 {
+		return fresh, agentStopPaneChanged(old.PaneID)
+	}
+	if _, err := s.herdrCall(ctx, "pane.close", map[string]any{"pane_id": old.PaneID}); err != nil && !missingPaneError(err) {
+		return fresh, err
+	}
+	return fresh, nil
+}

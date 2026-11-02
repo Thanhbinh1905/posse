@@ -31,6 +31,17 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Stop the Watch before rewriting the Lead and generation: a pass that
+	// still sees the live Lead adopts Herdr's generation and ends the hold.
+	for _, pid := range watchPIDs(f.root) {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, reason := waitForEvent(t, func() bool { return len(watchPIDs(f.root)) == 0 }, nil); !ok {
+		t.Fatalf("killed watch remains visible (%s): %v", reason, watchPIDs(f.root))
+	}
+
 	// The recorded Lead pane did not come back, so the Project stays held
 	// rather than adopting the current generation.
 	if err := f.db.SetProjectLead(context.Background(), f.project.ID, f.project.HerdrWorkspaceID, "stale-lead-pane", "posse:shop:stale-lead"); err != nil {
@@ -52,19 +63,10 @@ func TestWatchRepairRestoresHeldProjectWithoutExecutorRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, pid := range watchPIDs(f.root) {
-		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(f.root)) == 0 }) {
-		t.Fatalf("killed watch remains visible: %v", watchPIDs(f.root))
-	}
-
 	// A recorded generation that differs from Herdr's holds the Project for
 	// an explicit restore.
 	recovery := runPosse(t, f.binary, f.repo, f.env, "_herdr_started")
-	if !strings.Contains(recovery, "held_projects") || !strings.Contains(recovery, "shop") {
+	if !strings.Contains(recovery, "held_projects[1]: shop") {
 		t.Fatalf("the startup hook did not hold the Project: %s", recovery)
 	}
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {

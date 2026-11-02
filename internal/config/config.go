@@ -66,8 +66,20 @@ type ReviewLoop struct {
 }
 
 type CILoop struct {
-	MaxFixRounds   int `toml:"max_fix_rounds" json:"max_fix_rounds"`
-	RerunCancelled int `toml:"rerun_cancelled" json:"rerun_cancelled"`
+	MaxFixRounds   int    `toml:"max_fix_rounds" json:"max_fix_rounds"`
+	RerunCancelled int    `toml:"rerun_cancelled" json:"rerun_cancelled"`
+	FlakeWindow    string `toml:"flake_window" json:"flake_window,omitempty"`
+}
+
+// FlakeWindowDuration is how far back a failure on another branch makes a
+// failing test a known flake. Zero, including a plan frozen before the
+// setting existed, disables flake reruns.
+func (c CILoop) FlakeWindowDuration() time.Duration {
+	window, err := time.ParseDuration(c.FlakeWindow)
+	if err != nil {
+		return 0
+	}
+	return window
 }
 
 type FullPipeline struct {
@@ -682,7 +694,7 @@ func defaultMap() map[string]any {
 		"research":        map[string]any{"native": DefaultResearch.Native, "max_active": DefaultResearch.MaxActive, "max_result_bytes": DefaultResearch.MaxResultBytes, "max_output_bytes": DefaultResearch.MaxOutputBytes, "timeout": DefaultResearch.Timeout},
 		"worker_go_cache": map[string]any{"max_size": DefaultWorkerGoCache.MaxSize, "min_age": DefaultWorkerGoCache.MinAge, "interval": DefaultWorkerGoCache.Interval},
 		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}, "profile": ""},
-		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1},
+		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1, "flake_window": "168h"},
 		"full_pipeline":   map[string]any{"run_workflows": false},
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":          map[string]any{"lead": false},

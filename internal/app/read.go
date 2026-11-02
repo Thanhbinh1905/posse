@@ -207,6 +207,10 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		return err
 	}
 	now := time.Now()
+	idleSlots, err := idleSlotReasons(ctx.Context, db, project.ID, cfg, now)
+	if err != nil {
+		return err
+	}
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
@@ -223,10 +227,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 				return err
 			}
 		}
-		if taskWaitsOnUser(task, decisions) {
+		if taskWaitsOnUser(task, decisions, idleSlots) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
 				return err
+			}
+			if idle, ok := idleSlots[task.ID]; ok {
+				row.Reason = idle
 			}
 			row.Decisions = decisions[task.ID]
 			needsYou = append(needsYou, row)
@@ -266,10 +273,13 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		active := make([]activeTaskSummary, 0, len(tasks))
 		attention := make([]taskSummary, 0)
 		for _, task := range tasks {
-			if taskWaitsOnUser(task, decisions) {
+			if taskWaitsOnUser(task, decisions, idleSlots) {
 				reason, reasonErr := taskFailureReason(ctx.Context, db, task)
 				if reasonErr != nil {
 					return reasonErr
+				}
+				if idle, ok := idleSlots[task.ID]; ok {
+					reason = idle
 				}
 				row := taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason, Decisions: decisions[task.ID]}
 				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
@@ -485,7 +495,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 				return err
 			}
 		} else if task.State == store.StateQueued {
-			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task, cfg)
+			row.Reason, err = queuedTaskWaitReason(ctx.Context, db, project, task, cfg, false)
 			if err != nil {
 				return err
 			}
@@ -513,7 +523,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "tasks", Value: rows}, {Key: "help", Value: []any{"Run `posse show " + taskCLIName(tasks[0]) + "` to inspect a Task"}}})
 }
 
-func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config) (string, error) {
+func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Project, task store.Task, cfg config.Config, checkBlockers bool) (string, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return "", admittedPlanFailure(err)
@@ -527,7 +537,13 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 			return "waiting for " + strings.Join(unmet, ", "), nil
 		}
 	}
-	blockerReason, err := queuedTaskBlockerWaitReason(ctx, db, project, cfg, plan)
+	var blockerReason string
+	if checkBlockers {
+		blockerReason, err = queuedTaskBlockerWaitReason(ctx, db, project, cfg, plan)
+	}
+	if err == nil && blockerReason == "" {
+		blockerReason, err = db.QueuedTaskDeclineReason(ctx, task.ID)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -559,7 +575,7 @@ func addTaskDetails(ctx context.Context, db *store.DB, home string, project stor
 		row.Age = now.Sub(created).Round(time.Second).String()
 	}
 	if task.State == store.StateQueued {
-		reason, err := queuedTaskWaitReason(ctx, db, project, task, cfg)
+		reason, err := queuedTaskWaitReason(ctx, db, project, task, cfg, false)
 		if err != nil {
 			return err
 		}
@@ -708,7 +724,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		view["admission"], view["plan_revision"] = "admitted", plan.Revision
 		view["execution_mode"] = plan.Execution.Mode
 		if task.State == store.StateQueued {
-			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task, cfg)
+			waitReason, err := queuedTaskWaitReason(ctx.Context, db, project, task, cfg, true)
 			if err != nil {
 				return err
 			}
@@ -1070,9 +1086,33 @@ func taskNeedsUser(task store.Task) bool {
 }
 
 // taskWaitsOnUser reports whether needs_you lists the Task: it failed, was
-// lost, asked a question, or has a pending Decision.
-func taskWaitsOnUser(task store.Task, decisions map[int64][]int64) bool {
-	return taskNeedsUser(task) || task.State == store.StateNeedsDecision || len(decisions[task.ID]) > 0
+// lost, asked a question, has a pending Decision, or holds a Pool slot idle
+// while another Task waits for one.
+func taskWaitsOnUser(task store.Task, decisions map[int64][]int64, idleSlots map[int64]string) bool {
+	_, idle := idleSlots[task.ID]
+	return taskNeedsUser(task) || task.State == store.StateNeedsDecision || len(decisions[task.ID]) > 0 || idle
+}
+
+// idleSlotReasons maps each Task that holds a Pool slot with nothing pending,
+// past defaults.stall_after, to the reason needs_you shows for it.
+func idleSlotReasons(ctx context.Context, db *store.DB, projectID int64, cfg config.Config, now time.Time) (map[int64]string, error) {
+	idleFor := duration(cfg.Defaults.StallAfter)
+	if idleFor <= 0 {
+		return nil, nil
+	}
+	idle, waiting, err := db.IdleSlotTasks(ctx, projectID, idleFor, now)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(waiting))
+	for i, task := range waiting {
+		names[i] = taskIDString(task.Seq)
+	}
+	reasons := make(map[int64]string, len(idle))
+	for _, task := range idle {
+		reasons[task.ID] = "Holds a Pool slot with nothing pending while " + strings.Join(names, ", ") + " wait for a slot"
+	}
+	return reasons, nil
 }
 
 // pendingDecisionsByTask maps each Task ID to its pending Decision IDs.

@@ -54,6 +54,7 @@ func TestCopySignalFileAllowsOnlyWorktreeAndOwnScratchAfterResolvingSymlinks(t *
 	if err := os.WriteFile(foreignScratchFile, []byte("foreign scratch"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Chdir(task.WorktreePath)
 	outsideFromWorktree, err := filepath.Rel(task.WorktreePath, outsideFile)
 	if err != nil {
 		t.Fatal(err)
@@ -96,5 +97,52 @@ func TestCopySignalFileAllowsOnlyWorktreeAndOwnScratchAfterResolvingSymlinks(t *
 	}
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
 		t.Fatalf("rejected symlinked scratch file was copied to %s: %v", destination, err)
+	}
+}
+
+func TestCopySignalFileResolvesRelativePathsAgainstCwd(t *testing.T) {
+	home := t.TempDir()
+	project := store.Project{Name: "shop"}
+	task := store.Task{Seq: 1, WorktreePath: filepath.Join(t.TempDir(), "worktree")}
+	if err := os.MkdirAll(task.WorktreePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scratch, err := ensureTaskScratch(home, project, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "report.md"), []byte("scratch report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "report.md"), []byte("worktree report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "report.md"), []byte("outside report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		cwd  string
+		want string
+		fail bool
+	}{
+		{cwd: scratch, want: "scratch report"},
+		{cwd: task.WorktreePath, want: "worktree report"},
+		{cwd: outside, fail: true},
+	} {
+		t.Chdir(test.cwd)
+		destination := filepath.Join(t.TempDir(), "copied.md")
+		_, err := copySignalFile(home, project, task, "report.md", destination)
+		if test.fail {
+			if err == nil || !strings.Contains(err.Error(), "Signal files must be inside") {
+				t.Errorf("cwd %s: relative file outside worktree and scratch: err = %v", test.cwd, err)
+			}
+			continue
+		}
+		copied, readErr := os.ReadFile(destination)
+		if err != nil || readErr != nil || string(copied) != test.want {
+			t.Errorf("cwd %s: copied %q, err %v, %v; want %q", test.cwd, copied, err, readErr, test.want)
+		}
 	}
 }

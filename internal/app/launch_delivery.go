@@ -25,7 +25,7 @@ const launchDeliveryTimeout = 2 * time.Minute
 // retryPendingLaunches runs on focus events and normal Project reconciliation
 // (including watch ticks). Only a finished start intent can be retried here.
 func (s *Service) retryPendingLaunches(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, snapshot herdr.Snapshot) error {
-	if _, err := s.refillQueuedTasks(ctx, db, project, cfg); err != nil {
+	if _, err := s.refillQueuedTasks(ctx, db, project, cfg, false); err != nil {
 		return err
 	}
 	home, err := s.homePath()
@@ -126,22 +126,47 @@ func queuedTaskBlockerWaitReason(ctx context.Context, db *store.DB, project stor
 	return "", nil
 }
 
+const queuedDeclineRecheck = 2 * time.Minute
+
 // refillQueuedTasks admits queued Tasks into free Worker slots. It returns how
-// many left the queue, also when a later admission fails.
-func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) (int, error) {
+// many left the queue, also when a later admission fails. Admission checks
+// read the forge and origin, so other callers check at most one Task per free
+// slot and skip declined Tasks, which only the Watch checks again.
+func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, watch bool) (int, error) {
 	admitted := 0
 	home, err := s.homePath()
 	if err != nil {
 		return admitted, err
 	}
+	declines, err := db.QueuedTaskDeclines(ctx, project.ID)
+	if err != nil {
+		return admitted, err
+	}
+	budget := -1
+	if !watch {
+		active, err := db.ActiveWorkerCount(ctx, project.ID)
+		if err != nil {
+			return admitted, err
+		}
+		budget = max(cfg.Defaults.MaxWorkers-active, 0)
+	}
+	attempted := make(map[int64]bool)
 	for {
+		active, err := db.ActiveWorkerCount(ctx, project.ID)
+		if err != nil {
+			return admitted, err
+		}
+		full := active >= cfg.Defaults.MaxWorkers
 		tasks, err := db.Tasks(ctx, project.ID, false)
 		if err != nil {
 			return admitted, err
 		}
 		launched := false
 		for _, queued := range tasks {
-			if queued.State != store.StateQueued {
+			if queued.State != store.StateQueued || attempted[queued.ID] {
+				continue
+			}
+			if decline, found := declines[queued.ID]; found && (!watch || time.Since(decline.CheckedAt) < queuedDeclineRecheck) {
 				continue
 			}
 			plan, err := queued.AdmittedPlan()
@@ -183,6 +208,13 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 				}
 				continue
 			}
+			if full || budget == 0 {
+				continue
+			}
+			if budget > 0 {
+				budget--
+			}
+			attempted[queued.ID] = true
 			launchedTask, err := s.admitQueuedTask(ctx, db, home, project, cfg, queued, plan, false)
 			if err != nil {
 				return admitted, err
@@ -282,13 +314,21 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 		}
 	}
 	if err := validateTicketBlockers(ctx, cfg, brief, targets); err != nil {
-		return false, nil
+		reason := err.Error()
+		var failure *axi.Error
+		if errors.As(err, &failure) {
+			reason = failure.Message
+		}
+		return false, db.RecordQueuedTaskDecline(ctx, queued.ID, reason)
 	}
 	branch := store.TaskBranchName(queued.Seq)
 	if err := taskBranchAvailableForBranch(ctx, db, project, branch, members); err != nil {
 		if errors.Is(err, store.ErrTaskBranchExists) {
-			return false, nil
+			return false, db.RecordQueuedTaskDecline(ctx, queued.ID, err.Error())
 		}
+		return false, err
+	}
+	if err := db.ClearQueuedTaskDecline(ctx, queued.ID); err != nil {
 		return false, err
 	}
 	if !inline && s.DetachQueuedLaunch {
