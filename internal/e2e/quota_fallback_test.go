@@ -28,26 +28,34 @@ var quotaScreens = map[string]string{
 	"opencode": "  Error: You exceeded your current quota, please check your plan and billing details.\n\n  ┃  Ask anything...\n  ctrl+p commands\n",
 }
 
+// claudeAutoContinueScreen is the usage-limit screen Claude Code renders when it
+// plans to continue by itself, captured in #574.
+const claudeAutoContinueScreen = "  ⎿  You've hit your session limit · resets 1:30pm (Asia/Bangkok)\n● Usage limit reached · continuing automatically at 1:30pm · esc to cancel\n\n  ⚠ Usage limit reached · limit resets 1:30pm\n    Continuing shortly · esc to cancel\n\n────────────────────────────────────────\n> \n────────────────────────────────────────\n  ? for shortcuts\n"
+
 func TestClaudeSessionLimitFallsBackToAnotherProfile(t *testing.T) {
-	runQuotaFallback(t, "claude", "codex", "You've hit your session limit · resets 7pm", "7pm")
+	runQuotaFallback(t, "claude", "quota-primary", "codex", "You've hit your session limit · resets 7pm", "7pm")
+}
+
+func TestClaudeAutoContinueScreenFallsBackToAnotherProfile(t *testing.T) {
+	runQuotaFallback(t, "claude", "quota-autocontinue", "codex", "Usage limit reached · limit resets 1:30pm", "1:30pm")
 }
 
 func TestCodexUsageLimitFallsBackToAnotherProfile(t *testing.T) {
-	runQuotaFallback(t, "codex", "claude", "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again in 2 hours 13 minutes.", "in 2 hours 13 minutes")
+	runQuotaFallback(t, "codex", "quota-primary", "claude", "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again in 2 hours 13 minutes.", "in 2 hours 13 minutes")
 }
 
 func TestPiUsageLimitFallsBackToAnotherProfile(t *testing.T) {
-	runQuotaFallback(t, "pi", "claude", "You have hit your ChatGPT usage limit (plus plan). Try again in ~158 min.", "in ~158 min")
+	runQuotaFallback(t, "pi", "quota-primary", "claude", "You have hit your ChatGPT usage limit (plus plan). Try again in ~158 min.", "in ~158 min")
 }
 
 func TestOpenCodeQuotaFallsBackToAnotherProfile(t *testing.T) {
-	runQuotaFallback(t, "opencode", "claude", "You exceeded your current quota, please check your plan and billing details.", "")
+	runQuotaFallback(t, "opencode", "quota-primary", "claude", "You exceeded your current quota, please check your plan and billing details.", "")
 }
 
-func runQuotaFallback(t *testing.T, primaryKind, backupKind, line, resets string) {
+func runQuotaFallback(t *testing.T, primaryKind, primaryModel, backupKind, line, resets string) {
 	fixture := newQuotaFixture(t, [][2]string{
 		{"profiles.primary.kind", primaryKind},
-		{"profiles.primary.model", "quota-primary"},
+		{"profiles.primary.model", primaryModel},
 		{"profiles.backup.kind", backupKind},
 		{"profiles.backup.model", "quota-backup"},
 		{"profiles.primary.fallback", "backup"},
@@ -252,18 +260,18 @@ case "$*" in
 esac
 report working
 case " $* " in
-  *" quota-primary "*|*" quota-silent "*|*" quota-exit "*)
+  *" quota-primary "*|*" quota-silent "*|*" quota-exit "*|*" quota-autocontinue "*)
     printf 'work before the quota ran out\n' > quota-work.txt
     printf 'primary %[1]s %%s\n' "$PWD" >> "$POSSE_TEST_ROOT/quota.log"
     attempt=$(grep -c '^primary ' "$POSSE_TEST_ROOT/quota.log")
     while [ ! -e "$POSSE_TEST_ROOT/emit-quota-$attempt" ]; do sleep 0.02; done
-    printf '%%s' %[2]s
+    case " $* " in *" quota-autocontinue "*) printf '%%s' %[3]s ;; *) printf '%%s' %[2]s ;; esac
     # A quota-silent harness never reports the end of its turn, so Herdr keeps
     # showing it working, as Claude did during the 2026-10-25 stall.
     case " $* " in *" quota-silent "*) continue_silently=1 ;; *) continue_silently=0 ;; esac
     if [ "$continue_silently" = 1 ]; then while IFS= read -r line; do :; done; exit 0; fi
     # A quota-exit harness quits after its message, leaving the shell behind.
-    case " $* " in *" quota-exit "*) herdr pane release-agent "$HERDR_PANE_ID" --source posse.fake --agent %[1]s >/dev/null 2>&1; exit 0 ;; esac
+    case " $* " in *" quota-exit "*) i=0; while herdr agent get "$HERDR_PANE_ID" 2>/dev/null | grep -q '"launch_pending":true' && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done; herdr pane release-agent "$HERDR_PANE_ID" --source posse.fake --agent %[1]s >/dev/null 2>&1; exit 0 ;; esac
     report idle
     # Herdr runs plugin hooks outside the Worker's process group.
     HERDR_PLUGIN_EVENT_JSON="{\"event\":\"pane.agent_status_changed\",\"data\":{\"pane_id\":\"$HERDR_PANE_ID\",\"agent_status\":\"idle\"}}" setsid env -u POSSE_TASK_ID "$POSSE_E2E_POSSE_BIN" _ingest >> "$POSSE_TEST_ROOT/ingest.log" 2>&1 </dev/null &
@@ -275,7 +283,7 @@ case " $* " in
     ;;
 esac
 while IFS= read -r line; do :; done
-`, kind, shellQuote(screen))
+`, kind, shellQuote(screen), shellQuote(claudeAutoContinueScreen))
 		if err := os.WriteFile(filepath.Join(base.root, "bin", kind), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}

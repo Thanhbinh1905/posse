@@ -4,10 +4,13 @@ package e2e
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 // A /bin/sh pane reads input in canonical mode, where the tty discards a line
@@ -52,5 +55,37 @@ func TestWorkerLaunchLongerThanTTYLineRuns(t *testing.T) {
 	launchPrompt := "Read " + filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "launch.md") + " and follow it.\n"
 	if !strings.Contains(string(logged), launchPrompt) {
 		t.Fatalf("Worker start omitted its opening prompt %q:\n%s", launchPrompt, logged)
+	}
+}
+
+// A fish pane cannot source the POSIX launch script, and the agent would start
+// without its arguments. The start must fail with a clear error instead.
+func TestWorkerLaunchLongerThanTTYLineFailsInFishPane(t *testing.T) {
+	fixture := newPRLifecycleFixtureWithPaneShell(t, "fish")
+	defer fixture.db.Close()
+
+	configPath := filepath.Join(fixture.home, "config.toml")
+	configText, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argument := strings.Repeat("Posse's long launch argument. ", 200)
+	configText = []byte(strings.Replace(string(configText), "[profiles.deep]\nkind = \"claude\"\n", "[profiles.deep]\nkind = \"codex\"\nargs = [\"--long\", "+strconv.Quote(argument)+"]\n", 1))
+	if err := os.WriteFile(configPath, configText, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(fixture.root, "fish-launch.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Fish launch\ndone_when: the start fails clearly\n---\nStart with a launch line over the tty limit.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	start := exec.Command(fixture.binary, "start", "--brief", brief, "--name", "fish-launch")
+	start.Dir, start.Env = fixture.repo, fixture.leadEnv
+	output, err := start.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "launch_shell_unsupported") {
+		t.Fatalf("start in a fish pane = %v, want launch_shell_unsupported:\n%s", err, output)
+	}
+	if task := fixture.mustTask(t, "t1"); task.State != store.StateFailed {
+		t.Fatalf("Task state = %s, want failed", task.State)
 	}
 }

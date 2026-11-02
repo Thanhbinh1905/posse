@@ -127,3 +127,29 @@ func findTaskPane(panes []herdr.Pane, task store.Task) (herdr.Pane, bool) {
 	}
 	return pane, found
 }
+
+// replaceWorkerPane moves a Task whose agent has stopped into a fresh pane.
+// Herdr 0.9.1 keeps the stopped agent's record on its pane and rejects
+// agent.start there, with no call that removes the record. The old pane is
+// closed only while its shell is still the foreground.
+func (s *Service) replaceWorkerPane(ctx context.Context, home string, project store.Project, task store.Task, old herdr.Pane, kind string) (herdr.Pane, error) {
+	opened, err := s.openWorkerTab(ctx, home, project, task, task.WorktreePath, kind)
+	if err != nil {
+		return herdr.Pane{}, err
+	}
+	fresh := herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
+	group, err := s.paneAgentGroup(ctx, old.PaneID)
+	if err != nil {
+		if missingPaneError(err) {
+			return fresh, nil
+		}
+		return fresh, err
+	}
+	if group != 0 {
+		return fresh, agentStopPaneChanged(old.PaneID)
+	}
+	if _, err := s.herdrCall(ctx, "pane.close", map[string]any{"pane_id": old.PaneID}); err != nil && !missingPaneError(err) {
+		return fresh, err
+	}
+	return fresh, nil
+}
