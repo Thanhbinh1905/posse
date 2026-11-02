@@ -30,7 +30,7 @@ The current position and history are recoverable from admitted Task plans and De
 
 The optional feature flow is Discover (2-4 parallel Research Workers chosen by the Lead; cross-model check only on User request) -> Plan (critique, optional arena) -> Spec -> Tickets (grouped by category) -> Build -> Review -> Deliver. The Bug variant is Diagnose -> Build -> Review -> Deliver. Profiles map stages to the three frames and Git delivery, using existing Task types.
 
-Status: the direct path and workflow-profile configuration, preview, validation, admission freezing and user-approved run Decisions are implemented. `TestWorkflowProfileAdmissionAndNoProfileDirectPath` and `TestWorkflowRunsRequireUserApprovedProgressionAndRecoverPosition` cover direct-path admission, frozen profiles, User-gated transitions and restart recovery. Section 25 records the ready full-pipeline delivery lanes (single-repository and per-Member, PR and local delivery).
+Status: the direct path and workflow-profile configuration, preview, validation, admission freezing and user-approved run Decisions are implemented. `TestWorkflowProfileAdmissionAndNoProfileDirectPath` and `TestLaunchSkillsAreInjectedOnlyIntoPosseSessions/pi` cover unconfigured Claude and Pi direct-path admission. `TestWorkflowRunsRequireUserApprovedProgressionAndRecoverPosition` covers frozen profiles, User-gated transitions and restart recovery. Section 25 records the ready full-pipeline delivery lanes (single-repository and per-Member, PR and local delivery).
 
 ### Glossary and upgrade
 
