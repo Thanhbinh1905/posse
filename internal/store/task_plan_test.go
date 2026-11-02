@@ -161,6 +161,65 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	}
 }
 
+func TestPlanRevisionPreservesMergeGateForMergingTask(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := admittedStorePlan(t, home).Bind("t1")
+	data, _ := plan.Encode()
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", MergeMode: "local", PlanJSON: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateWorking, StateDone, "worker", "ready"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateDone, StateMerging, "cli", "merge started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTaskRepos(ctx, id, []TaskRepo{{Repo: "api", MergeMode: "local"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET gated_sha='gated-head' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE task_repos SET gated_sha='member-gate' WHERE task_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := plan.Launch
+	launch.ProfileName = "next"
+	revision, err := plan.Reconfigure(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlan(ctx, task, revision); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil || updated.State != StateMerging || updated.GatedSHA != "gated-head" {
+		t.Fatalf("revised merging Task = state %s gated_sha %q, err=%v", updated.State, updated.GatedSHA, err)
+	}
+	repos, err := db.TaskRepos(ctx, id)
+	if err != nil || len(repos) != 1 || repos[0].GatedSHA != "member-gate" {
+		t.Fatalf("revised merging Task Member gates = %#v, err=%v", repos, err)
+	}
+}
+
 func TestConcurrentSnapshotsKeepAdmittedPlanAndHistoryCoherent(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
