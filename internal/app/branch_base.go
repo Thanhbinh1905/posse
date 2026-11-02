@@ -68,7 +68,7 @@ func defaultBranchBase(ctx context.Context, project store.Project) (string, erro
 	if defaultBranchUnborn(ctx, projectRepoTarget(project)) {
 		return project.DefaultBranch, nil
 	}
-	for _, ref := range []string{"refs/heads/" + project.DefaultBranch, "refs/remotes/origin/" + project.DefaultBranch} {
+	for _, ref := range []string{"refs/remotes/origin/" + project.DefaultBranch, "refs/heads/" + project.DefaultBranch} {
 		_, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 		if err == nil {
 			return strings.TrimPrefix(ref, "refs/heads/"), nil

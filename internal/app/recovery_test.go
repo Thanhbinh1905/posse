@@ -673,7 +673,7 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(taskHome, "launch.md"), []byte("# Worker protocol\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configText := "[lead]\nkind = \"claude\"\n\n[profiles.deep]\nkind = \"claude\"\n"
+	configText := "[lead]\nkind = \"claude\"\n\n[profiles.deep]\nkind = \"claude\"\n\n[skills]\nchange = [\"posse-deslop\"]\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -789,6 +789,31 @@ func TestStartupRecoverySurvivesReconcileBeforeHook(t *testing.T) {
 	}
 	if adapter.CallCount("agent.start") != 2 {
 		t.Fatalf("recovery started %d agents, want one Worker and one Lead: %#v", adapter.CallCount("agent.start"), adapter.Calls)
+	}
+	var workerArgs []string
+	for _, call := range adapter.Calls {
+		if call.Method == "agent.start" && strings.Contains(call.Params["name"].(string), "-t1-") {
+			workerArgs, _ = call.Params["args"].([]string)
+		}
+	}
+	skillRoots, err := filepath.Glob(filepath.Join(home, "projects", "shop", "launch-skills", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := false
+	for index := 0; index+1 < len(workerArgs); index++ {
+		if workerArgs[index] == "--plugin-dir" {
+			for _, root := range skillRoots {
+				if workerArgs[index+1] == root {
+					if _, err := os.Stat(filepath.Join(root, "skills", "posse-deslop", "SKILL.md")); err == nil {
+						registered = true
+					}
+				}
+			}
+		}
+	}
+	if !registered {
+		t.Fatalf("Worker recovery omitted its frozen launch-skill plugin: args=%#v skillRoots=%q", workerArgs, skillRoots)
 	}
 }
 
