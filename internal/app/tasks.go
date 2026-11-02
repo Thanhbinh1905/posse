@@ -1741,6 +1741,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if pending {
 			return queuedInstructionsPendingFailure(ctx.Context, db, task, time.Now())
 		}
+		if err := requireRoleSkillsUsed(ctx.Context, db, home, project, task); err != nil {
+			return err
+		}
 	}
 	if verb == "needs-decision" && parsed.Flags["findings"] != "" {
 		if _, err := copySignalFile(home, project, task, parsed.Flags["findings"], filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "findings.toon")); err != nil {
