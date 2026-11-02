@@ -317,7 +317,7 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 	if !oneOfString(action, "fix", "accept", "defer", "withdraw", "reclassify") {
 		return axi.Usage("review dispose action must be fix, accept, defer, withdraw or reclassify")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -373,8 +373,16 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 		return admittedPlanFailure(err)
 	}
 	blockAt := "P1"
+	capSpent := false
 	if plan != nil && plan.ValidationLoops != nil {
 		blockAt = plan.ValidationLoops.Review.BlockAt
+		if plan.ValidationLoops.Review.Enabled {
+			usage, err := db.ReviewCapUsage(ctx.Context, change.ID)
+			if err != nil {
+				return err
+			}
+			capSpent = reviewCapUsed(change, usage) >= plan.ValidationLoops.MaxReviewRounds()
+		}
 	}
 	selectedFindings, err := db.ReviewFindingsForTask(ctx.Context, change.ID)
 	if err != nil {
@@ -393,12 +401,22 @@ func (s *Service) reviewDispose(ctx *axi.Context, args []string) error {
 			appliedFindings++
 		}
 	}
-	err = db.ApplyReviewDisposition(ctx.Context, change.ID, findings, patterns, action, parsed.Flags["severity"], parsed.Flags["issue"], parsed.Flags["reason"], parsed.Flags["user-approved"], actor, blockAt)
+	err = db.ApplyReviewDisposition(ctx.Context, change.ID, findings, patterns, action, parsed.Flags["severity"], parsed.Flags["issue"], parsed.Flags["reason"], parsed.Flags["user-approved"], actor, blockAt, capSpent)
 	if err != nil {
+		if errors.Is(err, store.ErrReviewCapDecisionRequired) {
+			return axi.Failure("review_cap_decision_required", err.Error(), false,
+				"Put the `review_cap` Decision in `posse decisions` to the User; only its `accept-head` answer accepts this head")
+		}
 		if errors.Is(err, store.ErrReviewDispositionRequiresUser) {
 			return axi.Failure("review_disposition_requires_user", err.Error(), false)
 		}
 		return axi.Failure("review_disposition_refused", err.Error(), false)
+	}
+	if err := refreshAdmittedReviewLedgers(ctx.Context, db, home, project, change); err != nil {
+		return err
+	}
+	if err := settleReviewDisposition(ctx.Context, db, project, change, action); err != nil {
+		return err
 	}
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "action", Value: action}, {Key: "findings", Value: appliedFindings}, {Key: "patterns", Value: len(patterns)}, {Key: "state", Value: "recorded"}})
 }

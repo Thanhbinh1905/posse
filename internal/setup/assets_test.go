@@ -81,6 +81,22 @@ func TestShippedSkillFrontmatter(t *testing.T) {
 	}
 }
 
+func TestReviewRoleRecommendedSkillsArePinned(t *testing.T) {
+	recommended := RecommendedSkills()["review"]
+	for _, required := range []string{"posse-tdd", "posse-technical-writing"} {
+		found := false
+		for _, name := range recommended {
+			if name == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("review role does not recommend %s", required)
+		}
+	}
+}
+
 func TestEveryWorkflowSkillIsRecommended(t *testing.T) {
 	covered := map[string]bool{}
 	for _, name := range PlatformSkillNames() {

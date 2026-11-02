@@ -21,8 +21,9 @@ var ClaudeReadOnlyTools = []string{"Glob", "Grep", "LS", "NotebookRead", "Read",
 // set is read-only. A same-named project or user definition overrides them and
 // is checked like any custom agent.
 var claudeBuiltinReadOnlyAgents = map[string][]string{
-	"Explore": {"Bash", "Glob", "Grep", "LS", "NotebookRead", "Read", "WebFetch", "WebSearch"},
-	"Plan":    {"Bash", "Glob", "Grep", "LS", "NotebookRead", "Read", "WebFetch", "WebSearch"},
+	"Explore":   {"Bash", "Glob", "Grep", "LS", "NotebookRead", "Read", "WebFetch", "WebSearch"},
+	"Plan":      {"Bash", "Glob", "Grep", "LS", "NotebookRead", "Read", "WebFetch", "WebSearch"},
+	"web-fetch": {"WebFetch"},
 }
 
 // PiReadOnlyTools is the explicit Pi tool loadout of a research child.

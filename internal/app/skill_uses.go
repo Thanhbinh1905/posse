@@ -96,6 +96,90 @@ func roleSkillChecklist(skills []string, step string, uses map[string]int, recor
 	return checks
 }
 
+// unusedRoleSkills lists the configured role skills with 0 recorded uses.
+// It returns nil when Posse does not record uses for the Task: they are
+// unknown there, not zero.
+func unusedRoleSkills(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) ([]string, error) {
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil {
+		return nil, err
+	}
+	if !skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)) {
+		return nil, nil
+	}
+	uses, err := db.TaskSkillUses(ctx, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	var unused []string
+	for _, name := range planRoleSkills(plan) {
+		if uses[name] == 0 {
+			unused = append(unused, name)
+		}
+	}
+	return unused, nil
+}
+
+// unusedRoleSkillsSummary appends the skills with 0 recorded uses to summary.
+// A lookup failure leaves the summary unchanged: the Notice must still go out.
+func (s *Service) unusedRoleSkillsSummary(ctx context.Context, db *store.DB, project store.Project, task store.Task, summary string) string {
+	home, err := s.homePath()
+	if err != nil {
+		return summary
+	}
+	unused, err := unusedRoleSkills(ctx, db, home, project, task)
+	if err != nil {
+		return summary
+	}
+	return withUnusedRoleSkills(summary, unused)
+}
+
+func (s *Service) annotateMergeReadyNotices(ctx context.Context, db *store.DB, project store.Project, task store.Task, notices []store.Notice) {
+	for i := range notices {
+		if notices[i].Kind == "merge_ready" {
+			notices[i].Summary = s.unusedRoleSkillsSummary(ctx, db, project, task, notices[i].Summary)
+		}
+	}
+}
+
+func quotedSkillNames(skills []string) string {
+	quoted := make([]string, len(skills))
+	for i, name := range skills {
+		quoted[i] = "`" + name + "`"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func roleSkillsUnusedFailure(skills []string) *axi.Error {
+	return axi.Failure(
+		"role_skills_unused",
+		"configured role skills have 0 recorded uses: "+quotedSkillNames(skills),
+		false,
+		"Invoke each skill at its step, then retry; `posse brief` lists the steps",
+	)
+}
+
+// requireRoleSkillsUsed refuses while a configured role skill has 0 uses.
+func requireRoleSkillsUsed(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+	unused, err := unusedRoleSkills(ctx, db, home, project, task)
+	if err != nil {
+		return err
+	}
+	if len(unused) > 0 {
+		return roleSkillsUnusedFailure(unused)
+	}
+	return nil
+}
+
+// withUnusedRoleSkills appends the skills with 0 recorded uses to a Lead
+// Notice summary.
+func withUnusedRoleSkills(summary string, unused []string) string {
+	if len(unused) == 0 {
+		return summary
+	}
+	return summary + "; role skills with 0 recorded uses: " + quotedSkillNames(unused)
+}
+
 // skillUsesRecorded reports whether Posse records the skill uses of this
 // Task: a claude Worker whose launch installed the Skill hook.
 func skillUsesRecorded(plan *taskplan.Plan, hookInstalled bool) bool {
@@ -103,25 +187,25 @@ func skillUsesRecorded(plan *taskplan.Plan, hookInstalled bool) bool {
 }
 
 // taskSkillChecklist is the `skill_checklist` field of publish and done
-// output, or nil when no loaded role skill applies to step.
-func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, step string) (axi.Field, bool, error) {
+// output. It returns nil when no loaded role skill applies to step.
+func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, step string) ([]axi.Field, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {
-		return axi.Field{}, false, err
+		return nil, err
 	}
 	uses, err := db.TaskSkillUses(ctx, task.ID)
 	if err != nil {
-		return axi.Field{}, false, err
+		return nil, err
 	}
 	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)))
 	if len(checks) == 0 {
-		return axi.Field{}, false, nil
+		return nil, nil
 	}
 	rows := make([]any, 0, len(checks))
 	for _, check := range checks {
 		rows = append(rows, axi.Object{{Key: "skill", Value: check.skill}, {Key: "when", Value: check.when}, {Key: "invoked", Value: check.invoked}})
 	}
-	return axi.Field{Key: "skill_checklist", Value: rows}, true, nil
+	return []axi.Field{{Key: "skill_checklist", Value: rows}}, nil
 }
 
 // taskSkillUseView reports how often the Worker invoked each role skill.

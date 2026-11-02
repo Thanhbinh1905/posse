@@ -35,8 +35,8 @@ func TestStoreLoadWithProjectHistoryKeepsWatchAndLeadFree(t *testing.T) {
 func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	f := newPRLifecycleFixtureWithLead(t, true)
 	defer f.db.Close()
-	if !waitForCondition(15*time.Second, func() bool { return len(watchPIDs(f.root)) > 0 }) {
-		t.Fatalf("isolated Watch runtime did not start: pids=%v", watchPIDs(f.root))
+	if ok, reason := waitForEvent(t, func() bool { return len(watchPIDs(f.root)) > 0 }, nil); !ok {
+		t.Fatalf("isolated Watch runtime did not start: %s", reason)
 	}
 	const workerCount = 6
 	if withHistory {
@@ -205,11 +205,16 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	close(samples)
 
 	byCommand := map[string][]sample{}
-	var failures []string
+	var failures, deferrals []string
+	total := 0
 	for sample := range samples {
+		total++
 		byCommand[sample.command] = append(byCommand[sample.command], sample)
-		if sample.failed || sample.busy || sample.deferred {
-			failures = append(failures, fmt.Sprintf("%s (%s): %s", sample.command, sample.elapsed.Round(time.Millisecond), strings.TrimSpace(sample.output)))
+		line := fmt.Sprintf("%s (%s): %s", sample.command, sample.elapsed.Round(time.Millisecond), strings.TrimSpace(sample.output))
+		if sample.failed || sample.busy {
+			failures = append(failures, line)
+		} else if sample.deferred {
+			deferrals = append(deferrals, line)
 		}
 	}
 	commands := make([]string, 0, len(byCommand))
@@ -248,11 +253,19 @@ func runStoreLoadAtWorkerLimit(t *testing.T, withHistory bool) {
 	fmt.Fprintf(&report, "watch.log contention lines=%d max heartbeat gap=%s\n", watchBusy, maxHeartbeatGap.Round(time.Millisecond))
 	t.Logf("store load with %d Workers, %d rounds:\n%s", workerCount, rounds, report.String())
 	if len(failures) > 0 {
-		t.Fatalf("%d foreground commands failed or deferred under load:\n%s\n%s", len(failures), report.String(), strings.Join(failures[:min(len(failures), 10)], "\n---\n"))
+		t.Fatalf("%d foreground commands failed under load:\n%s\n%s", len(failures), report.String(), strings.Join(failures[:min(len(failures), 10)], "\n---\n"))
 	}
-	if watchBusy > 0 {
+	// A foreground command may defer its reconciliation when CPU starvation
+	// exhausts its budget, and Watch retries contention on its next pass
+	// (#637). The #428 regression deferred most commands, so a budget of one
+	// in twenty still catches it.
+	if len(deferrals) > total/20 {
+		t.Fatalf("%d of %d foreground commands deferred under load:\n%s\n%s", len(deferrals), total, report.String(), strings.Join(deferrals[:min(len(deferrals), 10)], "\n---\n"))
+	}
+	if watchBusy > workerCount {
 		t.Fatalf("Watch logged %d contention failures under load:\n%s", watchBusy, watchLog)
 	}
+	runWatchPass(t, f.binary, f.repo, f.leadEnv)
 	// Watch passes run every two seconds; a third of the stale threshold
 	// leaves room for one slow pass but not for a stalled loop.
 	if maxHeartbeatGap > 10*time.Second {

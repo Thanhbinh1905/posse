@@ -533,11 +533,11 @@ func TestLaunchAgentSourcesLaunchOverTTYLineLimitFromScript(t *testing.T) {
 	if err := service.launchAgent(context.Background(), "w1:p1", "w", "codex", []string{"--flag", long}, map[string]string{"POSSE_LONG": long}, script); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.Calls) != 2 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["text"] != ". "+shellQuote(script) {
+	if len(fake.Calls) != 3 || fake.Calls[1].Method != "pane.send_input" || fake.Calls[1].Params["text"] != ". "+shellQuote(script) {
 		t.Fatalf("long launch did not source its script first: %#v", fake.Calls)
 	}
 	// Herdr rejects a null argument list.
-	if args := fake.Calls[1].Params["args"].([]string); fake.Calls[1].Method != "agent.start" || args == nil || len(args) != 0 {
+	if args := fake.Calls[2].Params["args"].([]string); fake.Calls[2].Method != "agent.start" || args == nil || len(args) != 0 {
 		t.Fatalf("long launch did not start the agent with an empty argument list: %#v", fake.Calls[1])
 	}
 	// Run the script as the pane's shell would: source it, then run the bare
