@@ -96,17 +96,19 @@ func TestPRDescriptionChangesUseRemoteDefaultBranchWhenLocalDefaultIsBehind(t *t
 	gitTest(t, fixture.worktree, "fetch", "origin")
 	gitTest(t, fixture.worktree, "rebase", "--onto", "origin/main", localBase)
 
-	fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
-	fixture.setGHHead(t, fixture.headSHA)
-	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
-		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "main")); got != localBase {
+		t.Fatalf("local main moved to %s, want stale base %s", got, localBase)
 	}
-	log, err := os.ReadFile(fixture.ghLog)
+	if got := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "refs/remotes/origin/main")); got == localBase {
+		t.Fatalf("origin/main did not advance beyond stale local main %s", localBase)
+	}
+	_, body, err := prDetails(context.Background(), fixture.db, fixture.project, fixture.task, fixture.service.homePath, "", "Worker completion summary", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(log), "upstream change") || !strings.Contains(string(log), "- worker change") {
-		t.Fatalf("PR Changes should list only commits beyond origin/main, got %q", log)
+	changes := strings.SplitN(strings.SplitN(body, "## Changes\n\n", 2)[1], "\n\n## Verification", 2)[0]
+	if strings.Contains(changes, "upstream change") || !strings.Contains(changes, "worker change") {
+		t.Fatalf("PR Changes should list only commits beyond origin/main, got %q", changes)
 	}
 }
 
