@@ -133,6 +133,18 @@ func TestWriteRecommendedSkillsAppendsTheBlockOnce(t *testing.T) {
 	}
 }
 
+func TestConfiguredSkillsDistinguishesAbsentAndEmptyRoles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeConfig(t, path, "[skills]\nchange = []\n")
+	configured, err := ConfiguredSkills(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured["change"] == nil || configured["review"] != nil {
+		t.Fatalf("configured role lists = %#v, want explicit empty change and absent review", configured)
+	}
+}
+
 func TestAddSkillsKeepsCommentsAndExistingEntries(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeConfig(t, path, "# my config\n[defaults]\nreview = \"none\" # keep\n\n[skills]\n# mine\nchange = [\"~/x\", \"posse-tdd\"]\n")

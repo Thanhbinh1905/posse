@@ -73,6 +73,10 @@ func sidebarLayoutState(path string) (string, error) {
 			if isSymlink {
 				return "symlink", nil
 			}
+			legacyRows := strings.TrimPrefix(legacySidebarLayoutSnippet, "[ui.sidebar.agents]\n")
+			if !strings.Contains(string(data), legacyRows) {
+				return "manual", nil
+			}
 			return "upgrade", nil
 		}
 		return "manual", nil
