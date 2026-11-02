@@ -148,7 +148,7 @@ func TestWatchBodyRefreshFailureCarriesForgeStderrIntoForgeUnavailable(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unavailable := f.service.forgeUnavailable(ctx, f.db, target, store.PRObservation{}); !strings.Contains(unavailable.Error(), stderr) {
+	if unavailable := f.service.forgeUnavailable(ctx, f.db, target, store.PRObservation{}, ""); !strings.Contains(unavailable.Error(), stderr) {
 		t.Fatalf("forge_unavailable = %v; want gh stderr %q", unavailable, stderr)
 	}
 }

@@ -171,14 +171,22 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 	if member != "" {
 		memberLabel = "Workspace member " + member + ": "
 	}
-	instruction := fmt.Sprintf(
-		"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
-		memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
-	)
-	if member != "" {
-		instruction += " For publication, use `posse publish --repo " + member + " \"<summary>\"` and report done without `--pr`."
+	var instruction string
+	if member == "" && fullPipelineSelected(task, "") {
+		instruction = fmt.Sprintf(
+			"PR head %s is missing current target commit %s from origin/%s, so its full-pipeline validation is stale. From the Task Sandbox, run `posse publish \"<summary>\"` with --verify, --proof and --risk to submit a fresh private candidate; Posse merges origin/%s into it. If the submission reports `candidate_target_conflict`, merge origin/%s into the Task branch (never rebase a pushed branch), resolve the conflicts and publish again. If the output names `review_carried_from`, the passed Review carries: in the candidate checkout run `posse validate test`, `posse validate docs` and `posse validate lint`, then `posse publish \"<summary>\"` there to promote, and signal done with the PR URL. Otherwise signal done from the candidate checkout to request a Review Round.",
+			headSHA, freshness.Tip, freshness.Branch, freshness.Branch, freshness.Branch,
+		)
 	} else {
-		instruction += " For publication, use `posse publish \"<summary>\"` and report done with the PR URL."
+		instruction = fmt.Sprintf(
+			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
+			memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
+		)
+		if member != "" {
+			instruction += " For publication, use `posse publish --repo " + member + " \"<summary>\"` and report done without `--pr`."
+		} else {
+			instruction += " For publication, use `posse publish \"<summary>\"` and report done with the PR URL."
+		}
 	}
 	after := task.CreatedAt
 	signals, err := db.TaskSignals(ctx, task.ID, 1)

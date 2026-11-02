@@ -86,6 +86,22 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 	}
 	gitTest(t, task.WorktreePath, "add", "change.txt")
 	gitTest(t, task.WorktreePath, "commit", "-m", "change")
+	refused := outcomeCLI(t, f.service, 1, "signal", "done", "Changed", "--turn", "launch:1")
+	for _, want := range []string{"role_skills_unused", "`posse-tdd`", "`posse-no-comments`"} {
+		if !strings.Contains(refused, want) {
+			t.Fatalf("refused done lacks %q:\n%s", want, refused)
+		}
+	}
+	if strings.Contains(refused, "`posse-deslop`") || strings.Contains(refused, "`posse-unslop`") {
+		t.Fatalf("refused done names a used skill:\n%s", refused)
+	}
+	for _, skill := range []string{"posse-tdd", "posse-no-comments"} {
+		event, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "worker", "cwd": task.WorktreePath, "tool_name": "Skill", "tool_input": map[string]any{"skill": skill}})
+		var stderr bytes.Buffer
+		if code := f.service.RunSkillHook(bytes.NewReader(event), &stderr, []string{"claude"}); code != 0 {
+			t.Fatalf("skill hook exit=%d: %s", code, &stderr)
+		}
+	}
 	done := outcomeCLI(t, f.service, 0, "signal", "done", "Changed", "--turn", "launch:1")
 	for _, want := range []string{"skill_checklist[3]{skill,when,invoked}:", "posse-deslop,\"before the `done` Signal", "posse-no-comments,", "posse-unslop,"} {
 		if !strings.Contains(done, want) {
@@ -96,7 +112,7 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 		t.Fatalf("done checklist lists a skill of another step:\n%s", done)
 	}
 	for _, row := range strings.Split(done, "\n") {
-		if strings.Contains(row, "posse-deslop,") && !strings.HasSuffix(row, ",yes") || strings.Contains(row, "posse-no-comments,") && !strings.HasSuffix(row, ",no") {
+		if strings.Contains(row, "posse-deslop,") && !strings.HasSuffix(row, ",yes") || strings.Contains(row, "posse-no-comments,") && !strings.HasSuffix(row, ",yes") {
 			t.Fatalf("done checklist marks the wrong skills invoked:\n%s", done)
 		}
 	}
@@ -105,7 +121,7 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	t.Chdir(f.repo)
 	shown := outcomeCLI(t, f.service, 0, "show", "t1")
-	for _, want := range []string{"skill_uses_recorded_by: claude hook", "role_skills[4]{skill,uses}:", "posse-tdd,0", "posse-deslop,2", "posse-no-comments,0", "posse-unslop,1"} {
+	for _, want := range []string{"skill_uses_recorded_by: claude hook", "role_skills[4]{skill,uses}:", "posse-tdd,1", "posse-deslop,2", "posse-no-comments,1", "posse-unslop,1"} {
 		if !strings.Contains(shown, want) {
 			t.Fatalf("show lacks %q:\n%s", want, shown)
 		}

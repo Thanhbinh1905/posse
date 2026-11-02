@@ -121,6 +121,23 @@ var (
 // /bin/sh pane. The kernel discards a longer line without an error.
 const ttyLineMaxBytes = 4095
 
+var nonPOSIXShells = map[string]bool{"fish": true, "csh": true, "tcsh": true, "nu": true, "elvish": true, "xonsh": true, "pwsh": true}
+
+// paneShellName names the pane's shell while it is the foreground process, or
+// returns "" when Herdr cannot tell.
+func (s *Service) paneShellName(ctx context.Context, paneID string) string {
+	info, err := s.sandboxPaneProcessInfo(ctx, paneID)
+	if err != nil {
+		return ""
+	}
+	for _, process := range info.ForegroundProcesses {
+		if process.PID == info.ShellPID {
+			return process.Name
+		}
+	}
+	return ""
+}
+
 var shellFunctionName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // launchAgent exports env into a pane's shell and starts an agent there. Each
@@ -150,6 +167,9 @@ func (s *Service) launchAgent(ctx context.Context, paneID, name, kind string, ar
 	if longest > ttyLineMaxBytes {
 		if !shellFunctionName.MatchString(command) {
 			return axi.Failure("launch_line_too_long", fmt.Sprintf("the %s launch needs a %d-byte shell line, over the %d-byte tty line limit, and %s cannot be a shell function name", kind, longest, ttyLineMaxBytes, command), false, "Shorten the Profile arguments or launch environment")
+		}
+		if shell := s.paneShellName(ctx, paneID); nonPOSIXShells[shell] {
+			return axi.Failure("launch_shell_unsupported", fmt.Sprintf("the %s launch needs a %d-byte shell line, over the %d-byte tty line limit, and the pane shell %s cannot source the POSIX launch script", kind, longest, ttyLineMaxBytes, shell), false, "Use a POSIX pane shell such as sh, bash or zsh, or shorten the Profile arguments or launch environment")
 		}
 		contents := strings.Join(append(lines, command+"() {", "\tunset -f "+command, "\tcommand "+launch+` "$@"`, "}"), "\n") + "\n"
 		if err := writeFile(script, []byte(contents)); err != nil {

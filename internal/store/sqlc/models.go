@@ -17,6 +17,36 @@ type Approval struct {
 	BranchSha string
 }
 
+type CiRerun struct {
+	ID          int64
+	ProjectID   int64
+	TaskID      int64
+	Repo        string
+	PrUrl       string
+	HeadSha     string
+	CheckName   string
+	RunID       string
+	JobID       string
+	Reason      string
+	TestsJson   string
+	Outcome     string
+	RequestedAt int64
+	SettledAt   int64
+}
+
+type CiTestFailure struct {
+	ProjectID  int64
+	TaskID     int64
+	Repo       string
+	PrUrl      string
+	HeadSha    string
+	CheckName  string
+	JobID      string
+	Package    string
+	Test       string
+	ObservedAt int64
+}
+
 type CompletedWorkerBusy struct {
 	TaskID          int64
 	TransitionID    int64
@@ -328,6 +358,12 @@ type PublishPrePushHead struct {
 	RequestUrl string
 	HeadSha    string
 	RecordedAt int64
+}
+
+type QueuedTaskDecline struct {
+	TaskID    int64
+	Reason    string
+	CheckedAt int64
 }
 
 type QuotaExhaustion struct {
@@ -678,6 +714,11 @@ type TaskSkillUse struct {
 	Uses    int64
 	FirstAt int64
 	LastAt  int64
+}
+
+type TaskSpecCheck struct {
+	TaskID    int64
+	CheckedAt int64
 }
 
 type TaskTargetChange struct {

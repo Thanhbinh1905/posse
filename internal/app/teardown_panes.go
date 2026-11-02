@@ -587,9 +587,6 @@ func (s *Service) verifyTaskPaneShellAfterForegroundExit(ctx context.Context, pr
 	if pane.WorkspaceID != expectedPane.WorkspaceID || pane.TabID != expectedPane.TabID || pane.Label != expectedPane.Label || !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
 		return fmt.Errorf("pane %s no longer matches Task %s after foreground process %d exited; preserving its processes", expectedPane.PaneID, taskIDString(task.Seq), foregroundPID)
 	}
-	if pane.Agent != "" || snapshotAgentName(snapshot, expectedPane.PaneID) != "" {
-		return fmt.Errorf("pane %s still exposes a foreground agent after Task process %d exited; preserving its processes", expectedPane.PaneID, foregroundPID)
-	}
 	shellAlive, err := authorization.verifyIfAlive(shellPID)
 	if err != nil {
 		return err

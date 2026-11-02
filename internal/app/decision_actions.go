@@ -77,7 +77,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err := db.ReviseTaskPlan(out.Context, task, revised); err != nil {
 				return err
 			}
-			if _, err := s.refillQueuedTasks(out.Context, db, project, cfg); err != nil {
+			if _, err := s.refillQueuedTasks(out.Context, db, project, cfg, false); err != nil {
 				return err
 			}
 			updated, err := db.TaskByID(out.Context, project.ID, task.ID)
@@ -203,6 +203,9 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				heads[i] = target.Commit
 			}
 			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, heads, decision.UserQuote, userDispositionBlockAt(task)); err != nil {
+				return err
+			}
+			if err := queueSettledReviewStep(out.Context, db, project, task, "User accepted the candidate head at the Review cap of Task "+taskIDString(task.Seq)); err != nil {
 				return err
 			}
 			if len(actual.Targets) > 1 {
