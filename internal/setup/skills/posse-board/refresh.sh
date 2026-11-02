@@ -15,7 +15,13 @@ write() {
 	mv -f "$board/$1.js.tmp" "$board/$1.js"
 }
 
-write posse "$(posse --full --json)"
+if posse_data=$(posse --full --json); then
+	:
+else
+	echo "posse-board: posse --full --json failed; board data was not updated" >&2
+	exit 1
+fi
+write posse "$posse_data"
 if issues=$(gh issue list --label ready-for-agent --state all --limit 200 \
 	--json number,title,state,body,url,createdAt,closedAt,labels); then
 	write issues "$issues"
@@ -23,4 +29,19 @@ else
 	echo "posse-board: gh issue list failed; the board shows no issues" >&2
 	write issues "[]"
 fi
+
+mkdir -p "$board/start-completions"
+completed_starts='['
+separator=''
+for marker in "$board"/start-completions/*; do
+	[ -f "$marker" ] || continue
+	request=${marker##*/}
+	case "$request" in
+		''|*[!a-zA-Z0-9_-]*) continue ;;
+	esac
+	completed_starts="$completed_starts$separator\"$request\""
+	separator=,
+done
+completed_starts="$completed_starts]"
+write starts "$completed_starts"
 echo "$board/index.html"

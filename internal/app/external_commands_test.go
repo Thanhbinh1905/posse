@@ -100,9 +100,8 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 	t.Setenv("PATH", userBin+string(os.PathListSeparator)+serverBin)
 	t.Setenv(watchRuntimeTokenEnv, "")
 	t.Setenv("HERDR_PLUGIN_ID", "")
-	t.Setenv("HERDR_PANE_ID", "w1-p1")
-	if got := version("gh"); got != "2.97.0" {
-		t.Fatalf("User command ran gh %s, want 2.97.0", got)
+	if err := os.WriteFile(filepath.Join(root, "posse", userShellPathFile), []byte(userBin), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	t.Setenv("PATH", serverBin)
@@ -128,10 +127,10 @@ func TestForgeCLIsResolveTheUserShellBinaryOutsideTheUserShell(t *testing.T) {
 		}
 	}
 	t.Setenv("HERDR_PANE_ID", "w1-p1")
-
-	// A User command always runs the binary its own shell resolves.
-	if got := version("gh"); got != "2.46.0" {
-		t.Fatalf("User command with only the server PATH ran gh %s, want 2.46.0", got)
+	for _, name := range []string{"gh", "glab"} {
+		if got := version(name); got != "2.97.0" {
+			t.Fatalf("service-inherited HERDR_PANE_ID resolved %s to version %s, want the User shell's 2.97.0", name, got)
+		}
 	}
 }
 

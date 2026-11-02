@@ -2969,7 +2969,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			}
 		}
 	}
-	if prepareChanged {
+	if prepareChanged || kindConfig.Prepare != "" {
 		if err := track("repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
 				members, err := workspaceMembers(ctx, db, project, task)
