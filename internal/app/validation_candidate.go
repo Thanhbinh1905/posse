@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -277,7 +280,7 @@ func candidateAuthorCanRefreshAfterMove(ctx context.Context, lane candidateLane,
 	return gitAncestor(ctx, lane.task.WorktreePath, targetHead, authorHead), nil
 }
 
-func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home string, lane candidateLane, summary, verification, proof, risk string, refresh bool) (returnErr error) {
+func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home string, lane candidateLane, cfg config.Config, summary, verification, proof, risk string, refresh bool) (returnErr error) {
 	ctx := out.Context
 	project, task, repoName := lane.project, lane.task, lane.repo
 	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "publish")
@@ -355,11 +358,15 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 					if err := db.UpdateValidationCandidateDescription(ctx, candidate.ID, summary, verification, proof, risk); err != nil {
 						return err
 					}
+					missing, err := copyConfiguredCandidateFiles(ctx, lane, candidate, cfg)
+					if err != nil {
+						return err
+					}
 					candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
 					if err != nil {
 						return err
 					}
-					return printCandidateSubmission(out, lane, candidate, true, submittedReviewCarry(ctx, db, lane))
+					return printCandidateSubmission(out, lane, candidate, true, missing, submittedReviewCarry(ctx, db, lane))
 				}
 			}
 		case store.ValidationCandidatePromoting:
@@ -433,11 +440,15 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 	if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
 		return err
 	}
+	missing, err := copyConfiguredCandidateFiles(ctx, lane, candidate, cfg)
+	if err != nil {
+		return err
+	}
 	candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
 	if err != nil {
 		return err
 	}
-	return printCandidateSubmission(out, lane, candidate, false, submittedReviewCarry(ctx, db, lane))
+	return printCandidateSubmission(out, lane, candidate, false, missing, submittedReviewCarry(ctx, db, lane))
 }
 
 // submittedReviewCarry records a Review carry to a freshly submitted
@@ -459,6 +470,128 @@ func submittedReviewCarry(ctx context.Context, db *store.DB, lane candidateLane)
 // when the candidate does not already contain it (ADR 0019). PR delivery
 // fetches the target from origin; local delivery shares the target ref's
 // object store and merges it directly.
+func copyConfiguredCandidateFiles(ctx context.Context, lane candidateLane, candidate store.ValidationCandidate, cfg config.Config) ([]string, error) {
+	paths := cfg.Pipeline.CandidateFiles
+	if lane.repo != "" && cfg.Repositories[lane.repo].CandidateFiles != nil {
+		paths = cfg.Repositories[lane.repo].CandidateFiles
+	}
+	var missing []string
+	for _, relative := range paths {
+		source := filepath.Join(lane.task.WorktreePath, relative)
+		info, err := os.Lstat(source)
+		if os.IsNotExist(err) {
+			missing = append(missing, relative)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("configured candidate path %q is not a regular file", relative)
+		}
+		for _, checkout := range []struct {
+			root string
+			name string
+		}{{lane.task.WorktreePath, "Sandbox"}, {candidate.WorktreePath, "private candidate checkout"}} {
+			tracked, err := candidatePathTracked(ctx, checkout.root, relative)
+			if err != nil {
+				return nil, err
+			}
+			if tracked {
+				return nil, fmt.Errorf("configured candidate path %q is tracked in the %s", relative, checkout.name)
+			}
+		}
+		resolvedSource, err := filepath.EvalSymlinks(source)
+		if err != nil || !pathWithin(lane.task.WorktreePath, resolvedSource) {
+			return nil, fmt.Errorf("configured candidate path %q escapes the Sandbox", relative)
+		}
+		if err := requireCandidatePathIgnored(ctx, lane.task.WorktreePath, relative); err != nil {
+			return nil, fmt.Errorf("configured candidate path %q is not gitignored in the Sandbox", relative)
+		}
+		if err := requireCandidatePathIgnored(ctx, candidate.WorktreePath, relative); err != nil {
+			return nil, fmt.Errorf("configured candidate path %q is not gitignored in the private candidate checkout", relative)
+		}
+		destination := filepath.Join(candidate.WorktreePath, relative)
+		if err := ensureCandidateFileParent(candidate.WorktreePath, filepath.Dir(destination)); err != nil {
+			return nil, fmt.Errorf("configured candidate path %q: %w", relative, err)
+		}
+		if existing, err := os.Lstat(destination); err == nil && !existing.Mode().IsRegular() {
+			return nil, fmt.Errorf("candidate destination %q is not a regular file", relative)
+		} else if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		in, err := os.Open(source)
+		if err != nil {
+			return nil, err
+		}
+		out, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+		if err == nil {
+			_, err = io.Copy(out, in)
+		}
+		closeErr := in.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if out != nil {
+			if closeErr := out.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return missing, nil
+}
+
+func candidatePathTracked(ctx context.Context, root, relative string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", relative)
+	cmd.Dir = root
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
+func requireCandidatePathIgnored(ctx context.Context, root, relative string) error {
+	cmd := exec.CommandContext(ctx, "git", "check-ignore", "--quiet", "--", relative)
+	cmd.Dir = root
+	return cmd.Run()
+}
+
+func ensureCandidateFileParent(root, parent string) error {
+	relative, err := filepath.Rel(root, parent)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("parent escapes the candidate checkout")
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err == nil {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("parent is not a private directory")
+			}
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Mkdir(current, 0o700); err != nil && !os.IsExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func mergeCandidateTarget(ctx context.Context, lane candidateLane, candidate store.ValidationCandidate) error {
 	var targetSHA string
 	if lane.localDelivery() {
@@ -492,7 +625,7 @@ func mergeCandidateTarget(ctx context.Context, lane candidateLane, candidate sto
 	return nil
 }
 
-func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate store.ValidationCandidate, resumed bool, carry axi.Object) error {
+func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate store.ValidationCandidate, resumed bool, missing []string, carry axi.Object) error {
 	task := lane.task
 	message := fmt.Sprintf("submitted: candidate %s at %s; validation required before publication", taskIDString(task.Seq), shortSHA(candidate.CandidateSHA))
 	if resumed {
@@ -502,7 +635,10 @@ func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate st
 	if lane.localDelivery() {
 		help = "A later validation pass may promote this exact candidate; no target ref was changed by submission"
 	}
-	ignoredHelp := "The candidate checkout lacks gitignored local files; copy the ones validation needs from the Sandbox, which never counts as a candidate change"
+	ignoredHelp := "Unlisted gitignored files are not copied; copy any others validation needs from the Sandbox, which never counts as a candidate change"
+	if len(missing) > 0 {
+		help += "; configured files missing from the Sandbox were skipped: " + strings.Join(missing, ", ")
+	}
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}}
 	if lane.repo != "" {
 		result = append(result, axi.Field{Key: "repo", Value: lane.repo})
