@@ -27,6 +27,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "_skill-hook" {
 		os.Exit(service.RunSkillHook(os.Stdin, os.Stderr, os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "_skill-use" {
+		os.Exit(service.RunSkillUse(os.Stderr, os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_research-run" {
 		os.Exit(service.RunResearchRunner(os.Args[2:], os.Stderr))
 	}
