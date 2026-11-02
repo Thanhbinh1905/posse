@@ -47,6 +47,27 @@ func findingsInput(key, severity string, inScope bool) *ReviewFindingsInput {
 	}
 }
 
+func TestPreExistingFindingDoesNotJoinIntroducedPattern(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	reviewID := addFindingsReviewRound(t, f, 2, 1, reviewShaA)
+	input := findingsInput("shared-pattern", "P1", true)
+	input.Patterns[0].Instances = append(input.Patterns[0].Instances, ReviewFindingInput{
+		Repository: "shop", Path: "README.md", Symbol: "document", Excerpt: "unchanged text", Line: 1, InScope: false,
+	})
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, reviewID), "done", "findings", map[string]string{}, "task_done", &ReviewVerdictInput{
+		Verdict: ReviewChangesRequested, ReportSHA256: reportHash, Findings: input,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var patterns int
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(DISTINCT pattern_id) FROM review_findings WHERE ship_task_id=?`, f.change).Scan(&patterns); err != nil {
+		t.Fatal(err)
+	}
+	if patterns != 2 {
+		t.Fatalf("introduced and pre-existing findings share %d pattern(s), want 2", patterns)
+	}
+}
+
 func TestReviewFindingsFailClosedAndDeriveVerdictAtomically(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	firstReview := addFindingsReviewRound(t, f, 2, 1, reviewShaA)

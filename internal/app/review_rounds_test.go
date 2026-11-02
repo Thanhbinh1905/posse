@@ -20,6 +20,47 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func TestReviewRoundCarriesDeliveredLeadInstructionsThatChangeScope(t *testing.T) {
+	f := newStartFixture(t)
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, at := range []int64{100, 300} {
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO signals(task_id,verb,at) VALUES(?,'done',?)`, change.ID, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, message := range []struct {
+		body        string
+		createdAt   int64
+		deliveredAt int64
+	}{
+		{body: "Expand scope to include the reviewed MR findings.", createdAt: 200, deliveredAt: 250},
+		{body: "Instruction delivered after completion.", createdAt: 350, deliveredAt: 400},
+	} {
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO messages(task_id,body,created_at,delivered_at,status) VALUES(?,?,?,?, 'delivered')`, change.ID, message.body, message.createdAt, message.deliveredAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	instructions, err := reviewScopeInstructions(context.Background(), db, change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instructions) != 1 || instructions[0] != "Expand scope to include the reviewed MR findings." {
+		t.Fatalf("review scope instructions = %#v", instructions)
+	}
+	brief := string(generatedReviewBrief(change, taskplan.Plan{}, 2, nil, instructions, false))
+	if !strings.Contains(brief, "Lead instructions delivered since the previous completion") || !strings.Contains(brief, instructions[0]) || !strings.Contains(brief, "Judge scope against the instructions below and the Change Brief") {
+		t.Fatalf("Review Brief omits the scope-changing instruction: %s", brief)
+	}
+}
+
 func TestReviewStartAdmitsFrozenRoundAndGeneratedFiles(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
@@ -75,6 +116,14 @@ guidance = ["docs/review.md"]
 	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
 		t.Fatal(err)
 	}
+	for _, at := range []int64{100, 300} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO signals(task_id,verb,at) VALUES(?,'done',?)`, change.ID, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO messages(task_id,body,created_at,delivered_at,status) VALUES(?,?,200,250,'delivered')`, change.ID, "Expand scope to include the reviewed MR findings."); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	t.Setenv("HERDR_WORKSPACE_ID", "w1")
@@ -122,10 +171,11 @@ guidance = ["docs/review.md"]
 		return contents
 	}
 	var metadata struct {
-		Round        int `json:"round"`
-		MaxRounds    int `json:"max_rounds"`
-		Remaining    int `json:"remaining_rounds"`
-		Repositories []struct {
+		Round            int      `json:"round"`
+		MaxRounds        int      `json:"max_rounds"`
+		Remaining        int      `json:"remaining_rounds"`
+		LeadInstructions []string `json:"lead_instructions"`
+		Repositories     []struct {
 			HeadSHA         string `json:"head_sha"`
 			TargetCommitSHA string `json:"target_commit_sha"`
 			DeltaSHA256     string `json:"delta_sha256"`
@@ -135,7 +185,7 @@ guidance = ["docs/review.md"]
 		t.Fatal(err)
 	}
 	delta := read("review/delta.patch")
-	if metadata.Round != 1 || metadata.MaxRounds != 1 || metadata.Remaining != 0 || len(metadata.Repositories) != 1 || metadata.Repositories[0].HeadSHA != head || metadata.Repositories[0].TargetCommitSHA != target || !strings.Contains(string(delta), "author-change.txt") {
+	if metadata.Round != 1 || metadata.MaxRounds != 1 || metadata.Remaining != 0 || len(metadata.Repositories) != 1 || metadata.Repositories[0].HeadSHA != head || metadata.Repositories[0].TargetCommitSHA != target || len(metadata.LeadInstructions) != 1 || metadata.LeadInstructions[0] != "Expand scope to include the reviewed MR findings." || !strings.Contains(string(delta), "author-change.txt") {
 		t.Fatalf("generated scope metadata = %#v; delta=%s", metadata, delta)
 	}
 	digest := sha256.Sum256(delta)
@@ -150,7 +200,7 @@ guidance = ["docs/review.md"]
 	}
 	launchPath := filepath.Join(plan.Paths.Output, "launch.md")
 	launch, err := os.ReadFile(launchPath)
-	if err != nil || !strings.Contains(string(launch), "## Review Round 1") || !strings.Contains(string(launch), "review/delta.patch") {
+	if err != nil || !strings.Contains(string(launch), "## Review Round 1") || !strings.Contains(string(launch), "review/delta.patch") || !strings.Contains(string(launch), "Expand scope to include the reviewed MR findings.") || !strings.Contains(string(launch), "Judge scope against the instructions below and the Change Brief") {
 		t.Fatalf("launch instructions omit Review Round files: %s err=%v", launch, err)
 	}
 	for _, name := range []string{"delta.patch", "cumulative.patch", "round.json", "conflicts.txt", "ledger.md", "guidance"} {
@@ -941,7 +991,7 @@ func TestReviewRoundScopeUsesFrozenTargetVirtualBaseline(t *testing.T) {
 				t.Fatalf("unexpected virtual merge conflicts: %#v", scope.Conflicts)
 			}
 			if test.conflict {
-				brief := string(generatedReviewBrief(store.Task{Seq: 1}, taskplan.Plan{}, 2, []reviewRoundScope{scope}, false))
+				brief := string(generatedReviewBrief(store.Task{Seq: 1}, taskplan.Plan{}, 2, []reviewRoundScope{scope}, nil, false))
 				if !strings.Contains(brief, "Conflicted paths: `conflict.txt`.") || !strings.Contains(brief, "Review them in `{{review_dir}}/cumulative.patch`.") {
 					t.Fatalf("Review Round brief does not name the conflicted path and point to cumulative.patch:\n%s", brief)
 				}
