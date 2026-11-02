@@ -112,9 +112,6 @@ func readPickerKey(reader *bufio.Reader) (string, error) {
 			return "", err
 		}
 		if next != '[' && next != 'O' {
-			if err := reader.UnreadByte(); err != nil {
-				return "", err
-			}
 			return "esc", nil
 		}
 		final, err := reader.ReadByte()
