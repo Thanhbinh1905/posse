@@ -704,17 +704,19 @@ func TestWatchHeartbeatStaysFreshAndReportsStalledProjectMaintenance(t *testing.
 		t.Fatal(err)
 	}
 	for _, notice := range notices {
-		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "timed out") {
+		if notice.Kind == "root_fetch_failing" && strings.Contains(notice.Summary, "timed out") {
 			t.Fatalf("Git fetch timed out before its configured bound: %#v", notice)
 		}
 	}
+	var rootFetchFailure store.Notice
 	if !waitForCondition(10*time.Second, func() bool {
 		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 		if err != nil {
 			return false
 		}
 		for _, notice := range notices {
-			if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "timed out after 2s") {
+			if notice.Kind == "root_fetch_failing" {
+				rootFetchFailure = notice
 				return true
 			}
 		}
@@ -724,7 +726,13 @@ func TestWatchHeartbeatStaysFreshAndReportsStalledProjectMaintenance(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Fatalf("bounded Git fetch timeout was not reported: %#v", notices)
+		t.Fatalf("bounded root Git fetch failure was not reported: %#v", notices)
+	}
+	if !strings.Contains(rootFetchFailure.Summary, "Origin fetch has failed") {
+		t.Fatalf("root_fetch_failing Notice did not describe the origin fetch failure: %#v", rootFetchFailure)
+	}
+	if strings.Contains(strings.ToLower(rootFetchFailure.Summary), "timed out") && !strings.Contains(rootFetchFailure.Summary, "2s") {
+		t.Fatalf("root_fetch_failing Notice omitted the configured timeout: %#v", rootFetchFailure)
 	}
 	if pids := watchPIDs(f.root); len(pids) != 1 || pids[0] != pid {
 		t.Fatalf("Watch did not remain alive after reporting the bounded fetch timeout: %v", pids)
