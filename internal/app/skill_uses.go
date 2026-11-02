@@ -65,7 +65,7 @@ func roleSkillProtocol(plan *taskplan.Plan) string {
 		return ""
 	}
 	var text strings.Builder
-	text.WriteString("\n\n## Role skills\n\nPosse loaded these skills for this role. Invoke each one at its step, not from memory of it:\n")
+	text.WriteString("\n\n## Role skills\n\nPosse loaded these skills for this role. Invoke each one at its step, not from memory of it. After invoking or reading a role skill, Pi Workers must run `posse _skill-use <skill-name>` to record its use:\n")
 	for _, name := range skills {
 		fmt.Fprintf(&text, "- `%s`: %s.\n", name, roleSkillWhen(name))
 	}
@@ -104,7 +104,7 @@ func unusedRoleSkills(ctx context.Context, db *store.DB, home string, project st
 	if err != nil || plan == nil {
 		return nil, err
 	}
-	if !skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)) {
+	if !skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) {
 		return nil, nil
 	}
 	uses, err := db.TaskSkillUses(ctx, task.ID)
@@ -180,10 +180,8 @@ func withUnusedRoleSkills(summary string, unused []string) string {
 	return summary + "; role skills with 0 recorded uses: " + quotedSkillNames(unused)
 }
 
-// skillUsesRecorded reports whether Posse records the skill uses of this
-// Task: a claude Worker whose launch installed the Skill hook.
-func skillUsesRecorded(plan *taskplan.Plan, hookInstalled bool) bool {
-	return plan != nil && plan.Launch.Profile.Kind == "claude" && hookInstalled
+func skillUsesRecorded(plan *taskplan.Plan, recordingInstalled bool) bool {
+	return plan != nil && recordingInstalled && (plan.Launch.Profile.Kind == "claude" || plan.Launch.Profile.Kind == "pi")
 }
 
 // taskSkillChecklist is the `skill_checklist` field of publish and done
@@ -197,7 +195,7 @@ func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project 
 	if err != nil {
 		return nil, err
 	}
-	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)))
+	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)))
 	if len(checks) == 0 {
 		return nil, nil
 	}
@@ -214,8 +212,8 @@ func taskSkillUseView(ctx context.Context, db *store.DB, home string, project st
 	if len(skills) == 0 {
 		return nil
 	}
-	if !skillUsesRecorded(plan, skillHookInstalled(home, project.Name, task.Seq)) {
-		view["skill_uses_recorded_by"] = "nothing: Posse records skill uses only for claude Workers launched with the skill hook"
+	if !skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) {
+		view["skill_uses_recorded_by"] = "nothing: Posse records skill uses only for claude Workers launched with the skill hook or pi Workers launched with skill-use recording"
 		return nil
 	}
 	uses, err := db.TaskSkillUses(ctx, task.ID)
@@ -265,6 +263,19 @@ func (s *Service) RunSkillHook(stdin io.Reader, stderr io.Writer, args []string)
 	return 0
 }
 
+// RunSkillUse records a role skill read or invoked by a Pi Worker.
+func (s *Service) RunSkillUse(stderr io.Writer, args []string) int {
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		fmt.Fprintln(stderr, "posse: _skill-use requires one skill name")
+		return 2
+	}
+	if err := s.recordSkillUse(context.Background(), args[0]); err != nil {
+		fmt.Fprintf(stderr, "posse: could not record skill %s: %v\n", args[0], err)
+		return 1
+	}
+	return 0
+}
+
 func (s *Service) recordSkillUse(ctx context.Context, skill string) error {
 	db, _, err := s.openDB()
 	if err != nil {
@@ -281,38 +292,45 @@ func (s *Service) recordSkillUse(ctx context.Context, skill string) error {
 	return db.RecordTaskSkillUse(ctx, parent.task.ID, skill)
 }
 
-// skillHookMarker names the file in a Task's home that records a launch
-// installed the Skill hook; Tasks launched before the hook have none.
-const skillHookMarker = "skill-hook"
+const (
+	skillUseMarker        = "skill-use-recording"
+	legacySkillHookMarker = "skill-hook"
+)
 
-func skillHookInstalled(home, project string, seq int) bool {
-	_, err := os.Stat(filepath.Join(home, "projects", project, "tasks", taskIDString(seq), skillHookMarker))
-	return err == nil
+func skillUseRecordingInstalled(home, project string, seq int) bool {
+	dir := filepath.Join(home, "projects", project, "tasks", taskIDString(seq))
+	for _, marker := range []string{skillUseMarker, legacySkillHookMarker} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
-// appendSkillUseLaunchArgs installs the Skill hook plugin for a Claude Worker
-// and marks the Task as recorded.
 func appendSkillUseLaunchArgs(home string, project store.Project, taskSeq int, kind string, args []string) ([]string, error) {
-	if kind != "claude" {
+	if kind != "claude" && kind != "pi" {
 		return args, nil
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("locate posse executable for the Claude skill hook: %w", err)
+	if kind == "claude" {
+		executable, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate posse executable for the Claude skill hook: %w", err)
+		}
+		hooks := map[string]any{
+			"PostToolUse": []any{map[string]any{"matcher": "Skill", "hooks": []any{map[string]any{"type": "command", "command": shellQuote(executable) + " _skill-hook claude", "timeout": 10}}}},
+		}
+		root := filepath.Join(home, "projects", project.Name, "claude-skill-uses")
+		if err := writeClaudeHookPlugin(root, "posse-skill-uses", "Posse record of the skills a Worker invokes", hooks); err != nil {
+			return nil, err
+		}
+		args = append(args, "--plugin-dir", root)
 	}
-	hooks := map[string]any{
-		"PostToolUse": []any{map[string]any{"matcher": "Skill", "hooks": []any{map[string]any{"type": "command", "command": shellQuote(executable) + " _skill-hook claude", "timeout": 10}}}},
-	}
-	root := filepath.Join(home, "projects", project.Name, "claude-skill-uses")
-	if err := writeClaudeHookPlugin(root, "posse-skill-uses", "Posse record of the skills a Worker invokes", hooks); err != nil {
-		return nil, err
-	}
-	marker := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(taskSeq), skillHookMarker)
+	marker := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(taskSeq), skillUseMarker)
 	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
 		return nil, err
 	}
 	if err := writeFile(marker, nil); err != nil {
 		return nil, err
 	}
-	return append(args, "--plugin-dir", root), nil
+	return args, nil
 }

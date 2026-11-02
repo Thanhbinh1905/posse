@@ -36,7 +36,7 @@ func installRoleSkills(t *testing.T, fixture *prMergeFixture, skills ...string) 
 }
 
 func skillHookMarkerPath(fixture *prMergeFixture) string {
-	return filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", skillHookMarker)
+	return filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", skillUseMarker)
 }
 
 func TestValidationDocsAndLintRefuseWhileAConfiguredRoleSkillHasNoUses(t *testing.T) {
