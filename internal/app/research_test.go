@@ -123,6 +123,27 @@ func childCall(agentID, tool string, input map[string]any) map[string]any {
 	return map[string]any{"hook_event_name": "PreToolUse", "agent_id": agentID, "agent_type": "Explore", "tool_name": tool, "tool_use_id": "child-" + tool, "tool_input": input}
 }
 
+func TestClaudeResearchHookAcceptsWebFetchAndRefusesGeneralPurpose(t *testing.T) {
+	f := newResearchFixture(t)
+
+	if code, _, stderr := f.hook(agentCall("tool-web-fetch", "web-fetch", nil)); code != 0 {
+		t.Fatalf("web-fetch: code=%d stderr=%s", code, stderr)
+	}
+	attempts := f.attempts()
+	var found bool
+	for _, attempt := range attempts {
+		if attempt.AgentType == "web-fetch" {
+			found = attempt.State == "registered" && strings.Join(attempt.Tools, ",") == "WebFetch"
+		}
+	}
+	if !found {
+		t.Fatalf("web-fetch was not registered with only the WebFetch tool: %+v", attempts)
+	}
+	if code, _, stderr := f.hook(agentCall("tool-general", "general-purpose", nil)); code != guardExitBlocked || !strings.Contains(stderr, "refused") {
+		t.Fatalf("general-purpose: code=%d stderr=%s", code, stderr)
+	}
+}
+
 func TestClaudeResearchHooksTrackReadOnlyChildren(t *testing.T) {
 	f := newResearchFixture(t)
 	ctx := context.Background()
