@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# Runs the deterministic checks that have broken main after a merge: the E2E
+# shard assignment self-test, go generate leaving no diff, and a migration
+# number that origin/main already uses. Run it before posse publish.
 cd "$(git rev-parse --show-toplevel)"
 
 migrations_dir=internal/store/migrations
