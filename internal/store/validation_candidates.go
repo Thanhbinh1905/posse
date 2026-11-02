@@ -257,6 +257,13 @@ func (db *DB) MarkValidationCandidateStale(ctx context.Context, id int64, observ
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
+		var state string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM validation_candidates WHERE id=?`, id).Scan(&state); err != nil {
+			return err
+		}
+		if state == ValidationCandidateStale || state == ValidationCandidatePromoted || state == ValidationCandidateSuperseded {
+			return nil
+		}
 		return ErrStateRace
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, observedSHA, id); err != nil {
@@ -281,6 +288,13 @@ func (db *DB) SupersedeValidationCandidate(ctx context.Context, id int64, expect
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
+		var state string
+		if err := db.QueryRowContext(ctx, `SELECT state FROM validation_candidates WHERE id=?`, id).Scan(&state); err != nil {
+			return err
+		}
+		if state == ValidationCandidateSuperseded {
+			return nil
+		}
 		return ErrStateRace
 	}
 	return db.persistCandidateTask(ctx, id)

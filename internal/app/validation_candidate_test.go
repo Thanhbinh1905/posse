@@ -393,6 +393,41 @@ func TestFullPipelineTargetMovementInvalidatesAndRefreshesCandidate(t *testing.T
 	}
 }
 
+func TestFullPipelinePromotedCandidateAllowsNextGenerationAfterTargetAndAuthorMove(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateHead := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, candidateHead)
+	recordCandidateStages(t, fixture)
+	fixture.setGHHead(t, candidateHead)
+	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidateHead)
+	if err := runCandidatePromotionForTest(t, fixture); err != nil {
+		t.Fatalf("promote candidate: %v", err)
+	}
+
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance frozen target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "fix failed CI")
+
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 0 || !strings.Contains(output, "target_current: false") {
+		t.Fatalf("status for moved promoted candidate: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./internal/app -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if code != 0 {
+		t.Fatalf("publish next generation: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	fresh, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || fresh.Generation != candidate.Generation+1 || fresh.State != store.ValidationCandidateActive || fresh.SubmittedSHA != strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD")) {
+		t.Fatalf("next candidate=%+v err=%v", fresh, err)
+	}
+}
+
 func TestFullPipelineTargetMovedValidationHelpExplainsMergeRefresh(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)

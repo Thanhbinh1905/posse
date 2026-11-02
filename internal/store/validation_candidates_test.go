@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -90,6 +91,53 @@ func TestValidationCandidateCustodySurvivesSnapshotRebuild(t *testing.T) {
 	stagesAfter, err := f.db.ValidationStages(f.ctx, f.change)
 	if err != nil || !reflect.DeepEqual(stagesAfter, stagesBefore) {
 		t.Fatalf("stage history after rebuild = %+v, want %+v, err=%v", stagesAfter, stagesBefore, err)
+	}
+}
+
+func TestFinalValidationCandidateTransitionsAreIdempotent(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	makeCandidate := func(generation int, state string) ValidationCandidate {
+		t.Helper()
+		candidate, err := f.db.CreateValidationCandidate(f.ctx, ValidationCandidate{
+			TaskID: f.change, SubmittedSHA: reviewShaA, CandidateSHA: reviewShaA, TargetSHA: reviewShaB,
+			RefName: "refs/posse/candidate/t1", WorktreePath: "/home/test/posse/projects/shop/tasks/t1/candidates/shop/g" + strconv.Itoa(generation), Summary: "Candidate",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.db.ActivateValidationCandidate(f.ctx, candidate.ID, reviewShaA); err != nil {
+			t.Fatal(err)
+		}
+		if state == ValidationCandidateStale || state == ValidationCandidateSuperseded {
+			if err := f.db.MarkValidationCandidateStale(f.ctx, candidate.ID, reviewShaC); err != nil {
+				t.Fatal(err)
+			}
+			if state == ValidationCandidateSuperseded {
+				if err := f.db.SupersedeValidationCandidate(f.ctx, candidate.ID, ValidationCandidateStale, "refs/posse/candidate/archive/t1/1", reviewShaA); err != nil {
+					t.Fatal(err)
+				}
+			}
+		} else {
+			if err := f.db.BeginValidationCandidatePromotion(f.ctx, candidate.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.CompleteValidationCandidatePromotion(f.ctx, candidate.ID, reviewShaA); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return candidate
+	}
+
+	for i, state := range []string{ValidationCandidateStale, ValidationCandidateSuperseded, ValidationCandidatePromoted} {
+		candidate := makeCandidate(i+1, state)
+		if err := f.db.MarkValidationCandidateStale(f.ctx, candidate.ID, reviewShaC); err != nil {
+			t.Errorf("mark %s candidate stale: %v", state, err)
+		}
+		if state == ValidationCandidateStale || state == ValidationCandidateSuperseded {
+			if err := f.db.SupersedeValidationCandidate(f.ctx, candidate.ID, ValidationCandidateStale, "refs/posse/candidate/archive/t1/1", reviewShaA); err != nil {
+				t.Errorf("supersede %s candidate: %v", state, err)
+			}
+		}
 	}
 }
 
