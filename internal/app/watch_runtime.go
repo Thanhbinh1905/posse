@@ -180,7 +180,7 @@ func (writer *watchRuntimeLogWriter) Close() error {
 	return writer.file.Close()
 }
 
-func startWatchProcess(command *exec.Cmd) error {
+var startWatchProcess = func(command *exec.Cmd) error {
 	if err := command.Start(); err != nil {
 		return err
 	}
