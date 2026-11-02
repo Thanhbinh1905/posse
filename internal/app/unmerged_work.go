@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -25,12 +27,16 @@ func (s *Service) unmergedWork(ctx context.Context, db *store.DB, project store.
 		}
 		return "", err
 	}
-	count, err := commitsAheadOfBase(ctx, task.WorktreePath, task.BaseRef)
+	baseRef, err := currentTaskBaseRef(ctx, project, task)
+	if err != nil {
+		return "", err
+	}
+	count, err := commitsAheadOfBase(ctx, task.WorktreePath, baseRef)
 	if err != nil {
 		return "", err
 	}
 	if ahead, convErr := strconv.Atoi(count); convErr != nil || ahead != 0 {
-		return fmt.Sprintf("branch has %s commits ahead of %s", count, task.BaseRef), nil
+		return fmt.Sprintf("branch has %s commits ahead of %s", count, baseRef), nil
 	}
 	status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain", "--untracked-files=all")
 	if err != nil {
@@ -45,6 +51,28 @@ func (s *Service) unmergedWork(ctx context.Context, db *store.DB, project store.
 		return "", err
 	}
 	return "", nil
+}
+
+func currentTaskBaseRef(ctx context.Context, project store.Project, task store.Task) (string, error) {
+	if task.BaseRef != project.DefaultBranch {
+		return task.BaseRef, nil
+	}
+	remoteRef := "refs/remotes/origin/" + project.DefaultBranch
+	if _, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
+		if gitRefMissing(err) {
+			return task.BaseRef, nil
+		}
+		return "", err
+	}
+	if _, err := gitOutput(ctx, task.WorktreePath, "merge-base", "--is-ancestor", task.BaseRef, remoteRef); err == nil {
+		return remoteRef, nil
+	} else {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return task.BaseRef, nil
+		}
+		return "", err
+	}
 }
 
 // failedStartEmpty reports whether a failed Task never reached working and its
