@@ -143,14 +143,17 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 		message := fmt.Sprintf("Lead instructions exceed the %d-token budget: %d bytes (maximum %d bytes at %d bytes per token)", leadInstructionTokenBudget, size, leadInstructionMaxBytes, leadInstructionBytesPerToken)
 		return leadLaunch{}, axi.Failure("lead_instructions_too_large", message, false)
 	}
-	if composed.HandoffLoaded {
-		if err := archiveHandoff(home, project); err != nil {
-			instructions += "\n\n## Handoff archive warning\n\n" + handoffLoadWarning(handoffPath(home, project.Name), err.Error()) + "\n"
-		}
-	}
 	instructionsFile := filepath.Join(home, "projects", project.Name, "lead.md")
 	if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
 		return leadLaunch{}, err
+	}
+	if composed.HandoffLoaded {
+		if err := archiveHandoff(home, project); err != nil {
+			instructions += "\n\n## Handoff archive warning\n\n" + handoffLoadWarning(handoffPath(home, project.Name), err.Error()) + "\n"
+			if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
+				return leadLaunch{}, err
+			}
+		}
 	}
 	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.AutoApproveArgs)+len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2)}
 	if kindConfig.LeadAutoApprove {
