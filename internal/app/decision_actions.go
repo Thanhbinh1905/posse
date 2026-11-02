@@ -163,6 +163,19 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		}
+	case "budget":
+		switch decision.Answer {
+		case "continue":
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "continued"}})
+		case "interrupt":
+			message := "Stop work now and report completion with `posse signal done`. The User selected interrupt after a token budget was exceeded. Do not continue work."
+			if err := s.sendInterrupt(out, db, project, task, message, "token budget exceeded", cfg); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "interrupted"}})
+		default:
+			return axi.Failure("decision_refused", "unknown budget Decision answer", false)
+		}
 	case "quota":
 		if decision.Answer == "discard" && task.State == store.StateTornDown {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
