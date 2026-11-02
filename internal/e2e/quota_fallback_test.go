@@ -48,6 +48,27 @@ func TestPiUsageLimitFallsBackToAnotherProfile(t *testing.T) {
 	runQuotaFallback(t, "pi", "quota-primary", "claude", "You have hit your ChatGPT usage limit (plus plan). Try again in ~158 min.", "in ~158 min")
 }
 
+func TestClaudeQuotaFallbackPreparesSandboxBeforeRelaunch(t *testing.T) {
+	fixture := newQuotaFixture(t, [][2]string{
+		{"profiles.primary.kind", "claude"},
+		{"profiles.primary.model", "quota-primary"},
+		{"profiles.backup.kind", "claude"},
+		{"profiles.backup.model", "quota-dialog"},
+		{"profiles.primary.fallback", "backup"},
+	})
+	task := fixture.startWithoutEmittingQuota(t)
+	if err := os.Remove(filepath.Join(fixture.base.root, "claude", ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.emitQuota(t, 1)
+	fixture.waitNotice(t, "quota_fallback")
+	fixture.waitLog(t, "backup claude "+filepath.Clean(task.WorktreePath)+" found work")
+	current := fixture.base.mustTask(t, "t1")
+	if current.Launches != 2 || current.Profile != "backup" || current.State != store.StateWorking || fixture.hasNotice(t, "quota_exhausted") {
+		t.Fatalf("fallback did not prepare the Sandbox before launch: launches=%d profile=%q state=%q", current.Launches, current.Profile, current.State)
+	}
+}
+
 func TestOpenCodeQuotaFallsBackToAnotherProfile(t *testing.T) {
 	runQuotaFallback(t, "opencode", "quota-primary", "claude", "You exceeded your current quota, please check your plan and billing details.", "")
 }
@@ -252,6 +273,16 @@ func newQuotaFixture(t *testing.T, settings [][2]string) *quotaFixture {
 set -eu
 if [ "${1:-}" = "--version" ]; then echo '%[1]s 1.0.0'; exit 0; fi
 report() { herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent %[1]s --state "$1" >/dev/null 2>&1; }
+case "$*" in
+  *" quota-dialog "*)
+    if ! grep -Fq "$PWD" "$POSSE_TEST_ROOT/claude/.claude.json" 2>/dev/null; then
+      printf 'Trust this folder?\n'
+      report blocked
+      while IFS= read -r line; do :; done
+      exit 0
+    fi
+    ;;
+esac
 report idle
 # Codex and OpenCode take the launch prompt as an argument; others read it.
 case "$*" in
@@ -294,6 +325,13 @@ while IFS= read -r line; do :; done
 
 func (fixture *quotaFixture) start(t *testing.T) store.Task {
 	t.Helper()
+	task := fixture.startWithoutEmittingQuota(t)
+	fixture.emitQuota(t, 1)
+	return task
+}
+
+func (fixture *quotaFixture) startWithoutEmittingQuota(t *testing.T) store.Task {
+	t.Helper()
 	brief := filepath.Join(fixture.base.root, "quota.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Survive a quota\ndone_when: the work continues\n---\nContinue the task.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -301,7 +339,6 @@ func (fixture *quotaFixture) start(t *testing.T) store.Task {
 	if output := runPosse(t, fixture.base.binary, fixture.base.repo, fixture.base.leadEnv, "start", "--brief", brief, "--name", "survive-quota", "--profile", "primary"); !strings.Contains(output, "t1") {
 		t.Fatalf("start did not return t1: %s", output)
 	}
-	fixture.emitQuota(t, 1)
 	return fixture.base.mustTask(t, "t1")
 }
 
