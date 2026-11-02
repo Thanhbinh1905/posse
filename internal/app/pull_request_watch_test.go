@@ -1506,6 +1506,36 @@ func TestPRMergeAutoTeardownRetriesAfterHerdrReturns(t *testing.T) {
 	}
 }
 
+func TestPRWatchContinuesAfterExecutorPaneAndMountAreAbsent(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	removeFixtureTaskPane(fixture)
+	fixture.service.Herdr = nil
+	var mounts int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM mounts WHERE task_id=?`, fixture.task.ID).Scan(&mounts); err != nil {
+		t.Fatal(err)
+	}
+	if mounts != 0 {
+		t.Fatalf("fixture retained %d Task mounts", mounts)
+	}
+
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("poll without an executor pane or Mount: %v", err)
+	}
+	observation, err := fixture.db.LatestPRObservation(context.Background(), fixture.task.ID)
+	if err != nil || observation.State != "OPEN" || observation.HeadSHA != fixture.headSHA {
+		t.Fatalf("PR watch lost custody without executor resources: observation=%#v err=%v", observation, err)
+	}
+}
+
 func TestPRWatchRaisesMergeReadyDecisionAfterObservation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()
