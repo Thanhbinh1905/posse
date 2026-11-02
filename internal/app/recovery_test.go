@@ -507,6 +507,20 @@ func TestOpenCodeRestartExportsInlinePluginOnlyToLeadShell(t *testing.T) {
 	}
 }
 
+func TestStopLeadAgentContinuesAfterHerdrReportsAgentNotReady(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "pi", AgentStatus: "working"}}}
+	fake.ErrorQueue["agent.send_keys"] = []error{&herdr.Error{Code: "agent_not_ready", Message: "agent is no longer active"}, nil}
+	adapter := &promptExitAdapter{Fake: fake}
+	service := testService(t.TempDir(), adapter)
+	if err := service.stopLeadAgent(context.Background(), "w1:p1", "pi"); err != nil {
+		t.Fatalf("stop Lead after agent became inactive during interrupt: %v", err)
+	}
+	if fake.CallCount("agent.send_keys") != 2 || fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("agent exit did not continue through the harness fallback: %#v", fake.Calls)
+	}
+}
+
 func TestStopLeadAgentUsesHarnessExitCommandAfterInterrupt(t *testing.T) {
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "pi", AgentStatus: "working"}}}

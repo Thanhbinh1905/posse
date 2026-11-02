@@ -743,14 +743,14 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 }
 
 func (s *Service) stopLeadAgent(ctx context.Context, paneID, agent string) error {
-	if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"ctrl+c"}}); err != nil && !missingAgentError(err) {
+	if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"ctrl+c"}}); err != nil && !inactiveLeadAgentError(err) {
 		return err
 	}
 	if err := s.waitLeadShellFor(ctx, paneID, 500*time.Millisecond); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"esc"}}); err != nil && !missingAgentError(err) {
+		if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"esc"}}); err != nil && !inactiveLeadAgentError(err) {
 			return err
 		}
 		if err := s.waitLeadShellFor(ctx, paneID, 500*time.Millisecond); err == nil {
@@ -760,10 +760,10 @@ func (s *Service) stopLeadAgent(ctx context.Context, paneID, agent string) error
 		}
 		command := leadExitCommand(agent)
 		if command != "" {
-			if _, err := s.herdrCall(ctx, "agent.prompt", map[string]any{"target": paneID, "text": command}); err != nil {
+			if _, err := s.herdrCall(ctx, "agent.prompt", map[string]any{"target": paneID, "text": command}); err != nil && !inactiveLeadAgentError(err) {
 				return err
 			}
-		} else if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"ctrl+d"}}); err != nil && !missingAgentError(err) {
+		} else if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{"ctrl+d"}}); err != nil && !inactiveLeadAgentError(err) {
 			return err
 		}
 	} else {
@@ -819,11 +819,11 @@ func (s *Service) leadPaneIsShell(ctx context.Context, paneID string) bool {
 	return false
 }
 
-func missingAgentError(err error) bool {
+func inactiveLeadAgentError(err error) bool {
 	var apiError *herdr.Error
 	if errors.As(err, &apiError) {
-		return apiError.Code == "agent_not_found" || apiError.Code == "not_found"
+		return apiError.Code == "agent_not_found" || apiError.Code == "agent_not_ready" || apiError.Code == "not_found"
 	}
 	var cliError *axi.Error
-	return errors.As(err, &cliError) && (cliError.Code == "agent_not_found" || cliError.Code == "not_found")
+	return errors.As(err, &cliError) && (cliError.Code == "agent_not_found" || cliError.Code == "agent_not_ready" || cliError.Code == "not_found")
 }

@@ -2255,6 +2255,7 @@ $body" ;; esac
     done
     ;;
   *)
+    trap 'herdr pane release-agent "$HERDR_PANE_ID" --source posse.fake --agent claude >/dev/null 2>&1 || true; exit 0' INT
     while IFS= read -r line; do printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/lead-prompts.log"; done
     ;;
 esac

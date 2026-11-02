@@ -5,12 +5,12 @@ package e2e
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -29,6 +29,7 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 
 	pi := filepath.Join(fixture.root, "bin", "pi")
 	piScript := "#!/bin/sh\n" +
+		"trap 'herdr pane release-agent \"$HERDR_PANE_ID\" --source posse.fake --agent pi >/dev/null 2>&1 || true; exit 0' INT\n" +
 		"printf '%s\\n' \"$@\" > \"$POSSE_TEST_ROOT/pi-args.log\"\n" +
 		"herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent pi --state idle >/dev/null 2>&1\n" +
 		"while IFS= read -r line; do herdr pane report-agent \"$HERDR_PANE_ID\" --source posse.fake --agent pi --state working >/dev/null 2>&1; done\n"
@@ -36,22 +37,33 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	startCount := 0
 	startPi := func() {
 		t.Helper()
+		startCount++
 		if err := os.Remove(filepath.Join(fixture.root, "pi-args.log")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		command := exec.Command(fixture.binary, "up", "--pi", "--replace", "--yes")
-		command.Dir, command.Env = fixture.repo, fixture.callerEnv
-		output, err := command.CombinedOutput()
+		userWorkspace, err := createWorkspace(client, fixture.repo)
 		if err != nil {
-			t.Fatalf("replace Lead with Pi: %v\n%s", err, output)
+			t.Fatal(err)
+		}
+		if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": userWorkspace.RootPane.PaneID}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Run(context.Background(), "pane", "run", userWorkspace.RootPane.PaneID, "posse up --pi --replace --yes"); err != nil {
+			paneOutput, readErr := client.Run(context.Background(), "pane", "read", userWorkspace.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "40")
+			t.Fatalf("replace Lead with Pi: %v\n%s\nreadErr=%v", err, paneOutput, readErr)
 		}
 		if !waitForCondition(10*time.Second, func() bool {
 			_, err := os.Stat(filepath.Join(fixture.root, "pi-args.log"))
 			return err == nil
 		}) {
-			t.Fatal("replacement Pi did not start")
+			snapshot, snapshotErr := client.Snapshot(context.Background())
+			paneOutput, readErr := client.Run(context.Background(), "pane", "read", userWorkspace.RootPane.PaneID, "--source", "recent-unwrapped", "--lines", "40")
+			lead, leadErr := fixture.db.ProjectLeadAgent(context.Background(), fixture.project.ID)
+			t.Fatalf("replacement Pi %d did not start: snapshot=%#v snapshotErr=%v lead=%#v leadErr=%v paneOutput=%s readErr=%v", startCount, snapshot, snapshotErr, lead, leadErr, paneOutput, readErr)
 		}
 	}
 	startPi()
