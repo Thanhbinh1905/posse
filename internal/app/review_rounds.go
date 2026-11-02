@@ -648,6 +648,16 @@ func generatedReviewBrief(change store.Task, plan taskplan.Plan, round int, scop
 	return []byte(builder.String())
 }
 
+func admittedReviewRoundFiles(plan taskplan.Plan) map[string][]byte {
+	files := make(map[string][]byte)
+	for _, input := range plan.Inputs {
+		if input.Role == "review-round-file" {
+			files[input.Source] = input.Bytes
+		}
+	}
+	return files
+}
+
 func reviewRoundPlanInputs(files map[string][]byte) []taskplan.Input {
 	names := make([]string, 0, len(files))
 	for name := range files {
