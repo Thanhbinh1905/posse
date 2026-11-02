@@ -61,7 +61,7 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		return err
 	}
 	if s.herdrContext == nil || !s.herdrContext() {
-		return axi.Failure("not_in_herdr", "posse attach must run from a Herdr pane", false, "Open a shell pane in Herdr and run `posse up`")
+		return axi.Failure("not_in_herdr", "posse attach must run from a Herdr pane", false, "Open a User shell pane in Herdr, then retry `posse attach`")
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -79,9 +79,6 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return configError(err)
 	}
-	if s.Herdr == nil {
-		return axi.Failure("herdr_unavailable", "Herdr adapter is not configured", true)
-	}
 	snapshot, err := s.snapshot(ctx.Context)
 	if err != nil {
 		return err
@@ -92,6 +89,9 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	if kind != "claude" && kind != "codex" && kind != "pi" {
 		return unsupportedAttachedSession(kind)
+	}
+	if err := refuseAttachForeignLeadWorkspace(snapshot, project, pane.WorkspaceID); err != nil {
+		return err
 	}
 	if _, ok := cfg.Kinds[kind]; !ok {
 		return unsupportedAttachedSession(kind)
@@ -137,7 +137,7 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		if verifyErr != nil || currentKind != kind || currentPane.WorkspaceID != pane.WorkspaceID {
 			return axi.Failure("attach_session_changed", "the selected pane or session changed during verification", false, "Inspect the target session, then retry `posse attach`")
 		}
-		return nil
+		return refuseAttachForeignLeadWorkspace(current, project, currentPane.WorkspaceID)
 	}); err != nil {
 		return err
 	}
@@ -177,6 +177,10 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 	})
 }
 
+func refuseAttachForeignLeadWorkspace(snapshot herdr.Snapshot, project store.Project, workspaceID string) error {
+	return refuseForeignLeadWorkspaceWithCommand(snapshot, project, os.Getenv("HERDR_PANE_ID"), workspaceID, "posse attach --pane <pane-id> --session <session-id>")
+}
+
 func attachedSession(snapshot herdr.Snapshot, paneID, sessionID string) (herdr.Pane, string, error) {
 	var pane *herdr.Pane
 	for index := range snapshot.Panes {
@@ -187,6 +191,9 @@ func attachedSession(snapshot herdr.Snapshot, paneID, sessionID string) (herdr.P
 	}
 	if pane == nil {
 		return herdr.Pane{}, "", axi.Failure("attach_pane_not_found", "the selected pane is not present in the Herdr session", false, "Inspect Herdr, then run `posse attach` with an active pane and session")
+	}
+	if pane.Agent == "" || pane.AgentStatus == "" || pane.AgentStatus == "unknown" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
+		return herdr.Pane{}, "", axi.Failure("attach_session_not_live", "the selected pane has no live agent session", false, "Inspect the pane or run `posse up` to start a fresh Lead")
 	}
 	kind := pane.Agent
 	if len(pane.AgentSession) > 0 && string(pane.AgentSession) != "null" {

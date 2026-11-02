@@ -49,6 +49,42 @@ func TestAttachRefusesFocusedPaneBeforeBinding(t *testing.T) {
 	assertAttachUnbound(t, home, project.ID)
 }
 
+func TestAttachRefusesBlockedAgentBeforeBinding(t *testing.T) {
+	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+	fake.SnapshotValue.Panes[1].AgentStatus = "blocked"
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 || !strings.Contains(output.String(), "agent_blocked") {
+		t.Fatalf("attach did not refuse the blocked pane: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.prompt") != 0 || fake.CallCount("pane.rename") != 0 {
+		t.Fatalf("blocked session was changed: %#v", fake.Calls)
+	}
+	assertAttachUnbound(t, home, project.ID)
+}
+
+func TestAttachRefusesPaneWithoutLiveAgentBeforeBinding(t *testing.T) {
+	for _, status := range []string{"", "unknown", "exited", "stopped"} {
+		t.Run(status, func(t *testing.T) {
+			home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+			fake.SnapshotValue.Panes[1].AgentStatus = status
+			var output bytes.Buffer
+			cli := service.CLI()
+			cli.Out = &output
+			cli.ErrOut = &output
+			if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 || !strings.Contains(output.String(), "attach_session_not_live") {
+				t.Fatalf("attach accepted a pane without a live agent: status=%q code=%d output=%s", status, code, output.String())
+			}
+			if fake.CallCount("agent.prompt") != 0 || fake.CallCount("pane.rename") != 0 {
+				t.Fatalf("non-live session was changed: %#v", fake.Calls)
+			}
+			assertAttachUnbound(t, home, project.ID)
+		})
+	}
+}
+
 func TestAttachRefusesChangedHerdrGenerationBeforePrompt(t *testing.T) {
 	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
 	adapter := &changingAttachGeneration{Fake: fake}
@@ -147,6 +183,27 @@ func TestAttachKeepsOneLeadPerProject(t *testing.T) {
 	if fake.CallCount("agent.prompt") != 0 || fake.CallCount("pane.rename") != 0 {
 		t.Fatalf("second Lead session was changed: %#v", fake.Calls)
 	}
+}
+
+func TestAttachRefusesForeignProjectLeadInTargetWorkspace(t *testing.T) {
+	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{
+		PaneID: "w1:p3", WorkspaceID: "w1", Label: "posse:other:lead", Agent: "codex", AgentStatus: "idle",
+	})
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 || !strings.Contains(output.String(), "lead_workspace_conflict") {
+		t.Fatalf("attach did not preserve the one-Lead-per-workspace rule: code=%d output=%s", code, output.String())
+	}
+	if !strings.Contains(output.String(), "posse attach --pane <pane-id> --session <session-id>") || strings.Contains(output.String(), "posse up") {
+		t.Fatalf("workspace refusal did not give attach-specific recovery guidance: %s", output.String())
+	}
+	if fake.CallCount("agent.prompt") != 0 || fake.CallCount("agent.start") != 0 {
+		t.Fatalf("attach changed a session in a conflicting workspace: %#v", fake.Calls)
+	}
+	assertAttachUnbound(t, home, project.ID)
 }
 
 func newAttachTestService(t *testing.T, kind, sessionID string) (string, store.Project, *herdr.Fake, *Service) {
