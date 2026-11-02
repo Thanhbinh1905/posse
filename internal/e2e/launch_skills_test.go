@@ -246,7 +246,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			unconfigured := startWorker("t2", "no-skills-block")
 			assertReadSkills(t, kind+" Worker without a [skills] block", filepath.Join(skillReads, filepath.Base(unconfigured.WorktreePath)), platform)
 
-			directConfig := "[lead]\nkind = \"" + kind + "\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 2\n\n[pool]\nkeep_idle = 1\n"
+			directConfig := "[lead]\nkind = \"" + kind + "\"\n\n[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\nmax_workers = 3\n\n[pool]\nkeep_idle = 1\n"
 			if err := os.WriteFile(filepath.Join(root, "posse", "config.toml"), []byte(directConfig), 0o600); err != nil {
 				t.Fatal(err)
 			}
