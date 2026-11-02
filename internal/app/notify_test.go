@@ -159,6 +159,25 @@ func TestNotifyCommandTimeoutIsLoggedWithoutWaiting(t *testing.T) {
 	}
 }
 
+func TestNoticeNeedsUserUsesLowkeyReportingKinds(t *testing.T) {
+	for _, testCase := range []struct {
+		kind           string
+		mergeAutonomy  string
+		wantUserAction bool
+	}{
+		{kind: "task_failed", wantUserAction: true},
+		{kind: "pr_merged", wantUserAction: true},
+		{kind: "merge_ready", mergeAutonomy: "ask", wantUserAction: true},
+		{kind: "merge_ready", mergeAutonomy: "auto", wantUserAction: false},
+		{kind: "pr_opened", wantUserAction: false},
+		{kind: "quota_fallback", wantUserAction: false},
+	} {
+		if got := noticeNeedsUser(store.Notice{Kind: testCase.kind}, testCase.mergeAutonomy); got != testCase.wantUserAction {
+			t.Errorf("noticeNeedsUser(%q, %q) = %v, want %v", testCase.kind, testCase.mergeAutonomy, got, testCase.wantUserAction)
+		}
+	}
+}
+
 func TestNotifyCommandSchemaAndHelpDescribeTheKey(t *testing.T) {
 	service := testService(t.TempDir(), nil)
 	output := &bytes.Buffer{}

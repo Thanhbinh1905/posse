@@ -16,13 +16,15 @@ import (
 const noticeCommandTimeout = 5 * time.Second
 
 type noticeCommandItem struct {
-	ID        int64           `json:"id"`
-	ProjectID int64           `json:"project_id"`
-	TaskID    int64           `json:"task_id"`
-	Kind      string          `json:"kind"`
-	Summary   string          `json:"summary"`
-	Data      json.RawMessage `json:"data"`
-	CreatedAt int64           `json:"created_at"`
+	ID          int64           `json:"id"`
+	ProjectID   int64           `json:"project_id"`
+	TaskID      int64           `json:"task_id"`
+	Kind        string          `json:"kind"`
+	Summary     string          `json:"summary"`
+	Data        json.RawMessage `json:"data"`
+	CreatedAt   int64           `json:"created_at"`
+	DeliveredAt int64           `json:"delivered_at"`
+	AckedAt     int64           `json:"acked_at"`
 }
 
 func runNoticeCommand(command string, notices []store.Notice, mergeAutonomy string) {
@@ -42,6 +44,7 @@ func runNoticeCommandWithLogger(command string, notices []store.Notice, mergeAut
 		selected = append(selected, noticeCommandItem{
 			ID: notice.ID, ProjectID: notice.ProjectID, TaskID: notice.TaskID,
 			Kind: notice.Kind, Summary: notice.Summary, Data: json.RawMessage(notice.DataJSON), CreatedAt: notice.CreatedAt,
+			DeliveredAt: notice.DeliveredAt, AckedAt: notice.AckedAt,
 		})
 	}
 	if len(selected) == 0 {
