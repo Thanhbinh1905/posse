@@ -225,6 +225,22 @@ func (s *Service) availableLeadKinds(ctx context.Context, cfg config.Config) []s
 	return available
 }
 
+func refuseForeignLeadWorkspace(snapshot herdr.Snapshot, project store.Project, callerPaneID, workspaceID string) error {
+	ownLabel := "posse:" + project.Name + ":lead"
+	for _, pane := range snapshot.Panes {
+		if pane.Label == "" || pane.Label == ownLabel {
+			continue
+		}
+		if pane.PaneID == callerPaneID || pane.WorkspaceID == workspaceID {
+			if strings.HasPrefix(pane.Label, "posse:") && strings.HasSuffix(pane.Label, ":lead") {
+				other := strings.TrimSuffix(strings.TrimPrefix(pane.Label, "posse:"), ":lead")
+				return axi.Failure("lead_workspace_conflict", fmt.Sprintf("Herdr workspace %s contains the Lead pane for Project %s", workspaceID, other), false, "Open a new Herdr workspace for this Project, then run `posse up` there")
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	parsed, err := parseUpArgs(args)
 	if err != nil {
@@ -330,6 +346,13 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		return herdrError(err)
 	}
 	if !registered {
+		initialSnapshot, snapshotErr := s.Herdr.Snapshot(ctx.Context)
+		if snapshotErr != nil {
+			return herdrError(snapshotErr)
+		}
+		if err := refuseForeignLeadWorkspace(initialSnapshot, store.Project{Name: name}, os.Getenv("HERDR_PANE_ID"), os.Getenv("HERDR_WORKSPACE_ID")); err != nil {
+			return err
+		}
 		if _, lookupErr := db.ProjectByName(ctx.Context, name); lookupErr == nil {
 			return axi.Failure("name_taken", fmt.Sprintf("Project name %q is already in use", name), false, "Retry with `posse up --name <different-name>`")
 		} else if !store.IsNotFound(lookupErr) {
@@ -378,6 +401,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 			if err != nil {
 				return herdrError(err)
 			}
+			if err := refuseForeignLeadWorkspace(current, project, os.Getenv("HERDR_PANE_ID"), workspaceID); err != nil {
+				return err
+			}
 			if _, found := leadWorkspace(current, project); !found {
 				if err := db.SetProjectWorkspace(ctx.Context, project.ID, workspaceID); err != nil {
 					return err
@@ -422,6 +448,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		if err != nil {
 			return herdrError(err)
 		}
+	}
+	if err := refuseForeignLeadWorkspace(snapshot, project, os.Getenv("HERDR_PANE_ID"), os.Getenv("HERDR_WORKSPACE_ID")); err != nil {
+		return err
 	}
 	if err := s.cleanupLegacyWatchTabs(ctx.Context, db, project, snapshot); err != nil {
 		return err
