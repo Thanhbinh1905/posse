@@ -130,6 +130,31 @@ func (s *Service) verifyDeliveryPreserved(ctx context.Context, db *store.DB, tar
 	if branchHead != remoteHead || observation.HeadSHA != branchHead {
 		return store.PRObservation{}, prReleaseRefused(fmt.Sprintf("preservation is uncertain: local branch %s, remote branch %s, and PR head %s must match", shortSHA(branchHead), shortSHA(remoteHead), shortSHA(observation.HeadSHA)), true)
 	}
+	sandbox, sandboxErr := db.SandboxByTask(ctx, target.task.ID)
+	if sandboxErr != nil && !store.IsNotFound(sandboxErr) {
+		return store.PRObservation{}, prReleaseRefused("cannot verify Task Sandbox ownership: "+sandboxErr.Error(), true)
+	}
+	ownedSandbox := sandboxErr == nil
+	if ownedSandbox {
+		if sandbox.ID != target.task.SandboxID || sandbox.TaskID != target.task.ID || !samePath(sandbox.Path, target.task.WorktreePath) || sandbox.State != "held" && sandbox.State != "releasing" {
+			return store.PRObservation{}, prReleaseRefused("the Task Sandbox is not owned by this delivery", true)
+		}
+		sandboxHead, err := gitOutput(ctx, sandbox.Path, "rev-parse", "HEAD")
+		if err != nil {
+			return store.PRObservation{}, prReleaseRefused("cannot verify the Task Sandbox HEAD: "+err.Error(), true)
+		}
+		if sandboxHead != branchHead && !sandboxAtReleaseReset(ctx, db, target, sandbox, sandboxHead) {
+			return store.PRObservation{}, prReleaseRefused("the Task Sandbox HEAD is not preserved by the Task branch and PR", true)
+		}
+		if sandboxHead == branchHead {
+			worktreeBranch, err := gitOutput(ctx, sandbox.Path, "symbolic-ref", "--quiet", "HEAD")
+			if err == nil && worktreeBranch != branchRef {
+				return store.PRObservation{}, prReleaseRefused("the Task Sandbox is checked out on a branch that does not own the preserved delivery", true)
+			}
+		}
+	} else if target.task.SandboxID != 0 {
+		return store.PRObservation{}, prReleaseRefused("the Task Sandbox ownership cannot be verified", true)
+	}
 	if _, err := os.Stat(target.task.WorktreePath); err == nil {
 		status, err := gitStatusOutput(ctx, target.task.WorktreePath, "--porcelain", "--ignored")
 		if err != nil || status != "" {
@@ -139,7 +164,7 @@ func (s *Service) verifyDeliveryPreserved(ctx context.Context, db *store.DB, tar
 			}
 			return store.PRObservation{}, prReleaseRefused("preservation is uncertain: "+cause, true)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if ownedSandbox || !errors.Is(err, os.ErrNotExist) {
 		return store.PRObservation{}, prReleaseRefused("cannot inspect the Task Sandbox: "+err.Error(), true)
 	}
 	plan, err := target.task.AdmittedPlan()
@@ -153,6 +178,27 @@ func (s *Service) verifyDeliveryPreserved(ctx context.Context, db *store.DB, tar
 		}
 	}
 	return observation, nil
+}
+
+func sandboxAtReleaseReset(ctx context.Context, db *store.DB, target stewardTarget, sandbox store.Sandbox, head string) bool {
+	intent, err := db.IntentByTask(ctx, target.task.ID)
+	if err != nil || intent.Command != "pr-release" {
+		return false
+	}
+	step := strings.TrimPrefix(intent.Step, "resuming:")
+	if step != "in_progress:sandbox.release" && step != "done:sandbox.release" {
+		return false
+	}
+	ref, _, err := sandboxResetRef(ctx, projectRepoTarget(target.project), false)
+	if err != nil {
+		return false
+	}
+	expected, err := gitOutput(ctx, target.project.Root, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil || head != expected {
+		return false
+	}
+	_, err = gitOutput(ctx, sandbox.Path, "symbolic-ref", "--quiet", "HEAD")
+	return err != nil
 }
 
 func (s *Service) recordExecutorPolicy(ctx context.Context, db *store.DB, target stewardTarget, policy, detail string) error {
@@ -276,7 +322,7 @@ func releaseIntentStep(ctx context.Context, db *store.DB, intent store.Intent, s
 		return err
 	}
 	prior := strings.TrimPrefix(current.Step, "resuming:")
-	if prior == "done:"+step {
+	if prior == "done:"+step || step == "executor.stop" && (prior == "in_progress:sandbox.release" || prior == "done:sandbox.release") {
 		return nil
 	}
 	if err := db.UpdateIntentStep(ctx, intent.ID, intent.ProcessID, "in_progress:"+step); err != nil {

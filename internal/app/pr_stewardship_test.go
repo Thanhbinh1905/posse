@@ -251,6 +251,31 @@ func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) 
 	}
 }
 
+func TestPRReleaseResumesAfterSandboxResetBeforeRelease(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "in_progress:sandbox.release", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetWorktree(ctx, fixture.worktree, projectRepoTarget(fixture.project), "warm", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("resume release after Sandbox reset: %d %s %s", code, output, stderr)
+	}
+	if sandbox, err := fixture.db.SandboxByTask(ctx, fixture.task.ID); !store.IsNotFound(err) {
+		t.Fatalf("resumed release left Task Sandbox owned: %#v err=%v", sandbox, err)
+	}
+}
+
 func TestPRReleaseRefusesWhenDeliveryPreservationIsUncertain(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()
@@ -311,6 +336,44 @@ func TestPRReleaseRefusesWhenRemoteHeadDiffersFromPRHead(t *testing.T) {
 	}
 	if cleared := fixture.service.Herdr.(*herdr.Fake).CallCount("pane.clear_agent_authority"); cleared != 0 {
 		t.Fatalf("refused release changed executor authority %d times", cleared)
+	}
+}
+
+func TestPRReleaseRefusesUnpublishedDetachedSandboxHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	gitTest(t, fixture.worktree, "checkout", "--detach")
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "unpublished.txt"), []byte("keep this commit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "unpublished.txt")
+	gitTest(t, fixture.worktree, "commit", "-m", "unpublished Sandbox output")
+	unpublishedHead, err := gitOutput(context.Background(), fixture.worktree, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "pr_release_refused") {
+		t.Fatalf("release accepted unpublished detached Sandbox HEAD: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	currentHead, err := gitOutput(context.Background(), fixture.worktree, "rev-parse", "HEAD")
+	if err != nil || currentHead != unpublishedHead {
+		t.Fatalf("refusal changed Sandbox HEAD from %s to %s: err=%v", unpublishedHead, currentHead, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.worktree, "unpublished.txt")); err != nil {
+		t.Fatalf("refusal lost unpublished Sandbox output: %v", err)
+	}
+	sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID)
+	if err != nil || sandbox.State != "held" {
+		t.Fatalf("refusal released Sandbox custody: %#v err=%v", sandbox, err)
 	}
 }
 
