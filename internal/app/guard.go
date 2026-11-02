@@ -1088,7 +1088,11 @@ func (g *guard) interpreterCode(e *shellEnv, interpreter, raw, code string) (boo
 
 var (
 	herdrSocketReference   = regexp.MustCompile(`herdr\.sock`)
-	herdrEnvironmentAccess = regexp.MustCompile(`(?:process\.env|os\.environ|ENVIRON|ENV)\s*(?:\.\s*|\[\s*['"])HERDR_[A-Z0-9_]+|(?:process\.env|os\.environ|ENV)\.get\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|(?:os\.environ\.__getitem__|ENV\.fetch)\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|(?:getenv|os\.Getenv)\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|\$ENV\s*\{\s*['"]?HERDR_[A-Z0-9_]+`)
+	herdrEnvironmentAccess = regexp.MustCompile(
+		`(?:process\.env|Bun\.env|Deno\.env|os\.environb?|ENVIRON|ENV)\s*(?:\.\s*HERDR_[A-Z0-9_]+|\[\s*b?['"]HERDR_[A-Z0-9_]+['"]|\.\s*[A-Za-z_]\w*\s*\(\s*b?['"]HERDR_[A-Z0-9_]+['"])|` +
+			`(?:getenv|os\.Getenv|os\.LookupEnv|System\.getenv|Environment\.GetEnvironmentVariable|std::env::(?:var|var_os))\s*\(\s*['"]HERDR_[A-Z0-9_]+['"]|` +
+			`\$ENV\s*\{\s*['"]?HERDR_[A-Z0-9_]+`,
+	)
 	// herdrProgram matches herdr as a command word or as an absolute,
 	// home-relative or ./ executable path, not as a package path or identifier.
 	herdrProgram = regexp.MustCompile("(^|[\\s\"'`(\\[,;|&=]|\\$\\()(?:(?:/|~/|\\$\\{?HOME\\}?/|\\./)[^\\s\"'`]*/)?herdr($|[\\s\"'`)\\],;|&])")
