@@ -202,6 +202,104 @@ func TestFullPipelinePublishSubmitsPrivateCandidateWithoutPushing(t *testing.T) 
 	}
 }
 
+func TestFullPipelineStaleCandidateDoneNamesStaleStateAndNextStep(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "advance Task branch")
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	if code, output, _ := fixture.run("signal", "done", "Need review"); code == 0 || !strings.Contains(output, "stale") || !strings.Contains(output, "posse publish") {
+		t.Fatalf("stale candidate Signal exit=%d output=%s", code, output)
+	}
+}
+
+func TestFullPipelineStaleCandidateAllowsNeedsDecisionSignal(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.MarkValidationCandidateStale(context.Background(), candidate.ID, candidate.SubmittedSHA); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	if code, output, stderr := fixture.run("signal", "needs-decision", "Need direction"); code != 0 {
+		t.Fatalf("needs-decision with stale candidate exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
+func TestFullPipelinePublishRefreshesCandidateAfterTaskBranchMergeInOneCall(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target-change.txt"), []byte("target advanced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "add", "target-change.txt")
+	gitTest(t, fixture.repo, "commit", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "fetch", "origin")
+	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
+	if code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert"); code != 0 {
+		t.Fatalf("publish after target merge exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || candidate.State != store.ValidationCandidateActive {
+		t.Fatalf("fresh candidate after merge = %+v, %v", candidate, err)
+	}
+}
+
+func TestFullPipelineDoneNoticeAndShowNameReviewStart(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("admitted plan=%v err=%v", plan, err)
+	}
+	plan.ValidationLoops = &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"}}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "signal", "done", "Candidate submitted"); code != 0 {
+		t.Fatalf("candidate done Signal exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundNextAction := false
+	for _, notice := range notices {
+		if notice.TaskID == fixture.task.ID && notice.Kind == "task_done" && strings.Contains(notice.Summary, "posse review start t1") {
+			foundNextAction = true
+		}
+	}
+	if !foundNextAction {
+		t.Fatalf("task_done Notice omitted the Review command: %#v", notices)
+	}
+	_ = os.Unsetenv(workerHomeEnv)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	if code, output, stderr := fixture.run("show", "t1"); code != 0 || !strings.Contains(output, "posse review start t1") {
+		t.Fatalf("show omitted the Review command: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestFullPipelineStagesAreOrderedAndCandidateMovementInvalidatesThem(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)

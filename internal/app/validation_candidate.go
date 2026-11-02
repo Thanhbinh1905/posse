@@ -137,6 +137,11 @@ func candidateSubmissionError(task store.Task, candidate store.ValidationCandida
 }
 
 func candidateAuthorMovedFailure(task store.Task, candidate store.ValidationCandidate, actual, branch string) error {
+	if candidate.State == store.ValidationCandidateStale {
+		return axi.Failure("candidate_author_moved",
+			fmt.Sprintf("candidate for t%d is stale: submitted %s, current %s (checkout %s)", task.Seq, candidate.SubmittedSHA, actual, branch),
+			false, "Run `posse publish` to submit a fresh candidate; the stale candidate remains preserved")
+	}
 	return axi.Failure("candidate_author_moved",
 		fmt.Sprintf("Task branch for t%d moved after candidate submission: submitted %s, current %s (checkout %s)", task.Seq, candidate.SubmittedSHA, actual, branch),
 		false, "Run `posse publish` again to submit a fresh candidate; the previous candidate remains preserved")
@@ -216,6 +221,10 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, actual); err != nil && err != store.ErrStateRace {
 					return err
 				}
+				candidate.State = store.ValidationCandidateStale
+				if allowResubmission {
+					continue
+				}
 			}
 			if candidate.State != store.ValidationCandidatePromoting && branch == "refs/heads/"+task.Branch {
 				promoted, err := db.PromotedValidationCandidateBefore(ctx, task.ID, candidate.Repo, candidate.Generation)
@@ -267,19 +276,6 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				if markErr := db.MarkValidationCandidateStale(ctx, candidate.ID, submittedSHA); markErr != nil && markErr != store.ErrStateRace {
 					return markErr
 				}
-				return candidateAuthorMovedFailure(task, candidate, submittedSHA, branch)
-			}
-			currentTarget, targetErr := lane.targetHead(ctx)
-			if targetErr != nil {
-				return axi.Failure("candidate_target_head_failed", "could not refresh the frozen target before validation", true, targetErr.Error())
-			}
-			if currentTarget == "" {
-				return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
-			}
-			if currentTarget != candidate.TargetSHA {
-				if markErr := db.MarkValidationCandidateStale(ctx, candidate.ID, currentTarget); markErr != nil && markErr != store.ErrStateRace {
-					return markErr
-				}
 				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
 				if err != nil {
 					return err
@@ -288,27 +284,47 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 					return err
 				}
 			} else {
-				if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
-					return err
+				currentTarget, targetErr := lane.targetHead(ctx)
+				if targetErr != nil {
+					return axi.Failure("candidate_target_head_failed", "could not refresh the frozen target before validation", true, targetErr.Error())
 				}
-				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
-				if err != nil {
-					return err
+				if currentTarget == "" {
+					return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 				}
-				if err := mergeCandidateTarget(ctx, lane, candidate); err != nil {
-					return err
+				if currentTarget != candidate.TargetSHA {
+					if markErr := db.MarkValidationCandidateStale(ctx, candidate.ID, currentTarget); markErr != nil && markErr != store.ErrStateRace {
+						return markErr
+					}
+					candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+					if err != nil {
+						return err
+					}
+					if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
+						return err
+					}
+				} else {
+					if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
+						return err
+					}
+					candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+					if err != nil {
+						return err
+					}
+					if err := mergeCandidateTarget(ctx, lane, candidate); err != nil {
+						return err
+					}
+					if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
+						return err
+					}
+					if err := db.UpdateValidationCandidateDescription(ctx, candidate.ID, summary, verification, proof, risk); err != nil {
+						return err
+					}
+					candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
+					if err != nil {
+						return err
+					}
+					return printCandidateSubmission(out, lane, candidate, true, submittedReviewCarry(ctx, db, lane))
 				}
-				if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
-					return err
-				}
-				if err := db.UpdateValidationCandidateDescription(ctx, candidate.ID, summary, verification, proof, risk); err != nil {
-					return err
-				}
-				candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
-				if err != nil {
-					return err
-				}
-				return printCandidateSubmission(out, lane, candidate, true, submittedReviewCarry(ctx, db, lane))
 			}
 		case store.ValidationCandidatePromoting:
 			return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate for t%d is being promoted", task.Seq), true, "Resume its internal promotion before submitting another candidate")

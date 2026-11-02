@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -226,6 +227,23 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 		admission = "admitted"
 	}
 	output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}}
+	findings, err := db.ReviewFindingsForTask(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	openFindings := make([]map[string]any, 0)
+	for _, finding := range findings {
+		if !oneOfString(finding.State, "open", "fix_claimed", "unverified", "disputed", "regressed") {
+			continue
+		}
+		openFindings = append(openFindings, map[string]any{
+			"id": "F-" + strconv.Itoa(finding.FindingSeq), "pattern": "P-" + strconv.Itoa(finding.PatternSeq),
+			"title": finding.Title, "state": finding.State, "severity": finding.Severity,
+			"repository": finding.Repository, "path": finding.Path, "symbol": finding.Symbol,
+			"fix_guidance": finding.FixGuidance,
+		})
+	}
+	output = append(output, axi.Field{Key: "open_findings", Value: openFindings})
 	if children, err := taskResearchViews(ctx.Context, db, task); err != nil {
 		return err
 	} else if len(children) > 0 {

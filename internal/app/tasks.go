@@ -1466,7 +1466,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		data["plan_sha256"] = plan.SHA256()
 		rootContext = plan.Execution.RootContext
 	}
-	if task.Type == "change" {
+	if task.Type == "change" && verb == "done" {
 		if err := s.refuseMovedCandidateAuthor(ctx.Context, db, project, task, false); err != nil {
 			return err
 		}
@@ -1774,6 +1774,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
+	if verb == "done" && task.Type == "change" && fullPipelineSelected(task, "") {
+		if plan, err := task.AdmittedPlan(); err != nil {
+			return admittedPlanFailure(err)
+		} else if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {
+			data["next_action"] = "posse review start " + taskIDString(task.Seq)
+		}
+	}
 	if workerResumed {
 		noticeKind = "worker_resumed"
 		data["reason"] = note
