@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,7 +139,7 @@ while IFS= read -r line; do :; done
 	if _, err := client.Run(context.Background(), "pane", "run", lead.RootPane.PaneID, "posse up --name shop --yes"); err != nil {
 		t.Fatal(err)
 	}
-	if !waitForCondition(30*time.Second, func() bool {
+	if ok, reason := waitForEvent(t, func() bool {
 		_, e := os.Stat(filepath.Join(root, "lead-started"))
 		if e != nil {
 			return false
@@ -153,8 +154,8 @@ while IFS= read -r line; do :; done
 			}
 		}
 		return false
-	}) {
-		t.Fatal("Lead did not start")
+	}, nil); !ok {
+		t.Fatalf("Lead did not start: %s", reason)
 	}
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)
@@ -186,7 +187,7 @@ while IFS= read -r line; do :; done
 		startEnv = setEnv(startEnv, "POSSE_INTENT_PAUSE_AT", "start:before:task.working")
 		startEnv = setEnv(startEnv, "POSSE_INTENT_PAUSE_FILE", pauseMarker)
 	}
-	startCtx, cancelStart := context.WithTimeout(context.Background(), 45*time.Second)
+	startCtx, cancelStart := context.WithCancel(context.Background())
 	defer cancelStart()
 	start := exec.CommandContext(startCtx, binary, "start", "--brief", brief, "--name", "scratch-release-probe")
 	start.Dir, start.Env, start.WaitDelay = repo, startEnv, time.Second
@@ -205,18 +206,49 @@ while IFS= read -r line; do :; done
 		cancelStart()
 		<-startDone
 	})
-	if !waitForCondition(30*time.Second, func() bool { _, err := os.Stat(filepath.Join(root, "worker-ready")); return err == nil }) {
-		t.Fatal("Worker did not finish its test process")
+	exists := func(path string) func() bool {
+		return func() bool { _, err := os.Stat(path); return err == nil }
+	}
+	startFailed := func() string {
+		select {
+		case <-startDone:
+			if startErr != nil {
+				return fmt.Sprintf("Start failed: %v %s", startErr, startOutput.String())
+			}
+		default:
+		}
+		return ""
+	}
+	taskEnded := func() string {
+		if reason := startFailed(); reason != "" {
+			return reason
+		}
+		current, err := db.Task(context.Background(), project.ID, "t1")
+		if err != nil {
+			return ""
+		}
+		return taskStateUnreachable("t1", current, expected)
+	}
+	if ok, reason := waitForEvent(t, exists(filepath.Join(root, "worker-ready")), taskEnded); !ok {
+		log, _ := os.ReadFile(filepath.Join(root, "worker-test.log"))
+		t.Fatalf("Worker did not finish its test process: %s; tests=%s", reason, log)
 	}
 	for _, name := range processNames {
-		if !waitForCondition(5*time.Second, func() bool { _, err := os.Stat(filepath.Join(root, name+"-ready")); return err == nil }) {
-			t.Fatalf("Worker's %s process did not start", name)
+		if ok, reason := waitForEvent(t, exists(filepath.Join(root, name+"-ready")), taskEnded); !ok {
+			t.Fatalf("Worker's %s process did not start: %s", name, reason)
 		}
 		processes[name] = readTeardownFixtureProcess(t, root, name)
 	}
 	if mode == "failed-discard-ordering" {
-		if !waitForCondition(10*time.Second, func() bool { _, err := os.Stat(pauseMarker); return err == nil }) {
-			t.Fatal("Start did not pause before its working transition")
+		if ok, reason := waitForEvent(t, exists(pauseMarker), func() string {
+			select {
+			case <-startDone:
+				return fmt.Sprintf("Start exited: %v %s", startErr, startOutput.String())
+			default:
+				return ""
+			}
+		}); !ok {
+			t.Fatalf("Start did not pause before its working transition: %s", reason)
 		}
 		spawning, err := db.Task(context.Background(), project.ID, "t1")
 		if err != nil || spawning.State != store.StateSpawning {
@@ -229,27 +261,33 @@ while IFS= read -r line; do :; done
 			t.Fatal(err)
 		}
 	}
-	<-startDone
+	if ok, reason := waitForEvent(t, func() bool {
+		select {
+		case <-startDone:
+			return true
+		default:
+			return false
+		}
+	}, nil); !ok {
+		t.Fatalf("Start did not finish: %s %s", reason, startOutput.String())
+	}
 	if startErr != nil {
 		t.Fatalf("Start failed: %v %s", startErr, startOutput.String())
 	}
-	if !waitForCondition(10*time.Second, func() bool {
-		current, err := db.Task(context.Background(), project.ID, "t1")
-		return err == nil && current.State == store.StateWorking
-	}) {
-		t.Fatal("Worker Task did not reach working before its Signal")
+	if current, err := db.Task(context.Background(), project.ID, "t1"); err != nil || current.State != store.StateWorking {
+		t.Fatalf("Worker Task did not reach working before its Signal: %#v %v", current, err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "task-working"), []byte("working\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var task store.Task
-	if !waitForCondition(30*time.Second, func() bool {
+	if ok, reason := waitForEvent(t, func() bool {
 		task, err = db.Task(context.Background(), project.ID, "t1")
 		return err == nil && task.State == expected
-	}) {
+	}, taskEnded); !ok {
 		signal, _ := os.ReadFile(filepath.Join(root, "signal.log"))
 		log, _ := os.ReadFile(filepath.Join(root, "worker-test.log"))
-		t.Fatalf("Report signal: %v %s tests=%s task=%#v", err, signal, log, task)
+		t.Fatalf("Report signal: %s %v %s tests=%s task=%#v", reason, err, signal, log, task)
 	}
 	tmpContents, _ := os.ReadFile(filepath.Join(root, "worker-tmpdir"))
 	workerTmp := strings.TrimSpace(string(tmpContents))
@@ -257,19 +295,16 @@ while IFS= read -r line; do :; done
 		t.Fatalf("Worker TMPDIR=%q, want Task scratch %q", workerTmp, wanted)
 	}
 	if mode == "scratch-child" {
-		if !waitForCondition(5*time.Second, func() bool {
-			_, err := os.Stat(filepath.Join(root, "signal-finished"))
-			return err == nil
-		}) {
-			t.Fatal("Worker done command did not finish before stopping the Project Watch")
+		if ok, reason := waitForEvent(t, exists(filepath.Join(root, "signal-finished")), nil); !ok {
+			t.Fatalf("Worker done command did not finish before stopping the Project Watch: %s", reason)
 		}
 		for _, pid := range watchPIDs(root) {
 			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 				t.Fatal(err)
 			}
 		}
-		if !waitForCondition(5*time.Second, func() bool { return len(watchPIDs(root)) == 0 }) {
-			t.Fatalf("fixture Watch did not stop before creating the unrelated Task: live PIDs=%v", watchPIDs(root))
+		if ok, reason := waitForEvent(t, func() bool { return len(watchPIDs(root)) == 0 }, nil); !ok {
+			t.Fatalf("fixture Watch did not stop before creating the unrelated Task: %s; live PIDs=%v", reason, watchPIDs(root))
 		}
 		// Prevent the active Lead from restarting its poll-only Watch while
 		// the synthetic Task moves through states without a Worker pane.
@@ -299,7 +334,7 @@ while IFS= read -r line; do :; done
 		if err := os.WriteFile(filepath.Join(root, "worker-exit"), []byte("exit\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !waitForCondition(5*time.Second, func() bool {
+		if ok, reason := waitForEvent(t, func() bool {
 			raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
 			if err != nil {
 				return false
@@ -311,8 +346,8 @@ while IFS= read -r line; do :; done
 				} `json:"process_info"`
 			}
 			return json.Unmarshal(raw, &info) == nil && info.ProcessInfo.ShellPID > 0 && (info.ProcessInfo.ForegroundProcessGroupID <= 1 || info.ProcessInfo.ForegroundProcessGroupID == info.ProcessInfo.ShellPID)
-		}) {
-			t.Fatal("failed fake Worker did not exit naturally")
+		}, nil); !ok {
+			t.Fatalf("failed fake Worker did not exit naturally: %s", reason)
 		}
 	}
 	finishTeardownOwnershipLifecycle(t, mode, binary, repo, home, root, env, leadEnv, db, project, task, processes)

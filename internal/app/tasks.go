@@ -1515,7 +1515,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				}
 				candidateFix = reviewRequest
 				if !reviewRequest {
-					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, ""); err != nil {
+					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, "", ""); err != nil {
 						return err
 					}
 				}
@@ -1869,6 +1869,8 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if verb == "done" && task.Type == "change" && !noChange {
 		if err := s.checkReviewCapAfterDone(maintenanceCtx, db, home, project, task); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
+		} else if step, err := reviewCarryNextStep(maintenanceCtx, db, project, task, true); err == nil {
+			signalResult = append(signalResult, step...)
 		}
 	}
 	if verb == "done" && task.Type == "review" && verdict != nil {
