@@ -351,6 +351,10 @@ func TestRunGuardBlocksOnlyWorkers(t *testing.T) {
 	if code := service.RunGuard(strings.NewReader(access), &stderr); code != guardExitBlocked {
 		t.Fatalf("guard allowed access to the Worker Herdr environment: code=%d stderr=%s", code, stderr.String())
 	}
+	reenabled := `{"tool_name":"Bash","tool_input":{"command":"bash -n +n -c 'herdr workspace close w1'"}}`
+	if code := service.RunGuard(strings.NewReader(reenabled), &stderr); code != guardExitBlocked {
+		t.Fatalf("guard allowed a Herdr command after noexec was disabled: code=%d stderr=%s", code, stderr.String())
+	}
 	if code := service.RunGuard(strings.NewReader(`{"tool_name":"Edit","tool_input":{"file_path":"x"}}`), &stderr); code != 0 {
 		t.Fatalf("guard blocked a tool without a command: code=%d", code)
 	}
@@ -560,8 +564,22 @@ func TestGuardAllowsShellSyntaxChecksThatMentionHerdr(t *testing.T) {
 	if err := os.WriteFile(path, []byte("herdr workspace close w1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if refused, reason := guardCommand("sh -n check.sh", scope); refused {
-		t.Fatalf("guard refused a syntax-only check: %#v", reason)
+	for _, command := range []string{
+		"sh -n check.sh",
+		"bash -o noexec -c 'herdr workspace close w1'",
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused a syntax-only check in %q: %#v", command, reason)
+		}
+	}
+	for _, command := range []string{
+		"bash -n +n -c 'herdr workspace close w1'",
+		"bash -n +n check.sh",
+		"bash -o noexec +o noexec -c 'herdr workspace close w1'",
+	} {
+		if refused, reason := guardCommand(command, scope); !refused {
+			t.Errorf("guard allowed execution after noexec was disabled in %q: %#v", command, reason)
+		}
 	}
 }
 
