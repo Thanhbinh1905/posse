@@ -188,7 +188,11 @@ func ConfiguredSkills(path string) (map[string][]string, error) {
 	table, _ := values["skills"].(map[string]any)
 	configured := map[string][]string{}
 	for _, role := range SkillRoles {
-		entries, _ := table[role].([]any)
+		entries, found := table[role].([]any)
+		if !found {
+			continue
+		}
+		configured[role] = make([]string, 0, len(entries))
 		for _, entry := range entries {
 			if name, ok := entry.(string); ok {
 				configured[role] = append(configured[role], name)

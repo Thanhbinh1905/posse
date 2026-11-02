@@ -112,6 +112,45 @@ func TestPublishRefusesRewriteWithoutApprovalAndRecordsApprovedRewrite(t *testin
 	}
 }
 
+func TestPublishRewriteRecordsBeforePushing(t *testing.T) {
+	f := newPublishedRewriteFixture(t)
+	oldHead := f.originHead(t)
+	f.amend(t, false)
+	if _, err := f.db.ExecContext(context.Background(), `CREATE TRIGGER reject_branch_rewrite BEFORE INSERT ON notices WHEN NEW.kind='branch_rewritten' BEGIN SELECT RAISE(ABORT, 'simulated record failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, _ := f.run("publish", "--rewrite", "--user-approved", rewriteQuote, "Worker completion summary")
+	if code == 0 || !strings.Contains(output, "simulated record failure") {
+		t.Fatalf("publish with failed rewrite record: exit=%d output=%s", code, output)
+	}
+	if got := f.originHead(t); got != oldHead {
+		t.Fatalf("record failure pushed rewritten head %s, want origin unchanged at %s", got, oldHead)
+	}
+}
+
+func TestPublishRewriteKeepsRecordWhenPushFails(t *testing.T) {
+	f := newPublishedRewriteFixture(t)
+	oldHead := f.originHead(t)
+	newHead := f.amend(t, false)
+	hook := filepath.Join(f.remote, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, _ := f.run("publish", "--rewrite", "--user-approved", rewriteQuote, "Worker completion summary")
+	if code != 1 || !strings.Contains(output, "pr_push_failed") {
+		t.Fatalf("publish with rejected push: exit=%d output=%s", code, output)
+	}
+	if got := f.originHead(t); got != oldHead {
+		t.Fatalf("rejected push moved origin to %s, want %s", got, oldHead)
+	}
+	rewrites := f.rewriteNotices(t)
+	if len(rewrites) != 1 || rewrites[0]["from_head"] != oldHead || rewrites[0]["to_head"] != newHead || rewrites[0]["user_quote"] != rewriteQuote {
+		t.Fatalf("rewrite record after rejected push = %#v", rewrites)
+	}
+}
+
 func TestPublishRewriteLeaseRefusesUnknownOriginHead(t *testing.T) {
 	f := newPublishedRewriteFixture(t)
 	other := filepath.Join(f.root, "other")

@@ -165,7 +165,7 @@ func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
 			t.Fatalf("submit %s private candidate: code=%d %s", repo.Repo, code, output)
 		}
 	}
-	if code, output := h.lead(t, "review", "t1"); code != 0 || !strings.Contains(output, "max_rounds: 3") || !strings.Contains(output, "review and repair rounds") {
+	if code, output := h.lead(t, "review", "t1"); code != 0 || !strings.Contains(output, "max_rounds: 3") || !strings.Contains(output, "Review fix rounds share max_rounds") {
 		t.Fatalf("review status does not explain the shared cap before round 1: code=%d %s", code, output)
 	}
 	h.recordRound(t, "t2", "changes_requested", unsafeMemberPattern("unsafe-api", "api", "unsafe api operation")+","+unsafeMemberPattern("unsafe-web", "web", "unsafe web operation"), "")

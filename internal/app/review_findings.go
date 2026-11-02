@@ -474,9 +474,6 @@ func resolveSignalFile(home string, project store.Project, task store.Task, supp
 	allowedRoots := []string{worktreeRoot, validatedScratchRoot}
 	allowedLocations := fmt.Sprintf("the Worker's worktree (%s) or this Task's scratch directory (%s)", worktreeRoot, scratchRoot)
 	filePath := supplied
-	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(worktreeRoot, filePath)
-	}
 	filePath, err = filepath.Abs(filePath)
 	if err != nil {
 		return "", nil, err

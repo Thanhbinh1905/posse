@@ -206,13 +206,13 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
 	}
-	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
-		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
-	}
 	if rewrite {
 		if err := recordBranchRewrite(out.Context, db, project, task, parsed.Flags["repo"], previousRemoteHead, sha, rewriteQuote); err != nil {
 			return err
 		}
+	}
+	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
+		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
@@ -244,10 +244,10 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		help = "Publish every changed PR member, then run `posse signal done \"<summary>\"`"
 		result = append(result, axi.Field{Key: "repo", Value: member.repo.Repo})
 	}
-	if checklist, ok, err := taskSkillChecklist(out.Context, db, home, project, task, "publish"); err != nil {
+	if checklist, err := taskSkillChecklist(out.Context, db, home, project, task, "publish"); err != nil {
 		return err
-	} else if ok {
-		result = append(result, checklist)
+	} else {
+		result = append(result, checklist...)
 	}
 	return out.Print(append(result, axi.Field{Key: "help", Value: []any{help}}))
 }

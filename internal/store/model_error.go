@@ -187,7 +187,13 @@ WHERE task_id=? AND episode=? AND fingerprint=? AND status='active' AND attempts
 	if err != nil {
 		return ModelErrorEpisode{}, false, err
 	}
-	return episode, updated == 1, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return episode, false, err
+	}
+	if updated == 1 {
+		endDeferrableWrites(ctx)
+	}
+	return episode, updated == 1, nil
 }
 
 func (db *DB) CompleteModelErrorNudge(ctx context.Context, taskID int64, episodeNumber int, backoffMillis int64, marker string, now int64) error {

@@ -32,7 +32,7 @@ change
 1 selected, 0 already in config
 ```
 
-Without a terminal it needs `--all` or skill names and prints the added skills per role. It appends to your lists, keeps comments and existing entries, and never removes anything. From a Lead it needs `--user-approved "<User's words>"`. `posse setup` offers the whole set once, and `posse setup --check` and `posse doctor` report what config lacks.
+Without a terminal it needs `--all` or skill names and prints the added skills per role. It appends to your lists, keeps comments and existing entries, and never removes anything. When `--project` adds a skill to a role without a Project list, it seeds that list with the role's global skills. An existing Project list, including an empty one, remains the override. From a Lead it needs `--user-approved "<User's words>"`. `posse setup` offers the whole set once, and `posse setup --check` and `posse doctor` report what config lacks.
 
 ## The `[skills]` block
 
@@ -58,6 +58,8 @@ Each entry is a bundled skill name or an absolute or `~/` path to a directory ho
 | `research` | read-only Research Workers | read sources, write a Report |
 
 A Worker's protocol lists its role skills and the step each one belongs to: `posse-tdd` before changing code, `posse-deslop` and `posse-no-comments` before the `done` Signal, and `posse-technical-writing` and `posse-unslop` on PR text, commit messages and Reports before `posse publish` and `done`. `posse publish` and `posse signal done` print a `skill_checklist` of the role skills for that step. For Claude Workers launched with the Posse `PostToolUse` hook, the hook records each Skill call, the checklist marks each skill `yes` or `no`, and `posse show <task>` lists `role_skills` with their use counts. For Codex and Pi Workers, and for Claude Tasks launched before the hook existed, the checklist shows `not recorded` and `posse show` reports `skill_uses_recorded_by: nothing`.
+
+A role skill listed in `[skills]` is required. While one has 0 recorded uses, `posse signal done`, `posse validate docs` and `posse validate lint` fail with `role_skills_unused` naming it, and the `merge_ready` Notice names it. There is no setting to relax this. Tasks launched without the hook are not refused, because their uses are unknown.
 
 ## Skills
 

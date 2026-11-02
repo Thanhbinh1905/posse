@@ -158,9 +158,6 @@ func (db *DB) withBusyTimeout(ctx context.Context, timeoutMillis int, operation 
 		return errors.Join(retryableContention(err), restoreBusyTimeoutAndClose(conn))
 	}
 	err = operation(conn)
-	if err == nil {
-		endDeferrableWrites(ctx)
-	}
 	return errors.Join(retryableContention(err), restoreBusyTimeoutAndClose(conn))
 }
 
@@ -2559,11 +2556,13 @@ func (db *DB) MessageByID(ctx context.Context, messageID int64) (Message, error)
 	return message, err
 }
 
+const pendingInstructionStatuses = `'queued','claimed','interrupting'`
+
 func hasPendingTaskInstructions(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, taskID int64) (bool, error) {
 	var pending bool
-	err := queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE task_id=? AND status IN ('queued','claimed','interrupting'))`, taskID).Scan(&pending)
+	err := queryer.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE task_id=? AND status IN (`+pendingInstructionStatuses+`))`, taskID).Scan(&pending)
 	return pending, err
 }
 
@@ -2573,7 +2572,7 @@ func (db *DB) HasPendingTaskInstructions(ctx context.Context, taskID int64) (boo
 
 func (db *DB) PendingTaskInstructions(ctx context.Context, taskID int64) ([]Message, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
-FROM messages WHERE task_id=? AND status IN ('queued', 'claimed', 'interrupting') ORDER BY created_at, id`, taskID)
+FROM messages WHERE task_id=? AND status IN (`+pendingInstructionStatuses+`) ORDER BY created_at, id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -2706,6 +2705,9 @@ WHERE id=? AND status='queued' AND NOT EXISTS (
 		return false, err
 	}
 	count, err := result.RowsAffected()
+	if count == 1 {
+		endDeferrableWrites(ctx)
+	}
 	return count == 1, err
 }
 
@@ -2890,6 +2892,7 @@ func (db *DB) ClaimNoticeBatch(ctx context.Context, projectID int64, ids []int64
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	endDeferrableWrites(ctx)
 	return true, nil
 }
 
