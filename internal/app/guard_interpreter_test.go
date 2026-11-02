@@ -41,6 +41,19 @@ func TestGuardAllowsInterpreterEditsOfSourceNamingHerdr(t *testing.T) {
 	}
 }
 
+func TestGuardAllowsInterpreterCodeWithHerdrVariableNamesAsText(t *testing.T) {
+	scope, _ := guardFixture(t)
+	for _, command := range []string{
+		`node -e 'console.log("HERDR_SOCKET_PATH")'`,
+		`awk 'BEGIN { print "HERDR_SOCKET_PATH" }'`,
+		`python3 -c "print('HERDR_SOCKET_PATH')"`,
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused a Herdr variable name used as text in %q: %#v", command, reason)
+		}
+	}
+}
+
 func TestGuardRefusesInterpreterCodeThatRunsHerdrOrOpensItsSocket(t *testing.T) {
 	scope, _ := guardFixture(t)
 	for _, command := range []string{
@@ -51,6 +64,17 @@ func TestGuardRefusesInterpreterCodeThatRunsHerdrOrOpensItsSocket(t *testing.T) 
 		"python3 - <<'EOF'\nimport subprocess\nsubprocess.run('~/.local/bin/herdr pane close w1:p1', shell=True)\nEOF",
 		// Socket access needs no herdr program.
 		"python3 - <<'EOF'\nimport os, socket\nsocket.socket(socket.AF_UNIX).connect(os.environ['HERDR_SOCKET_PATH'])\nEOF",
+		`python3 -c "import os; print(os.environ.get('HERDR_PANE_ID'))"`,
+		`python3 -c "import os; print(os.environ.__getitem__('HERDR_SOCKET_PATH'))"`,
+		`python3 -c "import os; print(os.environb[b'HERDR_SOCKET_PATH'])"`,
+		`python3 -c "import os; print(os.environ.setdefault('HERDR_SOCKET_PATH', ''))"`,
+		`python3 -c "import os; print(os.environ.pop('HERDR_SOCKET_PATH', None))"`,
+		`ruby -e 'puts ENV.fetch("HERDR_SOCKET_PATH")'`,
+		`node -e 'require("net").connect(process.env.HERDR_SOCKET_PATH)'`,
+		`bun -e 'console.log(Bun.env.HERDR_SOCKET_PATH)'`,
+		`bun -e 'console.log(Bun.env.get("HERDR_SOCKET_PATH"))'`,
+		`deno -e 'console.log(Deno.env.get("HERDR_SOCKET_PATH"))'`,
+		`awk 'BEGIN { print ENVIRON["HERDR_SOCKET_PATH"] }'`,
 		"python3 - <<'EOF'\nimport socket\nsocket.socket(socket.AF_UNIX).connect('/home/u/.config/herdr/herdr.sock')\nEOF",
 		`perl -e 'print ` + "`herdr pane list`" + `'`,
 		`perl -e 'exec "herdr", "pane", "close", "w1:p1"'`,
