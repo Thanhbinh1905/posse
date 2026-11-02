@@ -224,11 +224,18 @@ func (db *DB) AdvanceValidationCandidate(ctx context.Context, id int64, expected
 	}
 	defer tx.Rollback()
 	updatedAt := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET candidate_sha=?,updated_at=? WHERE id=? AND state IN ('preparing','active','stale','promoting') AND candidate_sha=?`, candidateSHA, updatedAt, id, expectedSHA)
+	result, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET candidate_sha=?,updated_at=? WHERE id=? AND state IN ('preparing','active','promoting') AND candidate_sha=?`, candidateSHA, updatedAt, id, expectedSHA)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
+		var state string
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM validation_candidates WHERE id=?`, id).Scan(&state); err != nil {
+			return err
+		}
+		if state == ValidationCandidateStale || state == ValidationCandidatePromoted || state == ValidationCandidateSuperseded {
+			return nil
+		}
 		return ErrStateRace
 	}
 	if candidateSHA != expectedSHA {

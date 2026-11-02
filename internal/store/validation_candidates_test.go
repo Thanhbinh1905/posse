@@ -133,6 +133,9 @@ func TestFinalValidationCandidateTransitionsAreIdempotent(t *testing.T) {
 		if err := f.db.MarkValidationCandidateStale(f.ctx, candidate.ID, reviewShaC); err != nil {
 			t.Errorf("mark %s candidate stale: %v", state, err)
 		}
+		if err := f.db.AdvanceValidationCandidate(f.ctx, candidate.ID, reviewShaA, reviewShaB); err != nil {
+			t.Errorf("advance %s candidate: %v", state, err)
+		}
 		if state == ValidationCandidateStale || state == ValidationCandidateSuperseded {
 			if err := f.db.SupersedeValidationCandidate(f.ctx, candidate.ID, ValidationCandidateStale, "refs/posse/candidate/archive/t1/1", reviewShaA); err != nil {
 				t.Errorf("supersede %s candidate: %v", state, err)

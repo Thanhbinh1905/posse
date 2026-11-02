@@ -411,20 +411,23 @@ func TestFullPipelinePromotedCandidateAllowsNextGenerationAfterTargetAndAuthorMo
 		t.Fatalf("promote candidate: %v", err)
 	}
 
+	gitTest(t, candidate.WorktreePath, "commit", "--allow-empty", "-m", "fix failed CI")
+	newHead := strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
+	gitTest(t, fixture.worktree, "merge", "--ff-only", newHead)
 	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance frozen target")
 	gitTest(t, fixture.repo, "push", "origin", "main")
-	gitTest(t, fixture.worktree, "commit", "--allow-empty", "-m", "fix failed CI")
 
-	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 0 || !strings.Contains(output, "target_current: false") {
-		t.Fatalf("status for moved promoted candidate: exit=%d output=%s stderr=%s", code, output, stderr)
+	statusCode, statusOutput, statusStderr := runCandidateCLI(t, fixture, candidate, "validate", "status")
+	if statusCode != 0 || !strings.Contains(statusOutput, "target_current: false") {
+		t.Errorf("status for moved promoted candidate: exit=%d output=%s stderr=%s", statusCode, statusOutput, statusStderr)
 	}
-	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./internal/app -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
-	if code != 0 {
-		t.Fatalf("publish next generation: exit=%d output=%s stderr=%s", code, output, stderr)
+	publishCode, publishOutput, publishStderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./internal/app -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if publishCode != 0 {
+		t.Errorf("publish next generation: exit=%d output=%s stderr=%s", publishCode, publishOutput, publishStderr)
 	}
 	fresh, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil || fresh.Generation != candidate.Generation+1 || fresh.State != store.ValidationCandidateActive || fresh.SubmittedSHA != strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD")) {
-		t.Fatalf("next candidate=%+v err=%v", fresh, err)
+		t.Errorf("next candidate=%+v err=%v", fresh, err)
 	}
 }
 
