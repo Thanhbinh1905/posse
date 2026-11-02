@@ -127,12 +127,56 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 		}
 	}
 
-	if err := os.Remove(filepath.Join(f.home, "projects", "shop", "tasks", "t1", skillHookMarker)); err != nil {
+	if err := os.Remove(filepath.Join(f.home, "projects", "shop", "tasks", "t1", skillUseMarker)); err != nil {
 		t.Fatal(err)
 	}
 	unhooked := outcomeCLI(t, f.service, 0, "show", "t1")
-	if !strings.Contains(unhooked, "skill_uses_recorded_by: \"nothing: Posse records skill uses only for claude Workers launched with the skill hook\"") || strings.Contains(unhooked, "role_skills") {
+	if !strings.Contains(unhooked, "skill_uses_recorded_by: \"nothing: Posse records skill uses only for claude Workers launched with the skill hook or pi Workers launched with skill-use recording\"") || strings.Contains(unhooked, "role_skills") {
 		t.Fatalf("show of a Task launched without the skill hook reports uses:\n%s", unhooked)
+	}
+}
+
+func TestPiWorkerRoleSkillUsesAreRecorded(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	setupFollowupAgentPath(t, "pi")
+	f.fake.Results["server.agent_manifests"] = json.RawMessage(`{"agents":[{"kind":"pi","available":true}]}`)
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
+	outcomeCLI(t, f.service, 0, "config", "set", "skills.change", `["posse-deslop"]`)
+	outcomeCLI(t, f.service, 0, "config", "set", "profiles.routing.kind", "pi")
+	outcomeCLI(t, f.service, 0, "config", "set", "dispatch", "[{type='change', use='routing'}]")
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "skills")
+	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skillUseRecordingInstalled(f.home, f.project.Name, task.Seq) {
+		t.Fatal("Pi Worker launch is not marked for skill-use recording")
+	}
+	t.Setenv(workerHomeEnv, f.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	t.Chdir(task.WorktreePath)
+	var stderr bytes.Buffer
+	if code := f.service.RunSkillUse(&stderr, []string{"posse-deslop"}); code != 0 {
+		t.Fatalf("skill-use exit=%d: %s", code, &stderr)
+	}
+	uses, err := f.db.TaskSkillUses(context.Background(), task.ID)
+	if err != nil || uses["posse-deslop"] != 1 {
+		t.Fatalf("Pi skill use = %v, err=%v", uses, err)
+	}
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "change.txt"), []byte("change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, task.WorktreePath, "add", "change.txt")
+	gitTest(t, task.WorktreePath, "commit", "-m", "change")
+	done := outcomeCLI(t, f.service, 0, "signal", "done", "Changed", "--turn", "launch:1")
+	if !strings.Contains(done, "posse-deslop,") || !strings.Contains(done, ",yes") {
+		t.Fatalf("Pi done Signal does not show the recorded skill: %s", done)
 	}
 }
 
