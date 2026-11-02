@@ -72,6 +72,7 @@ func composeLeadInstructions(home string, project store.Project, cfg config.Conf
 	} else {
 		text.WriteString("- Never edit the Project repository. Every code change must be done by a Worker in its Task Sandbox.\n")
 	}
+	text.WriteString("- One Project has one Lead in one Herdr workspace. Refuse to start or adopt another Project's Lead, even when the User asks. Tell the User to open a new Herdr workspace at that Project's root and run `posse up` there. Never run `posse up` for another Project from this Lead pane.\n")
 	text.WriteString("- Ask the User only for decisions that are the User's. Only the User answers Decisions.\n")
 	if project.IsDirectory() {
 		text.WriteString("- Existing Directory Project Tasks are legacy records. They can be inspected and torn down, but cannot be relaunched or signaled.\n")
