@@ -440,6 +440,69 @@ func TestWorkingSignalRejectsTerminalTaskStates(t *testing.T) {
 	}
 }
 
+func TestBriefShowsCurrentTurnTokenAfterWorkingSignal(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w2:p1")
+	t.Chdir(fixture.sandbox)
+	gitTest(t, fixture.sandbox, "switch", "-c", "posse/t1")
+	if err := os.WriteFile(filepath.Join(fixture.sandbox, "change.txt"), []byte("change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.sandbox, "add", "change.txt")
+	gitTest(t, fixture.sandbox, "commit", "-m", "Apply review fix")
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET branch='posse/t1',base_ref='main' WHERE id=?`, task.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	launchPath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", "launch.md")
+	if err := os.MkdirAll(filepath.Dir(launchPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchPath, []byte("Current Worker turn token: `launch:1`. Pass `--turn launch:1` to done.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(fixture.home, herdr.NewFake())
+	code, signal := runCLI(t, service, "signal", "working", "Continuing after the review fix")
+	if code != 0 {
+		t.Fatalf("working Signal failed: code=%d output=%s", code, signal)
+	}
+	if !strings.Contains(signal, `turn_token: "signal:1"`) {
+		t.Fatalf("working Signal did not return the refreshed token: %s", signal)
+	}
+	if code, output := runCLI(t, service, "brief"); code != 0 || !strings.Contains(output, "Current Worker turn token: `signal:1`") {
+		t.Fatalf("brief did not advertise current turn token signal:1: code=%d output=%s", code, output)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE seq=1 AND project_id=?`, fixture.project.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runCLI(t, service, "signal", "done", "Review fix complete", "--turn", "signal:1"); code != 0 || !strings.Contains(output, "state: done") {
+		t.Fatalf("done Signal with the token from brief was rejected: code=%d output=%s", code, output)
+	}
+}
+
 func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	ctx := context.Background()
