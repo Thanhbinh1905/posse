@@ -1479,8 +1479,6 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	return nil
 }
 
-// retrySpecReadyChecks runs the spec_ready_to_deliver check for merged Tasks
-// until it has completed once, so a failed check is retried on later polls.
 func (s *Service) retrySpecReadyChecks(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, now time.Time) error {
 	merged, err := db.TasksInState(ctx, project.ID, store.StateMerged)
 	if err != nil {

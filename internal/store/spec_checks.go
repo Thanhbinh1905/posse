@@ -5,8 +5,6 @@ import (
 	"time"
 )
 
-// SpecReadyChecked reports whether the Task's spec_ready_to_deliver check has
-// completed since its pull request merged.
 func (db *DB) SpecReadyChecked(ctx context.Context, taskID int64) (bool, error) {
 	var found bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_spec_checks WHERE task_id=?)`, taskID).Scan(&found)
