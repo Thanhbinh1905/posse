@@ -478,7 +478,32 @@ func (db *DB) Decisions(ctx context.Context, projectID int64, pendingOnly bool) 
 // PendingDecisions lists unanswered Decisions without first marking resolved
 // ones obsolete, so read commands work while the store is contended.
 func (db *DB) PendingDecisions(ctx context.Context, projectID int64) ([]Decision, error) {
-	return db.listDecisions(ctx, projectID, true)
+	query := decisionSelect + ` d
+		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0
+		AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND NOT (
+			(d.kind='merge_ready' AND t.state NOT IN ('done','merging'))
+			OR (d.kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>d.task_launches))
+			OR (d.kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>d.task_launches))
+			OR (d.kind='dependency' AND t.state<>'queued')
+			OR (d.kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches))
+			OR (d.kind='pr_closed' AND t.state='torn-down')
+			OR (d.kind='orphan' AND d.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')
+		))
+		ORDER BY d.id`
+	rows, err := db.QueryContext(ctx, query, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	decisions := []Decision{}
+	for rows.Next() {
+		decision, err := decisionRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		decisions = append(decisions, decision)
+	}
+	return decisions, rows.Err()
 }
 
 func (db *DB) listDecisions(ctx context.Context, projectID int64, pendingOnly bool) ([]Decision, error) {

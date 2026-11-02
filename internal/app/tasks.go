@@ -693,7 +693,8 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return skillErr
 		}
 	}
-	if generated != nil {
+	reviewFiles := admittedReviewRoundFiles(plan)
+	if len(reviewFiles) > 0 {
 		briefData = []byte(withReviewDir(string(briefData), taskHome))
 		brief.Body = withReviewDir(brief.Body, taskHome)
 	}
@@ -703,8 +704,8 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
-	if generated != nil {
-		if err := s.runIntentStep(ctx.Context, db, intent, "review.files", func() error { return writeReviewRoundFiles(taskHome, generated.Files) }); err != nil {
+	if len(reviewFiles) > 0 {
+		if err := s.runIntentStep(ctx.Context, db, intent, "review.files", func() error { return writeReviewRoundFiles(taskHome, reviewFiles) }); err != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 			return err
 		}

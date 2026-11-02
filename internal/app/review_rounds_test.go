@@ -199,6 +199,49 @@ guidance = ["docs/review.md"]
 	if code, output := start(); code != 1 || !strings.Contains(output, "review_round_cap") {
 		t.Fatalf("round cap refusal code=%d: %s", code, output)
 	}
+	plan.Paths.Output = filepath.Join(f.home, "projects", f.project.Name, "tasks", "t99")
+	plan.Paths.Scratch = filepath.Join(f.home, "scratch", f.project.Name, "t99")
+	planJSON, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET seq=99,branch='posse/t99',plan_json=?,state='failed',mount_id=NULL WHERE id=?`, planJSON, review.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, planJSON, review.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE mounts SET state='idle',task_id=NULL WHERE task_id=?`, review.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM transitions WHERE task_id=? AND to_state='working'`, review.ID); err != nil {
+		t.Fatal(err)
+	}
+	failedReview, err := db.TaskByID(ctx, f.project.ID, review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentProject, err := db.ProjectByID(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: currentProject.LeadPaneID, WorkspaceID: currentProject.HerdrWorkspaceID, Label: currentProject.LeadLabel, Agent: "claude", AgentStatus: "idle"}}
+	if _, err := f.service.relaunchTask(ctx, db, f.home, currentProject, cfg, failedReview, ""); err != nil {
+		t.Fatalf("relaunch never-started Review Task: %v", err)
+	}
+	for _, name := range []string{"brief.md", "launch.md"} {
+		contents, err := os.ReadFile(filepath.Join(plan.Paths.Output, name))
+		if err != nil || strings.Contains(string(contents), "{{review_dir}}") || !strings.Contains(string(contents), filepath.Join(plan.Paths.Output, "review")) {
+			t.Fatalf("relaunched %s has unresolved Review path: %s err=%v", name, contents, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(plan.Paths.Output, "review", "round.json")); err != nil {
+		t.Fatalf("relaunched Review Round files are missing: %v", err)
+	}
 }
 
 func TestReviewLedgerShowsFindingSeverity(t *testing.T) {
