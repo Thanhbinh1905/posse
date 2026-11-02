@@ -1935,7 +1935,7 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		return "", fmt.Errorf("review fix resolutions are valid only on a Change done Signal")
 	}
 	if reportReview != nil && (verb != "done" || task.Type != "review") {
-		return "", fmt.Errorf("Report-review verdicts are valid only on a Review done Signal")
+		return "", fmt.Errorf("report-review verdicts are valid only on a Review done Signal")
 	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
