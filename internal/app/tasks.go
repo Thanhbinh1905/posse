@@ -1869,6 +1869,8 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if noChange {
 		// No candidate or head to validate: the Task changed nothing.
 		state, err = db.RecordWorkerSignalWithVerdict(ctx.Context, task, verb, note, data, noticeKind, nil)
+	} else if verb == "done" && reportReview != nil {
+		state, err = db.RecordWorkerSignalWithReportReview(ctx.Context, task, verb, note, data, noticeKind, reportReview.ReportTaskID, reportReview.ReportDigest, verdictFlag)
 	} else {
 		state, err = s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, false, reviewResolutions)
 	}
@@ -1910,11 +1912,6 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return axi.Failure("store_busy", "the store was busy and this Signal was not recorded", true, "Run `posse signal` again with the same Signal")
 		}
 		return err
-	}
-	if verb == "done" && reportReview != nil {
-		if _, err := db.RecordReportReview(ctx.Context, reportReview.ReportTaskID, task.ID, reportReview.ReportDigest, verdictFlag); err != nil {
-			return axi.Failure("report_review_record_failed", "Review Signal was recorded, but its Report verdict could not be saved: "+err.Error(), false)
-		}
 	}
 	// The Signal and its Notice are committed before unrelated Project work.
 	// A retry after a post-commit failure would incorrectly imply it was lost.

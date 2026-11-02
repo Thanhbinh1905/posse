@@ -328,6 +328,45 @@ func TestReviewStartReviewsPublicationReportAndAllowsAcceptance(t *testing.T) {
 	if code, output := start("signal", "done", "Reviewed the exact Report", "--report", reportPath); code == 0 || !strings.Contains(output, "Report Review Task requires --verdict") {
 		t.Fatalf("Report Review without a verdict code=%d: %s", code, output)
 	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_report_review_insert BEFORE INSERT ON report_reviews BEGIN SELECT RAISE(ABORT, 'forced Report review write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failedCode, failedOutput := start("signal", "done", "Reviewed the exact Report", "--report", reportPath, "--verdict", "pass")
+	if failedCode == 0 || !strings.Contains(failedOutput, "forced Report review write failure") {
+		t.Fatalf("Report Review did not reach the forced verdict write failure: code=%d: %s", failedCode, failedOutput)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentReview, err := db.TaskByID(ctx, fixture.project.ID, boundReview.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signals, err := db.TaskSignals(ctx, boundReview.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviews, err := db.ReportReviewsForTask(ctx, reportID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentReview.State != store.StateWorking || len(signals) != 0 || len(reviews) != 0 {
+		t.Fatalf("failed verdict write left a terminal Review or Signal: state=%s signals=%#v reviews=%#v", currentReview.State, signals, reviews)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_report_review_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if code, output := start("signal", "done", "Reviewed the exact Report", "--report", reportPath, "--verdict", "pass"); code != 0 {
 		t.Fatalf("Report review completion code=%d: %s", code, output)
 	}
@@ -335,7 +374,7 @@ func TestReviewStartReviewsPublicationReportAndAllowsAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reviews, err := db.ReportReviewsForTask(ctx, reportID)
+	reviews, err = db.ReportReviewsForTask(ctx, reportID)
 	if err != nil || len(reviews) != 1 || reviews[0].ReportDigest != report.ReportDigest || reviews[0].Verdict != "pass" || reviews[0].ReviewTaskID != boundReview.ID {
 		t.Fatalf("recorded Report Review = %#v, %v", reviews, err)
 	}
