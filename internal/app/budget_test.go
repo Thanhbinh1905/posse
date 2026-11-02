@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 	"github.com/thanhbinh1905/posse/internal/usage"
@@ -161,6 +163,182 @@ func TestBudgetCrossingsRaiseOneNoticeAndDecisionPerScopeWithoutStoppingWorker(t
 	task, err := db.Task(ctx, f.project.ID, "t1")
 	if err != nil || task.State != store.StateWorking {
 		t.Fatalf("budget crossing stopped Worker: task=%#v err=%v", task, err)
+	}
+}
+
+func TestBudgetDecisionsExpireWithTheirWorkerAndPeriod(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		origin     func() string
+		transition store.State
+		launches   bool
+	}{
+		{name: "worker relaunch", origin: func() string { return "budget:task:1" }, launches: true},
+		{name: "task completion", origin: func() string { return "budget:task:1" }, transition: store.StateDone},
+		{name: "daily period rollover", origin: func() string { return "budget:daily:" + time.Now().AddDate(0, 0, -1).Format(time.DateOnly) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateWorking)
+			defer f.db.Close()
+			ctx := context.Background()
+			decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{
+				ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "budget", Origin: test.origin(),
+				Question: "Continue or interrupt?", Options: []string{"continue", "interrupt"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.launches {
+				if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET launches=launches+1 WHERE id=?`, f.task.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.transition != "" {
+				if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, test.transition, "worker", "finished"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+			if err != nil || len(decisions) != 0 {
+				t.Fatalf("stale budget Decision remained pending: %#v, %v", decisions, err)
+			}
+			stored, err := f.db.Decision(ctx, f.project.ID, decision.ID)
+			if err != nil || stored.ObsoleteAt == 0 {
+				t.Fatalf("stale budget Decision was not obsoleted: %#v, %v", stored, err)
+			}
+			if _, err := f.db.AnswerDecision(ctx, f.project.ID, decision.ID, "interrupt", "User chose interrupt"); err == nil {
+				t.Fatal("stale budget Decision accepted an answer")
+			}
+		})
+	}
+}
+
+func TestBudgetDecisionAnswersApplyWithoutStoppingTheWorker(t *testing.T) {
+	for _, option := range []string{"continue", "interrupt"} {
+		t.Run(option, func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateWorking)
+			defer f.db.Close()
+			ctx := context.Background()
+			decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{
+				ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "budget", Origin: "budget:task:1",
+				Question: "Continue or interrupt?", Options: []string{"continue", "interrupt"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code, output, stderr := f.run("decide", fmt.Sprint(decision.ID), option, "--user-approved", "User chose "+option); code != 0 {
+				t.Fatalf("decide %s: %s %s", option, output, stderr)
+			}
+			fake := f.service.Herdr.(*herdr.Fake)
+			fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
+			if option == "interrupt" {
+				for i := range fake.SnapshotValue.Panes {
+					if fake.SnapshotValue.Panes[i].PaneID == f.task.PaneID {
+						fake.SnapshotValue.Panes[i].AgentStatus = "working"
+					}
+				}
+				fake.BeforeCall = func(method string) {
+					if method == "agent.send_keys" {
+						for i := range fake.SnapshotValue.Panes {
+							if fake.SnapshotValue.Panes[i].PaneID == f.task.PaneID {
+								fake.SnapshotValue.Panes[i].AgentStatus = "idle"
+							}
+						}
+					}
+				}
+			}
+			code, output, stderr := f.run("apply", fmt.Sprint(decision.ID))
+			if code != 0 {
+				t.Fatalf("apply %s: %s %s", option, output, stderr)
+			}
+			task, err := f.db.Task(ctx, f.project.ID, "t1")
+			if err != nil || task.State != store.StateWorking {
+				t.Fatalf("%s changed Worker state: task=%#v err=%v", option, task, err)
+			}
+			for _, call := range fake.Calls {
+				if call.Method == "workspace.close" || call.Method == "pane.close" || call.Method == "worktree.remove" {
+					t.Fatalf("budget %s tore down Worker: %#v", option, fake.Calls)
+				}
+			}
+			if option == "continue" {
+				if fake.CallCount("agent.send_keys") != 0 {
+					t.Fatalf("continue sent abort keys: %#v", fake.Calls)
+				}
+				return
+			}
+			cfg, err := config.Load(f.home, f.project.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sentKeys []string
+			for _, call := range fake.Calls {
+				if call.Method == "agent.send_keys" {
+					sentKeys, _ = call.Params["keys"].([]string)
+				}
+			}
+			if fake.CallCount("agent.send_keys") != 1 || fmt.Sprint(sentKeys) != fmt.Sprint(cfg.Kinds["claude"].InterruptKeys) {
+				t.Fatalf("interrupt keys=%v calls=%#v, want %v", sentKeys, fake.Calls, cfg.Kinds["claude"].InterruptKeys)
+			}
+			messages, err := f.db.TaskMessagesAfter(ctx, f.task.ID, 0, 10)
+			if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "Stop work now") || !strings.Contains(messages[0].Body, "posse signal done") {
+				t.Fatalf("interrupt stop instruction = %#v, %v", messages, err)
+			}
+		})
+	}
+}
+
+func TestStaleBudgetInterruptCannotApplyAfterItsScopeChanges(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		stale func(*testing.T, *prMergeFixture, int64)
+	}{
+		{name: "worker relaunch", stale: func(t *testing.T, f *prMergeFixture, _ int64) {
+			if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET launches=launches+1 WHERE id=?`, f.task.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "task completion", stale: func(t *testing.T, f *prMergeFixture, _ int64) {
+			if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateDone, "worker", "finished"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "daily rollover", stale: func(t *testing.T, f *prMergeFixture, decisionID int64) {
+			day := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
+			if _, err := f.db.ExecContext(context.Background(), `UPDATE decisions SET origin=? WHERE id=?`, "budget:daily:"+day, decisionID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateWorking)
+			defer f.db.Close()
+			ctx := context.Background()
+			decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{
+				ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "budget", Origin: "budget:task:1",
+				Question: "Continue or interrupt?", Options: []string{"continue", "interrupt"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.db.AnswerDecision(ctx, f.project.ID, decision.ID, "interrupt", "User chose interrupt"); err != nil {
+				t.Fatal(err)
+			}
+			test.stale(t, f, decision.ID)
+			fake := f.service.Herdr.(*herdr.Fake)
+			fake.Results["pane.read"] = []byte(`{"text":"worker output"}`)
+			for i := range fake.SnapshotValue.Panes {
+				if fake.SnapshotValue.Panes[i].PaneID == f.task.PaneID {
+					fake.SnapshotValue.Panes[i].AgentStatus = "working"
+				}
+			}
+			code, output, stderr := f.run("apply", fmt.Sprint(decision.ID))
+			if code == 0 || !strings.Contains(output+stderr, "decision_refused") {
+				t.Fatalf("stale interrupt applied: exit=%d output=%s stderr=%s", code, output, stderr)
+			}
+			if fake.CallCount("agent.send_keys") != 0 {
+				t.Fatalf("stale interrupt sent abort keys: %#v", fake.Calls)
+			}
+		})
 	}
 }
 

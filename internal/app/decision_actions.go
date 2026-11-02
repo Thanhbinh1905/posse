@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -49,6 +50,9 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 	task, err := db.TaskByID(out.Context, project.ID, decision.TaskID)
 	if err != nil {
 		return err
+	}
+	if reason := store.BudgetDecisionStaleReason(decision, task, time.Now().Format(time.DateOnly)); reason != "" {
+		return axi.Failure("decision_refused", "budget Decision is obsolete: "+reason, false)
 	}
 	switch decision.Kind {
 	case "dependency":
