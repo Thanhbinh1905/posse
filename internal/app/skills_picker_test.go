@@ -2,8 +2,10 @@ package app
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testPickerChoices() []skillChoice {
@@ -34,6 +36,66 @@ func TestSkillPickerTogglesMovesAndSkipsConfiguredEntries(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("frames lack %q:\n%q", want, out.String())
 		}
+	}
+}
+
+type fragmentedPickerReader struct {
+	input string
+}
+
+func (r *fragmentedPickerReader) Read(p []byte) (int, error) {
+	if len(r.input) == 0 {
+		return 0, io.EOF
+	}
+	p[0] = r.input[0]
+	r.input = r.input[1:]
+	return 1, nil
+}
+
+type openEscapePickerReader struct {
+	*io.PipeReader
+}
+
+func (r openEscapePickerReader) waitForPickerEscape() (bool, error) {
+	return false, nil
+}
+
+func TestSkillPickerEscapeCancelsWhileInputRemainsOpen(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	result := make(chan struct {
+		saved bool
+		err   error
+	}, 1)
+	go func() {
+		_, saved, err := runSkillPicker(openEscapePickerReader{reader}, &bytes.Buffer{}, skillPicker{choices: testPickerChoices()})
+		result <- struct {
+			saved bool
+			err   error
+		}{saved: saved, err: err}
+	}()
+	if _, err := writer.Write([]byte{0x1b}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case outcome := <-result:
+		if outcome.saved || outcome.err != nil {
+			t.Fatalf("Escape cancellation = saved %v, err %v", outcome.saved, outcome.err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		reader.Close()
+		writer.Close()
+		<-result
+		t.Fatal("picker waited for input to close after Escape")
+	}
+}
+
+func TestSkillPickerReadsSplitEscapeSequences(t *testing.T) {
+	var out bytes.Buffer
+	choices, saved, err := runSkillPicker(&fragmentedPickerReader{input: " \x1b[B \r"}, &out, skillPicker{choices: testPickerChoices()})
+	if err != nil || !saved || !choices[0].selected || !choices[2].selected {
+		t.Fatalf("split down sequence: saved=%v err=%v choices=%+v", saved, err, choices)
 	}
 }
 
