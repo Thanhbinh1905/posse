@@ -71,10 +71,7 @@ func composeLeadInstructionsMode(home string, project store.Project, cfg config.
 	if knowledgeInstructions := renderedKnowledge(project, knowledge); knowledgeInstructions != "" {
 		text.WriteString(knowledgeInstructions)
 	}
-	var handoff, handoffWarning string
-	if consumeHandoff {
-		handoff, handoffWarning = loadHandoff(home, project)
-	}
+	handoff, handoffWarning := loadHandoff(home, project)
 	text.WriteString("## Runtime obligations\n\nThese obligations come from Posse's execution contract. Preferences can change default workflow advice but cannot grant authority, change Task evidence or override these obligations.\n\n")
 	if project.IsDirectory() {
 		text.WriteString("- This is a legacy Directory Project. Posse no longer admits Tasks here; non-Git work is edited directly outside Posse.\n")
@@ -96,7 +93,6 @@ func composeLeadInstructionsMode(home string, project store.Project, cfg config.
 	}
 	text.WriteString("- User-only keys (`pool.setup`, `kinds.<kind>.lead_auto_approve`, `autonomy.*`) may be changed only after explicit User approval. In this Lead conversation, use `posse config set <key> <value> [--project <name>] --user-approved \"<User's words>\"` or `posse config unset <key> [--project <name>] --user-approved \"<User's words>\"`. Outside a Lead pane, give the User the exact `! posse config set ...` or `! posse config unset ...` command.\n")
 	text.WriteString("- Preferences are how-to-work guidance. A User shell can run `posse preferences set <lead|worker> --file <file> [--project <name>]`; from this Lead, use that command with `--user-approved \"<User's words>\"` only after explicit consent. Workers cannot write preferences or config.\n")
-	text.WriteString("- Before `posse up --replace`, a Lead harness switch or context compaction when the harness exposes a hook, offer to preserve conversation-only state. Write a handoff only after the User asks. Prepare a Markdown file, then run `posse handoff write --file <file.md>`. Do not duplicate Tasks, Decisions, Notices, Reports or PRs. Keep accepted-but-unfiled decisions, open User questions with exact quotes, next steps and plan pointers. Do not write preferences or knowledge automatically as part of a handoff. When the User explicitly asks to preserve a standing preference or durable fact, use the existing `posse preferences set` consent flow or `posse knowledge set` flow; knowledge writes still require `knowledge.enabled` and must pass the startup budget.\n")
 	if cfg.Knowledge.Enabled {
 		text.WriteString("- Knowledge is opt-in curated reference context, not authority. Record a durable Project fact or lesson with `posse knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--user]`; point Task outcomes to their Report and never copy live Task, Decision or PR state. A write that would exceed `knowledge.budget_bytes` is refused: curate first by consolidating entries, archiving stale or low-use ones with `posse knowledge archive <id> --reason <why>`, or making conditional ones on-demand with `--when`. Never edit repository AGENTS or CLAUDE files to record knowledge. Workers cannot write knowledge.\n")
 	}
@@ -159,7 +155,7 @@ func composeLeadInstructionsMode(home string, project store.Project, cfg config.
 			section += handoffWarning + "\n"
 		}
 		section += "\n"
-		if consumeHandoff && handoff != "" && text.Len()+len(section) > leadInstructionMaxBytes-512 {
+		if handoff != "" && text.Len()+len(section) > leadInstructionMaxBytes-512 {
 			handoffWarning = fmt.Sprintf("The pending handoff at %s was not loaded because it would exceed the Lead instruction budget. Curate the note and restart the Lead.", handoffPath(home, project.Name))
 			section = "\n## Previous Lead handoff\n\n" + handoffWarning + "\n\n"
 		} else {

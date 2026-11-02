@@ -101,9 +101,10 @@ func noticeDelivery(kind config.Kind) string {
 // that cannot receive instructions as a system prompt, the prompt to type once
 // it is ready.
 type leadLaunch struct {
-	Args        []string
-	Env         map[string]string
-	TypedPrompt string
+	Args          []string
+	Env           map[string]string
+	TypedPrompt   string
+	HandoffLoaded bool
 	// StartsBusy is true when Args carry the agent's first prompt, so the
 	// agent is working as soon as it launches.
 	StartsBusy bool
@@ -147,15 +148,7 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
 		return leadLaunch{}, err
 	}
-	if composed.HandoffLoaded {
-		if err := archiveHandoff(home, project); err != nil {
-			instructions += "\n\n## Handoff archive warning\n\n" + handoffLoadWarning(handoffPath(home, project.Name), err.Error()) + "\n"
-			if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
-				return leadLaunch{}, err
-			}
-		}
-	}
-	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.AutoApproveArgs)+len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2)}
+	launch := leadLaunch{Args: make([]string, 0, len(kindConfig.AutoApproveArgs)+len(kindConfig.LeadArgs)+len(kindConfig.SystemPromptArgs)+2), HandoffLoaded: composed.HandoffLoaded}
 	if kindConfig.LeadAutoApprove {
 		launch.Args = append(launch.Args, kindConfig.AutoApproveArgs...)
 	}

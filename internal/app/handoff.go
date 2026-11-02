@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -127,6 +128,16 @@ func loadHandoff(home string, project store.Project) (string, string) {
 		return "", handoffLoadWarning(path, "the note header is malformed or the body is empty")
 	}
 	return string(body), ""
+}
+
+func (s *Service) archiveStartedLeadHandoff(ctx context.Context, home string, project store.Project) error {
+	if err := archiveHandoff(home, project); err != nil {
+		message := handoffLoadWarning(handoffPath(home, project.Name), "the Lead started but archiving failed: "+err.Error())
+		if _, notifyErr := s.herdrCall(ctx, "notification.show", map[string]any{"title": "Posse handoff needs attention", "body": message}); notifyErr != nil {
+			return fmt.Errorf("archive Lead handoff: %w; show notification: %v", err, notifyErr)
+		}
+	}
+	return nil
 }
 
 func archiveHandoff(home string, project store.Project) error {

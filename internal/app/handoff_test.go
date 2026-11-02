@@ -45,8 +45,12 @@ func TestHandoffWriteLoadsOnceAndArchivesOnLeadStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, "pi"); err != nil {
+	launch, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, "pi")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !launch.HandoffLoaded {
+		t.Fatal("Lead launch did not retain handoff archive ownership")
 	}
 	first, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "lead.md"))
 	if err != nil {
@@ -55,8 +59,17 @@ func TestHandoffWriteLoadsOnceAndArchivesOnLeadStartup(t *testing.T) {
 	if strings.Count(string(first), note) != 1 {
 		t.Fatalf("Lead instructions must include the handoff exactly once: %s", first)
 	}
+	if !strings.Contains(string(first), "Before `posse up --replace`") || !strings.Contains(string(first), "Write a handoff only after the User asks") {
+		t.Fatalf("Lead guidance omits the opt-in handoff trigger: %s", first)
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("handoff must remain pending until the agent starts: %v", err)
+	}
+	if err := archiveHandoff(f.home, f.project); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(pending); !os.IsNotExist(err) {
-		t.Fatalf("loaded handoff note was not removed from the pending path: %v", err)
+		t.Fatalf("started Lead did not remove the pending note: %v", err)
 	}
 	entries, err := os.ReadDir(filepath.Join(f.home, "projects", "shop", "handoff-archive"))
 	if err != nil || len(entries) != 1 {

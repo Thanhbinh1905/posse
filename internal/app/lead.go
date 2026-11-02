@@ -552,7 +552,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	s.pendingLead = &leadExecPlan{
 		ProjectID: project.ID, PaneID: leadPane.PaneID, WorkspaceID: callerWorkspaceID,
 		AgentName: agentName, Kind: kind, Binary: binary, Args: launch.Args, Env: launch.Env,
-		NeedsPrompt: launch.TypedPrompt != "",
+		NeedsPrompt: launch.TypedPrompt != "", HandoffLoaded: launch.HandoffLoaded,
 	}
 	result := axi.Object{
 		{Key: "project", Value: project.Name},

@@ -734,6 +734,11 @@ func (s *Service) restartLead(ctx context.Context, db *store.DB, home string, pr
 			return err
 		}
 	}
+	if leadStart.HandoffLoaded {
+		if err := s.archiveStartedLeadHandoff(ctx, home, project); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -62,8 +62,11 @@ func TestConversationHandoffMovesAcrossLeadHarnessOnce(t *testing.T) {
 		t.Fatalf("replacement Lead instructions omitted or duplicated the note: %s, %v", instructions, err)
 	}
 	archive := filepath.Join(fixture.home, "projects", "shop", "handoff-archive", "handoff-0001.md")
-	if _, err := os.Stat(archive); err != nil {
-		t.Fatalf("loaded note was not archived: %v", err)
+	if !waitForCondition(10*time.Second, func() bool {
+		_, err := os.Stat(archive)
+		return err == nil
+	}) {
+		t.Fatal("loaded note was not archived after the replacement Lead started")
 	}
 	if _, err := os.Stat(filepath.Join(fixture.home, "projects", "shop", "handoff.md")); !os.IsNotExist(err) {
 		t.Fatalf("pending note remains after startup: %v", err)
