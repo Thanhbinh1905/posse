@@ -274,6 +274,9 @@ func TestLeadComposerRetainsWorkspaceAndAnsweredDecisionGuidance(t *testing.T) {
 	}
 	for _, rule := range []string{
 		"Read shared workspace-root files such as CLAUDE.md and docs/",
+		"One Project has one Lead in one Herdr workspace",
+		"Refuse to start or adopt another Project's Lead",
+		"Tell the User to open a new Herdr workspace at that Project's root and run `posse up` there",
 		"posse project scan` after the User adds or removes a repository",
 		"posse apply <decision>` to relaunch or discard",
 		"posse start --from-orphan <decision>",
