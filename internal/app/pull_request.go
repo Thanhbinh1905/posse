@@ -1414,6 +1414,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				continue
 			}
 		}
+		s.annotateMergeReadyNotices(ctx, db, project, observed.task, effect.Notices)
 		if observed.current.State == "MERGED" && (!observed.hasBefore || observed.previous.State != "MERGED") {
 			if notice, violated := reviewPolicyViolation(ctx, db, project, cfg, observed.task, observed.current); violated {
 				effect.Notices = append(effect.Notices, notice)
