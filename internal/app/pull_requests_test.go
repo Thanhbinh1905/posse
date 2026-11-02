@@ -1273,8 +1273,10 @@ printf '%s\n' "$*" >> "$POSSE_TEST_GH_LOG"
 if [ "${POSSE_TEST_GH_FAIL:-}" != "" ]; then printf 'fake gh unavailable\n' >&2; exit 1; fi
 case "$1 $2" in
   "run rerun") printf 'rerun requested\n' ;;
+  "run list") printf '%s\n' "${POSSE_TEST_GH_TARGET_RUNS:-[]}" ;;
   "run view")
-    if [ "${4:-}" = "--repo" ] && [ "${6:-}" = "--json" ]; then printf '{"attempt":1,"status":"completed","headSha":"%s"}\n' "$(cat "$POSSE_TEST_GH_HEAD")"
+    if [ "${7:-}" = "jobs" ]; then if [ -n "${POSSE_TEST_GH_TARGET_JOBS:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_TARGET_JOBS"; else printf '{"jobs":[]}\n'; fi
+    elif [ "${4:-}" = "--repo" ] && [ "${6:-}" = "--json" ]; then printf '{"attempt":1,"status":"completed","headSha":"%s"}\n' "$(cat "$POSSE_TEST_GH_HEAD")"
     elif [ -n "${POSSE_TEST_GH_RUN_LOG:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_RUN_LOG"; else printf 'unit failed log\n'; fi ;;
   "api graphql")
     if [ -n "${POSSE_TEST_GH_ADVANCE_SHA:-}" ]; then
@@ -1360,6 +1362,8 @@ esac
 	t.Setenv("POSSE_TEST_GH_LEGACY_REPOSITORY", "")
 	t.Setenv("POSSE_TEST_GH_CANCELLED", "")
 	t.Setenv("POSSE_TEST_GH_RUN_LOG", "")
+	t.Setenv("POSSE_TEST_GH_TARGET_RUNS", "")
+	t.Setenv("POSSE_TEST_GH_TARGET_JOBS", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_JOB", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "")
 	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "")
