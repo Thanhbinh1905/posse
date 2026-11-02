@@ -11,9 +11,11 @@ import (
 
 var ErrReviewDispositionRequiresUser = errors.New("blocking Review disposition requires User approval")
 
+var ErrReviewCapDecisionRequired = errors.New("blocking Review finding at the spent Review cap requires the User's review_cap Decision")
+
 // ApplyReviewDisposition appends the disposition event and updates the current
 // finding projection in one transaction.
-func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingSeqs, patternSeqs []int, action, severity, issue, reason, quote, actor, blockAt string) error {
+func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingSeqs, patternSeqs []int, action, severity, issue, reason, quote, actor, blockAt string, capSpent bool) error {
 	if taskID < 1 || !oneOf(action, "accept", "defer", "withdraw", "reclassify") || !oneOf(blockAt, "P0", "P1", "P2") {
 		return fmt.Errorf("invalid Review disposition")
 	}
@@ -88,6 +90,9 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 		f := selected[id]
 		blocking := f.Origin == "introduced" && f.InScope && oneOf(f.State, "open", "fix_claimed", "unverified", "disputed", "regressed") &&
 			(f.Severity == "unclassified" || map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}[f.Severity] <= threshold)
+		if capSpent && blocking && (action != "reclassify" || map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}[severity] > threshold) {
+			return fmt.Errorf("%w: F-%d", ErrReviewCapDecisionRequired, f.Seq)
+		}
 		if blocking && action != "reclassify" && strings.TrimSpace(quote) == "" {
 			return fmt.Errorf("%w: blocking Review findings require --user-approved <quote>", ErrReviewDispositionRequiresUser)
 		}

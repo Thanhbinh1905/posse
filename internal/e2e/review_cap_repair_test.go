@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,41 +227,26 @@ func (h *ciRepairChange) hasNotice(kind string) bool {
 	return false
 }
 
-func TestFullPipelineCIRepairSharesReviewCapAndBlocksRepublishAtExhaustion(t *testing.T) {
+func TestFullPipelineCIRepairDoesNotConsumeReviewCap(t *testing.T) {
 	f := reviewIdentityFixture(t)
-	// A two-round cap is spent by Review Round 1 and one CI repair, while the
-	// CI loop alone would still allow two more repairs.
+	// t731: with a two-round cap, Review Round 1 passed and a CI repair
+	// followed; the repaired candidate still gets Review Round 2.
 	h := startCIRepairChange(t, f, [2]string{"ci_loop.max_fix_rounds", "3"}, [2]string{"review_loop.max_rounds", "2"})
 	firstHead := h.publishThenFailCI(t)
 	usage, err := f.db.ReviewCapUsage(context.Background(), h.change.ID)
-	if err != nil || usage.ReviewRounds != 1 || usage.RepairRounds != 1 {
-		t.Fatalf("shared cap usage=%+v err=%v, want one Review Round and one CI repair", usage, err)
+	if err != nil || usage.ReviewRounds != 1 || usage.RepairRounds != 0 {
+		t.Fatalf("Review cap usage=%+v err=%v, want one Review Round and no repair round", usage, err)
+	}
+	if h.hasNotice("review_cap_reached") {
+		t.Fatal("CI repair raised review_cap_reached")
 	}
 	candidate := h.submitCandidate(t, "Repaired CI candidate")
 	if candidate.CandidateSHA == firstHead {
 		t.Fatal("CI repair did not produce a fresh private candidate")
 	}
-	code, output := runReviewIdentityCLI(t, f, "review", "start", "t1", "--profile", "reviewer")
-	if code == 0 || !strings.Contains(output, "review_round_cap") {
-		t.Fatalf("Review Round admitted after the shared cap was spent: %d %s", code, output)
+	h.validateCandidate(t, candidate, "t3")
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Repaired CI candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+		t.Fatalf("promote repaired candidate: %d %s", code, output)
 	}
-	code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Repaired CI candidate")
-	if code == 0 || !strings.Contains(output, "review_cap_reached") || strings.Contains(output, "posse review start") {
-		t.Fatalf("republish after cap exhaustion was not refused with the cap Decision: %d %s", code, output)
-	}
-	h.assertOriginHead(t, firstHead)
-	decisions := openReviewCapDecisions(t, f, h.change)
-	if len(decisions) != 1 {
-		t.Fatalf("cap exhaustion raised %d Review cap Decisions, want one", len(decisions))
-	}
-	var origin string
-	if err := f.db.QueryRowContext(context.Background(), `SELECT origin FROM decisions WHERE id=?`, decisions[0]).Scan(&origin); err != nil || !strings.HasSuffix(origin, candidate.CandidateSHA) {
-		t.Fatalf("cap Decision origin=%q err=%v, want the repaired candidate head %s", origin, err, candidate.CandidateSHA)
-	}
-	for _, option := range []string{"accept-head", "final-fix", "rethink", "discard"} {
-		if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisions[0]), option); code != 1 || !strings.Contains(output, "user_only") {
-			t.Fatalf("Lead answered the cap Decision with %s: %d %s", option, code, output)
-		}
-	}
-	h.assertOriginHead(t, firstHead)
+	h.assertOriginHead(t, candidate.CandidateSHA)
 }
