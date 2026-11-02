@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -276,6 +277,9 @@ func (s *Service) restoreProject(ctx context.Context, db *store.DB, home string,
 	}
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
+		return workers, err
+	}
+	if err := refuseForeignLeadForProject(snapshot, project, os.Getenv("HERDR_PANE_ID")); err != nil {
 		return workers, err
 	}
 	if _, err := db.AckUndeliveredNotices(ctx, project.ID, "restore_needed", currentTime()); err != nil {
