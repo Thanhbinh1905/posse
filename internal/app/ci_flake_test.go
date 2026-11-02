@@ -257,3 +257,59 @@ func TestPRWatchFindsFlakyTestAboveTheInstructionTail(t *testing.T) {
 		t.Fatalf("CI fix rounds = %d, want none", fixes)
 	}
 }
+
+func (f *flakeFixture) failTargetRun(t *testing.T, age time.Duration) {
+	t.Helper()
+	created := time.Now().Add(-age).UTC().Format(time.RFC3339)
+	t.Setenv("POSSE_TEST_GH_TARGET_RUNS", `[{"databaseId":900,"headSha":"`+strings.Repeat("b", 40)+`","createdAt":"`+created+`"}]`)
+	t.Setenv("POSSE_TEST_GH_TARGET_JOBS", `{"jobs":[{"databaseId":901,"name":"e2e shard 3","conclusion":"failure"},{"databaseId":902,"name":"lint","conclusion":"success"},{"databaseId":903,"name":"unit","conclusion":"cancelled"}]}`)
+}
+
+func TestProjectWatchRecordsTargetBranchFailuresAsFlakeHistory(t *testing.T) {
+	f := newFlakeFixture(t)
+	f.freeze(t, "168h")
+	f.failTargetRun(t, 3*time.Hour)
+	f.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", f.headSHA)
+
+	f.poll(t)
+	if fixes := f.count(t, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`); fixes != 0 {
+		t.Fatalf("a failure first seen on the target branch queued %d CI fix rounds, want a rerun", fixes)
+	}
+	if log := f.ghLogText(t); strings.Count(log, "run rerun --job 456 --repo acme/shop") != 1 {
+		t.Fatalf("rerun commands = %q, want one job rerun", log)
+	}
+	if log := f.ghLogText(t); !strings.Contains(log, "run view --job 901 --log-failed") || strings.Contains(log, "--job 902") || strings.Contains(log, "--job 903") {
+		t.Fatalf("target run log reads = %q, want only the failed job 901", log)
+	}
+	var rows, observedBefore int
+	cutoff := time.Now().Add(-2 * time.Hour).UnixMilli()
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*), COALESCE(SUM(observed_at<?),0) FROM ci_test_failures WHERE test='TestFlaky' AND job_id='901' AND check_name='e2e shard 3' AND head_sha=?`, cutoff, strings.Repeat("b", 40)).Scan(&rows, &observedBefore); err != nil || rows != 1 || observedBefore != 1 {
+		t.Fatalf("target history rows=%d observed at the run time=%d err=%v, want one row observed when the run started", rows, observedBefore, err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind != "ci_flake_rerun" && strings.HasPrefix(notice.Kind, "ci_") {
+			t.Fatalf("target history raised a new Notice %s: %s", notice.Kind, notice.Summary)
+		}
+	}
+
+	f.poll(t)
+	if log := f.ghLogText(t); strings.Count(log, "run view --job 901 --log-failed") != 1 {
+		t.Fatalf("a recorded target run was fetched again: %q", log)
+	}
+}
+
+func TestProjectWatchIgnoresTargetBranchFailuresOutsideTheFlakeWindow(t *testing.T) {
+	f := newFlakeFixture(t)
+	f.freeze(t, "1h")
+	f.failTargetRun(t, 3*time.Hour)
+	f.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", f.headSHA)
+
+	f.poll(t)
+	if fixes := f.count(t, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`); fixes != 1 {
+		t.Fatalf("a target failure older than the window queued %d CI fix rounds, want one", fixes)
+	}
+}

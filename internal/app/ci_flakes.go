@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
@@ -212,4 +213,100 @@ func recordCIRerun(ctx context.Context, db *store.DB, rerun store.CIRerun, reque
 		return err
 	}
 	return db.FailCIRerunRequest(ctx, id)
+}
+
+const targetCIRunLimit = 10
+
+// recordTargetBranchCIFailures adds the failed jobs of each frozen target
+// branch's own push runs to the flake history, so a flake first seen there is
+// known on the next PR. It only reads from the forge and never raises a Notice;
+// a forge error leaves the history as it was.
+func (s *Service) recordTargetBranchCIFailures(ctx context.Context, db *store.DB, project store.Project, forge repositoryForge, watched []store.Task, now time.Time) {
+	branches := map[string]store.Task{}
+	windows := map[string]time.Duration{}
+	for _, task := range watched {
+		if task.Type != "change" || task.State == store.StateMerged {
+			continue
+		}
+		plan, err := task.AdmittedPlan()
+		if err != nil || plan == nil || plan.ValidationLoops == nil {
+			continue
+		}
+		window := plan.ValidationLoops.CI.FlakeWindowDuration()
+		branch := taskTargetBranch(project, task)
+		if window <= 0 || window < windows[branch] {
+			continue
+		}
+		branches[branch], windows[branch] = task, window
+	}
+	for branch, task := range branches {
+		_ = recordTargetBranchRuns(ctx, db, project, forge, task.PRURL, branch, now.Add(-windows[branch]))
+	}
+}
+
+type targetCIRun struct {
+	DatabaseID int64     `json:"databaseId"`
+	HeadSHA    string    `json:"headSha"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+func recordTargetBranchRuns(ctx context.Context, db *store.DB, project store.Project, forge repositoryForge, prURL, branch string, since time.Time) error {
+	ref, err := pullRequestReferenceFromURL(prURL)
+	if err != nil {
+		return err
+	}
+	selector := githubRepositorySelector(ref)
+	output, err := commandOutputArgs(ctx, forge.Root, "gh", "run", "list", "--repo", selector, "--branch", branch, "--event", "push", "--status", "failure", "--limit", fmt.Sprint(targetCIRunLimit), "--json", "databaseId,headSha,createdAt")
+	if err != nil {
+		return err
+	}
+	var runs []targetCIRun
+	if err := json.Unmarshal([]byte(output), &runs); err != nil {
+		return err
+	}
+	targetURL := fmt.Sprintf("https://%s/%s/%s/tree/%s", ref.Host, ref.Owner, ref.Repo, branch)
+	for _, run := range runs {
+		if run.CreatedAt.Before(since) || run.DatabaseID < 1 || run.HeadSHA == "" {
+			continue
+		}
+		output, err := commandOutputArgs(ctx, forge.Root, "gh", "run", "view", fmt.Sprint(run.DatabaseID), "--repo", selector, "--json", "jobs")
+		if err != nil {
+			return err
+		}
+		var view struct {
+			Jobs []struct {
+				DatabaseID int64  `json:"databaseId"`
+				Name       string `json:"name"`
+				Conclusion string `json:"conclusion"`
+			} `json:"jobs"`
+		}
+		if err := json.Unmarshal([]byte(output), &view); err != nil {
+			return err
+		}
+		for _, job := range view.Jobs {
+			if !oneOfString(strings.ToLower(job.Conclusion), "failure", "timed_out") {
+				continue
+			}
+			jobID := fmt.Sprint(job.DatabaseID)
+			recorded, err := db.CITestFailureRecorded(ctx, project.ID, targetURL, run.HeadSHA, job.Name, jobID)
+			if err != nil {
+				return err
+			}
+			if recorded {
+				continue
+			}
+			log, err := failedCILog(ctx, forge.Root, forge, prURL, failedCheck{Name: job.Name, RunID: fmt.Sprint(run.DatabaseID), JobID: jobID})
+			if err != nil {
+				return err
+			}
+			failures := []store.CITestFailure{}
+			for _, failure := range parseGoTestFailures(log).Tests {
+				failures = append(failures, store.CITestFailure{ProjectID: project.ID, PRURL: targetURL, HeadSHA: run.HeadSHA, CheckName: job.Name, JobID: jobID, Package: failure.Package, Test: failure.Test, ObservedAt: run.CreatedAt.UnixMilli()})
+			}
+			if err := db.RecordCITestFailures(ctx, failures); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
