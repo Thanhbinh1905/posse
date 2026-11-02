@@ -180,7 +180,7 @@ func (writer *watchRuntimeLogWriter) Close() error {
 	return writer.file.Close()
 }
 
-func startWatchProcess(command *exec.Cmd) error {
+var startWatchProcess = func(command *exec.Cmd) error {
 	if err := command.Start(); err != nil {
 		return err
 	}
@@ -650,12 +650,12 @@ func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args 
 	if os.Getenv(watchRuntimeTokenEnv) != "" || command == "ack" || command == "down" || command == "lookout" || command == "remove" || command == "_update-preflight" || command == "watch" && (containsArgument(args, "--handoff") || containsArgument(args, "--poll-only") || containsArgument(args, "--repair") || containsArgument(args, "--receipt") || containsArgument(args, "--receipt-outcome") || containsArgument(args, "--receipt-token")) {
 		return
 	}
-	binary, err := os.Executable()
-	if err != nil || !watchExecutableVerifier(binary) {
+	home, err := s.homePath()
+	if err != nil || s.workerCaller(ctx.Context, home) {
 		return
 	}
-	home, err := s.homePath()
-	if err != nil {
+	binary, err := os.Executable()
+	if err != nil || !watchExecutableVerifier(binary) {
 		return
 	}
 	if _, err := os.Stat(filepath.Join(home, "posse.db")); errors.Is(err, os.ErrNotExist) {
