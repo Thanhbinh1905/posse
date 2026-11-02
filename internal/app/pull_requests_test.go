@@ -87,6 +87,29 @@ func TestPRMergePushesGatedBranchAndOpensPullRequest(t *testing.T) {
 	}
 }
 
+func TestPRDescriptionChangesUseRemoteDefaultBranchWhenLocalDefaultIsBehind(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	localBase := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "main"))
+	gitTest(t, fixture.repo, "checkout", "--detach", localBase)
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "upstream change")
+	gitTest(t, fixture.repo, "push", "origin", "HEAD:main")
+	gitTest(t, fixture.worktree, "fetch", "origin")
+	gitTest(t, fixture.worktree, "rebase", "--onto", "origin/main", localBase)
+
+	fixture.headSHA = strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	fixture.setGHHead(t, fixture.headSHA)
+	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
+		t.Fatalf("publish: %d %s %s", code, output, stderr)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "upstream change") || !strings.Contains(string(log), "- worker change") {
+		t.Fatalf("PR Changes should list only commits beyond origin/main, got %q", log)
+	}
+}
+
 func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	brief := "---\ntype: change\ntitle: E2E Brief title\ndone_when: commit exists\nissues: [12]\nrefs: [14]\n---\nE2E intent\n"
