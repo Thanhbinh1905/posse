@@ -76,6 +76,11 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 		if err != nil {
 			return result, errors.Join(returnedErr, err)
 		}
+		idle, err := raiseIdleSlotNotice(budgetCtx, db, projectID, stallAfter, now)
+		result.Notices = append(result.Notices, idle...)
+		if err != nil {
+			return result, errors.Join(returnedErr, err)
+		}
 	}
 	return result, returnedErr
 }

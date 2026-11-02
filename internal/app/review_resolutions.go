@@ -75,7 +75,7 @@ func convertReviewResolutions(input reviewResolutionsFile, expected, actual stri
 
 // reviewFixMemberAnswers reads the head of every Member a workspace Review fix
 // named. A full-pipeline Member answers from its clean private candidate, which
-// must still be the candidate the fix was issued for.
+// may be a newer candidate than the one the fix was issued for when that one was superseded.
 func (s *Service) reviewFixMemberAnswers(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, round store.ValidationFixRound) ([]store.ReviewFixMemberHead, error) {
 	answers := make([]store.ReviewFixMemberHead, 0, len(round.MemberHeads))
 	for _, member := range round.MemberHeads {
@@ -84,9 +84,10 @@ func (s *Service) reviewFixMemberAnswers(ctx context.Context, db *store.DB, home
 			return nil, err
 		}
 		root := lane.task.WorktreePath
+		var candidateID int64
 		if member.CandidateID > 0 {
 			candidate, err := db.LatestValidationCandidate(ctx, task.ID, member.Repository)
-			if err != nil || candidate.ID != member.CandidateID || candidate.State != store.ValidationCandidateActive {
+			if err != nil || candidate.ID < member.CandidateID || candidate.State != store.ValidationCandidateActive {
 				return nil, axi.Failure("candidate_missing", lane.memberLabel("the private candidate this Review fix was issued for is no longer active"), false, "The Lead must decide whether to queue a new Review fix for the current candidate")
 			}
 			if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
@@ -100,6 +101,7 @@ func (s *Service) reviewFixMemberAnswers(ctx context.Context, db *store.DB, home
 				return nil, axi.Failure("candidate_dirty", lane.memberLabel("commit candidate changes before signalling done"), false, candidate.WorktreePath)
 			}
 			root = candidate.WorktreePath
+			candidateID = candidate.ID
 		}
 		head, err := gitOutput(ctx, root, "rev-parse", "HEAD")
 		if err != nil {
@@ -108,7 +110,11 @@ func (s *Service) reviewFixMemberAnswers(ctx context.Context, db *store.DB, home
 		if !gitAncestor(ctx, root, member.ExpectedBaseHead, head) {
 			return nil, recordHeadDiscontinuity(ctx, db, project, task, member.ExpectedBaseHead, head)
 		}
-		answers = append(answers, store.ReviewFixMemberHead{Repository: member.Repository, ActualHead: head, CandidateID: member.CandidateID})
+		answerCandidate := member.CandidateID
+		if member.CandidateID > 0 {
+			answerCandidate = candidateID
+		}
+		answers = append(answers, store.ReviewFixMemberHead{Repository: member.Repository, ActualHead: head, CandidateID: answerCandidate})
 	}
 	return answers, nil
 }

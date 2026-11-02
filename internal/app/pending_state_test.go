@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -88,6 +89,67 @@ func TestNeedsYouListsPendingDecisionsAndNeedsDecisionTasks(t *testing.T) {
 	}
 }
 
+func TestPendingBlocksExcludeResolvedDecisionsWithoutWrites(t *testing.T) {
+	home, project, openDecision := pendingFixture(t)
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='failed' WHERE project_id=? AND seq=2`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	staleDecision, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: 2, Origin: "test:resolved", Kind: "recovery", Question: "Relaunch?", Options: []string{"relaunch", "discard"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done' WHERE project_id=? AND seq=2`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	var obsoleteAt int64
+	if err := db.QueryRowContext(ctx, `SELECT obsolete_at FROM decisions WHERE id=?`, staleDecision.ID).Scan(&obsoleteAt); err != nil || obsoleteAt != 0 {
+		t.Fatalf("Decision was obsolete before the pending read: obsolete_at=%d, err=%v", obsoleteAt, err)
+	}
+	pendingDecisions, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range pendingDecisions {
+		if decision.ID == staleDecision.ID {
+			t.Fatalf("PendingDecisions listed resolved Decision %d", staleDecision.ID)
+		}
+	}
+	if err := db.QueryRowContext(ctx, `SELECT obsolete_at FROM decisions WHERE id=?`, staleDecision.ID).Scan(&obsoleteAt); err != nil || obsoleteAt != 0 {
+		t.Fatalf("PendingDecisions wrote obsolete_at=%d, err=%v", obsoleteAt, err)
+	}
+	t.Setenv("HERDR_PANE_ID", project.LeadPaneID)
+	for _, command := range []struct {
+		args []string
+		lead bool
+	}{{args: []string{"lead"}, lead: true}, {}} {
+		result := runJSON(t, home, command.args...)
+		if command.lead {
+			pending := result["pending"].(map[string]any)
+			ids := pending["decisions"].([]any)
+			if len(ids) != 1 || ids[0] != float64(openDecision.ID) {
+				t.Fatalf("Lead pending Decisions = %v, want only %d", ids, openDecision.ID)
+			}
+		} else {
+			rows := result["needs_you"].([]any)
+			for _, row := range rows {
+				item := row.(map[string]any)
+				ids, _ := item["decisions"].([]any)
+				for _, id := range ids {
+					if id == float64(staleDecision.ID) {
+						t.Fatalf("needs_you listed resolved Decision %d", staleDecision.ID)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestLeadPrintsPendingBlock(t *testing.T) {
 	home, project, decision := pendingFixture(t)
 	t.Setenv("HERDR_PANE_ID", project.LeadPaneID)
@@ -147,5 +209,40 @@ func TestUpAllFromLiveLeadRestoresProject(t *testing.T) {
 	cli.Out, cli.ErrOut = output, output
 	if code := cli.Run([]string{"up", "--all"}); code != 0 || !strings.Contains(output.String(), "state: restored") || strings.Contains(output.String(), "runs in the Lead pane") {
 		t.Fatalf("up --all from a running Lead = %d: %s", code, output)
+	}
+}
+
+func TestNeedsYouListsIdleSlotHolderWhileAnotherTaskWaits(t *testing.T) {
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	held, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Held", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, held, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, held, store.StateWorking, store.StateDone, "worker", "committed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 2, Type: "change", Title: "Waiting", State: store.StateQueued, MergeMode: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().Add(-3 * time.Hour).UnixMilli()
+	for _, statement := range []string{`UPDATE transitions SET at=?`, `UPDATE tasks SET created_at=?`} {
+		if _, err := db.ExecContext(ctx, statement, long); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(project.Root)
+	t.Setenv("HERDR_PANE_ID", "")
+	result := runJSON(t, home)
+	rows, _ := result["needs_you"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("needs_you = %v, want the idle holder t1", result["needs_you"])
+	}
+	row := rows[0].(map[string]any)
+	if row["id"] != "t1" || !strings.Contains(row["reason"].(string), "t2") {
+		t.Fatalf("idle holder row = %v", row)
 	}
 }

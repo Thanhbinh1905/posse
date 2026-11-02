@@ -56,8 +56,7 @@ func (db *DB) TaskPlanRevisions(ctx context.Context, taskID int64) ([]string, er
 }
 
 // ReviseTaskPlan compares the admitted revision before recording an explicit
-// launch reconfiguration. Recorded merge-head evidence is invalidated in the same transaction;
-// old revisions and Signals remain history, not evidence for the new revision.
+// launch reconfiguration. It invalidates merge-head evidence unless the Task is merging.
 func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan) error {
 	previous, err := task.AdmittedPlan()
 	if err != nil {
@@ -75,7 +74,7 @@ func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan)
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, gated_sha='', updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
 		data, plan.Launch.ProfileName, plan.Launch.DispatchRule, time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State)
 	if err != nil {
 		return err
@@ -88,10 +87,13 @@ func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, task.ID, plan.Revision, data); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='' WHERE task_id=?`, task.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='' WHERE task_id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state<>'merging')`, task.ID, task.ID); err != nil {
 		return err
 	}
 	note := fmt.Sprintf("Execution plan revised from %d to %d; prior revision evidence invalidated", previous.Revision, plan.Revision)
+	if task.State == StateMerging {
+		note = fmt.Sprintf("Execution plan revised from %d to %d; merge gate retained", previous.Revision, plan.Revision)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, task.State, task.State, "lead", note, time.Now().UnixMilli()); err != nil {
 		return err
 	}
