@@ -751,6 +751,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				// A held Project keeps its recorded panes for `posse up`. Pure
 				// contention defers observations; Watch records it for maintenance
 				// diagnostics, while foreground commands warn about stale output.
+				if errors.Is(runErr, errRecoveryHeld) {
+					s.relabelProjectTabs(ctx, db, project)
+				}
 				if store.IsOnlyBusy(runErr) {
 					if options.watchObservation {
 						return cfg, runErr
