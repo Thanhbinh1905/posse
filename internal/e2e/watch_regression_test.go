@@ -639,12 +639,15 @@ exec "$POSSE_TEST_REAL_GIT" "$@"
 	stopLiveWatchRuntime(t, f.root)
 }
 
-func TestWatchHeartbeatStopsWhenProjectMaintenanceStalls(t *testing.T) {
+func TestWatchHeartbeatStaysFreshAndReportsStalledProjectMaintenance(t *testing.T) {
 	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
 	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
 		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
 	}
+	stopLiveWatchRuntime(t, f.root)
+	f.env = setEnv(f.env, "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "2s")
+	f.env = setEnv(f.env, "POSSE_TEST_WATCH_RUNTIME_HEARTBEAT_INTERVAL", "50ms")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -670,6 +673,15 @@ func TestWatchHeartbeatStopsWhenProjectMaintenanceStalls(t *testing.T) {
 	if _, err := f.db.ExecContext(context.Background(), `UPDATE project_watch_state SET checkout_checked_at=0 WHERE project_id=?`, f.project.ID); err != nil {
 		t.Fatal(err)
 	}
+	command := exec.Command(f.binary, "doctor", "--json")
+	command.Dir, command.Env = f.repo, f.env
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("start Project Watch with a bounded Git timeout: %v\n%s", err, output)
+	}
+	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
+		t.Fatalf("Project watch did not restart: %v", watchPIDs(f.root))
+	}
+	pid := watchPIDs(f.root)[0]
 	select {
 	case <-fetchStarted:
 	case <-time.After(10 * time.Second):
@@ -679,13 +691,43 @@ func TestWatchHeartbeatStopsWhenProjectMaintenanceStalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(7 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 	during, err := f.db.WatchRuntime(context.Background(), f.project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if during.HeartbeatAt != before.HeartbeatAt {
-		t.Fatalf("Watch heartbeat advanced while Project maintenance was stalled: before=%d during=%d", before.HeartbeatAt, during.HeartbeatAt)
+	if during.HeartbeatAt <= before.HeartbeatAt || time.Since(time.UnixMilli(during.HeartbeatAt)) > 5*time.Second {
+		t.Fatalf("Watch heartbeat did not stay fresh during the bounded Git fetch: before=%d during=%d", before.HeartbeatAt, during.HeartbeatAt)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "timed out") {
+			t.Fatalf("Git fetch timed out before its configured bound: %#v", notice)
+		}
+	}
+	if !waitForCondition(10*time.Second, func() bool {
+		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.Kind == "pr_watch_failing" && strings.Contains(notice.Summary, "timed out after 2s") {
+				return true
+			}
+		}
+		return false
+	}) {
+		notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("bounded Git fetch timeout was not reported: %#v", notices)
+	}
+	if pids := watchPIDs(f.root); len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("Watch did not remain alive after reporting the bounded fetch timeout: %v", pids)
 	}
 }
 
