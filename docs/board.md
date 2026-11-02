@@ -37,13 +37,14 @@ Dragging a Ready card onto Running asks for the same confirmation.
 
 ## Start from the board
 
-On confirm, the board sends one `posse-board-start` prompt with the issue number to the Lead. The card shows "sent, waiting for the Lead". The Lead writes a one-ticket Brief with `review: quick`, quotes the confirmation in its `## Intent` block and starts it with `posse start --queue`. On the next refresh the card becomes the Task and the activity line shows `started tN for #N`.
+On confirm, the board sends a `posse-board-start` prompt with the issue number and a unique request ID. The card shows "sent, waiting for the Lead". The Lead writes a one-ticket Brief with `review: quick`, quotes the confirmation in `## Intent`, and starts it with `posse start --queue`. After the start succeeds or the Lead declines it, the Lead writes an empty marker named with the request ID in `board/start-completions/`. On refresh, the board replaces a successful start with its Task or returns a declined issue to Ready.
 
 ## Data
 
-The board lives in `~/.posse/projects/<project>/board/`. The skill's `refresh.sh` copies the fixed `board.html` there as `index.html` only when it changed, and writes two data files:
+The board lives in `~/.posse/projects/<project>/board/`. The skill's `refresh.sh` copies the fixed `board.html` there as `index.html` only when it changed, and writes three data files:
 
 - `posse.js`: `posse --full --json`.
 - `issues.js`: `gh issue list --label ready-for-agent --state all --limit 200 --json number,title,state,body,url,createdAt,closedAt,labels`.
+- `starts.js`: request IDs found in `start-completions/`.
 
-Each file wraps the raw JSON in one `posseBoardData(...)` call, because Lavish serves the page in a sandboxed iframe that cannot `fetch` sibling files. The page maps the data to columns and lanes itself, so the Lead never writes HTML and the board looks the same on every load.
+Each file wraps JSON in one `posseBoardData(...)` call because Lavish serves the page in a sandboxed iframe that cannot `fetch` sibling files. The page maps the data to columns and lanes, so the Lead never writes HTML.
