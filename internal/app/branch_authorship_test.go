@@ -18,10 +18,10 @@ func TestPublishRefusesStaleBranchAuthorGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, false); err != nil {
+	if _, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 2, fixture.headSHA, true)
+	claim, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 2, fixture.headSHA, fixture.headSHA, true)
 	if err != nil {
 		t.Fatal(err)
 	}

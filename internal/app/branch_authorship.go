@@ -32,32 +32,54 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 	if previousErr != nil && previousErr != store.ErrNotFound {
 		return 0, previousErr
 	}
-	if previousErr == nil && previous.TaskID > 0 {
+	previousHead := head
+	if previousErr == nil {
+		previousHead = previous.HeadSHA
+		if err := requireBranchHeadAncestor(ctx, task.WorktreePath, previousHead, head); err != nil {
+			return 0, err
+		}
 		if task.PRURL != "" {
 			remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
 			if err != nil {
 				return 0, err
 			}
-			if remoteHead == "" || remoteHead != head {
+			if remoteHead == "" {
 				return 0, store.ErrBranchAuthorHeadChanged
+			}
+			if err := requireBranchHeadAncestor(ctx, task.WorktreePath, remoteHead, head); err != nil {
+				return 0, err
 			}
 		} else if candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, ""); candidateErr == nil {
 			expectedHead := candidate.SubmittedSHA
 			if candidate.PromotedSHA != "" {
 				expectedHead = candidate.PromotedSHA
 			}
-			if expectedHead != head {
-				return 0, store.ErrBranchAuthorHeadChanged
+			if err := requireBranchHeadAncestor(ctx, task.WorktreePath, expectedHead, head); err != nil {
+				return 0, err
 			}
 		} else if candidateErr != store.ErrNotFound {
 			return 0, candidateErr
 		}
 	}
-	claim, err := db.ClaimBranchAuthor(ctx, repository, task.Branch, task.ID, attempt, head, previousWriterStopped)
+	confirmedHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+	if err != nil {
+		return 0, err
+	}
+	if confirmedHead != head {
+		return 0, store.ErrBranchAuthorHeadChanged
+	}
+	claim, err := db.ClaimBranchAuthor(ctx, repository, task.Branch, task.ID, attempt, previousHead, head, previousWriterStopped)
 	if err != nil {
 		return 0, err
 	}
 	return claim.Generation, nil
+}
+
+func requireBranchHeadAncestor(ctx context.Context, worktree, ancestor, head string) error {
+	if _, err := gitOutput(ctx, worktree, "merge-base", "--is-ancestor", ancestor, head); err != nil {
+		return store.ErrBranchAuthorHeadChanged
+	}
+	return nil
 }
 
 func requireWorkerBranchAuthor(ctx context.Context, db *store.DB, task store.Task) error {

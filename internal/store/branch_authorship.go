@@ -26,17 +26,18 @@ type BranchAuthorClaim struct {
 
 // ClaimBranchAuthor transfers branch authorship after the caller has stopped
 // the prior Worker and verified the current external head.
-func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, taskID int64, attempt int, expectedHead string, previousWriterStopped bool) (BranchAuthorClaim, error) {
-	repository, branch, expectedHead = strings.TrimSpace(repository), strings.TrimSpace(branch), strings.TrimSpace(expectedHead)
-	if repository == "" || branch == "" || taskID < 1 || attempt < 1 || !validValidationSHA(expectedHead) {
-		return BranchAuthorClaim{}, fmt.Errorf("repository, branch, task, attempt and expected head are required")
+func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, taskID int64, attempt int, previousHead, nextHead string, previousWriterStopped bool) (BranchAuthorClaim, error) {
+	repository, branch = strings.TrimSpace(repository), strings.TrimSpace(branch)
+	previousHead, nextHead = strings.TrimSpace(previousHead), strings.TrimSpace(nextHead)
+	if repository == "" || branch == "" || taskID < 1 || attempt < 1 || !validValidationSHA(previousHead) || !validValidationSHA(nextHead) {
+		return BranchAuthorClaim{}, fmt.Errorf("repository, branch, task, attempt and valid heads are required")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return BranchAuthorClaim{}, err
 	}
 	defer tx.Rollback()
-	claim := BranchAuthorClaim{Repository: repository, Branch: branch, TaskID: taskID, Attempt: attempt, HeadSHA: expectedHead}
+	claim := BranchAuthorClaim{Repository: repository, Branch: branch, TaskID: taskID, Attempt: attempt, HeadSHA: nextHead}
 	var ownerTask int64
 	var ownerAttempt int
 	var generation int64
@@ -44,22 +45,23 @@ func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, 
 	err = tx.QueryRowContext(ctx, `SELECT task_id,attempt,generation,head_sha FROM branch_authorship WHERE repository=? AND branch=?`, repository, branch).Scan(&ownerTask, &ownerAttempt, &generation, &head)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		if previousHead != nextHead {
+			return BranchAuthorClaim{}, ErrBranchAuthorHeadChanged
+		}
 		claim.Generation = 1
-		_, err = tx.ExecContext(ctx, `INSERT INTO branch_authorship(repository,branch,task_id,attempt,generation,head_sha,updated_at) VALUES(?,?,?,?,?,?,?)`, repository, branch, taskID, attempt, claim.Generation, expectedHead, time.Now().UnixMilli())
+		_, err = tx.ExecContext(ctx, `INSERT INTO branch_authorship(repository,branch,task_id,attempt,generation,head_sha,updated_at) VALUES(?,?,?,?,?,?,?)`, repository, branch, taskID, attempt, claim.Generation, nextHead, time.Now().UnixMilli())
 	case err != nil:
 		return BranchAuthorClaim{}, err
-	case ownerTask == taskID && ownerAttempt == attempt && !previousWriterStopped:
-		return BranchAuthorClaim{}, ErrBranchAuthorWriterActive
 	case !previousWriterStopped:
 		return BranchAuthorClaim{}, ErrBranchAuthorWriterActive
-	case head != expectedHead:
+	case head != previousHead:
 		return BranchAuthorClaim{}, ErrBranchAuthorHeadChanged
 	default:
-		if err := invalidateBranchAuthorEvidenceTx(ctx, tx, ownerTask, expectedHead); err != nil {
+		if err := invalidateBranchAuthorEvidenceTx(ctx, tx, ownerTask, nextHead); err != nil {
 			return BranchAuthorClaim{}, err
 		}
 		claim.Generation = generation + 1
-		_, err = tx.ExecContext(ctx, `UPDATE branch_authorship SET task_id=?,attempt=?,generation=?,head_sha=?,updated_at=? WHERE repository=? AND branch=? AND generation=?`, taskID, attempt, claim.Generation, expectedHead, time.Now().UnixMilli(), repository, branch, generation)
+		_, err = tx.ExecContext(ctx, `UPDATE branch_authorship SET task_id=?,attempt=?,generation=?,head_sha=?,updated_at=? WHERE repository=? AND branch=? AND generation=? AND head_sha=?`, taskID, attempt, claim.Generation, nextHead, time.Now().UnixMilli(), repository, branch, generation, previousHead)
 	}
 	if err != nil {
 		return BranchAuthorClaim{}, err

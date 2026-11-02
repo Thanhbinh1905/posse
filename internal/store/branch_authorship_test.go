@@ -27,14 +27,14 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, branchAuthorTestSHA, false)
+	first, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, branchAuthorTestSHA, branchAuthorTestSHA, false)
 	if err != nil || first.Generation != 1 {
 		t.Fatalf("initial claim = %#v, %v", first, err)
 	}
-	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, branchAuthorTestSHA, false); !errors.Is(err, ErrBranchAuthorWriterActive) {
+	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, branchAuthorTestSHA, branchAuthorTestSHA, false); !errors.Is(err, ErrBranchAuthorWriterActive) {
 		t.Fatalf("duplicate claim in the same attempt error = %v", err)
 	}
-	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorTestSHA, false); !errors.Is(err, ErrBranchAuthorWriterActive) {
+	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorTestSHA, branchAuthorTestSHA, false); !errors.Is(err, ErrBranchAuthorWriterActive) {
 		t.Fatalf("claim with an unstopped writer error = %v", err)
 	}
 	reviewID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "review", Title: "Review", ShortName: "review", ReviewsTaskID: taskID}, func(int) (bool, error) { return false, nil })
@@ -56,10 +56,10 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO merge_queue_entries(project_id,task_id,repo,target_branch,entered_at,created_at) VALUES(?,?,'','main',1,1)`, project.ID, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorOtherSHA, true); !errors.Is(err, ErrBranchAuthorHeadChanged) {
+	if _, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorOtherSHA, branchAuthorTestSHA, true); !errors.Is(err, ErrBranchAuthorHeadChanged) {
 		t.Fatalf("claim with a mismatched head error = %v", err)
 	}
-	second, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorTestSHA, true)
+	second, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 2, branchAuthorTestSHA, branchAuthorTestSHA, true)
 	if err != nil || second.Generation != 2 {
 		t.Fatalf("successor claim = %#v, %v", second, err)
 	}
@@ -93,7 +93,7 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", newTaskID, 1, branchAuthorTestSHA, true)
+	third, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", newTaskID, 1, branchAuthorTestSHA, branchAuthorTestSHA, true)
 	if err != nil || third.Generation != 3 {
 		t.Fatalf("cross-Task claim = %#v, %v", third, err)
 	}
@@ -112,7 +112,7 @@ func TestBranchAuthorClaimRequiresStoppedWriterAndExpectedHead(t *testing.T) {
 func TestBranchAuthorTransferInvalidatesReviewPass(t *testing.T) {
 	targets := []ReviewTarget{{Repository: "shop", Commit: reviewShaA}}
 	fixture := newReviewVerdictFixture(t, targets)
-	if _, err := fixture.db.ClaimBranchAuthor(fixture.ctx, "/repo/.git", "posse/change", fixture.change, 1, reviewShaA, false); err != nil {
+	if _, err := fixture.db.ClaimBranchAuthor(fixture.ctx, "/repo/.git", "posse/change", fixture.change, 1, reviewShaA, reviewShaA, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.db.RecordWorkerSignalWithVerdict(fixture.ctx, fixture.task(t, fixture.review), "done", "reviewed", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewPass, ReportSHA256: reportHash}); err != nil {
@@ -125,7 +125,7 @@ func TestBranchAuthorTransferInvalidatesReviewPass(t *testing.T) {
 		_ = fixture.db.QueryRowContext(fixture.ctx, `SELECT COUNT(*) FROM review_verdicts v JOIN tasks t ON t.id=v.task_id JOIN review_rounds r ON r.review_task_id=v.task_id AND r.ship_task_id=t.reviews_task_id AND r.status='verdict' AND r.verdict=v.verdict WHERE t.reviews_task_id=?`, fixture.change).Scan(&joined)
 		t.Fatalf("fresh Review pass = %t, %v; rounds=%d verdicts=%d joined=%d", ok, err, rounds, verdicts, joined)
 	}
-	if _, err := fixture.db.ClaimBranchAuthor(fixture.ctx, "/repo/.git", "posse/change", fixture.change, 2, reviewShaA, true); err != nil {
+	if _, err := fixture.db.ClaimBranchAuthor(fixture.ctx, "/repo/.git", "posse/change", fixture.change, 2, reviewShaA, reviewShaA, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := fixture.db.CurrentReviewPass(fixture.ctx, fixture.change, targets); err != nil || ok {
