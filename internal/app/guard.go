@@ -944,7 +944,7 @@ func (g *guard) shell(e *shellEnv, args []string, literal []bool, raw, stdin str
 				return g.opaque(e, raw, raw)
 			}
 			return g.check(e.clone(), args[index+1], depth+1, stdinRedirected)
-		case arg == "-o" || arg == "+o" || arg == "--rcfile" || arg == "--init-file":
+		case arg == "-o" || arg == "+o" || arg == "-O" || arg == "+O" || arg == "--rcfile" || arg == "--init-file":
 			index++
 		case strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+"):
 		default:
@@ -982,6 +982,7 @@ func shellNoexec(args []string) bool {
 		case arg == "-O" || arg == "+O" || arg == "--rcfile" || arg == "--init-file":
 			index++
 		case strings.HasPrefix(arg, "--rcfile=") || strings.HasPrefix(arg, "--init-file="):
+			continue
 		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--"):
 			noexec = noexec || strings.Contains(arg[1:], "n")
 		case strings.HasPrefix(arg, "+"):
@@ -989,6 +990,7 @@ func shellNoexec(args []string) bool {
 				noexec = false
 			}
 		case strings.HasPrefix(arg, "--"):
+			continue
 		default:
 			return noexec
 		}

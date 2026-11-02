@@ -575,6 +575,7 @@ func TestGuardAllowsShellSyntaxChecksThatMentionHerdr(t *testing.T) {
 	for _, command := range []string{
 		"bash -n +n -c 'herdr workspace close w1'",
 		"bash -n +n check.sh",
+		"bash -O extglob -n +n -c 'herdr workspace close w1'",
 		"bash -o noexec +o noexec -c 'herdr workspace close w1'",
 	} {
 		if refused, reason := guardCommand(command, scope); !refused {
