@@ -2136,6 +2136,13 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	}
 	noticeSummary := note
 	noticeDataJSON := string(encoded)
+	if noticeKind == "task_done" {
+		if noticeData, ok := data.(map[string]any); ok {
+			if nextAction, ok := noticeData["next_action"].(string); ok && nextAction != "" {
+				noticeSummary += ". Next action: " + nextAction
+			}
+		}
+	}
 	if workerResumed {
 		noticeKind = "worker_resumed"
 		noticeSummary = task.Title + ": Worker resumed: " + strconv.Quote(note)
@@ -2284,6 +2291,24 @@ FROM messages WHERE task_id=? AND status='delivered' AND created_at>=? ORDER BY 
 		messages[left], messages[right] = messages[right], messages[left]
 	}
 	return messages, nil
+}
+
+func (db *DB) DeliveredTaskMessagesThrough(ctx context.Context, taskID, deliveredAt int64) ([]Message, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
+FROM messages WHERE task_id=? AND status='delivered' AND delivered_at<=? ORDER BY delivered_at, id`, taskID, deliveredAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []Message
+	for rows.Next() {
+		var message Message
+		if err := rows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
 }
 
 func (db *DB) UnfinishedTaskMessages(ctx context.Context, taskID int64) ([]Message, error) {

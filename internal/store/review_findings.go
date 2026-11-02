@@ -226,6 +226,10 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 			if !finding.InScope {
 				origin = "pre_existing"
 			}
+			patternKey := key
+			if origin == "pre_existing" {
+				patternKey = "pre-existing:" + key
+			}
 
 			if sequence, claimed := findingSequence(finding.Regresses); claimed {
 				prior, exists := ledgerBySequence[sequence]
@@ -267,10 +271,10 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 				}
 			}
 
-			patternID, found := patternIDs[key]
+			patternID, found := patternIDs[patternKey]
 			if !found {
 				var existing int64
-				err := tx.QueryRowContext(ctx, `SELECT id FROM review_patterns WHERE ship_task_id=? AND key=?`, changeTaskID, key).Scan(&existing)
+				err := tx.QueryRowContext(ctx, `SELECT id FROM review_patterns WHERE ship_task_id=? AND key=?`, changeTaskID, patternKey).Scan(&existing)
 				if err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return result, err
 				}
@@ -280,7 +284,7 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 						return result, err
 					}
 					inserted, err := tx.ExecContext(ctx, `INSERT INTO review_patterns(ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(?,?,?,?,?,?,?,?)`,
-						changeTaskID, seq, key, pattern.Title, pattern.Rule, pattern.RootCause, pattern.FixGuidance, round)
+						changeTaskID, seq, patternKey, pattern.Title, pattern.Rule, pattern.RootCause, pattern.FixGuidance, round)
 					if err != nil {
 						return result, err
 					}
@@ -291,7 +295,7 @@ func recordReviewFindingsTx(ctx context.Context, tx *writeTx, changeTaskID, revi
 					}
 				}
 				patternID = existing
-				patternIDs[key] = patternID
+				patternIDs[patternKey] = patternID
 			}
 			var seq int
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0)+1 FROM review_findings WHERE ship_task_id=?`, changeTaskID).Scan(&seq); err != nil {
