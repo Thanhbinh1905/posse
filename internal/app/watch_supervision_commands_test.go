@@ -9,6 +9,30 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 )
 
+func TestWorkerCommandsSkipWatchSupervision(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	t.Setenv(workerHomeEnv, fixture.home)
+	previous := watchExecutableVerifier
+	t.Cleanup(func() { watchExecutableVerifier = previous })
+	calls := 0
+	watchExecutableVerifier = func(string) bool {
+		calls++
+		return false
+	}
+	service := New(fixture.home, nil)
+	ctx := &axi.Context{Context: context.Background(), Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}}
+	for _, name := range []string{"validate", "publish", "signal"} {
+		command := &axi.Command{Name: name, Handler: func(*axi.Context, []string) error { return nil }}
+		service.structureStoreErrors(command)
+		if err := command.Handler(ctx, nil); err != nil {
+			t.Fatalf("Worker %s command failed: %v", name, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("Worker commands triggered Project Watch supervision %d times", calls)
+	}
+}
+
 func TestNoticeOnlyCommandsSkipWatchSupervision(t *testing.T) {
 	previous := watchExecutableVerifier
 	t.Cleanup(func() { watchExecutableVerifier = previous })
