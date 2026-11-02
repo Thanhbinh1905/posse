@@ -370,7 +370,7 @@ block_at = "P1"
 }
 
 func TestReviewLaunchFindingsExampleCarriesFilledResolution(t *testing.T) {
-	brief := string(generatedReviewBrief(store.Task{Seq: 1}, taskplan.Plan{}, 1, nil, false))
+	brief := string(generatedReviewBrief(store.Task{Seq: 1}, taskplan.Plan{}, 1, nil, nil, false))
 	_, after, ok := strings.Cut(brief, "```json\n")
 	if !ok {
 		t.Fatal("review brief has no json example")
