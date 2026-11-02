@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Runs the checks that have broken main after a merge: staticcheck, the E2E
-# shard assignment self-test, go generate leaving no diff, and migration numbers
-# that origin/main already uses. Run it before posse publish.
+# Runs the checks that have broken main after a merge: staticcheck, generated
+# code, E2E shard assignments, and migration numbers that origin/main already
+# uses. Run it before posse publish.
 cd "$(git rev-parse --show-toplevel)"
 
 migrations_dir=internal/store/migrations
@@ -24,12 +24,11 @@ scripts/run-e2e-shard.sh --self-test || fail "E2E shard self-test failed; record
 step "staticcheck"
 scripts/staticcheck.sh || fail "staticcheck failed"
 
-step "go generate"
-before=$(git status --porcelain)
-go generate ./...
-after=$(git status --porcelain)
-if [ "$before" != "$after" ]; then
-  git status --short >&2
+step "generated code"
+if ! go generate ./...; then
+  fail "go generate failed"
+fi
+if ! git diff --exit-code; then
   fail "go generate changed files; commit the regenerated output"
 fi
 
