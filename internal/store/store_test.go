@@ -695,6 +695,8 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
 		`CREATE UNIQUE INDEX projects_project_uuid_idx ON projects(project_uuid)`,
+		`DROP TABLE branch_author_invalidated_verdicts`,
+		`DROP TABLE branch_authorship`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("prepare legacy project UUID database: %v", err)
@@ -848,6 +850,8 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
+		`DROP TABLE branch_author_invalidated_verdicts`,
+		`DROP TABLE branch_authorship`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("prepare legacy receipt migration: %v", err)
@@ -1072,6 +1076,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
 		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
+		`DROP TABLE branch_author_invalidated_verdicts`,
+		`DROP TABLE branch_authorship`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("prepare pre-migration database: %v", err)

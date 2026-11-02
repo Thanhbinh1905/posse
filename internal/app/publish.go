@@ -62,6 +62,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if err := requireWorkerBranchAuthor(out.Context, db, task); err != nil {
+		return axi.Failure("publish_refused", "the Worker does not hold the current branch author claim", false, err.Error())
+	}
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {
 		return admittedPlanFailure(planErr)
@@ -206,6 +209,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
 	}
+	if err := requireWorkerBranchAuthor(out.Context, db, task); err != nil {
+		return axi.Failure("publish_refused", "the branch author claim changed before push", false, err.Error())
+	}
 	if rewrite {
 		if err := recordBranchRewrite(out.Context, db, project, task, parsed.Flags["repo"], previousRemoteHead, sha, rewriteQuote); err != nil {
 			return err
@@ -213,6 +219,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
+	}
+	if err := updateWorkerBranchAuthorHead(out.Context, db, task, sha); err != nil {
+		return err
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
