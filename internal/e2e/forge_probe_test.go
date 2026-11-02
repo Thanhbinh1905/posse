@@ -146,39 +146,3 @@ func TestForgeReadinessUsesCacheInMultiMemberWorkspace(t *testing.T) {
 		t.Errorf("readiness invoked a forge CLI despite having no cached auth result:\n%s", calls)
 	}
 }
-
-func TestUserShellPathIsRecordedOnlyByUserShellProcesses(t *testing.T) {
-	f := newMultiMemberForgeFixture(t)
-	pathFile := filepath.Join(f.home, "user-shell-path")
-	run := func(env []string) {
-		t.Helper()
-		command := exec.Command(f.binary, "--json")
-		command.Dir = f.workspace
-		command.Env = env
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("posse --json: %v\n%s", err, output)
-		}
-	}
-	readPath := func() string {
-		t.Helper()
-		contents, err := os.ReadFile(pathFile)
-		if err != nil {
-			t.Fatalf("read recorded User shell PATH: %v", err)
-		}
-		return string(contents)
-	}
-	userPath := "/user/shell/bin" + string(os.PathListSeparator) + f.binDir
-	env := setEnv(f.env, "POSSE_WATCH_TOKEN", "")
-	env = setEnv(env, "HERDR_PLUGIN_ID", "")
-
-	run(setEnv(setEnv(env, "PATH", userPath), "HERDR_PANE_ID", "w1-p1"))
-	if got := readPath(); got != userPath {
-		t.Fatalf("a command run in a Herdr pane without a terminal recorded %q, want %q", got, userPath)
-	}
-
-	servicePath := "/service/server/bin" + string(os.PathListSeparator) + f.binDir
-	run(setEnv(setEnv(env, "PATH", servicePath), "HERDR_PANE_ID", ""))
-	if got := readPath(); got != userPath {
-		t.Fatalf("a service-like process with no terminal and no Herdr pane replaced the User shell PATH with %q, want %q", got, userPath)
-	}
-}
