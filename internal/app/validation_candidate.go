@@ -205,11 +205,11 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 			continue
 		}
 		if candidate.State == store.ValidationCandidateStale || actual != candidate.SubmittedSHA || branch != "refs/heads/"+task.Branch {
-			refreshAfterTargetMerge := false
+			refreshCandidateAfterMove := false
 			if allowResubmission && candidate.State == store.ValidationCandidateActive && actual != candidate.SubmittedSHA && branch == "refs/heads/"+task.Branch {
-				refreshAfterTargetMerge, err = candidateAuthorIncludesNewTarget(ctx, lane, candidate, actual)
+				refreshCandidateAfterMove, err = candidateAuthorCanRefreshAfterMove(ctx, lane, candidate, actual)
 				if err != nil {
-					return axi.Failure("candidate_target_head_failed", "could not verify whether the moved Task branch includes the current frozen target", true, err.Error())
+					return axi.Failure("candidate_target_head_failed", "could not verify whether the moved Task branch can safely refresh the stale candidate", true, err.Error())
 				}
 			}
 			canMarkStale := candidate.State == store.ValidationCandidatePreparing || candidate.State == store.ValidationCandidateActive
@@ -225,9 +225,6 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 					return err
 				}
 				candidate.State = store.ValidationCandidateStale
-				if refreshAfterTargetMerge {
-					continue
-				}
 			}
 			if candidate.State != store.ValidationCandidatePromoting && branch == "refs/heads/"+task.Branch {
 				promoted, err := db.PromotedValidationCandidateBefore(ctx, task.ID, candidate.Repo, candidate.Generation)
@@ -238,19 +235,30 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 					return candidateReturnedToPromotedFailure(memberTask, candidate, actual, lane.repo)
 				}
 			}
+			if refreshCandidateAfterMove {
+				continue
+			}
 			return candidateAuthorMovedFailure(memberTask, candidate, actual, branch)
 		}
 	}
 	return nil
 }
 
-func candidateAuthorIncludesNewTarget(ctx context.Context, lane candidateLane, candidate store.ValidationCandidate, authorHead string) (bool, error) {
+func candidateAuthorCanRefreshAfterMove(ctx context.Context, lane candidateLane, candidate store.ValidationCandidate, authorHead string) (bool, error) {
 	targetHead, err := lane.targetHead(ctx)
 	if err != nil || targetHead == "" {
 		return false, err
 	}
 	if targetHead == candidate.TargetSHA {
-		return false, nil
+		submittedTree, err := gitOutput(ctx, lane.task.WorktreePath, "rev-parse", "--verify", candidate.SubmittedSHA+"^{tree}")
+		if err != nil {
+			return false, nil
+		}
+		authorTree, err := gitOutput(ctx, lane.task.WorktreePath, "rev-parse", "--verify", authorHead+"^{tree}")
+		if err != nil {
+			return false, err
+		}
+		return submittedTree == authorTree, nil
 	}
 	if !lane.localDelivery() {
 		branch := lane.targetBranch()

@@ -697,6 +697,93 @@ func TestPrivateCandidateSubmissionStaysLocalAndRecoversCheckout(t *testing.T) {
 	}
 }
 
+func TestFullPipelinePublishRefreshesCandidateAfterSquashOnUnchangedTarget(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "second-change.txt"), []byte("second worker change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "second-change.txt")
+	gitTest(t, fixture.worktree, "commit", "-m", "second worker change")
+	submitThroughCLI(t, fixture)
+	oldCandidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitTest(t, fixture.worktree, "reset", "--soft", "refs/remotes/origin/main")
+	gitTest(t, fixture.worktree, "commit", "-m", "squash Task changes")
+	squashedHead := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	if squashedHead == oldCandidate.SubmittedSHA {
+		t.Fatal("squash did not rewrite Task history")
+	}
+	if tree := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD^{tree}")); tree != strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", oldCandidate.SubmittedSHA+"^{tree}")) {
+		t.Fatalf("squash changed the Task tree: got %s", tree)
+	}
+	if target := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "refs/remotes/origin/main")); target != oldCandidate.TargetSHA {
+		t.Fatalf("target moved during squash: got %s, candidate target %s", target, oldCandidate.TargetSHA)
+	}
+
+	if code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert"); code != 0 {
+		t.Fatalf("publish after squash on unchanged target exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	fresh, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ID == oldCandidate.ID || fresh.Generation != oldCandidate.Generation+1 || fresh.State != store.ValidationCandidateActive || fresh.SubmittedSHA != squashedHead || fresh.TargetSHA != oldCandidate.TargetSHA {
+		t.Fatalf("fresh candidate=%+v; old candidate=%+v", fresh, oldCandidate)
+	}
+	candidates, err := fixture.db.ValidationCandidates(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldState string
+	for _, candidate := range candidates {
+		if candidate.ID == oldCandidate.ID {
+			oldState = candidate.State
+		}
+	}
+	if oldState != store.ValidationCandidateSuperseded {
+		t.Fatalf("old candidate state after squash refresh=%q, want %q", oldState, store.ValidationCandidateSuperseded)
+	}
+}
+
+func TestFullPipelineSquashRefreshDoesNotAllowReturningToPromotedHead(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	promoted, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.BeginValidationCandidatePromotion(context.Background(), promoted.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.CompleteValidationCandidatePromotion(context.Background(), promoted.ID, promoted.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitTest(t, fixture.worktree, "commit", "--amend", "-m", "rewritten history with the same tree")
+	submitThroughCLI(t, fixture)
+	pending, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "reset", "--hard", promoted.PromotedSHA)
+	if code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert"); code == 0 || !strings.Contains(output+stderr, "returned to the promoted head") {
+		t.Fatalf("publish accepted a return to the promoted head: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	stale, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || stale.ID != pending.ID || stale.State != store.ValidationCandidateStale {
+		t.Fatalf("pending candidate after rejected return=%+v err=%v", stale, err)
+	}
+}
+
 func TestCandidateAuthorMovementRequiresResubmission(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
