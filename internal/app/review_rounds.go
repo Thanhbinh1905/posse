@@ -126,6 +126,12 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if maxRounds < 1 || maxRounds > 3 {
 		return axi.Failure("plan_invalid", "Change Task has an invalid frozen Review Round cap", false)
 	}
+	if profile == "" {
+		profile, err = s.autoStartReviewProfile(ctx.Context, project, home)
+		if err != nil {
+			return err
+		}
+	}
 	generated, err := buildReviewRound(ctx.Context, db, project, change, *plan, maxRounds, home)
 	if err != nil {
 		return err

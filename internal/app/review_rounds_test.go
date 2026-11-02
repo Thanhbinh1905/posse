@@ -647,6 +647,59 @@ VALUES(?,1,?,?,'delta',?,?,?,?,?,'[]','verdict','pass',0)`, change.ID, change.ID
 	}
 }
 
+func TestReviewStartWithoutProfileChoosesReviewerIndependentOfAuthor(t *testing.T) {
+	configText := `[defaults]
+merge_mode = "local"
+review = "quick"
+
+[profiles.author]
+kind = "claude"
+model = "author-model"
+
+[profiles.sonnet]
+kind = "claude"
+model = "review-model-a"
+
+[profiles.opus]
+kind = "claude"
+model = "review-model-b"
+
+[[dispatch]]
+type = "change"
+use = "author"
+
+[[dispatch]]
+type = "review"
+use = "sonnet"
+
+[[dispatch]]
+type = "review"
+use = "opus"
+
+[review_loop]
+enabled = true
+auto_start = true
+`
+	f, db, change := newAutoStartReviewFixture(t, configText)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code != 0 {
+		t.Fatalf("review start without --profile exit=%d output=%s", code, output.String())
+	}
+	rounds, err := db.ReviewRoundsFor(context.Background(), change.ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("review rounds = %#v, %v", rounds, err)
+	}
+	review, err := db.TaskByID(context.Background(), change.ProjectID, rounds[0].ReviewTaskID)
+	if err != nil || review.Profile != "sonnet" || review.Profile == "author" {
+		t.Fatalf("Review Task profile=%q, err=%v", review.Profile, err)
+	}
+}
+
 func TestAutoStartPicksFirstReviewRuleCandidateEvenWithAuthorModel(t *testing.T) {
 	f, db, change := newAutoStartReviewFixture(t, `[defaults]
 merge_mode = "local"
