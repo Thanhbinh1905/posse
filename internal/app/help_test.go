@@ -66,6 +66,11 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("signal help omitted Signal file flags: code=%d output=%s", code, output.String())
 	}
 
+	output.Reset()
+	if code := cli.Run([]string{"validate", "test", "--help"}); code != 0 || !strings.Contains(output.String(), "Each --verify value must contain a command and result separated by ->") {
+		t.Fatalf("validate help omitted the --verify separator rule: code=%d output=%s", code, output.String())
+	}
+
 	var checkSummary func(*axi.Command)
 	checkSummary = func(command *axi.Command) {
 		if command.Summary != "" && strings.ContainsAny(command.Summary, "\r\n") {

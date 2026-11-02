@@ -173,5 +173,5 @@ func pendingCandidateFailure(ctx context.Context, db *store.DB, task store.Task)
 		message = candidate.Repo + ": " + message
 		command += " --repo " + candidate.Repo
 	}
-	return axi.Failure("candidate_pending", message, false, "Promote it through validation with `posse publish`, or abandon it with `"+command+" --reason \"<why>\"`")
+	return axi.Failure("candidate_pending", message, false, "Run `posse review start "+taskIDString(task.Seq)+"` to start the Review Round, then complete validation and run `posse publish`, or abandon it with `"+command+" --reason \"<why>\"`")
 }

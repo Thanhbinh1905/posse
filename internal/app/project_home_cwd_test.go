@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -47,7 +48,8 @@ func TestProjectForCWDResolvesFromPosseHomeFolder(t *testing.T) {
 	}
 	t.Chdir(stray)
 	_, err = service.projectForCWD(context.Background(), db)
-	if err == nil || !strings.Contains(err.Error(), "not registered as a Project") {
-		t.Fatalf("unregistered home folder error = %v", err)
+	structured, ok := err.(*axi.Error)
+	if !ok || !strings.Contains(structured.Message, "not registered as a Project") || len(structured.Help) == 0 || !strings.Contains(structured.Help[0], filepath.Join(home, "projects", "<name>")) || strings.Contains(structured.Help[0], "~/.posse") {
+		t.Fatalf("unregistered home folder error = %#v", err)
 	}
 }
