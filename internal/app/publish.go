@@ -285,7 +285,7 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	} else if root, err := gitTop(ctx, ""); err != nil || !samePath(root, task.WorktreePath) {
 		return axi.Failure("publish_refused", "publish must run at the Task Sandbox or its private candidate checkout", false)
 	}
-	if err := s.refuseMovedCandidateAuthor(ctx, db, project, task, true); err != nil {
+	if err := s.refuseMovedCandidateAuthor(ctx, db, project, task, true, true); err != nil {
 		return err
 	}
 	if err := validateChangeSignal(ctx, lane.task); err != nil {
