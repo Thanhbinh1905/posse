@@ -33,6 +33,12 @@ type ReportAcceptance struct {
 	AcceptedAt   int64  `toml:"accepted_at" json:"accepted_at"`
 }
 
+type reportReviewInput struct {
+	ReportTaskID int64
+	ReportDigest string
+	Verdict      string
+}
+
 func (db *DB) RecordReportBundle(ctx context.Context, taskID int64, digest, manifestJSON string) error {
 	if manifestJSON == "" || digest != reportManifestDigest(manifestJSON) {
 		return fmt.Errorf("report bundle digest must be the SHA-256 of its manifest")
@@ -71,14 +77,28 @@ func (db *DB) RecordReportBundle(ctx context.Context, taskID int64, digest, mani
 }
 
 func (db *DB) RecordReportReview(ctx context.Context, reportTaskID, reviewTaskID int64, digest, verdict string) (ReportReview, error) {
-	if verdict != "pass" && verdict != "changes_requested" && verdict != "inconclusive" {
-		return ReportReview{}, fmt.Errorf("invalid Report-review verdict %q", verdict)
-	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return ReportReview{}, err
 	}
 	defer tx.Rollback()
+	review, err := recordReportReviewTx(ctx, tx, reportTaskID, reviewTaskID, digest, verdict)
+	if err != nil {
+		return ReportReview{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ReportReview{}, err
+	}
+	if err := db.PersistTask(ctx, reportTaskID); err != nil {
+		return ReportReview{}, err
+	}
+	return review, nil
+}
+
+func recordReportReviewTx(ctx context.Context, tx *writeTx, reportTaskID, reviewTaskID int64, digest, verdict string) (ReportReview, error) {
+	if verdict != "pass" && verdict != "changes_requested" && verdict != "inconclusive" {
+		return ReportReview{}, fmt.Errorf("invalid Report-review verdict %q", verdict)
+	}
 	var reportType, reportState, currentDigest, manifest string
 	var reportProjectID int64
 	var reportLaunches int
@@ -129,12 +149,6 @@ func (db *DB) RecordReportReview(ctx context.Context, reportTaskID, reviewTaskID
 		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT id,recorded_at FROM report_reviews WHERE report_task_id=? AND review_task_id=? AND report_digest=? AND reviewer_launch=?`, reportTaskID, reviewTaskID, digest, reviewerLaunches).Scan(&review.ID, &review.RecordedAt); err != nil {
-		return ReportReview{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return ReportReview{}, err
-	}
-	if err := db.PersistTask(ctx, reportTaskID); err != nil {
 		return ReportReview{}, err
 	}
 	return review, nil
