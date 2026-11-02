@@ -138,6 +138,9 @@ func (s *Service) commands() *axi.Command {
 			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
 			{Name: "archive", Usage: "$ knowledge archive <id> --reason <why> [--project <name>|--user]", Summary: "Move an entry to the never-loaded archive with provenance.", Handler: s.knowledgeArchive},
 		}},
+		{Name: "handoff", Summary: "Preserve conversation-only context for the next Lead.", Subcommands: []*axi.Command{
+			{Name: "write", Usage: "$ handoff write --file <file.md>", Summary: "Queue a bounded handoff note for the next Lead start.", Handler: s.handoffWrite},
+		}},
 		{Name: "preferences", Summary: "Inspect and update layered User and Project preferences.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Worker preferences with their sources.", Handler: s.preferencesShow},
 			{Name: "path", Usage: "$ preferences path <lead|worker> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},

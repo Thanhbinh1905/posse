@@ -1,0 +1,222 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/store"
+)
+
+func TestHandoffWriteLoadsOnceAndArchivesOnLeadStartup(t *testing.T) {
+	f := newPreferenceSetFixture(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLeadAgent(context.Background(), f.project.ID, store.LeadAgent{Kind: "claude", Session: "claude-session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(f.repo)
+	source := filepath.Join(f.root, "handoff.md")
+	const note = "Open question: should the delivery remain local?\nNext: check the frozen profile decision.\n"
+	if err := os.WriteFile(source, []byte(note), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := runPreferenceSetCLI(t, f.service, 0, "handoff", "write", "--file", source)
+	if !strings.Contains(output, "state: written") {
+		t.Fatalf("handoff write did not report success: %s", output)
+	}
+
+	pending := filepath.Join(f.home, "projects", "shop", "handoff.md")
+	contents, err := os.ReadFile(pending)
+	if err != nil || !strings.Contains(string(contents), "generation: 1") || !strings.Contains(string(contents), `harness: "claude"`) || !strings.Contains(string(contents), `session: "claude-session-1"`) || !strings.Contains(string(contents), note) {
+		t.Fatalf("handoff note lacks provenance or exact body: %q, %v", contents, err)
+	}
+
+	cfg, err := config.Load(f.home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, "pi"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "lead.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(first), note) != 1 {
+		t.Fatalf("Lead instructions must include the handoff exactly once: %s", first)
+	}
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("loaded handoff note was not removed from the pending path: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(f.home, "projects", "shop", "handoff-archive"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("handoff archive entries = %v, %v", entries, err)
+	}
+	archived, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "handoff-archive", entries[0].Name()))
+	if err != nil || !bytes.Contains(archived, []byte(note)) {
+		t.Fatalf("archived note lost its contents: %q, %v", archived, err)
+	}
+
+	if _, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "lead.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(second), note) {
+		t.Fatalf("consumed handoff reloaded on the next Lead start: %s", second)
+	}
+}
+
+func TestHandoffWriteDoesNotOverwriteAnUnconsumedNote(t *testing.T) {
+	f := newPreferenceSetFixture(t)
+	t.Chdir(f.repo)
+	first := filepath.Join(f.root, "first.md")
+	second := filepath.Join(f.root, "second.md")
+	if err := os.WriteFile(first, []byte("First handoff.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("Second handoff.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPreferenceSetCLI(t, f.service, 0, "handoff", "write", "--file", first)
+	output := runPreferenceSetCLI(t, f.service, 1, "handoff", "write", "--file", second)
+	if !strings.Contains(output, "handoff_pending") {
+		t.Fatalf("second write did not identify the pending note: %s", output)
+	}
+	contents, err := os.ReadFile(handoffPath(f.home, "shop"))
+	if err != nil || !strings.Contains(string(contents), "First handoff.") || strings.Contains(string(contents), "Second handoff.") {
+		t.Fatalf("second write replaced pending note: %q, %v", contents, err)
+	}
+}
+
+func TestHandoffWriteRejectsEmptyAndOversizedNotes(t *testing.T) {
+	f := newPreferenceSetFixture(t)
+	t.Chdir(f.repo)
+	for _, test := range []struct {
+		name    string
+		content string
+	}{
+		{name: "empty", content: "  \n"},
+		{name: "oversized", content: strings.Repeat("x", handoffMaxBytes+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := filepath.Join(f.root, test.name+".md")
+			if err := os.WriteFile(source, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			cli := f.service.CLI()
+			cli.Out, cli.ErrOut = &output, &output
+			if code := cli.Run([]string{"handoff", "write", "--file", source}); code == 0 {
+				t.Fatalf("invalid handoff accepted: %s", output.String())
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(f.home, "projects", "shop", "handoff.md")); !os.IsNotExist(err) {
+		t.Fatalf("invalid handoff created a pending note: %v", err)
+	}
+}
+
+func TestHandoffThatExceedsRemainingInstructionBudgetDoesNotBlockStartup(t *testing.T) {
+	f := newPreferenceSetFixture(t)
+	cfg, err := config.Load(f.home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := composeLeadInstructions(f.home, f.project, cfg, "claude", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Identity.Lead.Persona = strings.Repeat("p", leadInstructionMaxBytes-len(baseline.Text)-1000)
+	source := filepath.Join(f.root, "handoff.md")
+	if err := os.WriteFile(source, []byte(strings.Repeat("n", 2*1024)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(f.repo)
+	runPreferenceSetCLI(t, f.service, 0, "handoff", "write", "--file", source)
+	if _, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, "claude"); err != nil {
+		t.Fatalf("handoff exceeded the budget and blocked Lead startup: %v", err)
+	}
+	instructions, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "lead.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(instructions), "would exceed the Lead instruction budget") {
+		t.Fatalf("startup instructions lack a budget warning: %s", instructions)
+	}
+	if _, err := os.Stat(handoffPath(f.home, "shop")); err != nil {
+		t.Fatalf("note that did not fit was consumed: %v", err)
+	}
+}
+
+func TestInvalidHandoffWarnsWithoutBlockingLeadStartup(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content []byte
+		warning string
+	}{
+		{name: "malformed", content: []byte("not a valid handoff"), warning: "note header is malformed or the body is empty"},
+		{name: "oversized", content: []byte(strings.Repeat("x", handoffMaxBytes+1)), warning: "exceeds the size limit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newPreferenceSetFixture(t)
+			pending := handoffPath(f.home, "shop")
+			if err := os.WriteFile(pending, test.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(f.home, "shop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.service.prepareLeadLaunch(f.home, f.project, cfg, "claude"); err != nil {
+				t.Fatalf("invalid handoff blocked startup: %v", err)
+			}
+			instructions, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "lead.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(instructions), test.warning) {
+				t.Fatalf("startup instructions lack an actionable warning: %s", instructions)
+			}
+			if _, err := os.Stat(pending); err != nil {
+				t.Fatalf("invalid note should remain available for repair: %v", err)
+			}
+		})
+	}
+}
+
+func TestHandoffWriteUsesRecordedLeadIdentity(t *testing.T) {
+	f := newPreferenceSetFixture(t)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLeadAgent(context.Background(), f.project.ID, store.LeadAgent{Kind: "claude", Session: "session-42"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(f.repo)
+	source := filepath.Join(f.root, "identity.md")
+	if err := os.WriteFile(source, []byte("Next step.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPreferenceSetCLI(t, f.service, 0, "handoff", "write", "--file", source)
+	contents, err := os.ReadFile(filepath.Join(f.home, "projects", "shop", "handoff.md"))
+	if err != nil || !strings.Contains(string(contents), `harness: "claude"`) || !strings.Contains(string(contents), `session: "session-42"`) {
+		t.Fatalf("handoff provenance omitted recorded Lead identity: %q, %v", contents, err)
+	}
+}

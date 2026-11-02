@@ -124,7 +124,7 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	if len(readiness) > 0 {
 		gaps = readiness[0]
 	}
-	composed, err := composeLeadInstructions(home, project, cfg, kind, gaps)
+	composed, err := composeLeadInstructionsMode(home, project, cfg, kind, gaps, true)
 	if err != nil {
 		return leadLaunch{}, err
 	}
@@ -142,6 +142,11 @@ func (s *Service) prepareLeadLaunch(home string, project store.Project, cfg conf
 	if size := len(instructions); size > leadInstructionMaxBytes {
 		message := fmt.Sprintf("Lead instructions exceed the %d-token budget: %d bytes (maximum %d bytes at %d bytes per token)", leadInstructionTokenBudget, size, leadInstructionMaxBytes, leadInstructionBytesPerToken)
 		return leadLaunch{}, axi.Failure("lead_instructions_too_large", message, false)
+	}
+	if composed.HandoffLoaded {
+		if err := archiveHandoff(home, project); err != nil {
+			instructions += "\n\n## Handoff archive warning\n\n" + handoffLoadWarning(handoffPath(home, project.Name), err.Error()) + "\n"
+		}
 	}
 	instructionsFile := filepath.Join(home, "projects", project.Name, "lead.md")
 	if err := writeFile(instructionsFile, []byte(instructions)); err != nil {
