@@ -17,7 +17,6 @@ import (
 type writeTx struct {
 	*sql.Tx
 	conn        *sql.Conn
-	ctx         context.Context
 	releaseOnce sync.Once
 	releaseErr  error
 }
@@ -29,9 +28,6 @@ func (tx *writeTx) release() error {
 
 func (tx *writeTx) Commit() error {
 	err := tx.Tx.Commit()
-	if err == nil {
-		endDeferrableWrites(tx.ctx)
-	}
 	return errors.Join(retryableContention(err), tx.release())
 }
 
@@ -58,10 +54,9 @@ type deferrableWritesKey struct{}
 // WithDeferrableWrites marks writes the caller can skip under contention, such
 // as the observations a read command records before it prints the last
 // recorded state. Each waits at most ObservationWriteBusyTimeout for the write
-// lock and returns its busy error without retrying. The first write that
-// succeeds ends deferral for the rest of ctx: it may be a claim that leads to
-// a side effect, such as a prompt sent to a pane, and the write recording that
-// side effect must wait the full busy timeout.
+// lock and returns its busy error without retrying. A claim that precedes a
+// send ends deferral for the rest of ctx: the write recording that side effect
+// must wait the full busy timeout.
 func WithDeferrableWrites(ctx context.Context) context.Context {
 	return context.WithValue(ctx, deferrableWritesKey{}, new(atomic.Bool))
 }
@@ -131,7 +126,7 @@ func (db *DB) beginTxWithRetry(ctx context.Context) (*writeTx, error) {
 		}
 		tx, err := conn.BeginTx(ctx, nil)
 		if err == nil {
-			return &writeTx{Tx: tx, conn: conn, ctx: ctx}, nil
+			return &writeTx{Tx: tx, conn: conn}, nil
 		}
 		lastErr = err
 		if !isBusyErr(err) || deferrableWrites(ctx) {

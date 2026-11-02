@@ -130,7 +130,7 @@ func TestQueuedTaskWaitReasonNamesTheRealBlocker(t *testing.T) {
 	}
 	reason := func() string {
 		t.Helper()
-		reason, err := queuedTaskWaitReason(ctx, db, fixture.project, queued, cfg)
+		reason, err := queuedTaskWaitReason(ctx, db, fixture.project, queued, cfg, true)
 		if err != nil {
 			t.Fatal(err)
 		}

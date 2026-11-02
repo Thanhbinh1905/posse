@@ -765,7 +765,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 							return cfg, err
 						}
 					}
-					count, err := s.refillQueuedTasks(ctx, db, project, cfg)
+					count, err := s.refillQueuedTasks(ctx, db, project, cfg, true)
 					if options.admitted != nil {
 						*options.admitted = err == nil || count > 0
 					}

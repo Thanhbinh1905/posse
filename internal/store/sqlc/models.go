@@ -360,6 +360,12 @@ type PublishPrePushHead struct {
 	RecordedAt int64
 }
 
+type QueuedTaskDecline struct {
+	TaskID    int64
+	Reason    string
+	CheckedAt int64
+}
+
 type QuotaExhaustion struct {
 	TaskID     int64
 	Launch     int64
@@ -708,6 +714,11 @@ type TaskSkillUse struct {
 	Uses    int64
 	FirstAt int64
 	LastAt  int64
+}
+
+type TaskSpecCheck struct {
+	TaskID    int64
+	CheckedAt int64
 }
 
 type TaskTargetChange struct {
