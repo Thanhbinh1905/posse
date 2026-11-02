@@ -87,7 +87,7 @@ esac
 				if countNoticeKind(notices, "merge_ready") != 0 {
 					t.Fatalf("merge_ready raised while candidate %s is pending: %+v", scoped, notices)
 				}
-				if code := f.run("merge", "t1", "--execute", "--user-approved", "merge it"); code != 1 || !strings.Contains(f.out.String(), "candidate_pending") || !strings.Contains(f.out.String(), shortSHA(scoped)) {
+				if code := f.run("merge", "t1", "--execute", "--user-approved", "merge it"); code != 1 || !strings.Contains(f.out.String(), "candidate_pending") || !strings.Contains(f.out.String(), shortSHA(scoped)) || !strings.Contains(f.out.String(), "posse review start t1") {
 					t.Fatalf("merge with a pending candidate exit=%d output=%s", code, f.out.String())
 				}
 				if calls, err := os.ReadFile(log); err != nil || strings.Contains(string(calls), "mr merge") {
