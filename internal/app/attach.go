@@ -97,11 +97,12 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		return unsupportedAttachedSession(kind)
 	}
 	leadPaneID, running := projectLeadPane(snapshot, project)
-	recovering := running && leadPaneID == pane.PaneID && project.LeadPaneID == pane.PaneID && project.HerdrWorkspaceID == pane.WorkspaceID
-	if running && !recovering {
+	sameBoundPane := running && leadPaneID == pane.PaneID && project.LeadPaneID == pane.PaneID && project.HerdrWorkspaceID == pane.WorkspaceID
+	if running && !sameBoundPane {
 		return axi.Failure("lead_running", fmt.Sprintf("Project %s already has a Lead running in pane %s", project.Name, leadPaneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
 	}
-	if recovering {
+	instructionsDelivered := false
+	if sameBoundPane {
 		lead, err := db.ProjectLeadAgent(ctx.Context, project.ID)
 		if err != nil {
 			return err
@@ -109,6 +110,7 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		if (lead.Kind != "" && lead.Kind != kind) || (lead.Session != "" && lead.Session != parsed.SessionID) {
 			return axi.Failure("lead_running", fmt.Sprintf("Project %s already records a different Lead session in pane %s", project.Name, pane.PaneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
 		}
+		instructionsDelivered = lead.Kind == kind && lead.Session == parsed.SessionID
 	}
 	now := time.Now()
 	claimed, err := db.ClaimLeadStart(ctx.Context, project.ID, now.UnixMilli(), now.Add(-2*time.Minute).UnixMilli(), "attach", os.Getpid())
@@ -141,7 +143,7 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		if current.ServerStartedAt != snapshot.ServerStartedAt {
 			return axi.Failure("attach_generation_changed", "Herdr restarted while the session was being verified", false, "Inspect the target session, then retry `posse attach`")
 		}
-		if paneID, running := projectLeadPane(current, project); running && !(recovering && paneID == pane.PaneID) {
+		if paneID, running := projectLeadPane(current, project); running && !(sameBoundPane && paneID == pane.PaneID) {
 			return axi.Failure("lead_running", fmt.Sprintf("Project %s already has a Lead running in pane %s", project.Name, paneID), false, "Use the existing Lead or stop it with `posse down` before attaching another session")
 		}
 		currentPane, currentKind, verifyErr := attachedSession(current, parsed.PaneID, parsed.SessionID)
@@ -150,7 +152,7 @@ func (s *Service) attach(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		return refuseAttachForeignLeadWorkspace(current, project, currentPane.WorkspaceID)
 	}
-	if recovering {
+	if instructionsDelivered {
 		current, err := s.snapshot(ctx.Context)
 		if err != nil {
 			return err

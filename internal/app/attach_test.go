@@ -253,6 +253,33 @@ func TestAttachBindingFailureCanBeRetriedBeforeHerdrLabeling(t *testing.T) {
 	}
 }
 
+func TestAttachRefusesRecoveryForDifferentRecordedSession(t *testing.T) {
+	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p2", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLeadAgent(context.Background(), project.ID, store.LeadAgent{Kind: "claude", Session: "other-session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out = &output
+	cli.ErrOut = &output
+	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code == 0 || !strings.Contains(output.String(), "lead_running") {
+		t.Fatalf("attach did not refuse a different recorded session: code=%d output=%s", code, output.String())
+	}
+	if fake.CallCount("agent.prompt") != 0 || fake.CallCount("pane.rename") != 0 {
+		t.Fatalf("attach changed a pane with a different recorded session: %#v", fake.Calls)
+	}
+}
+
 func TestAttachRecoversAfterPaneBindingBeforeSessionBinding(t *testing.T) {
 	home, project, fake, service := newAttachTestService(t, "claude", "session-claude")
 	db, err := store.Open(home)
@@ -312,8 +339,8 @@ func TestAttachRecoversAfterPaneBindingBeforeSessionBinding(t *testing.T) {
 	if code := cli.Run([]string{"attach", "--pane", "w1:p2", "--session", "session-claude"}); code != 0 {
 		t.Fatalf("attach did not recover the partial session binding: code=%d output=%s", code, output.String())
 	}
-	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("pane.rename") != 1 {
-		t.Fatalf("recovery resent instructions or failed to label the pane: %#v", fake.Calls)
+	if fake.CallCount("agent.prompt") != 2 || fake.CallCount("pane.rename") != 1 {
+		t.Fatalf("recovery did not redeliver instructions without a recorded session binding: %#v", fake.Calls)
 	}
 }
 
