@@ -126,6 +126,114 @@ func TestPublishAdoptsOnlyThisTasksOpenPullRequest(t *testing.T) {
 	}
 }
 
+func TestCandidateSubmissionRejectsPathTrackedByFrozenTarget(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(fixture.worktree, ".gitignore"), []byte("app.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", ".gitignore")
+	gitTest(t, fixture.worktree, "commit", "-m", "ignore local configuration")
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "app.yaml"), []byte("secret: local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := filepath.Join(fixture.root, "upstream")
+	gitTest(t, fixture.root, "clone", "--branch", "main", fixture.remote, upstream)
+	gitTest(t, upstream, "config", "user.name", "Test User")
+	gitTest(t, upstream, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(upstream, "app.yaml"), []byte("tracked: main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, upstream, "add", "app.yaml")
+	gitTest(t, upstream, "commit", "-m", "track app configuration")
+	gitTest(t, upstream, "push", "origin", "main")
+	installFullPipelinePlan(t, fixture)
+	projectConfig := filepath.Join(fixture.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[pipeline]\ncandidate_files = [\"app.yaml\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if code == 0 || !strings.Contains(output+stderr, "tracked") {
+		t.Fatalf("publish accepted a configured path tracked by the frozen target: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(candidate.WorktreePath, "app.yaml"))
+	if err != nil || string(contents) != "tracked: main\n" {
+		t.Fatalf("tracked target file was changed: contents=%q err=%v", contents, err)
+	}
+}
+
+func TestCandidateSubmissionRejectsPathTrackedInSandbox(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(fixture.worktree, ".gitignore"), []byte("app.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", ".gitignore")
+	gitTest(t, fixture.worktree, "commit", "-m", "ignore local configuration")
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "app.yaml"), []byte("secret: local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "-f", "app.yaml")
+	gitTest(t, fixture.worktree, "commit", "-m", "track local configuration")
+	installFullPipelinePlan(t, fixture)
+	projectConfig := filepath.Join(fixture.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[pipeline]\ncandidate_files = [\"app.yaml\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if code == 0 || !strings.Contains(output+stderr, "tracked in the Sandbox") {
+		t.Fatalf("publish accepted a configured path tracked in the Sandbox: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
+func TestCandidateSubmissionRejectsPathIgnoredOnlyBySandbox(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	upstream := filepath.Join(fixture.root, "upstream")
+	gitTest(t, fixture.root, "clone", "--branch", "main", fixture.remote, upstream)
+	gitTest(t, upstream, "config", "user.name", "Test User")
+	gitTest(t, upstream, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(upstream, ".gitignore"), []byte("app.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, upstream, "add", ".gitignore")
+	gitTest(t, upstream, "commit", "-m", "ignore app configuration")
+	gitTest(t, upstream, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "fetch", "origin", "main")
+	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "app.yaml"), []byte("secret: local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upstream, ".gitignore"), []byte("*.secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, upstream, "add", ".gitignore")
+	gitTest(t, upstream, "commit", "-m", "stop ignoring app configuration")
+	gitTest(t, upstream, "push", "origin", "main")
+	installFullPipelinePlan(t, fixture)
+	projectConfig := filepath.Join(fixture.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("[pipeline]\ncandidate_files = [\"app.yaml\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	code, output, stderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if code == 0 || !strings.Contains(output+stderr, "not gitignored in the private candidate checkout") {
+		t.Fatalf("publish accepted a path ignored only by the Sandbox: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestCandidateValidationAcceptsGitignoredLocalFilesFromSandbox(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	if err := os.WriteFile(filepath.Join(fixture.worktree, ".gitignore"), []byte("app.yaml\n"), 0o600); err != nil {

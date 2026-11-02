@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -436,14 +437,27 @@ func copyConfiguredCandidateFiles(ctx context.Context, lane candidateLane, candi
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("configured candidate path %q is not a regular file", relative)
 		}
+		for _, checkout := range []struct {
+			root string
+			name string
+		}{{lane.task.WorktreePath, "Sandbox"}, {candidate.WorktreePath, "private candidate checkout"}} {
+			tracked, err := candidatePathTracked(ctx, checkout.root, relative)
+			if err != nil {
+				return nil, err
+			}
+			if tracked {
+				return nil, fmt.Errorf("configured candidate path %q is tracked in the %s", relative, checkout.name)
+			}
+		}
 		resolvedSource, err := filepath.EvalSymlinks(source)
 		if err != nil || !pathWithin(lane.task.WorktreePath, resolvedSource) {
 			return nil, fmt.Errorf("configured candidate path %q escapes the Sandbox", relative)
 		}
-		ignored := exec.CommandContext(ctx, "git", "check-ignore", "--quiet", "--no-index", "--", relative)
-		ignored.Dir = lane.task.WorktreePath
-		if err := ignored.Run(); err != nil {
-			return nil, fmt.Errorf("configured candidate path %q is not gitignored", relative)
+		if err := requireCandidatePathIgnored(ctx, lane.task.WorktreePath, relative); err != nil {
+			return nil, fmt.Errorf("configured candidate path %q is not gitignored in the Sandbox", relative)
+		}
+		if err := requireCandidatePathIgnored(ctx, candidate.WorktreePath, relative); err != nil {
+			return nil, fmt.Errorf("configured candidate path %q is not gitignored in the private candidate checkout", relative)
 		}
 		destination := filepath.Join(candidate.WorktreePath, relative)
 		if err := ensureCandidateFileParent(candidate.WorktreePath, filepath.Dir(destination)); err != nil {
@@ -476,6 +490,26 @@ func copyConfiguredCandidateFiles(ctx context.Context, lane candidateLane, candi
 		}
 	}
 	return missing, nil
+}
+
+func candidatePathTracked(ctx context.Context, root, relative string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", relative)
+	cmd.Dir = root
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
+}
+
+func requireCandidatePathIgnored(ctx context.Context, root, relative string) error {
+	cmd := exec.CommandContext(ctx, "git", "check-ignore", "--quiet", "--", relative)
+	cmd.Dir = root
+	return cmd.Run()
 }
 
 func ensureCandidateFileParent(root, parent string) error {
