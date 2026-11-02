@@ -61,6 +61,39 @@ func restartedSnapshot(project store.Project) herdr.Snapshot {
 	return herdr.Snapshot{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w1"}}, Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel}}}
 }
 
+func TestHeldRestoreRefreshesHerdrAgentRows(t *testing.T) {
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	if _, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Worker", ShortName: "worker", State: store.StateSpawning, Branch: "posse/t1", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2"}); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{
+		ServerStartedAt: "new-generation",
+		Workspaces:      []herdr.Workspace{{WorkspaceID: "w1"}, {WorkspaceID: "w2"}},
+		Tabs:            []herdr.Tab{{TabID: "w1:t1", WorkspaceID: "w1"}, {TabID: "w2:t1", WorkspaceID: "w2"}},
+		Panes: []herdr.Pane{
+			{PaneID: "w1:p1", WorkspaceID: "w1", TabID: "w1:t1", Label: project.LeadLabel},
+			{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", Label: "posse:shop:t1"},
+		},
+	}
+	service := testService(home, fake)
+	if _, err := service.prepareProjectObservation(ctx, db, project); err != nil {
+		t.Fatalf("observe Project after a Herdr restart: %v", err)
+	}
+	rows := map[string]string{}
+	for _, call := range fake.Calls {
+		if call.Method != "pane.report_metadata" {
+			continue
+		}
+		tokens, _ := call.Params["tokens"].(map[string]string)
+		rows[call.Params["pane_id"].(string)] = tokens["posse_row"]
+	}
+	if rows["w1:p1"] != leadWorkspaceLabel(project) || rows["w2:p1"] != "└─ worker-t1" {
+		t.Fatalf("held restore did not fill Herdr Agent rows: %#v; calls=%#v", rows, fake.Calls)
+	}
+}
+
 func TestHerdrRestartDoesNotRelaunchLead(t *testing.T) {
 	ctx := context.Background()
 	home, db, project := restoreFixture(t)
