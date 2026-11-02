@@ -35,6 +35,7 @@ type Service struct {
 	updateConfirm        confirmFunc
 	reexecUpdate         func(string, []string, []string) error
 	updateSetup          func(context.Context, string, string, bool) ([]byte, error)
+	downWatchStop        func(context.Context, string, store.Project) error
 	maintenanceMu        sync.Mutex
 	maintenance          map[string]bool
 	maintenanceCancels   map[string]context.CancelFunc
