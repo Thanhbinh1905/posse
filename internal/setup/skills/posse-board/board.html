@@ -918,10 +918,10 @@ main {
         note("started " + card.task.id + " for #" + card.number);
       }
     }
-    const lead = posse.project && posse.project.lead;
+    const lead = posse.project?.lead;
     for (const [number, pending] of state.pending) {
       if (lead === "working") pending.sawWorking = true;
-      else if (pending.sawWorking) {
+      else if (pending.sawWorking && (lead === "idle" || lead === "done")) {
         state.pending.delete(number);
         note("Lead declined the start for #" + number);
       }
