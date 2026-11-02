@@ -811,7 +811,14 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		}
 		return "", "", axi.Failure("brief_missing", "could not read the Task Brief for the pull request body", false, err.Error())
 	}
-	changes, err := gitOutput(ctx, task.WorktreePath, "log", "--reverse", "--format=- %s", task.BaseRef+"..HEAD")
+	changesBase := task.BaseRef
+	if changesBase == project.DefaultBranch {
+		changesBase, err = defaultBranchBase(ctx, project)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	changes, err := gitOutput(ctx, task.WorktreePath, "log", "--reverse", "--format=- %s", changesBase+"..HEAD")
 	if err != nil {
 		return "", "", axi.Failure("pr_changes_failed", "could not read Task commit subjects for the pull request body", false, err.Error())
 	}
@@ -819,7 +826,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 	if changes == "" {
 		return "", "", axi.Failure("pr_changes_failed", "Task branch has no commit subjects for the pull request body", false)
 	}
-	changedFiles, err := gitOutput(ctx, task.WorktreePath, "diff", "--name-only", "-z", task.BaseRef+"...HEAD")
+	changedFiles, err := gitOutput(ctx, task.WorktreePath, "diff", "--name-only", "-z", changesBase+"...HEAD")
 	if err != nil {
 		return "", "", axi.Failure("pr_changes_failed", "could not inspect Task files for the pull request body", false, err.Error())
 	}
