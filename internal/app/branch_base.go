@@ -61,21 +61,37 @@ func taskCheckoutBase(ctx context.Context, root string, task store.Task, member,
 	return commit, nil
 }
 
-// defaultBranchBase returns the ref a Task starting from the default branch
-// branches from: the local branch, else origin's copy. It refuses before
-// admission when neither exists, so the failure breaks no Sandbox.
 func defaultBranchBase(ctx context.Context, project store.Project) (string, error) {
-	if defaultBranchUnborn(ctx, projectRepoTarget(project)) {
+	originRef := "refs/remotes/origin/" + project.DefaultBranch
+	localRef := "refs/heads/" + project.DefaultBranch
+	_, originErr := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", originRef+"^{commit}")
+	_, localErr := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", localRef+"^{commit}")
+	if originErr != nil && !gitRefMissing(originErr) {
+		return "", originErr
+	}
+	if localErr != nil && !gitRefMissing(localErr) {
+		return "", localErr
+	}
+	originExists, localExists := originErr == nil, localErr == nil
+	if originExists && localExists {
+		if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", originRef, localRef); err == nil {
+			return project.DefaultBranch, nil
+		} else {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				return "", err
+			}
+			return originRef, nil
+		}
+	}
+	if originExists {
+		return originRef, nil
+	}
+	if localExists {
 		return project.DefaultBranch, nil
 	}
-	for _, ref := range []string{"refs/remotes/origin/" + project.DefaultBranch, "refs/heads/" + project.DefaultBranch} {
-		_, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-		if err == nil {
-			return strings.TrimPrefix(ref, "refs/heads/"), nil
-		}
-		if !gitRefMissing(err) {
-			return "", err
-		}
+	if defaultBranchUnborn(ctx, projectRepoTarget(project)) {
+		return project.DefaultBranch, nil
 	}
 	return "", axi.Failure("default_branch_missing", fmt.Sprintf("Project %s has no branch %s to start Tasks from", project.Name, project.DefaultBranch), false,
 		"Create it in "+project.Root+" with `git branch "+project.DefaultBranch+" <commit>`, then retry")

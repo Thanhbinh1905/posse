@@ -58,6 +58,33 @@ func TestStartUsesFreshOriginDefaultBranchWhenProjectCheckoutIsBehind(t *testing
 	}
 }
 
+func TestStartUsesLocalDefaultBranchWhenItIsAheadOfOrigin(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	origin := filepath.Join(f.root, "origin.git")
+	gitTest(t, f.root, "init", "-q", "--bare", origin)
+	gitTest(t, f.repo, "remote", "add", "origin", origin)
+	gitTest(t, f.repo, "push", "-q", "origin", "main")
+	gitTest(t, f.repo, "fetch", "-q", "origin")
+	if err := os.WriteFile(filepath.Join(f.repo, "local-advance.txt"), []byte("local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "add", "local-advance.txt")
+	gitTest(t, f.repo, "commit", "-q", "-m", "advance local main")
+	output := outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "local-ahead")
+	if strings.Contains(output, "default_branch_missing") {
+		t.Fatalf("start refused the local default branch: %s", output)
+	}
+	tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("start did not admit one Task: %#v (%v)", tasks, err)
+	}
+	got := gitTest(t, tasks[0].WorktreePath, "rev-parse", "HEAD")
+	want := gitTest(t, f.repo, "rev-parse", "refs/heads/main")
+	if strings.TrimSpace(got) != strings.TrimSpace(want) {
+		t.Fatalf("Task branch starts at %s, want local main tip %s", got, want)
+	}
+}
+
 // A default branch that exists only on origin still starts Tasks (#702).
 func TestStartAcceptsOriginOnlyDefaultBranch(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
