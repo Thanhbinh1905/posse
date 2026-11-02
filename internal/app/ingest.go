@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -347,6 +348,14 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		_, notifyErr := s.herdrCall(ctx, "notification.show", map[string]any{"title": fmt.Sprintf("Posse: %d new notices", len(notices)), "body": project.Name})
 		if notifyErr != nil {
 			return notifyErr
+		}
+		notifyHome, homeErr := s.homePath()
+		if homeErr != nil {
+			log.Printf("posse: could not resolve notify command config for Project %s: %v", project.Name, homeErr)
+		} else if notifyConfig, configErr := config.Load(notifyHome, project.Name); configErr != nil {
+			log.Printf("posse: could not load notify command config for Project %s: %v", project.Name, configErr)
+		} else {
+			runNoticeCommand(notifyConfig.Notify.Command, notices, notifyConfig.Autonomy.Merge)
 		}
 		if err := db.RecordNoticeNotification(ctx, project.ID, currentTime()); err != nil {
 			return err

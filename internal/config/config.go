@@ -215,6 +215,10 @@ type Lowkey struct {
 	Lead bool `toml:"lead" json:"lead"`
 }
 
+type Notify struct {
+	Command string `toml:"command" json:"command"`
+}
+
 // Knowledge opts into curated User and Project knowledge (ADR 0032).
 type Knowledge struct {
 	Enabled     bool `toml:"enabled" json:"enabled"`
@@ -226,6 +230,7 @@ const DefaultKnowledgeBudgetBytes = 8192
 type Config struct {
 	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
 	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`
+	Notify              Notify                     `toml:"notify" json:"notify"`
 	Knowledge           Knowledge                  `toml:"knowledge" json:"knowledge"`
 	Skills              Skills                     `toml:"skills" json:"skills"`
 	Identity            Identity                   `toml:"identity" json:"identity"`
@@ -705,6 +710,7 @@ func defaultMap() map[string]any {
 		"pipeline":        map[string]any{"candidate_files": []string{}},
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":          map[string]any{"lead": false},
+		"notify":          map[string]any{"command": ""},
 		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
