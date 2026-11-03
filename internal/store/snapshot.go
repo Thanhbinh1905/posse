@@ -44,10 +44,12 @@ type TaskSnapshot struct {
 	Deliveries         []Delivery          `toml:"deliveries,omitempty"`
 	DeliveryOperations []DeliveryOperation `toml:"delivery_operations,omitempty"`
 	// Members and TaskRepos are set for a workspace Project only.
-	Members       []ProjectRepo      `toml:"members,omitempty"`
-	TaskRepos     []TaskRepo         `toml:"task_repos,omitempty"`
-	TargetChanges []TaskTargetChange `toml:"target_changes,omitempty"`
-	PlanRevisions []string           `toml:"plan_revisions,omitempty"`
+	Members         []ProjectRepo       `toml:"members,omitempty"`
+	TaskRepos       []TaskRepo          `toml:"task_repos,omitempty"`
+	TargetChanges   []TaskTargetChange  `toml:"target_changes,omitempty"`
+	PlanRevisions   []string            `toml:"plan_revisions,omitempty"`
+	BudgetUsage     []BudgetUsageRecord `toml:"budget_usage,omitempty"`
+	BudgetCrossings []BudgetCrossing    `toml:"budget_crossings,omitempty"`
 	// ReviewTargets and ReviewVerdict are set for a Review Task only.
 	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
@@ -365,6 +367,14 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	budgetUsage, err := db.TaskBudgetUsage(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	budgetCrossings, err := db.TaskBudgetCrossings(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	turnToken, err := db.TaskTurnToken(ctx, taskID)
 	if err != nil {
 		return err
@@ -375,7 +385,7 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1134,6 +1144,22 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,agent_status,agent_status_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.AgentStatus, task.AgentStatusSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity); err != nil {
 			return err
+		}
+		for _, usage := range snapshot.BudgetUsage {
+			if usage.TaskID != 0 && usage.TaskID != task.ID || usage.Launch < 1 || usage.Launch > max(task.Launches, 1) || usage.SessionID == "" || usage.SessionKind == "" || usage.Tokens < 0 || usage.DayTokens < 0 || usage.LocalDay == "" {
+				return fmt.Errorf("invalid budget usage in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_budget_usage(task_id,launch,session_id,session_kind,tokens,local_day,day_tokens) VALUES(?,?,?,?,?,?,?)`, task.ID, usage.Launch, usage.SessionID, usage.SessionKind, usage.Tokens, usage.LocalDay, usage.DayTokens); err != nil {
+				return err
+			}
+		}
+		for _, crossing := range snapshot.BudgetCrossings {
+			if crossing.TaskID != 0 && crossing.TaskID != task.ID || crossing.ProjectID != 0 && crossing.ProjectID != task.ProjectID || crossing.Scope != "task" && crossing.Scope != "daily" || crossing.ScopeKey == "" {
+				return fmt.Errorf("invalid budget crossing in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO budget_crossings(project_id,scope,scope_key,task_id,created_at) VALUES(?,?,?,?,?)`, task.ProjectID, crossing.Scope, crossing.ScopeKey, task.ID, crossing.CreatedAt); err != nil {
+				return err
+			}
 		}
 		var previous *taskplan.Plan
 		for index, data := range snapshot.PlanRevisions {
