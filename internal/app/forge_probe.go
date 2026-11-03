@@ -19,6 +19,7 @@ const forgeProbeCache = "forge-auth-cache.json"
 
 var forgeProbeTimeout = 2 * time.Second
 var forgeProbeCacheTTL = 5 * time.Second
+var forgeProbeNow = time.Now
 
 type forgeProbeOutcome struct {
 	GitHubChecked       bool `json:"github_checked"`
@@ -107,7 +108,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 	for {
 		var entry forgeProbeCacheEntry
 		forgeProbeState.Lock()
-		if cached := forgeProbeState.memory[memoryKey]; forgeProbeCacheFresh(cached, time.Now()) && (cacheTimeoutResults || !cached.Outcome.anyTimedOut()) {
+		if cached := forgeProbeState.memory[memoryKey]; forgeProbeCacheFresh(cached, forgeProbeNow()) && (cacheTimeoutResults || !cached.Outcome.anyTimedOut()) {
 			entry = cached
 		}
 		if !entry.CheckedAt.IsZero() && entry.Outcome.covers(mode) {
@@ -142,7 +143,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 		if !cacheTimeoutResults && entry.Outcome.anyTimedOut() {
 			entry = forgeProbeCacheEntry{}
 		}
-		if !forgeProbeCacheFresh(entry, time.Now()) {
+		if !forgeProbeCacheFresh(entry, forgeProbeNow()) {
 			entry = forgeProbeCacheEntry{}
 		}
 		outcome := entry.Outcome
@@ -154,7 +155,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 			if probeErr == nil {
 				// A still-fresh cache entry may expire while the missing CLI runs.
 				// Drop it before merging, then probe anything the request still lacks.
-				if !forgeProbeCacheFresh(entry, time.Now()) {
+				if !forgeProbeCacheFresh(entry, forgeProbeNow()) {
 					outcome = forgeProbeOutcome{}
 				}
 				outcome = mergeForgeProbeOutcomes(outcome, probed)
@@ -165,7 +166,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 					outcome = mergeForgeProbeOutcomes(outcome, remaining)
 				}
 				if probeErr == nil && (!outcome.anyTimedOut() || cacheTimeoutResults) {
-					entry = forgeProbeCacheEntry{CheckedAt: time.Now(), Outcome: outcome}
+					entry = forgeProbeCacheEntry{CheckedAt: forgeProbeNow(), Outcome: outcome}
 					writeForgeProbeCache(home, key, entry)
 				}
 			}
@@ -174,7 +175,7 @@ func cachedForgeProbe(ctx context.Context, root, host string, cfg config.Config,
 		forgeProbeState.Lock()
 		if probeErr == nil && (!outcome.anyTimedOut() || cacheTimeoutResults) {
 			forgeProbeState.memory[memoryKey] = entry
-			pruneForgeProbeMemory(time.Now())
+			pruneForgeProbeMemory(forgeProbeNow())
 		} else if probeErr == nil {
 			delete(forgeProbeState.memory, memoryKey)
 		}
@@ -195,7 +196,7 @@ func cachedForgeProbeOnly(host string, cfg config.Config, mode string) (forgePro
 	forgeProbeState.Lock()
 	entry := forgeProbeState.memory[memoryKey]
 	forgeProbeState.Unlock()
-	if forgeProbeCacheFresh(entry, time.Now()) && entry.Outcome.covers(mode) {
+	if forgeProbeCacheFresh(entry, forgeProbeNow()) && entry.Outcome.covers(mode) {
 		return entry.Outcome, true, nil
 	}
 	entry, found := readForgeProbeCache(home, key)
@@ -357,7 +358,7 @@ func readForgeProbeCache(home, key string) (forgeProbeCacheEntry, bool) {
 		return forgeProbeCacheEntry{}, false
 	}
 	entry, ok := cache.Entries[key]
-	if !ok || !forgeProbeCacheFresh(entry, time.Now()) {
+	if !ok || !forgeProbeCacheFresh(entry, forgeProbeNow()) {
 		return forgeProbeCacheEntry{}, false
 	}
 	return entry, true
@@ -376,7 +377,7 @@ func writeForgeProbeCache(home, key string, entry forgeProbeCacheEntry) {
 			cache.Entries = map[string]forgeProbeCacheEntry{}
 		}
 	}
-	now := time.Now()
+	now := forgeProbeNow()
 	for cachedKey, cachedEntry := range cache.Entries {
 		if !forgeProbeCacheFresh(cachedEntry, now) {
 			delete(cache.Entries, cachedKey)
