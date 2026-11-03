@@ -141,7 +141,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return err
 	}
-	if len(parsed.Positionals) != 0 || parsed.Flags["brief"] == "" && generated == nil || parsed.Flags["brief"] != "" && generated != nil {
+	briefPath := parsed.Flags["brief"]
+	if generated == nil {
+		if len(parsed.Positionals) > 1 || len(parsed.Positionals) == 1 && briefPath != "" && parsed.Positionals[0] != briefPath {
+			return axi.Usage("start accepts one Brief path; do not pass different positional and --brief paths")
+		}
+		if briefPath == "" && len(parsed.Positionals) == 1 {
+			briefPath = parsed.Positionals[0]
+		}
+	}
+	if len(parsed.Positionals) > 0 && generated != nil || briefPath == "" && generated == nil || parsed.Flags["brief"] != "" && generated != nil {
 		return axi.Usage("start requires --brief <file>")
 	}
 	db, home, err := s.openDB()
@@ -160,7 +169,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return configError(err)
 	}
-	sourceBriefPath := parsed.Flags["brief"]
+	sourceBriefPath := briefPath
 	var briefData []byte
 	if generated != nil {
 		sourceBriefPath = generated.BriefPath
@@ -168,7 +177,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	} else {
 		briefData, err = os.ReadFile(sourceBriefPath)
 		if err != nil {
-			return axi.Failure("brief_invalid", "cannot read Brief: "+err.Error(), false, "Check the Brief path and retry")
+			return axi.Failure("brief_invalid", "cannot read Brief: "+err.Error(), false, "Check the path or use `posse start --brief <file>`")
 		}
 	}
 	brief, err := dispatch.ParseBriefText(string(briefData))
