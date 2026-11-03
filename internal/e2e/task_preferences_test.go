@@ -16,6 +16,29 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestStartRejectsUserChoiceWithoutPreferenceFields(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	brief := filepath.Join(f.root, "research.md")
+	text := `---
+type: research
+title: Research only
+done_when: findings are recorded
+---
+Investigate.
+`
+	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "research-only", "--user-approved", "No workflow preference was selected")
+	if code != 1 || !strings.Contains(output, "user_choice_unused") || !strings.Contains(output, "Drop --user-approved") {
+		t.Fatalf("unused User choice refusal: %d %s", code, output)
+	}
+	tasks, err := f.db.Tasks(context.Background(), f.project.ID, true)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("refusal created Tasks: %#v %v", tasks, err)
+	}
+}
+
 func TestTaskPreferencesRequireScopedUserChoice(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "defaults.review", "quick")
