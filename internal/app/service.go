@@ -43,6 +43,7 @@ type Service struct {
 	teardownMu           sync.Mutex
 	teardowns            map[string]chan struct{}
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
+	checkQueuedBranch    func(context.Context, *store.DB, store.Project, string, []taskMember) error
 	// DetachQueuedLaunch runs each queued Task start in its own session. The
 	// posse binary sets it; unit tests keep the start in-process.
 	DetachQueuedLaunch bool
