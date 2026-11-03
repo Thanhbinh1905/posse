@@ -1273,9 +1273,8 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	behind := []behindPR{}
 	moved := false
-	// Without the current-target rule only conflicting PRs, and full-pipeline
-	// PRs whose validation a target move stales, ask the Worker to refresh,
-	// and they bypass the merge queue.
+	// Without the current-target rule, conflicting non-full-pipeline PRs bypass
+	// the queue; stale full-pipeline candidates use it to serialize refreshes.
 	conflicts := []behindPR{}
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
@@ -1318,6 +1317,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			continue
 		}
+		retainGreenObservation := false
 		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || fullPipelineSelected(task, "")) {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
 			var beforeQuery prTargetFreshness
@@ -1330,7 +1330,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				}
 				continue
 			}
-			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget {
+			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget && observation.Mergeable == "CONFLICTING" && !fullPipelineSelected(task, "") {
 				conflicts = append(conflicts, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
 			} else if !freshness.Fresh {
 				// A target that advanced only during the query may hold this
@@ -1344,9 +1344,22 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 						return err
 					}
 					behind = append(behind, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
+					if fullPipelineSelected(task, "") && hasPrevious && previous.HeadSHA == observation.HeadSHA {
+						place, placeErr := db.PlaceInMergeQueue(ctx, task.ID, "", freshness.Branch, now.UnixMilli())
+						if placeErr != nil {
+							return placeErr
+						}
+						if !place.Head() {
+							observation.Checks = previous.Checks
+							failures = nil
+							retainGreenObservation = true
+						}
+					}
 				}
-				observation.Checks = stalePRChecks()
-				failures = nil
+				if !retainGreenObservation {
+					observation.Checks = stalePRChecks()
+					failures = nil
+				}
 			}
 		}
 		if observation.State == "MERGED" {
