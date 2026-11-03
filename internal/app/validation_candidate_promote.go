@@ -90,10 +90,10 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		return candidateSubmissionError(task, candidate, "candidate_remote_moved", "origin Task branch moved after candidate submission", false)
 	}
 	if alreadyPushed {
-		if err := requireFullPipelineCandidateResults(ctx, db, lane, candidate); err != nil {
+		if err := requireFullPipelineCandidateResults(ctx, db, lane, candidate, ""); err != nil {
 			return err
 		}
-	} else if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate); err != nil {
+	} else if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate, ""); err != nil {
 		return err
 	}
 	candidateStatus, err := gitStatusOutput(ctx, candidate.WorktreePath, "--porcelain", "--untracked-files=all")
