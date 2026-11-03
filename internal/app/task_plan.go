@@ -133,7 +133,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
 		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop},
 		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup},
-		DeleteBranchOnMerge: cfg.Defaults.DeleteBranchOnMerge})
+		DeleteBranchOnMerge: cfg.Defaults.DeleteBranchOnMerge, TaskBudgetTokens: cfg.Budget.TaskTokens})
 }
 
 // Restore files absent after a crash from the admitted inputs, never from
