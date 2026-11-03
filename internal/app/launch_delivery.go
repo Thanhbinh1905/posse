@@ -322,8 +322,20 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 		return false, db.RecordQueuedTaskDecline(ctx, queued.ID, reason)
 	}
 	branch := store.TaskBranchName(queued.Seq)
-	if err := taskBranchAvailableForBranch(ctx, db, project, branch, members); err != nil {
-		if errors.Is(err, store.ErrTaskBranchExists) {
+	checkBranch := s.checkQueuedBranch
+	if checkBranch == nil {
+		checkBranch = taskBranchAvailableForBranch
+	}
+	if err := checkBranch(ctx, db, project, branch, members); err != nil {
+		var failure *axi.Error
+		if errors.Is(err, store.ErrTaskBranchExists) || errors.As(err, &failure) && failure.Code == "branch_exists" {
+			current, lookupErr := db.TaskByID(ctx, project.ID, queued.ID)
+			if lookupErr != nil {
+				return false, lookupErr
+			}
+			if current.State != store.StateQueued {
+				return false, nil
+			}
 			return false, db.RecordQueuedTaskDecline(ctx, queued.ID, err.Error())
 		}
 		return false, err
