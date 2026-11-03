@@ -112,7 +112,7 @@ func (f *prMergeFixture) setGitLabApprovals(t *testing.T, approved bool, remaini
 
 func (f *prMergeFixture) setGitLabState(t *testing.T, state, mergeable, pipeline, sha string) {
 	t.Helper()
-	mr := map[string]any{"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17", "state": state, "sha": sha, "source_branch": "posse/t1", "target_branch": defaultValue(os.Getenv("POSSE_TEST_GLAB_BASE_BRANCH"), "main"), "source_project_id": 7, "target_project_id": 7, "detailed_merge_status": mergeable, "merge_commit_sha": "", "head_pipeline": map[string]any{"status": pipeline, "web_url": "https://git.example.com/group/sub/shop/-/pipelines/3"}}
+	mr := map[string]any{"web_url": "https://git.example.com/group/sub/shop/-/merge_requests/17", "title": "fix: E2E PR title", "state": state, "sha": sha, "source_branch": "posse/t1", "target_branch": defaultValue(os.Getenv("POSSE_TEST_GLAB_BASE_BRANCH"), "main"), "source_project_id": 7, "target_project_id": 7, "detailed_merge_status": mergeable, "merge_commit_sha": "", "head_pipeline": map[string]any{"status": pipeline, "web_url": "https://git.example.com/group/sub/shop/-/pipelines/3"}}
 	if state == "merged" {
 		mr["merge_commit_sha"] = defaultValue(os.Getenv("POSSE_TEST_GLAB_MERGE_COMMIT"), strings.Repeat("c", 40))
 	}
@@ -456,7 +456,7 @@ auto_teardown = "finished"
 		t.Fatalf("merge: %d %s %s", code, output, stderr)
 	}
 	log, err := os.ReadFile(f.ghLog)
-	if err != nil || !strings.Contains(string(log), "--sha "+task.GatedSHA) || !strings.Contains(string(log), "--squash") || !strings.Contains(string(log), "--auto-merge=false") {
+	if err != nil || !strings.Contains(string(log), "--sha "+task.GatedSHA) || !strings.Contains(string(log), "--squash") || !strings.Contains(string(log), "--squash-message fix: E2E PR title (#17)") || !strings.Contains(string(log), "--auto-merge=false") {
 		t.Fatalf("unprotected merge: %q %v", log, err)
 	}
 	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/staging")

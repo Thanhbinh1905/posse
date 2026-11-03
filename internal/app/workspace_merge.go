@@ -394,25 +394,26 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 	if err != nil {
 		return axi.Failure("pr_url_invalid", repo.Repo+": "+err.Error(), false)
 	}
-	var headSHA string
+	var headSHA, prTitle string
 	if forge.Kind == "gitlab" {
 		mr, viewErr := gitlabMR(ctx, forge, number)
 		if viewErr != nil {
 			return axi.Failure("pr_view_failed", repo.Repo+": could not verify the merge request head", true, viewErr.Error())
 		}
-		headSHA = mr.SHA
+		headSHA, prTitle = mr.SHA, mr.Title
 	} else {
-		output, viewErr := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", repo.PRURL, "--json", "headRefOid")
+		output, viewErr := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", repo.PRURL, "--json", "headRefOid,title")
 		if viewErr != nil {
 			return axi.Failure("pr_view_failed", repo.Repo+": could not verify the pull request head", true, strings.TrimSpace(output))
 		}
 		var head struct {
 			HeadRefOID string `json:"headRefOid"`
+			Title      string `json:"title"`
 		}
 		if err := json.Unmarshal([]byte(output), &head); err != nil || head.HeadRefOID == "" {
 			return axi.Failure("pr_view_failed", repo.Repo+": gh pr view returned no headRefOid", true, strings.TrimSpace(output))
 		}
-		headSHA = head.HeadRefOID
+		headSHA, prTitle = head.HeadRefOID, head.Title
 	}
 	if headSHA != repo.GatedSHA {
 		if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Pull request head in "+repo.Repo+" moved after its merge head was recorded"); err != nil {
@@ -439,13 +440,19 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 	if forge.Kind == "gitlab" {
 		args := []string{"mr", "merge", fmt.Sprint(number), "--repo", "https://" + forge.Host + "/" + forge.Path, "--sha", repo.GatedSHA, "--yes", "--auto-merge=false"}
 		if method == "squash" {
-			args = append(args, "--squash")
+			args = append(args, "--squash", "--squash-message", mergeCommitSubject(prTitle, number))
 		}
 		if _, err := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, forge.Root, "glab", args...); err != nil {
 			return axi.Failure("pr_merge_failed", repo.Repo+": GitLab did not merge the merge request", true, err.Error())
 		}
-	} else if _, err := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, member.target.Root, "gh", "pr", "merge", repo.PRURL, "--"+method, "--match-head-commit", repo.GatedSHA); err != nil {
-		return axi.Failure("pr_merge_failed", repo.Repo+": GitHub did not merge the pull request", true, err.Error())
+	} else {
+		args := []string{"pr", "merge", repo.PRURL, "--" + method, "--match-head-commit", repo.GatedSHA}
+		if method == "squash" {
+			args = append(args, "--subject", mergeCommitSubject(prTitle, number))
+		}
+		if _, err := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, member.target.Root, "gh", args...); err != nil {
+			return axi.Failure("pr_merge_failed", repo.Repo+": GitHub did not merge the pull request", true, err.Error())
+		}
 	}
 	return nil
 }
