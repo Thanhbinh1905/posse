@@ -123,6 +123,53 @@ func TestPRWatchSerializesStaleFullPipelineCandidates(t *testing.T) {
 	}
 }
 
+func TestPRWatchDoesNotQueueTargetRefreshForActiveCandidate(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	fixture.requireCurrentTarget(t)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, stderr)
+	}
+	targetTip := fixture.advanceTarget(t, false, true)
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO validation_candidates(task_id,repo,generation,submitted_sha,candidate_sha,target_sha,ref_name,worktree_path,state,summary,created_at,updated_at) VALUES(?,'',1,?,?,?,'refs/posse/test','/candidate','active','candidate',?,?)`, fixture.task.ID, fixture.headSHA, fixture.headSHA, targetTip, time.Now().UnixMilli(), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	writeForge := func() {
+		t.Helper()
+		fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+		cfg, err := config.Load(fixture.home, fixture.project.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeForge()
+	writeForge()
+	var messages int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 {
+		t.Fatalf("active candidate for target %s received %d stale-target refresh messages, want 0", targetTip, messages)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE validation_candidates SET state='promoted',promoted_sha=candidate_sha WHERE task_id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, Kind: "review_cap", Origin: "test:review-cap", Question: "How should the review cap be handled?", Options: []string{"accept", "revise"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeForge()
+	writeForge()
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 {
+		t.Fatalf("open review_cap Decision received %d stale-target refresh messages, want 0", messages)
+	}
+}
+
 func TestPRWatchRetainsGreenObservationForQueuedFullPipelineFollower(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
