@@ -142,6 +142,10 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	if task.State != store.StateDone && task.State != store.StateMerging {
 		return targetSync{}, nil
 	}
+	pending, err := hasCurrentTargetWork(ctx, db, task, member, freshness.Tip)
+	if err != nil || pending {
+		return targetSync{}, err
+	}
 	place, err := db.PlaceInMergeQueue(ctx, task.ID, member, freshness.Branch, time.Now().UnixMilli())
 	if err != nil {
 		return targetSync{}, err
@@ -164,6 +168,28 @@ func queueConflictTargetSyncInstruction(ctx context.Context, db *store.DB, task 
 		return nil
 	}
 	return queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA)
+}
+
+func hasCurrentTargetWork(ctx context.Context, db *store.DB, task store.Task, member, targetSHA string) (bool, error) {
+	candidates, err := db.LiveValidationCandidates(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range candidates {
+		if candidate.Repo == member && candidate.TargetSHA == targetSHA {
+			return true, nil
+		}
+	}
+	decisions, err := db.PendingDecisions(ctx, task.ProjectID)
+	if err != nil {
+		return false, err
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == task.ID && decision.Kind == "review_cap" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
