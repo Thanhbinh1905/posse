@@ -195,7 +195,8 @@ func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project 
 	if err != nil {
 		return nil, err
 	}
-	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)))
+	usesRecorded := skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) || len(uses) > 0
+	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, usesRecorded)
 	if len(checks) == 0 {
 		return nil, nil
 	}
@@ -212,19 +213,19 @@ func taskSkillUseView(ctx context.Context, db *store.DB, home string, project st
 	if len(skills) == 0 {
 		return nil
 	}
-	if !skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) {
-		view["skill_uses_recorded_by"] = "nothing: Posse records skill uses only for claude Workers launched with the skill hook or pi Workers launched with skill-use recording"
-		return nil
-	}
 	uses, err := db.TaskSkillUses(ctx, task.ID)
 	if err != nil {
 		return err
+	}
+	if len(uses) == 0 && !skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) {
+		view["skill_uses_recorded_by"] = "nothing recorded; run `posse _skill-use <skill-name>` after reading or invoking each role skill"
+		return nil
 	}
 	rows := make([]map[string]any, 0, len(skills))
 	for _, name := range skills {
 		rows = append(rows, map[string]any{"skill": name, "uses": uses[name]})
 	}
-	view["skill_uses_recorded_by"] = "claude hook"
+	view["skill_uses_recorded_by"] = "Task skill-use records"
 	view["role_skills"] = rows
 	return nil
 }
