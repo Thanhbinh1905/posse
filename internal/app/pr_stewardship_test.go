@@ -150,6 +150,9 @@ func stewardPollFixture(t *testing.T) (*prMergeFixture, string) {
 func TestPRInspectWaitsForAProjectPollHeldByAnotherProcess(t *testing.T) {
 	f, _ := stewardPollFixture(t)
 	defer f.db.Close()
+	previousBudget := stewardObserveBudget
+	stewardObserveBudget = 300 * time.Millisecond
+	defer func() { stewardObserveBudget = previousBudget }()
 	ctx := context.Background()
 	holder, err := f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), time.Minute, true)
 	if err != nil || holder == "" {
@@ -384,12 +387,26 @@ func TestForgeUnavailableNamesAProjectPollClaimThatIsNeverReleased(t *testing.T)
 	if holder, err := f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), time.Minute, true); err != nil || holder == "" {
 		t.Fatalf("watch claim=%q err=%v", holder, err)
 	}
-	previous := stewardObserveBudget
-	stewardObserveBudget = 300 * time.Millisecond
-	defer func() { stewardObserveBudget = previous }()
+	previous, previousWait := stewardObserveBudget, stewardObserveWaitBudget
+	stewardObserveBudget, stewardObserveWaitBudget = 300*time.Millisecond, 300*time.Millisecond
+	defer func() { stewardObserveBudget, stewardObserveWaitBudget = previous, previousWait }()
 	code, output, stderr := f.run("pr", "inspect", "t1")
 	combined := output + stderr
 	if code == 0 || !strings.Contains(combined, "forge_unavailable") || !strings.Contains(combined, "poll claim") {
 		t.Fatalf("pr inspect: %d %s; want forge_unavailable naming the poll claim", code, combined)
+	}
+}
+
+func TestForgeUnavailableDoesNotBlameProjectPollClaimForForgeTimeout(t *testing.T) {
+	f, _ := stewardPollFixture(t)
+	defer f.db.Close()
+	t.Setenv("POSSE_TEST_GH_DELAY", "1")
+	previous := externalCommandTimeout
+	externalCommandTimeout = 100 * time.Millisecond
+	defer func() { externalCommandTimeout = previous }()
+	code, output, stderr := f.run("pr", "inspect", "t1")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "forge_unavailable") || strings.Contains(combined, "poll claim") {
+		t.Fatalf("pr inspect: %d %s; want forge_unavailable without blaming the Project poll claim", code, combined)
 	}
 }

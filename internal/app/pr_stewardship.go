@@ -140,7 +140,8 @@ func (s *Service) resolveStewardTarget(ctx context.Context, db *store.DB, projec
 	return stewardTarget{project: project, cfg: cfg, task: task, member: member, prURL: prURL, delivery: delivery, forge: forge, actor: role, actorPane: actor.paneID}, nil
 }
 
-var stewardObserveBudget = 30 * time.Second
+var stewardObserveBudget = store.PRPollClaimLease
+var stewardObserveWaitBudget = store.PRPollClaimLease
 
 // observeDelivery refreshes the Project's PR watch and returns the PR's
 // observation. current is false when the watch did not confirm it from the
@@ -148,9 +149,20 @@ var stewardObserveBudget = 30 * time.Second
 // cause then says why, when it is known.
 func (s *Service) observeDelivery(ctx context.Context, db *store.DB, target stewardTarget) (observation store.PRObservation, current bool, cause string, err error) {
 	started := time.Now().UnixMilli()
-	pollCtx, cancel := context.WithTimeout(ctx, stewardObserveBudget)
-	pollErr := s.refreshProjectPullRequests(pollCtx, db, target.project, target.cfg)
-	cancel()
+	waitCtx, cancelWait := context.WithTimeout(ctx, stewardObserveWaitBudget)
+	defer cancelWait()
+	var pollErr error
+	for {
+		pollCtx, cancelPoll := context.WithTimeout(waitCtx, stewardObserveBudget)
+		pollErr = s.refreshProjectPullRequests(pollCtx, db, target.project, target.cfg)
+		cancelPoll()
+		if !errors.Is(pollErr, context.DeadlineExceeded) || !errors.Is(pollErr, errProjectPollClaimHeld) {
+			break
+		}
+		if waitCtx.Err() != nil {
+			break
+		}
+	}
 	if ctx.Err() != nil {
 		return store.PRObservation{}, false, "", ctx.Err()
 	}
@@ -168,8 +180,6 @@ func (s *Service) observeDelivery(ctx context.Context, db *store.DB, target stew
 		}
 	}
 	switch {
-	case errors.Is(pollErr, context.DeadlineExceeded):
-		cause = "another process held the Project poll claim for " + stewardObserveBudget.String()
 	case pollErr != nil:
 		cause = pollErr.Error()
 	default:

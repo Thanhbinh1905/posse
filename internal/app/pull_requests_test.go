@@ -1304,6 +1304,7 @@ case "$1 $2" in
     elif [ "${4:-}" = "--repo" ] && [ "${6:-}" = "--json" ]; then printf '{"attempt":1,"status":"completed","headSha":"%s"}\n' "$(cat "$POSSE_TEST_GH_HEAD")"
     elif [ "${POSSE_TEST_GH_RUN_LOG_JOB:-}" = "$4" ]; then printf '%s\n' "$POSSE_TEST_GH_RUN_LOG_FOR_JOB"; elif [ -n "${POSSE_TEST_GH_RUN_LOG:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_RUN_LOG"; else printf 'unit failed log\n'; fi ;;
   "api graphql")
+    if [ -n "${POSSE_TEST_GH_DELAY:-}" ]; then sleep "$POSSE_TEST_GH_DELAY"; fi
     if [ -n "${POSSE_TEST_GH_ADVANCE_SHA:-}" ]; then
       git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_ADVANCE_SHA:refs/heads/${POSSE_TEST_GH_ADVANCE_BRANCH:-main}" >/dev/null
     fi
