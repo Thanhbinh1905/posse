@@ -254,7 +254,27 @@ func (s *Service) recoverCandidateForRefresh(ctx context.Context, db *store.DB, 
 	if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
 		return candidate, err
 	}
-	return db.LatestValidationCandidate(ctx, task.ID, candidate.Repo)
+	latest, err := db.LatestValidationCandidate(ctx, task.ID, candidate.Repo)
+	if err != nil {
+		return latest, err
+	}
+	if latest.State != store.ValidationCandidateStale {
+		return latest, nil
+	}
+	refHead, found, err := readGitRef(ctx, task.WorktreePath, latest.RefName)
+	if err != nil {
+		return latest, err
+	}
+	if !found {
+		return latest, axi.Failure("candidate_ref_missing", "private candidate ref disappeared after checkout recovery", true, latest.RefName)
+	}
+	if refHead != latest.CandidateSHA {
+		if !gitAncestor(ctx, task.WorktreePath, latest.CandidateSHA, refHead) {
+			return latest, axi.Failure("candidate_ref_moved", "private candidate ref no longer descends from its recorded head", false, latest.RefName)
+		}
+		latest.CandidateSHA = refHead
+	}
+	return latest, nil
 }
 
 func candidatePrivateFixCommits(ctx context.Context, candidate store.ValidationCandidate, authorHead string) ([]string, error) {
