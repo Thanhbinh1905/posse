@@ -152,16 +152,15 @@ func (s *Service) observeDelivery(ctx context.Context, db *store.DB, target stew
 	waitCtx, cancelWait := context.WithTimeout(ctx, stewardObserveWaitBudget)
 	defer cancelWait()
 	var pollErr error
+	budget := stewardObserveBudget
 	for {
-		pollCtx, cancelPoll := context.WithTimeout(waitCtx, stewardObserveBudget)
+		pollCtx, cancelPoll := context.WithTimeout(waitCtx, budget)
 		pollErr = s.refreshProjectPullRequests(pollCtx, db, target.project, target.cfg)
 		cancelPoll()
-		if !errors.Is(pollErr, context.DeadlineExceeded) || !errors.Is(pollErr, errProjectPollClaimHeld) {
+		if !errors.Is(pollErr, context.DeadlineExceeded) || !errors.Is(pollErr, errProjectPollClaimHeld) || waitCtx.Err() != nil {
 			break
 		}
-		if waitCtx.Err() != nil {
-			break
-		}
+		budget = stewardObserveWaitBudget
 	}
 	if ctx.Err() != nil {
 		return store.PRObservation{}, false, "", ctx.Err()
