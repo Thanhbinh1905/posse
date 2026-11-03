@@ -75,7 +75,7 @@ func TestTaskAddMemberCLIAddsMemberAndNotifiesWorker(t *testing.T) {
 	}
 	fake := fixture.service.Herdr.(*herdr.Fake)
 	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "idle"})
-	output := outcomeCLI(t, fixture.service, 0, "task", "add-member", "t1", "e2e-tool", "--base", "main")
+	output := outcomeCLI(t, fixture.service, 0, "task", "add-member", "t1", "e2e-tool", "--base", "main", "--user-approved", "Add e2e-tool to this Task")
 	if !strings.Contains(output, "state: delivered") {
 		t.Fatalf("Worker notification was not delivered: %s", output)
 	}
@@ -104,6 +104,58 @@ func TestTaskAddMemberCLIAddsMemberAndNotifiesWorker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fixture.task.WorktreePath, "e2e-tool", ".git")); err != nil {
 		t.Fatalf("new Member checkout missing from Sandbox: %v", err)
+	}
+}
+
+func TestTaskAddMemberRequiresApproval(t *testing.T) {
+	fixture := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"local\"\nreview = \"none\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	admitRunningWorkspacePlan(t, fixture)
+	output := outcomeCLI(t, fixture.service, 1, "task", "add-member", "t1", "e2e-tool")
+	if !strings.Contains(output, "user_approval_required") {
+		t.Fatalf("expected named User-approval refusal, got %s", output)
+	}
+}
+
+func TestTaskAddMemberStoresScopedUserApproval(t *testing.T) {
+	fixture := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"local\"\nreview = \"none\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	gitTest(t, filepath.Join(fixture.workspace, "e2e-tool"), "branch", "release", "main")
+	admitRunningWorkspacePlan(t, fixture)
+	ctx := context.Background()
+	if err := fixture.db.UpdateTaskWorkspace(ctx, fixture.task.ID, "w1", "w1:p2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.UpdateTaskLaunch(ctx, fixture.task.ID, fixture.task.WorktreePath, "w1", "w1:p2", fixture.task.PaneLabel, "worker"); err != nil {
+		t.Fatal(err)
+	}
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w1:p2", WorkspaceID: "w1", Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "idle"})
+	quote := "  Add e2e-tool to this Task only.  "
+	outcomeCLI(t, fixture.service, 0, "task", "add-member", "t1", "e2e-tool", "--base", "main", "--user-approved", quote)
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.UserChoice != nil {
+		t.Fatalf("Member approval changed Brief preferences: %#v", plan.UserChoice)
+	}
+	if len(plan.MemberAdmissions) != 1 || plan.MemberAdmissions[0].Repository != "e2e-tool" || plan.MemberAdmissions[0].Scope != "member:e2e-tool" || plan.MemberAdmissions[0].Quote != quote || plan.MemberAdmissions[0].Actor != "lead" || plan.MemberAdmissions[0].Source != "task add-member --user-approved" {
+		t.Fatalf("Member approval did not survive admitted-plan decoding: %#v", plan.MemberAdmissions)
+	}
+	mergeGrantFound := false
+	for _, grant := range plan.Grants {
+		if grant.Name == "autonomy.merge" {
+			mergeGrantFound = grant.Value == "ask"
+		}
+		if grant.Name == "autonomy.discard" {
+			t.Fatalf("Member approval added discard authority: %#v", plan.Grants)
+		}
+	}
+	if !mergeGrantFound {
+		t.Fatalf("Member approval changed merge authority: %#v", plan.Grants)
 	}
 }
 

@@ -13,13 +13,14 @@ import (
 )
 
 func (s *Service) taskAddMember(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("task add-member", args, map[string]flagSpec{"base": {}, "target": {}})
+	parsed, err := parseArgs("task add-member", args, map[string]flagSpec{"base": {}, "target": {}, "user-approved": {}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 2 {
-		return axi.Usage("task add-member requires <task> <repo> [--base <ref>] [--target <ref>]")
+		return axi.Usage("task add-member requires <task> <repo> --user-approved <quote> [--base <ref>] [--target <ref>]")
 	}
+	quote := parsed.Flags["user-approved"]
 	db, _, err := s.openDB()
 	if err != nil {
 		return err
@@ -78,6 +79,9 @@ func (s *Service) taskAddMember(ctx *axi.Context, args []string) error {
 	}
 	if repo == nil {
 		return axi.Failure("not_project_member", "repository "+repoName+" is not an active Member of this Project", false, "Run `posse project show` to inspect Project Members")
+	}
+	if strings.TrimSpace(quote) == "" {
+		return axi.Failure("user_approval_required", "adding a workspace Member requires the User's approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves adding this Member")
 	}
 	if !safeWorkspaceRootPath(repo.Path) {
 		return axi.Failure("member_path_invalid", "Project Member has an unsafe Sandbox path", false)
@@ -162,6 +166,9 @@ func (s *Service) taskAddMember(ctx *axi.Context, args []string) error {
 		revised.Execution.Members = append(append([]taskplan.Member(nil), plan.Execution.Members...), selected)
 		revised.Revision++
 		revised.PreviousSHA256 = plan.SHA256()
+		revised.MemberAdmissions = append(append([]taskplan.MemberAdmission(nil), plan.MemberAdmissions...), taskplan.MemberAdmission{
+			Repository: repoName, Scope: "member:" + repoName, Quote: quote, Actor: "lead", Source: "task add-member --user-approved",
+		})
 		if err := db.ReviseTaskPlanWithRepo(ctx.Context, task, revised, store.TaskRepo{Repo: repoName, WorktreePath: sandboxMemberPath, BaseRef: base, TargetBranch: member.TargetBranch, MergeMode: member.MergeMode}); err != nil {
 			if current, readErr := db.TaskByID(ctx.Context, project.ID, task.ID); readErr == nil && current.PlanJSON == task.PlanJSON {
 				_, _ = gitOutput(ctx.Context, root, "worktree", "remove", "--force", sandboxMemberPath)

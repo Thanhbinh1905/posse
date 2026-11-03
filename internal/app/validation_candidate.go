@@ -204,6 +204,9 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 		if candidate.State == store.ValidationCandidatePromoting && actual == candidate.CandidateSHA && branch == "refs/heads/"+task.Branch {
 			continue
 		}
+		if actual == candidate.SubmittedSHA && branch == "refs/heads/"+task.Branch {
+			continue
+		}
 		if candidate.State == store.ValidationCandidateStale && (allowResubmission || allowStale) {
 			continue
 		}
@@ -245,6 +248,72 @@ func (s *Service) refuseMovedCandidateAuthor(ctx context.Context, db *store.DB, 
 		}
 	}
 	return nil
+}
+
+func (s *Service) recoverCandidateForRefresh(ctx context.Context, db *store.DB, home string, task store.Task, candidate store.ValidationCandidate) (store.ValidationCandidate, error) {
+	if err := s.ensureCandidateCheckout(ctx, db, home, task, candidate); err != nil {
+		return candidate, err
+	}
+	latest, err := db.LatestValidationCandidate(ctx, task.ID, candidate.Repo)
+	if err != nil {
+		return latest, err
+	}
+	if latest.State != store.ValidationCandidateStale {
+		return latest, nil
+	}
+	refHead, found, err := readGitRef(ctx, task.WorktreePath, latest.RefName)
+	if err != nil {
+		return latest, err
+	}
+	if !found {
+		return latest, axi.Failure("candidate_ref_missing", "private candidate ref disappeared after checkout recovery", true, latest.RefName)
+	}
+	if refHead != latest.CandidateSHA {
+		if !gitAncestor(ctx, task.WorktreePath, latest.CandidateSHA, refHead) {
+			return latest, axi.Failure("candidate_ref_moved", "private candidate ref no longer descends from its recorded head", false, latest.RefName)
+		}
+		latest.CandidateSHA = refHead
+	}
+	return latest, nil
+}
+
+func candidatePrivateFixCommits(ctx context.Context, candidate store.ValidationCandidate, authorHead string) ([]string, error) {
+	root := candidate.WorktreePath
+	mergedTree, mergeErr := gitOutput(ctx, root, "merge-tree", "--write-tree", candidate.SubmittedSHA, candidate.TargetSHA)
+	candidateTree, err := gitOutput(ctx, root, "rev-parse", "--verify", candidate.CandidateSHA+"^{tree}")
+	if err != nil {
+		return nil, err
+	}
+	mergedTreeFields := strings.Fields(mergedTree)
+	if mergeErr == nil && len(mergedTreeFields) > 0 && mergedTreeFields[0] == candidateTree {
+		return nil, nil
+	}
+	output, err := gitOutput(ctx, root, "rev-list", "--reverse", candidate.CandidateSHA, "^"+candidate.SubmittedSHA, "^"+candidate.TargetSHA)
+	if err != nil {
+		return nil, err
+	}
+	commits := strings.Fields(output)
+	if len(commits) == 0 {
+		commits = []string{candidate.CandidateSHA}
+	}
+	var unmerged []string
+	for _, commit := range commits {
+		if !gitAncestor(ctx, root, commit, authorHead) {
+			unmerged = append(unmerged, commit)
+		}
+	}
+	return unmerged, nil
+}
+
+func refuseUnmergedCandidateFixes(ctx context.Context, candidate store.ValidationCandidate, authorHead string) error {
+	commits, err := candidatePrivateFixCommits(ctx, candidate, authorHead)
+	if err != nil {
+		return err
+	}
+	if len(commits) == 0 {
+		return nil
+	}
+	return axi.Failure("candidate_review_fix_unmerged", "Review fix commits are present only in the private candidate: "+strings.Join(commits, ", "), false, "Merge these commits into the Task branch, then run `posse publish` again to preserve the Review fix")
 }
 
 func candidateAuthorCanRefreshAfterMove(ctx context.Context, lane candidateLane, candidate store.ValidationCandidate, authorHead string) (bool, error) {
@@ -334,6 +403,13 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 		switch candidate.State {
 		case store.ValidationCandidatePreparing, store.ValidationCandidateActive:
 			if candidate.SubmittedSHA != submittedSHA {
+				candidate, err = s.recoverCandidateForRefresh(ctx, db, home, task, candidate)
+				if err != nil {
+					return err
+				}
+				if err := refuseUnmergedCandidateFixes(ctx, candidate, submittedSHA); err != nil {
+					return err
+				}
 				if markErr := db.MarkValidationCandidateStale(ctx, candidate.ID, submittedSHA); markErr != nil && markErr != store.ErrStateRace {
 					return markErr
 				}
@@ -353,6 +429,13 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 					return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 				}
 				if currentTarget != candidate.TargetSHA {
+					candidate, err = s.recoverCandidateForRefresh(ctx, db, home, task, candidate)
+					if err != nil {
+						return err
+					}
+					if err := refuseUnmergedCandidateFixes(ctx, candidate, submittedSHA); err != nil {
+						return err
+					}
 					if markErr := db.MarkValidationCandidateStale(ctx, candidate.ID, currentTarget); markErr != nil && markErr != store.ErrStateRace {
 						return markErr
 					}
@@ -408,6 +491,13 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				return err
 			}
 		case store.ValidationCandidateStale:
+			candidate, err = s.recoverCandidateForRefresh(ctx, db, home, task, candidate)
+			if err != nil {
+				return err
+			}
+			if err := refuseUnmergedCandidateFixes(ctx, candidate, submittedSHA); err != nil {
+				return err
+			}
 			if err := s.archiveCandidate(ctx, db, task, candidate); err != nil {
 				return err
 			}
