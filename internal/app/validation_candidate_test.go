@@ -707,16 +707,40 @@ func TestCandidatePromotionResumesAfterCrashBetweenPushAndPullRequest(t *testing
 	if err := fixture.db.BeginValidationCandidatePromotion(context.Background(), candidate.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.db.StartIntent(context.Background(), fixture.project.ID, fixture.task.ID, "publish", "candidate.push", "{}", os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE intents SET process_id=0,process_boot_id='',process_start_time='' WHERE task_id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
 	gitTest(t, fixture.worktree, "merge", "--ff-only", candidateHead)
 	gitTest(t, fixture.worktree, "push", "origin", candidateHead+":refs/heads/posse/t1")
 	fixture.setGHHead(t, candidateHead)
 	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidateHead)
-	if err := runCandidatePromotionForTest(t, fixture); err != nil {
-		t.Fatalf("resume interrupted promotion: %v (%s)", err, fixture.output.String())
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 1 || !strings.Contains(output, "candidate_promotion_in_progress") || !strings.Contains(output, candidateHead[:7]) || !strings.Contains(output, "posse publish") {
+		t.Fatalf("validation during promotion: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("publish"); code != 1 || !strings.Contains(output, "candidate_promotion_in_progress") || !strings.Contains(output, candidateHead[:7]) || !strings.Contains(output, "posse publish") {
+		t.Fatalf("summary-free publish during promotion: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("publish", "Candidate summary"); code != 1 || !strings.Contains(output, "candidate_promotion_in_progress") || !strings.Contains(output, candidateHead[:7]) || !strings.Contains(output, "posse publish") {
+		t.Fatalf("publish during promotion: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "publish"); code != 0 {
+		t.Fatalf("resume interrupted promotion: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 	candidate, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil || candidate.State != store.ValidationCandidatePromoted || candidate.PromotedSHA != candidateHead {
 		t.Fatalf("resumed candidate=%+v err=%v", candidate, err)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "intent_stuck" && strings.Contains(notice.Summary, "unknown interrupted command") {
+			t.Fatalf("publish recovery reported an unknown interrupted command: %+v", notice)
+		}
 	}
 }
 
