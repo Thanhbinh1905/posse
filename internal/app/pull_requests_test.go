@@ -355,8 +355,11 @@ func TestPRMergeIgnoresLegacyFailingGateAndOpensPR(t *testing.T) {
 	}
 }
 
-func TestPRMergeRequiresApprovalAndPinsTheGatedHead(t *testing.T) {
+func TestPRMergeUsesPRTitleInsteadOfItsSingleCommitMessage(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	if err := fixture.db.SetTaskPRTitle(context.Background(), fixture.task.ID, "fix: E2E PR title"); err != nil {
+		t.Fatal(err)
+	}
 	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
 	}
@@ -381,8 +384,8 @@ func TestPRMergeRequiresApprovalAndPinsTheGatedHead(t *testing.T) {
 		t.Fatalf("approved PR merge exit=%d output=%s error=%s", code, output, errOutput)
 	}
 	log, err := os.ReadFile(fixture.ghLog)
-	if err != nil || !strings.Contains(string(log), "--squash") || !strings.Contains(string(log), "--match-head-commit "+task.GatedSHA) {
-		t.Fatalf("gh pr merge did not pin the gated SHA and configured method: %q, %v", log, err)
+	if err != nil || !strings.Contains(string(log), "--squash") || !strings.Contains(string(log), "--match-head-commit "+task.GatedSHA) || !strings.Contains(string(log), "--subject fix: E2E PR title (#17)") {
+		t.Fatalf("gh pr merge did not use the PR title, pin the gated SHA and configured method: %q, %v", log, err)
 	}
 }
 
@@ -1365,7 +1368,7 @@ case "$1 $2" in
          repository="{\"nameWithOwner\":\"$source\"}"
          # gh 2.46 omits nameWithOwner and names the owner separately.
          if [ -n "${POSSE_TEST_GH_LEGACY_REPOSITORY:-}" ]; then repository="{\"name\":\"${source#*/}\"},\"headRepositoryOwner\":{\"login\":\"${source%%/*}\"}"; fi
-         printf '{"url":"%s","state":"%s","headRefOid":"%s","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$repository" ;;
+         printf '{"url":"%s","state":"%s","headRefOid":"%s","title":"fix: E2E PR title","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$repository" ;;
     esac ;;
   "pr merge") printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
