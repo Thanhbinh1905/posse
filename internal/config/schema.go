@@ -30,6 +30,8 @@ type KeySpec struct {
 }
 
 var keySpecs = []KeySpec{
+	{Key: "budget.daily_tokens", Type: TypeInteger, Default: int64(0), Meaning: "Per-Project token limit for the host-local calendar day; 0 disables it."},
+	{Key: "budget.task_tokens", Type: TypeInteger, Default: int64(0), Meaning: "Default total-token limit per Task; a Brief budget_tokens value overrides it. 0 disables it."},
 	{Key: "identity.lead.name", Type: TypeString, Default: "Lead", Meaning: "Display name and Lead voice toward the User."},
 	{Key: "identity.lead.persona", Type: TypeString, Default: "", Meaning: "Lead persona used only when speaking to the User."},
 	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language for Lead messages to the User. Briefs, send instructions, reviews, Reports, commit messages and other artifacts stay in English."},
@@ -255,6 +257,11 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 			if parsed, err := time.ParseDuration(text); err == nil && parsed < MinWorkerGoCacheAge {
 				return fmt.Errorf("%s must be at least %s", key, MinWorkerGoCacheAge)
 			}
+		}
+	}
+	if key == "budget.daily_tokens" || key == "budget.task_tokens" {
+		if number, ok := integerValue(value); ok && number < 0 {
+			return fmt.Errorf("%s cannot be negative", key)
 		}
 	}
 	if key == "pool.keep_idle" {

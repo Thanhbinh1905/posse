@@ -692,6 +692,8 @@ func TestOpenMigratesHomeWithLegacyProjectUUIDVersion32(t *testing.T) {
 		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
 		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`ALTER TABLE notices DROP COLUMN command_notified_at`,
+		`DROP TABLE budget_crossings`,
+		`DROP TABLE task_budget_usage`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`ALTER TABLE projects ADD COLUMN project_uuid TEXT NOT NULL DEFAULT ''`,
@@ -847,6 +849,8 @@ func TestOpenMigratesLegacyNoticeDeliveryMigrationVersion32(t *testing.T) {
 		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
 		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`ALTER TABLE notices DROP COLUMN command_notified_at`,
+		`DROP TABLE budget_crossings`,
+		`DROP TABLE task_budget_usage`,
 		`DELETE FROM goose_db_version WHERE version_id >= 32`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 32`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(32,1)`,
@@ -1074,6 +1078,8 @@ func TestTerminalMessageMigrationRepairsExistingOrphans(t *testing.T) {
 		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
 		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
 		`ALTER TABLE notices DROP COLUMN command_notified_at`,
+		`DROP TABLE budget_crossings`,
+		`DROP TABLE task_budget_usage`,
 		`DELETE FROM goose_db_version WHERE version_id >= 26`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
