@@ -12,6 +12,66 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func refuseMergedTaskPullRequest(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, repo string) error {
+	prURL := task.PRURL
+	if repo != "" {
+		repos, err := db.TaskRepos(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		prURL = ""
+		for _, member := range repos {
+			if member.Repo == repo {
+				prURL = member.PRURL
+				break
+			}
+		}
+	}
+	if prURL == "" {
+		return nil
+	}
+	root := project.Root
+	if project.IsWorkspace() {
+		target, err := projectTarget(ctx, db, project, repo)
+		if err != nil {
+			return err
+		}
+		root = target.Root
+	}
+	forge, err := forgeForRepository(ctx, root, cfg, repo)
+	if err != nil {
+		return err
+	}
+	var state string
+	if forge.Kind == "gitlab" {
+		number, err := forgeReference(prURL, forge)
+		if err != nil {
+			return err
+		}
+		mr, err := gitlabMR(ctx, forge, number)
+		if err != nil {
+			return axi.Failure("pr_view_failed", "could not refresh the recorded merge request before publishing", true, err.Error())
+		}
+		state = mr.State
+	} else {
+		output, err := commandOutputArgs(ctx, forge.Root, "gh", "pr", "view", prURL, "--json", "state")
+		if err != nil {
+			return axi.Failure("pr_view_failed", "could not refresh the recorded pull request before publishing", true, strings.TrimSpace(output))
+		}
+		var pull struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal([]byte(output), &pull); err != nil {
+			return axi.Failure("pr_view_failed", "gh returned invalid pull request state", true, err.Error())
+		}
+		state = pull.State
+	}
+	if strings.EqualFold(state, "merged") {
+		return axi.Failure("pr_merged", "pull request merged; Task cannot publish another PR", false)
+	}
+	return nil
+}
+
 func remoteBranchHead(ctx context.Context, root, ref string) (string, error) {
 	output, err := gitOutput(ctx, root, "ls-remote", "--heads", "origin", ref)
 	if err != nil {
@@ -93,6 +153,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	task, err = db.TaskByID(out.Context, project.ID, task.ID)
 	if err != nil {
+		return err
+	}
+	if err := refuseMergedTaskPullRequest(out.Context, db, project, cfg, task, repoFilter); err != nil {
 		return err
 	}
 	changes, err := db.TaskTargetChanges(out.Context, task.ID)
