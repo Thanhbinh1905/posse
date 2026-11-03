@@ -22,6 +22,7 @@ type Brief struct {
 	WorkflowRun    string
 	Stage          string
 	ReviewRounds   int
+	BudgetTokens   int64
 	Base           string
 	BaseByRepo     map[string]string
 	Target         string
@@ -172,7 +173,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "base", "target", "review_of", "supersedes", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -202,6 +203,13 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 			return Brief{}, err
 		}
 		brief.After = dependencies
+	}
+	if raw, found := values["budget_tokens"]; found {
+		limit, err := strconv.ParseInt(unquote(raw), 10, 64)
+		if err != nil || limit < 1 {
+			return Brief{}, &BriefError{Field: "budget_tokens", Reason: "must be a positive integer"}
+		}
+		brief.BudgetTokens = limit
 	}
 	if raw, found := values["review_rounds"]; found {
 		rounds, err := strconv.Atoi(unquote(raw))
