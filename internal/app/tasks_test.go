@@ -285,6 +285,67 @@ use = "claude"
 	}
 }
 
+func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
+	fixture := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Current Worker", ShortName: "current-worker", State: store.StateSpawning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "race-probe", "--queue"}); code != 0 {
+		t.Fatalf("queue admission exit=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queued, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := queued.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("admitted plan=%+v err=%v", plan, err)
+	}
+	if err := db.Transition(ctx, activeID, store.StateSpawning, store.StateFailed, "cli", "fixture Worker finished"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := db.ClaimQueuedTask(ctx, fixture.project.ID, queued.ID, 1, store.TaskBranchName(queued.Seq), os.Getpid())
+	if err != nil || !claimed {
+		t.Fatalf("first concurrent launch claim=%t err=%v", claimed, err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launched, err := fixture.service.admitQueuedTask(ctx, db, fixture.home, fixture.project, cfg, queued, plan, true)
+	if err != nil || launched {
+		t.Fatalf("losing concurrent launch=%t err=%v", launched, err)
+	}
+	declines, err := db.QueuedTaskDeclines(ctx, fixture.project.ID)
+	if err != nil || len(declines) != 0 {
+		t.Fatalf("losing launch recorded queued declines=%#v err=%v", declines, err)
+	}
+	notices, err := db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "pr_watch_failing") != 0 {
+		t.Fatalf("losing launch Notices=%#v err=%v", notices, err)
+	}
+}
+
 func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
 	fixture := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
