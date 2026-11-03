@@ -311,6 +311,10 @@ func (s *Service) printDelivery(ctx *axi.Context, db *store.DB, target stewardTa
 	if err != nil {
 		return err
 	}
+	executorPolicy, err := db.DeliveryExecutorPolicy(ctx.Context, target.delivery.ID)
+	if err != nil {
+		return err
+	}
 	operationRows := make([]any, 0, len(operations))
 	for _, operation := range operations {
 		operationRows = append(operationRows, axi.Object{{Key: "id", Value: operation.ID}, {Key: "operation", Value: operation.Operation}, {Key: "actor", Value: operation.Actor}, {Key: "head", Value: shortSHA(operation.HeadSHA)}, {Key: "subject", Value: operation.Subject}, {Key: "outcome", Value: operation.Outcome}, {Key: "detail", Value: operation.Detail}, {Key: "at", Value: operation.UpdatedAt}})
@@ -335,7 +339,7 @@ func (s *Service) printDelivery(ctx *axi.Context, db *store.DB, target stewardTa
 	}
 	help = append(help, "Run `posse pr reply "+target.taskLabel()+" --body <text>` to answer a reviewer on the PR/MR")
 	return ctx.Print(axi.Object{
-		{Key: "delivery", Value: axi.Row{{Key: "task", Value: taskIDString(target.task.Seq)}, {Key: "repo", Value: target.member}, {Key: "url", Value: target.prURL}, {Key: "steward", Value: target.delivery.Steward}, {Key: "origin", Value: target.delivery.Origin}}},
+		{Key: "delivery", Value: axi.Row{{Key: "task", Value: taskIDString(target.task.Seq)}, {Key: "repo", Value: target.member}, {Key: "url", Value: target.prURL}, {Key: "steward", Value: target.delivery.Steward}, {Key: "origin", Value: target.delivery.Origin}, {Key: "executor_policy", Value: executorPolicy}}},
 		{Key: "authors", Value: authors},
 		{Key: "observation", Value: axi.Row{{Key: "head", Value: observation.HeadSHA}, {Key: "state", Value: observation.State}, {Key: "checks", Value: checks.State}, {Key: "review", Value: observation.Review}, {Key: "mergeable", Value: observation.Mergeable}, {Key: "confirmed_at", Value: confirmed}}},
 		{Key: "failures", Value: failureRows},
