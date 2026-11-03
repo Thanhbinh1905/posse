@@ -321,6 +321,7 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 	if err != nil {
 		return err
 	}
+	s.dispatchNoticeCommand(ctx, db, project, notices)
 	if len(snapshot.Panes) == 0 {
 		snapshot, err = s.snapshot(ctx)
 		if err != nil {
