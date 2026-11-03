@@ -406,6 +406,44 @@ func TestFullPipelineDoneNoticeAndShowNameReviewStart(t *testing.T) {
 	}
 }
 
+func TestValidationStatusUsesMergeReviewEvidence(t *testing.T) {
+	for _, evidenceKind := range []string{"carry", "accept-head"} {
+		t.Run(evidenceKind, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+			installFullPipelinePlan(t, fixture)
+			submitThroughCLI(t, fixture)
+			candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evidenceKind == "carry" {
+				if err := fixture.db.RecordReviewCarry(context.Background(), store.ReviewCarry{
+					ChangeTaskID: fixture.task.ID, Repository: fixture.project.Name,
+					FromHead: strings.Repeat("b", 40), ToHead: candidate.CandidateSHA,
+					TargetCommitSHA: strings.Repeat("c", 40), Tree: strings.Repeat("d", 40),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := fixture.db.RecordReviewDisposition(context.Background(), fixture.task.ID, 0, []string{candidate.CandidateSHA}, "User accepted this head", "P1"); err != nil {
+				t.Fatal(err)
+			}
+			recordCandidateStages(t, fixture)
+			if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 0 || !strings.Contains(output, "review_pass: true") || !strings.Contains(output, "publication_ready: true") {
+				t.Fatalf("active candidate status did not match Merge review evidence: exit=%d output=%s stderr=%s", code, output, stderr)
+			}
+			if err := fixture.db.BeginValidationCandidatePromotion(context.Background(), candidate.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.CompleteValidationCandidatePromotion(context.Background(), candidate.ID, candidate.CandidateSHA); err != nil {
+				t.Fatal(err)
+			}
+			if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 0 || !strings.Contains(output, "candidate_state: promoted") || !strings.Contains(output, "review_pass: true") || !strings.Contains(output, "publication_ready: false") {
+				t.Fatalf("promoted candidate status did not match Merge review evidence: exit=%d output=%s stderr=%s", code, output, stderr)
+			}
+		})
+	}
+}
+
 func TestFullPipelineStagesAreOrderedAndCandidateMovementInvalidatesThem(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
