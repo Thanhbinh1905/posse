@@ -431,6 +431,44 @@ func TestFullPipelineTargetMovementInvalidatesAndRefreshesCandidate(t *testing.T
 	}
 }
 
+func TestFullPipelinePromotedCandidateAllowsNextGenerationAfterTargetAndAuthorMove(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateHead := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, candidateHead)
+	recordCandidateStages(t, fixture)
+	fixture.setGHHead(t, candidateHead)
+	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", candidateHead)
+	if err := runCandidatePromotionForTest(t, fixture); err != nil {
+		t.Fatalf("promote candidate: %v", err)
+	}
+
+	gitTest(t, candidate.WorktreePath, "commit", "--allow-empty", "-m", "fix failed CI")
+	newHead := strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
+	gitTest(t, fixture.worktree, "merge", "--ff-only", newHead)
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance frozen target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+
+	statusCode, statusOutput, statusStderr := runCandidateCLI(t, fixture, candidate, "validate", "status")
+	if statusCode != 0 || !strings.Contains(statusOutput, "target_current: false") {
+		t.Errorf("status for moved promoted candidate: exit=%d output=%s stderr=%s", statusCode, statusOutput, statusStderr)
+	}
+	publishCode, publishOutput, publishStderr := fixture.run("publish", "Candidate summary", "--verify", "go test ./internal/app -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if publishCode != 0 {
+		t.Errorf("publish next generation: exit=%d output=%s stderr=%s", publishCode, publishOutput, publishStderr)
+	}
+	fresh, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || fresh.Generation != candidate.Generation+1 || fresh.State != store.ValidationCandidateActive || fresh.SubmittedSHA != strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD")) {
+		t.Errorf("next candidate=%+v err=%v", fresh, err)
+	}
+}
+
 func TestFullPipelineTargetMovedValidationHelpExplainsMergeRefresh(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
