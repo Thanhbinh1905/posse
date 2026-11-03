@@ -1021,7 +1021,7 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 
 var (
 	prPollContendedRetry    = 50 * time.Millisecond
-	errProjectPollClaimHeld = errors.New("Project poll claim remained held")
+	errProjectPollClaimHeld = errors.New("project poll claim remained held")
 )
 
 // refreshProjectPullRequests is a forced poll whose result a caller guards
