@@ -60,7 +60,7 @@ The Bug variant is **Diagnose -> Build -> Review -> Deliver**. Diagnose maps to 
 
 ### Profile sketch and freezing
 
-The following TOML is a design sketch, **not configuration accepted by the current CLI**. Stage order is array order; every stage names its frame, transition gate, Task type and Worker count. `gate = "user"` is a stage decision, not an executable Gate command. `task_type = "none"` denotes Git mechanics, not a new Task type. Worker counts are dispatch bounds subject to Project capacity, not permission to exceed it.
+The following TOML is accepted by the current CLI as a workflow profile. Stage order is array order; every stage names its frame, transition gate, Task type and Worker count. The CLI validates the profile and freezes all fields into the run. `gate = "user"` means the User decides whether to advance; it is not an executable Gate command. `task_type = "none"` denotes Git mechanics, not a new Task type. `workers` is descriptive metadata: it does not dispatch Workers or override the Project's `max_workers` limit. `skills` remains opaque metadata; Posse does not load skills from this field.
 
 ```toml
 [workflows.feature]
@@ -85,7 +85,7 @@ stages = [
 
 Here `ship` denotes delivery outside the three frames. Review allocates no reviewer for `none`, or one independent reviewer per round for `quick`/`full-pipeline`; full-pipeline also performs its required test/docs/lint work in the private candidate lane. Selecting `none` records review as not required, not passed; the User still decides the profile's next-stage transition.
 
-Creating a workflow run freezes the selected profile's exact content, stage order, gates, Task types, Worker bounds, source and digest in the initial Task plan. Later Tasks, stage Decisions and status use that run snapshot, not edited dotfiles; deleting or renaming the source does not affect the run. Config changes affect new runs only. A User who wants an active run to adopt an edit starts a new run; active runs are not migrated. No profile is frozen for an unconfigured direct Task. This is an ordered recipe over existing Tasks, not a general workflow DSL, new Task hierarchy, scheduler or five-table workflow runner.
+Creating a workflow run freezes the selected profile's exact content, stage order, gates, Task types, Worker metadata, source and digest in the initial Task plan. Later Tasks, stage Decisions and status use that run snapshot, not edited dotfiles; deleting or renaming the source does not affect the run. Config changes affect new runs only. A User who wants an active run to adopt an edit starts a new run; active runs are not migrated. No profile is frozen for an unconfigured direct Task. This is an ordered recipe over existing Tasks, not a general workflow DSL, new Task hierarchy, scheduler or five-table workflow runner.
 
 Skill fields remain opaque placeholders. Skill sets, bundle contents, registries, loaders and default skill selection are explicitly deferred until the workflow takes shape; S01-S03 (#161-#163) are not prerequisites for the direct path or this workflow decision.
 
@@ -93,4 +93,13 @@ Skill fields remain opaque placeholders. Skill sets, bundle contents, registries
 
 The core owns dispatch correctness, isolation, selected evidence and ship authority. Users can keep detailed processes in dotfiles without imposing them on every Project. Stage transitions need visible User decisions even when the next action is mechanically ready. The trade-off is deliberate: unattended progression is unavailable until separately designed and opted into.
 
-This ADR records agreed design, not shipped workflow-profile support. [Spec sections 1.1 and 25](../spec.md#11-workflow-boundary) distinguish the direct path and the shipped `full-pipeline` review mode from planned profile behavior. The implementation must preserve existing admitted plans and demonstrate an unconfigured single-Worker path as well as a User-gated profile path.
+Workflow-profile configuration, preview, admission freezing and User-approved stage Decisions are implemented. [Spec sections 1.1 and 25](../spec.md#11-workflow-boundary) describe the shipped direct path, profiles and review modes.
+
+## E2E evidence
+
+The existing fake-agent suite covers these contracts without duplicating their scenarios:
+
+- `TestWorkflowProfileAdmissionAndNoProfileDirectPath` starts the unconfigured Claude direct path and checks its frozen launch identity, then checks that a selected profile is frozen. `TestLaunchSkillsAreInjectedOnlyIntoPosseSessions/pi` starts an unconfigured fake Pi Worker and checks the implicit launch identity without a Worker Profile.
+- `TestWorkflowRunsRequireUserApprovedProgressionAndRecoverPosition` refuses unapproved and out-of-order transitions, checks that profile edits do not alter active runs, preserves separate Merge authority, and reconstructs run position and Decisions from snapshots.
+- `TestWorkerGuardAgainstIsolatedHerdr`, `TestTeardownNeverClosesAReplacementAtThePaneCloseBoundary` and related Teardown tests cover isolation and Task-owned teardown.
+- `TestStagingSelectedReviewModesPublishOnlyToStaging` and `TestStagingFullPipelineCIRepairRepublishesAcrossRestart` cover selected review evidence, staging publication and recovery after restart. The complete validation proof is tracked in [#303](https://github.com/Thanhbinh1905/posse/issues/303).
