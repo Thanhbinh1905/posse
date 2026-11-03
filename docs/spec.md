@@ -634,7 +634,7 @@ autonomy: { merge: ask }     # optional, tighten only
 <body: goal, context, constraints, User's intent in their words>
 ```
 
-Brief frontmatter is a flat `key: value` subset of YAML. `done_when` also accepts a block list of items, which Posse joins with `; ` into one criterion; every other field rejects a YAML list with `YAML lists are unsupported`, whatever the item text. Use inline `[a, b]` lists where a field takes several values.
+Brief frontmatter is a flat `key: value` subset of YAML. `done_when` also accepts a block list of items, which Posse joins with `;` followed by a space into one criterion; every other field rejects a YAML list with `YAML lists are unsupported`, whatever the item text. Use inline `[a, b]` lists where a field takes several values.
 
 ```yaml
 done_when:
