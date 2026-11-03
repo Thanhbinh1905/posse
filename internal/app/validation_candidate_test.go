@@ -275,12 +275,14 @@ func TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate(t *testing.T)
 	gitTest(t, fixture.repo, "push", "origin", "main")
 	gitTest(t, fixture.worktree, "fetch", "origin")
 	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
-	code, output, stderr := fixture.run("publish", "Refreshed candidate", "--verify", "go test ./internal/app -run TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate -count=1 -> passed", "--proof", "Review fix retained", "--risk", "Risk: low\nRollback: revert")
+	code, output, stderr := fixture.run("publish", "--refresh", "Refreshed candidate", "--verify", "go test ./internal/app -run TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate -count=1 -> passed", "--proof", "Review fix retained", "--risk", "Risk: low\nRollback: revert")
+	if code == 0 || !strings.Contains(output+stderr, fixSHA) || !strings.Contains(strings.ToLower(output+stderr), "merge") {
+		t.Fatalf("refresh without merging the private fix should print the required Task-branch merge step: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	gitTest(t, fixture.worktree, "merge", "--no-edit", fixSHA)
+	code, output, stderr = fixture.run("publish", "--refresh", "Refreshed candidate")
 	if code != 0 {
-		if !strings.Contains(output+stderr, fixSHA) || !strings.Contains(strings.ToLower(output+stderr), "merge") {
-			t.Fatalf("refresh refusal did not name the Review fix to merge: exit=%d output=%s stderr=%s", code, output, stderr)
-		}
-		return
+		t.Fatalf("refresh after following the printed merge step: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 	refreshed, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil {
@@ -288,6 +290,19 @@ func TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate(t *testing.T)
 	}
 	if _, err := gitOutput(context.Background(), refreshed.WorktreePath, "show", refreshed.CandidateSHA+":review-fix.txt"); err != nil {
 		t.Fatalf("refreshed candidate %s lost Review fix %s from prior candidate %s: %v", refreshed.CandidateSHA, fixSHA, candidate.CandidateSHA, err)
+	}
+	if refreshed.Summary != "Refreshed candidate" || refreshed.Verification != "go test ./... -> passed" || refreshed.Proof != "Intent proof: verified" || refreshed.Risk != "Risk: low\nRollback: revert" {
+		t.Fatalf("refresh discarded previous description fields: %+v", refreshed)
+	}
+	if !strings.Contains(output, "previously recorded Review resolutions carry over") {
+		t.Fatalf("refresh did not tell the Worker that prior Review resolutions carry: %s", output)
+	}
+	turn, err = fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, refreshed, "signal", "done", "Fresh candidate is ready", "--turn", turn); code != 0 {
+		t.Fatalf("done without new resolutions after refresh: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 }
 
