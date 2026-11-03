@@ -38,12 +38,34 @@ type Decision struct {
 	ObsoleteReason string   `json:"obsolete_reason"`
 }
 
+func BudgetDecisionStaleReason(decision Decision, task Task, localDay string) string {
+	if decision.Kind != "budget" {
+		return ""
+	}
+	if task.Launches != decision.TaskLaunches {
+		return "Worker launch changed"
+	}
+	if !oneOfState(task.State, StateSpawning, StateWorking, StateStalled, StateBlocked, StateNeedsDecision) {
+		return "Task left its working state"
+	}
+	if day, ok := strings.CutPrefix(decision.Origin, "budget:daily:"); ok {
+		if day != localDay {
+			return "Project daily budget period ended"
+		}
+		return ""
+	}
+	if taskID, ok := strings.CutPrefix(decision.Origin, "budget:task:"); !ok || taskID != fmt.Sprint(task.ID) {
+		return "Budget Decision scope changed"
+	}
+	return ""
+}
+
 func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decision, error) {
 	if request.ProjectID < 1 || request.TaskID < 1 || strings.TrimSpace(request.Origin) == "" || strings.TrimSpace(request.Question) == "" || len(request.Options) < 1 {
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least one option")
 	}
 	switch request.Kind {
-	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "quota":
+	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "quota", "budget":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
 	}
@@ -397,6 +419,9 @@ const resolvedDecisionPredicate = `
 		OR (d.kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>d.task_launches))
 		OR (d.kind='dependency' AND t.state<>'queued')
 		OR (d.kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches))
+		OR (d.kind='budget' AND (t.state NOT IN ('spawning','working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches
+			OR (d.origin LIKE 'budget:daily:%' AND substr(d.origin,14)<>date('now','localtime'))
+			OR (d.origin NOT LIKE 'budget:daily:%' AND d.origin<>'budget:task:'||t.id)))
 		OR (d.kind='pr_closed' AND (
 			(d.origin LIKE 'pr_closed:invalid:%' AND (t.state='torn-down' OR d.origin<>'pr_closed:invalid:'||t.id||':'||t.pr_url))
 			OR (d.origin NOT LIKE 'pr_closed:invalid:%' AND (t.state='torn-down'
@@ -413,9 +438,10 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'pr_closed' THEN 'Closed PR was reopened, replaced or Task discarded'
 		WHEN 'orphan' THEN 'Unrecoverable Orphan resolved during Teardown'
 		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
+		WHEN 'budget' THEN 'Budget Decision no longer applies to this Worker launch, Task state or Project day'
 		WHEN 'dependency' THEN 'Task is no longer queued'
 		ELSE 'Task no longer failed or lost' END
-		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','dependency')
+		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','budget','dependency')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=d.task_id AND (`+resolvedDecisionPredicate+`))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
 		return err
@@ -428,7 +454,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" {
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" {
 		return "", nil
 	}
 	var state State
@@ -456,6 +482,9 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "quota" && (!QuotaDecisionState(state) || launches != decision.TaskLaunches) {
 		return "Worker relaunched or Task left its working states", nil
+	}
+	if decision.Kind == "budget" {
+		return BudgetDecisionStaleReason(decision, Task{ID: decision.TaskID, State: state, Launches: launches}, time.Now().Format(time.DateOnly)), nil
 	}
 	if decision.Kind == "pr_closed" {
 		var owned bool
