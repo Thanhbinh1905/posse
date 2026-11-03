@@ -226,17 +226,22 @@ func (s *Service) availableLeadKinds(ctx context.Context, cfg config.Config) []s
 }
 
 func refuseForeignLeadWorkspace(snapshot herdr.Snapshot, project store.Project, callerPaneID, workspaceID string) error {
+	return refuseForeignLeadWorkspaceWithCommand(snapshot, project, callerPaneID, workspaceID, "posse up")
+}
+
+func refuseForeignLeadWorkspaceWithCommand(snapshot herdr.Snapshot, project store.Project, callerPaneID, workspaceID, command string) error {
 	ownLabel := "posse:" + project.Name + ":lead"
+	recovery := "Open a new Herdr workspace for this Project, then run `" + command + "` there"
 	for _, pane := range snapshot.Panes {
 		if pane.Label == "" || pane.Label == ownLabel || !strings.HasPrefix(pane.Label, "posse:") || !strings.HasSuffix(pane.Label, ":lead") {
 			continue
 		}
 		other := strings.TrimSuffix(strings.TrimPrefix(pane.Label, "posse:"), ":lead")
 		if pane.PaneID == callerPaneID {
-			return axi.Failure("lead_workspace_conflict", fmt.Sprintf("cannot start Project %s from Project %s's Lead pane in Herdr workspace %s. Open a new Herdr workspace for this Project, then run `posse up` there", project.Name, other, pane.WorkspaceID), false, "Open a new Herdr workspace for this Project, then run `posse up` there")
+			return axi.Failure("lead_workspace_conflict", fmt.Sprintf("cannot start Project %s from Project %s's Lead pane in Herdr workspace %s. %s", project.Name, other, pane.WorkspaceID, recovery), false, recovery)
 		}
 		if pane.WorkspaceID == workspaceID {
-			return axi.Failure("lead_workspace_conflict", fmt.Sprintf("Herdr workspace %s contains the Lead pane for Project %s. Open a new Herdr workspace for this Project, then run `posse up` there", workspaceID, other), false, "Open a new Herdr workspace for this Project, then run `posse up` there")
+			return axi.Failure("lead_workspace_conflict", fmt.Sprintf("Herdr workspace %s contains the Lead pane for Project %s. %s", workspaceID, other, recovery), false, recovery)
 		}
 	}
 	return nil
@@ -490,7 +495,9 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	}
 	candidates := make([]herdr.Pane, 0)
 	for _, pane := range snapshot.Panes {
-		if _, named := leadAgentPanes[pane.PaneID]; pane.Label == label || named {
+		_, named := leadAgentPanes[pane.PaneID]
+		recorded := project.LeadPaneID != "" && pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID
+		if pane.Label == label || named || recorded {
 			candidates = append(candidates, pane)
 		}
 	}
