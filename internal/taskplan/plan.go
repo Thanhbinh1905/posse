@@ -15,7 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 6
+const Version = 7
 
 // planVersionRuntimeWorkflow marks the first plan version that binds a frozen
 // workflow to its run and stage identity.
@@ -162,6 +162,7 @@ type Plan struct {
 	Executor        string                    `json:"executor"`
 	Execution       Execution                 `json:"execution"`
 	Review          string                    `json:"review"`
+	BudgetTokens    int64                     `json:"budget_tokens,omitempty"`
 	ReviewOf        int64                     `json:"review_of,omitempty"`
 	Dependencies    []dispatch.Dependency     `json:"dependencies,omitempty"`
 	Delivery        string                    `json:"delivery"`
@@ -215,6 +216,7 @@ type Request struct {
 	ProseLanguage       string
 	Pool                config.Pool
 	DeleteBranchOnMerge bool
+	TaskBudgetTokens    int64
 }
 
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
@@ -234,6 +236,10 @@ func Resolve(r Request) (Plan, error) {
 		validationLoops = &frozen
 	} else if brief.ReviewRounds > 0 {
 		return Plan{}, &dispatch.BriefError{Field: "review_rounds", Reason: "cannot be frozen without review loop configuration"}
+	}
+	budgetTokens := r.TaskBudgetTokens
+	if brief.BudgetTokens > 0 {
+		budgetTokens = brief.BudgetTokens
 	}
 	userChoice := r.UserChoice != nil
 	delivery, autonomy, err := dispatch.ResolveDelivery(brief, r.Delivery, r.Autonomy, userChoice)
@@ -269,7 +275,7 @@ func Resolve(r Request) (Plan, error) {
 		}
 	}
 	p := Plan{Version: Version, Revision: 1, Type: brief.Type, Outcome: outcome, Executor: "worker",
-		Execution: r.Execution, Review: review, ReviewOf: r.ReviewOf, Delivery: delivery,
+		Execution: r.Execution, Review: review, BudgetTokens: budgetTokens, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
 		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool,
@@ -494,6 +500,12 @@ func (p Plan) Validate() error {
 	}
 	if brief.Type != p.Type {
 		return invalid("selected Brief has another Task type")
+	}
+	if p.BudgetTokens < 0 {
+		return invalid("Task token budget cannot be negative")
+	}
+	if p.Version >= 7 && brief.BudgetTokens > 0 && p.BudgetTokens != brief.BudgetTokens {
+		return invalid("frozen Task token budget does not match the selected Brief")
 	}
 	if p.Workflow == nil {
 		if brief.Workflow != "" || brief.WorkflowRun != "" || brief.Stage != "" {
