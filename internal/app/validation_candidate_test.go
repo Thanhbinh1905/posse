@@ -213,6 +213,112 @@ func TestFullPipelineStaleCandidateDoneNamesStaleStateAndNextStep(t *testing.T) 
 	}
 }
 
+func TestFullPipelineStaleCandidateWithUnchangedAuthorAllowsDoneSignal(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.MarkValidationCandidateStale(context.Background(), candidate.ID, candidate.TargetSHA); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	turn, err := fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("signal", "done", "Request a review", "--turn", turn); strings.Contains(output+stderr, "candidate_author_moved") {
+		t.Fatalf("done Signal reported unchanged Task branch as moved: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("publish", "Refresh stale candidate", "--verify", "go test ./internal/app -run TestFullPipelineStaleCandidateWithUnchangedAuthorAllowsDoneSignal -count=1 -> passed", "--proof", "Same Task branch head verified", "--risk", "Risk: low\nRollback: revert"); code != 0 {
+		t.Fatalf("publish with unchanged Task branch exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
+func TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixPath := filepath.Join(candidate.WorktreePath, "review-fix.txt")
+	if err := os.WriteFile(fixPath, []byte("review fix\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, candidate.WorktreePath, "add", "review-fix.txt")
+	gitTest(t, candidate.WorktreePath, "commit", "-m", "apply Review fix")
+	fixSHA := strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
+	turn, err := fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "signal", "done", "Review fix completed", "--turn", turn); code != 0 {
+		t.Fatalf("record private Review fix: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("signal", "working", "Continue after the Review fix"); code != 0 {
+		t.Fatalf("resume after private Review fix: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	recordCandidateReviewPass(t, fixture, fixSHA)
+	candidate, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target-change.txt"), []byte("target advanced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "add", "target-change.txt")
+	gitTest(t, fixture.repo, "commit", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "fetch", "origin")
+	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
+	code, output, stderr := fixture.run("publish", "Refreshed candidate", "--verify", "go test ./internal/app -run TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate -count=1 -> passed", "--proof", "Review fix retained", "--risk", "Risk: low\nRollback: revert")
+	if code != 0 {
+		if !strings.Contains(output+stderr, fixSHA) || !strings.Contains(strings.ToLower(output+stderr), "merge") {
+			t.Fatalf("refresh refusal did not name the Review fix to merge: exit=%d output=%s stderr=%s", code, output, stderr)
+		}
+		return
+	}
+	refreshed, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(context.Background(), refreshed.WorktreePath, "show", refreshed.CandidateSHA+":review-fix.txt"); err != nil {
+		t.Fatalf("refreshed candidate %s lost Review fix %s from prior candidate %s: %v", refreshed.CandidateSHA, fixSHA, candidate.CandidateSHA, err)
+	}
+}
+
+func TestFullPipelineTargetRefreshRefusesUnrecordedPrivateFix(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, "unrecorded-fix.txt"), []byte("private fix\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, candidate.WorktreePath, "add", "unrecorded-fix.txt")
+	gitTest(t, candidate.WorktreePath, "commit", "-m", "apply unrecorded Review fix")
+	fixSHA := strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target-change.txt"), []byte("target advanced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "add", "target-change.txt")
+	gitTest(t, fixture.repo, "commit", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "fetch", "origin")
+	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
+	code, output, stderr := fixture.run("publish", "Refresh candidate with unrecorded fix", "--verify", "go test ./internal/app -run TestFullPipelineTargetRefreshRefusesUnrecordedPrivateFix -count=1 -> passed", "--proof", "Private candidate fix commit retained", "--risk", "Risk: low\nRollback: revert")
+	if code == 0 || !strings.Contains(output+stderr, fixSHA) || !strings.Contains(output+stderr, "candidate_review_fix_unmerged") {
+		t.Fatalf("publish did not name the unrecorded private fix: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestFullPipelineStaleCandidateAllowsNeedsDecisionSignal(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
