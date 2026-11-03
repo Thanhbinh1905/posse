@@ -221,11 +221,11 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 }
 
 func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store.Project, task store.Task, candidate store.ValidationCandidate) error {
-	targets, err := changeCandidateTargets(ctx, db, project, task)
+	targets, err := changeCandidateTargetsForCandidate(ctx, db, project, task, &candidate)
 	if err != nil {
 		return err
 	}
-	if err := ensureReviewCarry(ctx, db, project, task, targets); err != nil {
+	if err := ensureReviewCarryForCandidate(ctx, db, project, task, targets, &candidate); err != nil {
 		return err
 	}
 	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets)
@@ -272,7 +272,7 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 }
 
 func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
-	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && candidate.State != store.ValidationCandidatePromoting {
+	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && candidate.State != store.ValidationCandidatePromoting && candidate.State != store.ValidationCandidateSuperseded {
 		return axi.Failure("candidate_not_active", lane.memberLabel("candidate is not eligible for full-pipeline promotion"), false)
 	}
 	targetHead, err := lane.gatedTargetHead(ctx, candidate)
@@ -287,8 +287,6 @@ func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, l
 			if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
 				return err
 			}
-		} else if err := db.InvalidateValidationStages(ctx, candidate.ID, targetHead); err != nil {
-			return err
 		}
 		return axi.Failure("validation_stale", lane.memberLabel("the frozen target moved after local validation"), false, "Submit a fresh candidate and rerun review -> test -> docs -> lint")
 	}
@@ -376,8 +374,8 @@ func (s *Service) workspaceCandidateReviewRequest(ctx context.Context, db *store
 
 // requireFullPipelineValidationAt is the publication barrier of Merge and the
 // done Signal: every changed full-pipeline lane needs a promoted candidate
-// that is its exact delivered head, against its current frozen target, with
-// current ordered results. commit pins a single-repository PR head; otherwise
+// that is its exact delivered head, against the target it was validated against,
+// with current ordered results. commit pins a single-repository PR head; otherwise
 // the Task branch tip, the head local integration would fast-forward, is
 // checked; a local lane's gated head must also be the candidate, since local
 // Merge fast-forwards to it. A Member already integrated under this barrier
@@ -401,10 +399,24 @@ func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project 
 		if err != nil {
 			return axi.Failure("candidate_missing", lane.memberLabel("full-pipeline Task has no submitted private candidate"), false)
 		}
-		if candidate.State != store.ValidationCandidatePromoted {
+		head := commit
+		if commit != "" {
+			candidates, err := db.ValidationCandidates(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			for _, recorded := range candidates {
+				if recorded.Repo == lane.repo && recorded.PromotedSHA == commit &&
+					(recorded.State == store.ValidationCandidatePromoted || recorded.State == store.ValidationCandidateSuperseded) {
+					candidate = recorded
+					break
+				}
+			}
+		}
+		if candidate.State != store.ValidationCandidatePromoted &&
+			(candidate.State != store.ValidationCandidateSuperseded || candidate.PromotedSHA == "" || candidate.PromotedSHA != head) {
 			return axi.Failure("candidate_not_promoted", lane.memberLabel("full-pipeline candidates must be promoted through the private fast-forward path before Merge"), false)
 		}
-		head := commit
 		if lane.repo != "" || head == "" && lane.localDelivery() {
 			head, err = gitOutput(ctx, lane.task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
 			if err != nil {

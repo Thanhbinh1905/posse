@@ -349,9 +349,31 @@ func candidateAuthorCanRefreshAfterMove(ctx context.Context, lane candidateLane,
 	return gitAncestor(ctx, lane.task.WorktreePath, targetHead, authorHead), nil
 }
 
+func refuseMergedCandidateRefresh(ctx context.Context, db *store.DB, lane candidateLane, cfg config.Config) error {
+	prURL, err := promotedPullRequestURL(ctx, db, lane)
+	if err != nil || prURL == "" {
+		return err
+	}
+	forge, err := forgeForRepository(ctx, lane.project.Root, cfg, lane.repo)
+	if err != nil {
+		return err
+	}
+	state, head, _, err := readRemotePRHead(ctx, forge, prURL)
+	if err != nil {
+		return axi.Failure("pr_view_failed", "could not verify the recorded PR before refreshing its candidate", true, err.Error())
+	}
+	if state == "MERGED" {
+		return axi.Failure("pr_already_merged", "the recorded PR has merged; a refresh candidate cannot be created", false, head)
+	}
+	return nil
+}
+
 func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home string, lane candidateLane, cfg config.Config, summary, verification, proof, risk string, refresh bool) (returnErr error) {
 	ctx := out.Context
 	project, task, repoName := lane.project, lane.task, lane.repo
+	if err := refuseMergedCandidateRefresh(ctx, db, lane, cfg); err != nil {
+		return err
+	}
 	intent, err := s.startTaskIntent(ctx, db, project.ID, task.ID, "publish")
 	if err != nil {
 		return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
@@ -461,11 +483,6 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 			}
 			if currentTarget == "" {
 				return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
-			}
-			if currentTarget != candidate.TargetSHA {
-				if err := db.InvalidateValidationStages(ctx, candidate.ID, currentTarget); err != nil {
-					return err
-				}
 			}
 			if submittedSHA == candidate.PromotedSHA && currentTarget == candidate.TargetSHA {
 				return printPromotedCandidate(out, db, lane, candidate)
