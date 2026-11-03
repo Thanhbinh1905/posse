@@ -371,6 +371,7 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	project.HerdrWorkspaceID = "w1"
 	project.LeadPaneID = "w1:p1"
 	project.LeadLabel = "posse:shop:lead"
+	pendingHandoff := writeTestHandoff(t, home, project, "Recovery must retain the prompt-only handoff.\n")
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: project.LeadLabel, Agent: "claude", AgentStatus: "working"}}}
 	fake.Results["agent.get"] = []byte(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
@@ -386,6 +387,9 @@ func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing
 	defer db.Close()
 	if err := service.restartLead(ctx, db, home, project, cfg, fake.SnapshotValue); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(pendingHandoff); err != nil {
+		t.Fatalf("recovery consumed the handoff before posse lead returned it: %v", err)
 	}
 	found, restartedWithBypass := false, false
 	for _, call := range fake.Calls {
@@ -500,6 +504,50 @@ func TestOpenCodeRestartExportsInlinePluginOnlyToLeadShell(t *testing.T) {
 	}
 	if len(fake.Calls) != 2 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["pane_id"] != "w1:p1" || !strings.Contains(fake.Calls[0].Params["text"].(string), `lead'"'"'s-plugin`) {
 		t.Fatalf("Lead shell export = %#v", fake.Calls)
+	}
+}
+
+func TestLeadPaneIsShellUsesProcessInfoWhenHerdrAgentStatusIsUnknown(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "unknown"}}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w1:p1","shell_pid":42,"foreground_process_group_id":42}}`)
+	service := testService(t.TempDir(), fake)
+	if !service.leadPaneIsShell(context.Background(), "w1:p1") {
+		t.Fatal("pane process info showed the shell in the foreground, but the stale Herdr agent record was treated as active")
+	}
+}
+
+func TestLeadPaneIsShellWhenHerdrStillReportsIdleAgentAfterExit(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "idle"}}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w1:p1","shell_pid":42,"foreground_process_group_id":42}}`)
+	service := testService(t.TempDir(), fake)
+	if !service.leadPaneIsShell(context.Background(), "w1:p1") {
+		t.Fatal("pane process info showed the shell in the foreground, but the idle Herdr agent record was treated as active")
+	}
+}
+
+func TestLeadPaneIsNotShellWhenUnknownAgentStillOwnsForeground(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "unknown"}}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w1:p1","shell_pid":42,"foreground_process_group_id":43}}`)
+	service := testService(t.TempDir(), fake)
+	if service.leadPaneIsShell(context.Background(), "w1:p1") {
+		t.Fatal("pane process info showed a foreground process distinct from the shell, but it was treated as a shell")
+	}
+}
+
+func TestStopLeadAgentContinuesAfterHerdrReportsAgentNotReady(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "pi", AgentStatus: "working"}}}
+	fake.ErrorQueue["agent.send_keys"] = []error{&herdr.Error{Code: "agent_not_ready", Message: "agent is no longer active"}, nil}
+	adapter := &promptExitAdapter{Fake: fake}
+	service := testService(t.TempDir(), adapter)
+	if err := service.stopLeadAgent(context.Background(), "w1:p1", "pi"); err != nil {
+		t.Fatalf("stop Lead after agent became inactive during interrupt: %v", err)
+	}
+	if fake.CallCount("agent.send_keys") != 2 || fake.CallCount("agent.prompt") != 1 {
+		t.Fatalf("agent exit did not continue through the harness fallback: %#v", fake.Calls)
 	}
 }
 

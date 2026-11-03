@@ -2255,6 +2255,8 @@ $body" ;; esac
     done
     ;;
   *)
+    trap 'herdr pane release-agent "$HERDR_PANE_ID" --source posse.fake --agent claude >/dev/null 2>&1 || true; exit 0' INT
+    printf 'POSSE_TEST_CLAUDE_INTERRUPT_READY\n'
     while IFS= read -r line; do printf '%s\n' "$line" >> "$POSSE_TEST_ROOT/lead-prompts.log"; done
     ;;
 esac
@@ -2470,6 +2472,11 @@ esac
 			return processInfoErr == nil && paneForegroundMatches(processInfo, "claude")
 		}) {
 			t.Fatalf("Lead agent did not reach the pane foreground: %s (%v)", processInfo, processInfoErr)
+		}
+		if _, err := client.Run(context.Background(), "pane", "wait-output", project.LeadPaneID, "--match", "POSSE_TEST_CLAUDE_INTERRUPT_READY", "--source", "recent-unwrapped", "--timeout", "30000"); err != nil {
+			snapshot, snapshotErr := client.Snapshot(context.Background())
+			paneOutput, readErr := client.Run(context.Background(), "pane", "read", project.LeadPaneID, "--source", "recent-unwrapped", "--lines", "40")
+			t.Fatalf("Lead agent did not install its interrupt handler: %v; snapshot=%#v snapshotErr=%v paneOutput=%s readErr=%v", err, snapshot, snapshotErr, paneOutput, readErr)
 		}
 	}
 	if _, err := client.Run(context.Background(), "pane", "report-agent", project.LeadPaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
