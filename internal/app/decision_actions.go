@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -49,6 +50,9 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 	task, err := db.TaskByID(out.Context, project.ID, decision.TaskID)
 	if err != nil {
 		return err
+	}
+	if reason := store.BudgetDecisionStaleReason(decision, task, time.Now().Format(time.DateOnly)); reason != "" {
+		return axi.Failure("decision_refused", "budget Decision is obsolete: "+reason, false)
 	}
 	switch decision.Kind {
 	case "dependency":
@@ -162,6 +166,19 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
+		}
+	case "budget":
+		switch decision.Answer {
+		case "continue":
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "continued"}})
+		case "interrupt":
+			message := "Stop work now and report completion with `posse signal done`. The User selected interrupt after a token budget was exceeded. Do not continue work."
+			if err := s.sendInterrupt(out, db, project, task, message, "token budget exceeded", cfg); err != nil {
+				return err
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "interrupted"}})
+		default:
+			return axi.Failure("decision_refused", "unknown budget Decision answer", false)
 		}
 	case "quota":
 		if decision.Answer == "discard" && task.State == store.StateTornDown {
