@@ -17,15 +17,16 @@ import (
 )
 
 type leadExecPlan struct {
-	ProjectID   int64             `json:"project_id"`
-	PaneID      string            `json:"pane_id"`
-	WorkspaceID string            `json:"workspace_id"`
-	AgentName   string            `json:"agent_name"`
-	Kind        string            `json:"kind"`
-	Binary      string            `json:"binary"`
-	Args        []string          `json:"args"`
-	Env         map[string]string `json:"env,omitempty"`
-	NeedsPrompt bool              `json:"needs_prompt"`
+	ProjectID     int64             `json:"project_id"`
+	PaneID        string            `json:"pane_id"`
+	WorkspaceID   string            `json:"workspace_id"`
+	AgentName     string            `json:"agent_name"`
+	Kind          string            `json:"kind"`
+	Binary        string            `json:"binary"`
+	Args          []string          `json:"args"`
+	Env           map[string]string `json:"env,omitempty"`
+	NeedsPrompt   bool              `json:"needs_prompt"`
+	HandoffLoaded bool              `json:"handoff_loaded,omitempty"`
 }
 
 func (s *Service) ExecPendingLead() error {
@@ -97,7 +98,7 @@ func (s *Service) finalizeLead(args []string) error {
 	if os.Getenv("HERDR_PANE_ID") != plan.PaneID || os.Getenv("HERDR_WORKSPACE_ID") != plan.WorkspaceID {
 		return errors.New("lead startup pane context changed")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -152,6 +153,11 @@ func (s *Service) finalizeLead(args []string) error {
 	}
 	if plan.NeedsPrompt {
 		if err := s.deliverLeadPrompt(ctx, plan.PaneID, "Run `posse lead` and follow it."); err != nil {
+			return err
+		}
+	}
+	if plan.HandoffLoaded {
+		if err := s.archiveStartedLeadHandoff(ctx, home, project); err != nil {
 			return err
 		}
 	}

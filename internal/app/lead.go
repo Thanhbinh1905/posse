@@ -106,7 +106,8 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	composed, err := composeLeadInstructions(home, project, cfg, kind, gaps)
+	caller := s.configCaller(ctx.Context, db)
+	composed, err := composeLeadInstructionsMode(home, project, cfg, kind, gaps, caller.role == "lead" && caller.projectID == project.ID)
 	if err != nil {
 		return err
 	}
@@ -123,7 +124,13 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 		{Key: "pending", Value: pending},
 		{Key: "help", Value: []any{"Continue the Lead conversation with the User. For code changes, follow the runtime obligations in these instructions and use `posse start`."}},
 	}
-	return ctx.Print(withReadiness(result, gaps))
+	if err := ctx.Print(withReadiness(result, gaps)); err != nil {
+		return err
+	}
+	if composed.HandoffLoaded {
+		return s.archiveStartedLeadHandoff(ctx.Context, home, project)
+	}
+	return nil
 }
 
 // leadPending is what a restarted Lead must pick up: pending Decision IDs,
@@ -597,7 +604,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 	s.pendingLead = &leadExecPlan{
 		ProjectID: project.ID, PaneID: leadPane.PaneID, WorkspaceID: callerWorkspaceID,
 		AgentName: agentName, Kind: kind, Binary: binary, Args: launch.Args, Env: launch.Env,
-		NeedsPrompt: launch.TypedPrompt != "",
+		NeedsPrompt: launch.TypedPrompt != "", HandoffLoaded: launch.HandoffLoaded,
 	}
 	result := axi.Object{
 		{Key: "project", Value: project.Name},
