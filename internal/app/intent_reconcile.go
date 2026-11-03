@@ -64,6 +64,10 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		return err
 	}
 	for _, intent := range intents {
+		if intent.Command == "pr-release" {
+			// The retry must recheck the current PR and branch before releasing the Sandbox.
+			continue
+		}
 		if !allowNetwork && intent.Command == "merge --open-pr" {
 			continue
 		}
