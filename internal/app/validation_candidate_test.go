@@ -609,6 +609,49 @@ func TestCandidatePromotionFastForwardsTaskBranchAndOrigin(t *testing.T) {
 	}
 }
 
+func TestCandidatePromotionRefusesMergedTaskPR(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	gitTest(t, fixture.worktree, "push", "origin", "refs/heads/posse/t1:refs/heads/posse/t1")
+	submitted := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	if err := fixture.db.RecordVerifiedPRHead(context.Background(), fixture.task.ID, "https://github.com/acme/shop/pull/17", submitted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=? WHERE id=?`, "https://github.com/acme/shop/pull/17", fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	submitThroughCLI(t, fixture)
+	candidateHead := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, candidateHead)
+	recordCandidateStages(t, fixture)
+	fixture.setGHHead(t, submitted)
+	t.Setenv("POSSE_TEST_GH_VIEW_STATE", "MERGED")
+
+	before := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	remoteBefore := strings.TrimSpace(gitTest(t, fixture.remote, "show-ref", "--hash", "refs/heads/posse/t1"))
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, output, stderr := runCandidateCLI(t, fixture, candidate, "publish", "Candidate summary")
+	if code == 0 || !strings.Contains(output+stderr, "pull request merged") {
+		t.Fatalf("publish result = %d, %s %s; want refusal for merged PR", code, output, stderr)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD")); got != before {
+		t.Fatalf("Sandbox advanced to %s after merged-PR refusal, want %s", got, before)
+	}
+	if got := strings.TrimSpace(gitTest(t, fixture.remote, "show-ref", "--hash", "refs/heads/posse/t1")); got != remoteBefore {
+		t.Fatalf("remote advanced to %s after merged-PR refusal, want %s", got, remoteBefore)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "pr create") {
+		t.Fatalf("merged PR refusal created another pull request: %s", log)
+	}
+}
+
 func TestCandidatePromotionResumesAfterCrashBetweenPushAndPullRequest(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
