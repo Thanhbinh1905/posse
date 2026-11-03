@@ -18,13 +18,20 @@ import (
 // merging: its branch tip in the Project repository, or in each changed Member
 // of a workspace.
 func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Project, change store.Task) ([]store.ReviewTarget, error) {
+	return changeCandidateTargetsForCandidate(ctx, db, project, change, nil)
+}
+
+func changeCandidateTargetsForCandidate(ctx context.Context, db *store.DB, project store.Project, change store.Task, selected *store.ValidationCandidate) ([]store.ReviewTarget, error) {
 	plan, planErr := change.AdmittedPlan()
 	if planErr != nil {
 		return nil, admittedPlanFailure(planErr)
 	}
 	if !project.IsWorkspace() && plan != nil && (plan.Review == "full-pipeline" || isFullPipelineTask(change, project.Name)) {
 		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
-		if err != nil || !offersCandidateHead(candidate) {
+		if selected != nil && selected.Repo == "" {
+			candidate, err = *selected, nil
+		}
+		if err != nil || (!offersCandidateHead(candidate) && !offersHistoricalPromotedCandidate(candidate)) {
 			return nil, axi.Failure("candidate_missing", "full-pipeline review requires an active private candidate", false, "Submit the Task with `posse publish` before starting its Review")
 		}
 		return []store.ReviewTarget{{Repository: project.Name, Commit: candidate.CandidateSHA}}, nil
@@ -65,7 +72,10 @@ func changeCandidateTargets(ctx context.Context, db *store.DB, project store.Pro
 		}
 		if memberReviews[repo.Repo] == "full-pipeline" {
 			candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo.Repo)
-			if err != nil || !offersCandidateHead(candidate) {
+			if selected != nil && selected.Repo == repo.Repo {
+				candidate, err = *selected, nil
+			}
+			if err != nil || (!offersCandidateHead(candidate) && !offersHistoricalPromotedCandidate(candidate)) {
 				return nil, axi.Failure("candidate_missing", "full-pipeline review requires an active private candidate for Member "+repo.Repo, false, "Submit the Member with `posse publish --repo "+repo.Repo+"` before starting its Review")
 			}
 			targets = append(targets, store.ReviewTarget{Repository: repo.Repo, Commit: candidate.CandidateSHA})
@@ -96,6 +106,10 @@ func offersCandidateHead(candidate store.ValidationCandidate) bool {
 		return true
 	}
 	return false
+}
+
+func offersHistoricalPromotedCandidate(candidate store.ValidationCandidate) bool {
+	return candidate.State == store.ValidationCandidateSuperseded && candidate.PromotedSHA != "" && candidate.PromotedSHA == candidate.CandidateSHA
 }
 
 // reviewableChange refuses a Change Task that has not completed. Only a completed

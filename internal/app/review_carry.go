@@ -13,6 +13,10 @@ import (
 // ensureReviewCarry records only the review component of evidence. It never
 // carries test, docs, lint, config or forge results to a different head.
 func ensureReviewCarry(ctx context.Context, db *store.DB, project store.Project, task store.Task, targets []store.ReviewTarget) error {
+	return ensureReviewCarryForCandidate(ctx, db, project, task, targets, nil)
+}
+
+func ensureReviewCarryForCandidate(ctx context.Context, db *store.DB, project store.Project, task store.Task, targets []store.ReviewTarget, selected *store.ValidationCandidate) error {
 	if len(targets) != 1 {
 		return nil
 	}
@@ -27,7 +31,10 @@ func ensureReviewCarry(ctx context.Context, db *store.DB, project store.Project,
 	root, targetSHA := task.WorktreePath, ""
 	if fullPipelineSelected(task, "") {
 		candidate, err := db.LatestValidationCandidate(ctx, task.ID, "")
-		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted {
+		if selected != nil && selected.Repo == "" {
+			candidate, err = *selected, nil
+		}
+		if err != nil || candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && !offersHistoricalPromotedCandidate(candidate) {
 			return nil
 		}
 		root, targetSHA = candidate.WorktreePath, candidate.TargetSHA
