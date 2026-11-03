@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -111,6 +112,16 @@ func (db *DB) TaskDeliveries(ctx context.Context, taskID int64) ([]Delivery, err
 		deliveries = append(deliveries, delivery)
 	}
 	return deliveries, rows.Err()
+}
+
+// DeliveryExecutorPolicy returns the latest applied policy, or retain when none was selected.
+func (db *DB) DeliveryExecutorPolicy(ctx context.Context, deliveryID int64) (string, error) {
+	var policy string
+	err := db.QueryRowContext(ctx, `SELECT subject FROM delivery_operations WHERE delivery_id=? AND operation='executor_policy' AND outcome='succeeded' ORDER BY id DESC LIMIT 1`, deliveryID).Scan(&policy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "retain", nil
+	}
+	return policy, err
 }
 
 // DeliveryOperations lists a delivery's newest operations first.
