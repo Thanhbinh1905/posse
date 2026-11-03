@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,6 +157,45 @@ func TestStartRejectsInvalidOptionalDisplayName(t *testing.T) {
 	retry := workerNameRetrySuggestion("research-generalizing-opus")
 	if retry != "research-generaliz-retry" || validateWorkerName(retry) != nil {
 		t.Fatalf("suggested retry is not an accepted Task Name: %q", retry)
+	}
+}
+
+func TestStartAcceptsPositionalBriefAndRejectsConflicts(t *testing.T) {
+	fixture := newStartFixture(t)
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--help"}); code != 0 || !strings.Contains(output.String(), "start <brief.md>") {
+		t.Fatalf("start help exit=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"start", fixture.brief, "--name", "launch-probe"}); code != 0 {
+		t.Fatalf("positional Brief start exit=%d output=%s", code, output.String())
+	}
+	task, _ := fixture.onlyTask(t)
+	plan, err := task.AdmittedPlan()
+	briefData, readErr := os.ReadFile(fixture.brief)
+	briefDigest := sha256.Sum256(briefData)
+	if err != nil || readErr != nil || plan == nil || len(plan.Inputs) == 0 || !bytes.Equal(plan.Inputs[0].Bytes, briefData) || plan.Inputs[0].SHA256 != hex.EncodeToString(briefDigest[:]) {
+		t.Fatalf("positional Brief was not recorded in the admitted plan: plan=%+v err=%v readErr=%v", plan, err, readErr)
+	}
+
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "conflicting paths", args: []string{"start", fixture.brief, "--brief", filepath.Join(filepath.Dir(fixture.brief), "other.md")}},
+		{name: "missing path", args: []string{"start"}},
+		{name: "unreadable positional path", args: []string{"start", filepath.Join(filepath.Dir(fixture.brief), "missing.md")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := &bytes.Buffer{}
+			cli := fixture.service.CLI()
+			cli.Out, cli.ErrOut = output, output
+			if code := cli.Run(test.args); code == 0 || !strings.Contains(output.String(), "--brief") {
+				t.Fatalf("start args=%v exit=%d output=%s, want error naming --brief", test.args, code, output.String())
+			}
+		})
 	}
 }
 
