@@ -162,7 +162,7 @@ func (s *Service) commands() *axi.Command {
 			{Name: "status", Usage: "$ workflow status [<run>]", Summary: "Show workflow run position, stage Tasks, results and advance history.", Handler: s.workflowStatus},
 			{Name: "advance", Usage: "$ workflow advance <run> --to <next-stage> --user-approved <quote> [--abandon <task>]...", Summary: "Record User approval to advance a run to its next profile stage.", Handler: s.workflowAdvance},
 		}},
-		{Name: "start", Usage: "$ start --brief <file> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>] [--queue]", Summary: "Start a Worker from a Brief with an optional display name. `--user-approved` scopes consent to explicit Brief preferences; `--queue` admits it durably until prerequisites and capacity permit dispatch.", Handler: s.spawn},
+		{Name: "start", Usage: "$ start <brief.md> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>] [--queue]", Summary: "Start a Worker from a Brief with an optional display name. Positional paths and `--brief <file>` are accepted. `--user-approved` scopes consent to explicit Brief preferences; `--queue` admits it durably until prerequisites and capacity permit dispatch.", Handler: s.spawn},
 		{Name: "task", Summary: "Manage an admitted Task.", Subcommands: []*axi.Command{
 			{Name: "add-member", Usage: "$ task add-member <task> <repo> --user-approved <quote> [--base <ref>] [--target <ref>]", Summary: "Add a Project Member to a running workspace Change Task with recorded User approval.", Handler: s.taskAddMember},
 		}},
