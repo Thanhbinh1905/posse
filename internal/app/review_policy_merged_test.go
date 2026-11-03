@@ -89,6 +89,11 @@ func TestFullPipelineGatedMergeAfterNewerCandidateSupersedesItIsNotReportedAsPol
 	}
 
 	merge := mergeOnOrigin(t, fixture, promoted.TargetSHA, promotedHead, false)
+	if err := os.WriteFile(filepath.Join(fixture.worktree, "unreviewed.txt"), []byte("new content without a Review pass\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "unreviewed.txt")
+	gitTest(t, fixture.worktree, "commit", "-m", "add unreviewed content after merge")
 	submitThroughCLI(t, fixture)
 	newer, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil {
@@ -96,6 +101,9 @@ func TestFullPipelineGatedMergeAfterNewerCandidateSupersedesItIsNotReportedAsPol
 	}
 	if newer.ID == promoted.ID || newer.State != store.ValidationCandidateActive || newer.TargetSHA != merge {
 		t.Fatalf("post-merge refresh candidate = %+v, want a newer active candidate against merged head %s", newer, merge)
+	}
+	if newer.CandidateSHA == promotedHead || strings.TrimSpace(gitTest(t, newer.WorktreePath, "show", newer.CandidateSHA+":unreviewed.txt")) != "new content without a Review pass" {
+		t.Fatalf("newer candidate %s does not contain the unreviewed change", newer.CandidateSHA)
 	}
 
 	if violations := pollMergedPR(t, fixture, promotedHead, merge); len(violations) != 0 {
@@ -115,20 +123,19 @@ func TestMergedFullPipelineTaskDoesNotCreateRefreshCandidate(t *testing.T) {
 	installFullPipelinePlan(t, fixture)
 	head := promoteFullPipelineCandidateForTest(t, fixture)
 	merge := mergeOnOrigin(t, fixture, candidateTarget(t, fixture), head, false)
-	if violations := pollMergedPR(t, fixture, head, merge); len(violations) != 0 {
-		t.Fatalf("promoted merge reported a policy violation: %q", violations)
-	}
-	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance target after merge reconciliation")
-	gitTest(t, fixture.repo, "push", "origin", "main")
-	if code, output, stderr := fixture.run("publish", "--refresh", "Refreshed summary", "--verify", "go test ./... -> passed", "--proof", "The promoted candidate passed Review, test, docs and lint", "--risk", "Risk: low\nRollback: revert"); code == 0 || !strings.Contains(output+stderr, "publish_refused") {
-		t.Fatalf("refresh after merge: code=%d output=%s stderr=%s, want refusal", code, output, stderr)
+	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", merge, head)
+	if code, output, stderr := fixture.run("publish", "--refresh", "Refreshed summary", "--verify", "go test ./... -> passed", "--proof", "The promoted candidate passed Review, test, docs and lint", "--risk", "Risk: low\nRollback: revert"); code == 0 || !strings.Contains(output+stderr, "pr_already_merged") {
+		t.Fatalf("refresh during merge reconciliation: code=%d output=%s stderr=%s, want refusal", code, output, stderr)
 	}
 	candidates, err := fixture.db.ValidationCandidates(context.Background(), fixture.task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(candidates) != 1 {
-		t.Fatalf("merged Task has %d validation candidates, want only the promoted candidate", len(candidates))
+		t.Fatalf("merged PR has %d validation candidates before reconciliation, want only the promoted candidate", len(candidates))
+	}
+	if violations := pollMergedPR(t, fixture, head, merge); len(violations) != 0 {
+		t.Fatalf("promoted merge reported a policy violation: %q", violations)
 	}
 }
 

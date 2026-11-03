@@ -218,11 +218,11 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 }
 
 func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store.Project, task store.Task, candidate store.ValidationCandidate) error {
-	targets, err := changeCandidateTargets(ctx, db, project, task)
+	targets, err := changeCandidateTargetsForCandidate(ctx, db, project, task, &candidate)
 	if err != nil {
 		return err
 	}
-	if err := ensureReviewCarry(ctx, db, project, task, targets); err != nil {
+	if err := ensureReviewCarryForCandidate(ctx, db, project, task, targets, &candidate); err != nil {
 		return err
 	}
 	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets)
