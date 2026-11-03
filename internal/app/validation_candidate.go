@@ -453,7 +453,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 				}
 			}
 		case store.ValidationCandidatePromoting:
-			return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate for t%d is being promoted", task.Seq), true, "Resume its internal promotion before submitting another candidate")
+			return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate %s for t%d is being promoted", shortSHA(candidate.CandidateSHA), task.Seq), true, "Resume its promotion by running `posse publish` from the private candidate checkout")
 		case store.ValidationCandidatePromoted:
 			currentTarget, targetErr := lane.targetHead(ctx)
 			if targetErr != nil {
