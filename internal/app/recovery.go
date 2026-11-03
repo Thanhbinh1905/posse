@@ -821,9 +821,26 @@ func (s *Service) leadPaneIsShell(ctx context.Context, paneID string) bool {
 		return false
 	}
 	for _, pane := range snapshot.Panes {
-		if pane.PaneID == paneID {
-			return pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
+		if pane.PaneID != paneID {
+			continue
 		}
+		if pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped" {
+			return true
+		}
+		if pane.AgentStatus != "unknown" && pane.AgentStatus != "idle" {
+			return false
+		}
+		raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": paneID})
+		if err != nil {
+			return false
+		}
+		var result struct {
+			ProcessInfo paneProcessInfo `json:"process_info"`
+		}
+		if json.Unmarshal(raw, &result) != nil {
+			return false
+		}
+		return result.ProcessInfo.PaneID == paneID && result.ProcessInfo.ShellPID > 1 && result.ProcessInfo.ForegroundProcessGroup == result.ProcessInfo.ShellPID
 	}
 	return false
 }

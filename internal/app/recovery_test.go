@@ -507,6 +507,36 @@ func TestOpenCodeRestartExportsInlinePluginOnlyToLeadShell(t *testing.T) {
 	}
 }
 
+func TestLeadPaneIsShellUsesProcessInfoWhenHerdrAgentStatusIsUnknown(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "unknown"}}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w1:p1","shell_pid":42,"foreground_process_group_id":42}}`)
+	service := testService(t.TempDir(), fake)
+	if !service.leadPaneIsShell(context.Background(), "w1:p1") {
+		t.Fatal("pane process info showed the shell in the foreground, but the stale Herdr agent record was treated as active")
+	}
+}
+
+func TestLeadPaneIsShellWhenHerdrStillReportsIdleAgentAfterExit(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "idle"}}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w1:p1","shell_pid":42,"foreground_process_group_id":42}}`)
+	service := testService(t.TempDir(), fake)
+	if !service.leadPaneIsShell(context.Background(), "w1:p1") {
+		t.Fatal("pane process info showed the shell in the foreground, but the idle Herdr agent record was treated as active")
+	}
+}
+
+func TestLeadPaneIsNotShellWhenUnknownAgentStillOwnsForeground(t *testing.T) {
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "unknown"}}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w1:p1","shell_pid":42,"foreground_process_group_id":43}}`)
+	service := testService(t.TempDir(), fake)
+	if service.leadPaneIsShell(context.Background(), "w1:p1") {
+		t.Fatal("pane process info showed a foreground process distinct from the shell, but it was treated as a shell")
+	}
+}
+
 func TestStopLeadAgentContinuesAfterHerdrReportsAgentNotReady(t *testing.T) {
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", Agent: "pi", AgentStatus: "working"}}}
