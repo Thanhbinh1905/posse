@@ -21,12 +21,14 @@ fail() {
 step "E2E shard assignments"
 scripts/run-e2e-shard.sh --self-test || fail "E2E shard self-test failed; record durations with scripts/refresh-e2e-durations.sh"
 
-step "go generate"
-before=$(git status --porcelain)
-go generate ./...
-after=$(git status --porcelain)
-if [ "$before" != "$after" ]; then
-  git status --short >&2
+step "staticcheck"
+scripts/staticcheck.sh || fail "staticcheck failed"
+
+step "generated code"
+if ! go generate ./...; then
+  fail "go generate failed"
+fi
+if ! git diff --exit-code; then
   fail "go generate changed files; commit the regenerated output"
 fi
 
