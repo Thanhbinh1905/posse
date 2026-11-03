@@ -328,9 +328,16 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 		}
 	}
 	lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
+	delivery := ""
+	if found && lead.Agent != "" {
+		delivery = s.leadNoticeDelivery(project, lead.Agent)
+		if lead.Tokens["posse_attached"] == "true" && extensionOwnsNotices(delivery) {
+			delivery = config.NoticeDeliveryPrompt
+		}
+	}
 	// Lead watch plugins acknowledge these without involving the Lead. Do
 	// not display a Herdr notification for a batch that needs no turn.
-	if found && lead.Agent != "" && extensionOwnsNotices(s.leadNoticeDelivery(project, lead.Agent)) {
+	if found && lead.Agent != "" && extensionOwnsNotices(delivery) {
 		home, err := s.homePath()
 		if err != nil {
 			return err
@@ -368,7 +375,6 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 	if err != nil {
 		return configError(err)
 	}
-	delivery := s.leadNoticeDelivery(project, lead.Agent)
 	// Lead plugins own their watch and quiet routine ack. A typed fallback
 	// could race them and expose a lowkey Notice in the conversation.
 	if extensionOwnsNotices(delivery) {
