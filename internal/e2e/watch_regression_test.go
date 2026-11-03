@@ -646,7 +646,7 @@ func TestWatchHeartbeatStaysFreshAndReportsStalledProjectMaintenance(t *testing.
 		t.Fatalf("Project watch did not start: %v", watchPIDs(f.root))
 	}
 	stopLiveWatchRuntime(t, f.root)
-	f.env = setEnv(f.env, "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "2s")
+	f.env = setEnv(f.env, "POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "1s")
 	f.env = setEnv(f.env, "POSSE_TEST_WATCH_RUNTIME_HEARTBEAT_INTERVAL", "50ms")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -731,7 +731,7 @@ func TestWatchHeartbeatStaysFreshAndReportsStalledProjectMaintenance(t *testing.
 	if !strings.Contains(rootFetchFailure.Summary, "Origin fetch has failed") {
 		t.Fatalf("root_fetch_failing Notice did not describe the origin fetch failure: %#v", rootFetchFailure)
 	}
-	if strings.Contains(strings.ToLower(rootFetchFailure.Summary), "timed out") && !strings.Contains(rootFetchFailure.Summary, "2s") {
+	if strings.Contains(strings.ToLower(rootFetchFailure.Summary), "timed out") && !strings.Contains(rootFetchFailure.Summary, "1s") {
 		t.Fatalf("root_fetch_failing Notice omitted the configured timeout: %#v", rootFetchFailure)
 	}
 	if pids := watchPIDs(f.root); len(pids) != 1 || pids[0] != pid {
