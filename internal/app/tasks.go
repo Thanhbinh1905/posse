@@ -238,6 +238,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if role != "lead" && role != "user" {
 			return axi.Failure("user_only", "only the User or registered Lead may record a Task preference choice", false)
 		}
+		if len(taskplan.PreferenceFields(brief)) == 0 {
+			return axi.Failure("user_choice_unused", "the Brief selects no delivery, review, base, target, execution or paths preference", false, "Drop --user-approved and retry")
+		}
 		choice = &taskplan.UserChoice{Quote: quote, Actor: role, Source: "start --user-approved"}
 	}
 	// Workspace review tightening is checked per Member during plan resolution.

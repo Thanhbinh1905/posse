@@ -76,7 +76,7 @@ type UserChoice struct {
 	Fields      []string `json:"fields"`
 }
 
-func preferenceFields(brief dispatch.Brief) []string {
+func PreferenceFields(brief dispatch.Brief) []string {
 	var fields []string
 	if brief.MergeMode != "" {
 		fields = append(fields, "delivery")
@@ -291,7 +291,7 @@ func Resolve(r Request) (Plan, error) {
 	}
 	if userChoice {
 		choice := *r.UserChoice
-		choice.BriefSHA256, choice.Fields = r.Brief.SHA256, preferenceFields(brief)
+		choice.BriefSHA256, choice.Fields = r.Brief.SHA256, PreferenceFields(brief)
 		p.UserChoice = &choice
 	}
 	p.Execution.Members = append([]Member(nil), p.Execution.Members...)
@@ -615,7 +615,7 @@ func (p Plan) Validate() error {
 	}
 	if p.UserChoice != nil {
 		choice := p.UserChoice
-		if strings.TrimSpace(choice.Quote) == "" || choice.Actor != "lead" && choice.Actor != "user" || choice.Source != "start --user-approved" || choice.BriefSHA256 != p.Inputs[0].SHA256 || len(choice.Fields) == 0 || strings.Join(choice.Fields, ",") != strings.Join(preferenceFields(brief), ",") {
+		if strings.TrimSpace(choice.Quote) == "" || choice.Actor != "lead" && choice.Actor != "user" || choice.Source != "start --user-approved" || choice.BriefSHA256 != p.Inputs[0].SHA256 || len(choice.Fields) == 0 || strings.Join(choice.Fields, ",") != strings.Join(PreferenceFields(brief), ",") {
 			return invalid("invalid scoped User choice provenance")
 		}
 	}
