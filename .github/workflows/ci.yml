@@ -56,7 +56,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             go mod download &&
-            go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -version >/dev/null && exit 0
+            scripts/staticcheck.sh --version >/dev/null && exit 0
             echo "go mod download failed (attempt $attempt)" >&2
             sleep $((attempt * 5))
           done
@@ -71,7 +71,7 @@ jobs:
       - name: Vet
         run: go vet -tags=e2e,perf ./...
       - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 -tags=e2e,perf ./...
+        run: scripts/staticcheck.sh
       - name: Check generated code
         run: |
           go generate ./...
