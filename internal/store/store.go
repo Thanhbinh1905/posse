@@ -3461,15 +3461,16 @@ func (db *DB) ResetTaskProgress(ctx context.Context, taskID int64) error {
 }
 
 type Notice struct {
-	ID          int64
-	ProjectID   int64
-	TaskID      int64
-	Kind        string
-	Summary     string
-	DataJSON    string
-	CreatedAt   int64
-	DeliveredAt int64
-	AckedAt     int64
+	ID                int64
+	ProjectID         int64
+	TaskID            int64
+	Kind              string
+	Summary           string
+	DataJSON          string
+	CreatedAt         int64
+	DeliveredAt       int64
+	AckedAt           int64
+	CommandNotifiedAt int64
 }
 
 func (db *DB) CreateNotice(ctx context.Context, notice Notice) (int64, error) {
