@@ -39,9 +39,6 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
-		return axi.Usage("publish requires a Worker summary")
-	}
 	rewrite, rewriteQuote := parsed.Bool("rewrite"), parsed.Flags["user-approved"]
 	if rewrite != (strings.TrimSpace(rewriteQuote) != "") {
 		return axi.Usage("publish --rewrite requires --user-approved \"<User's words>\", and --user-approved requires --rewrite")
@@ -113,6 +110,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("publish_refused", "--rewrite does not support full-pipeline Tasks", false)
 		}
 		return s.publishFullPipeline(out, db, home, project, task, repoFilter, cwd, cfg, parsed)
+	}
+	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
+		return axi.Usage("publish requires a Worker summary")
 	}
 	if !pathWithin(task.WorktreePath, cwd) {
 		return axi.Failure("publish_refused", "publish must run inside this Worker's Task Sandbox", false)
@@ -273,6 +273,11 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	}
 	candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, repo)
 	candidateCWD := candidateErr == nil && pathWithin(candidate.WorktreePath, cwd)
+	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
+		if candidateErr != nil || candidate.State != store.ValidationCandidatePromoting || !candidateCWD {
+			return axi.Usage("publish requires a Worker summary")
+		}
+	}
 	if candidateCWD {
 		root, err := gitTop(ctx, "")
 		if err != nil || !samePath(root, candidate.WorktreePath) {

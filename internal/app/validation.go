@@ -57,6 +57,9 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		return err
 	}
 	stage := parsed.Positionals[0]
+	if candidate.State == store.ValidationCandidatePromoting {
+		return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate %s for t%d is being promoted", shortSHA(candidate.CandidateSHA), task.Seq), true, "Resume its promotion by running `posse publish` from the private candidate checkout")
+	}
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && !(stage == "status" && candidate.State == store.ValidationCandidateStale) {
 		return candidateSubmissionError(task, candidate, "candidate_not_active", "candidate is not available for validation", false)
 	}
