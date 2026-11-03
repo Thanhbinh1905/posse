@@ -41,8 +41,14 @@ func TestValidationCandidateCustodySurvivesSnapshotRebuild(t *testing.T) {
 		t.Fatalf("stage history after candidate movement = %+v, %v", stageHistory, err)
 	}
 	for _, stage := range stageHistory {
-		if stage.Status != "invalidated" || stage.InvalidatedSHA != reviewShaB {
-			t.Fatalf("candidate movement did not persist stage invalidation: %+v", stage)
+		if stage.Status != "invalidated" || stage.InvalidatedSHA != reviewShaB || stage.InvalidatedFromStatus != "passed" {
+			t.Fatalf("candidate movement did not persist stage invalidation origin: %+v", stage)
+		}
+		if _, err := f.db.ValidationStageAtMerge(f.ctx, candidate.ID, stage.Stage, reviewShaA, reviewShaB, configSHA, reviewShaB); err != nil {
+			t.Fatalf("exact invalidation origin did not preserve the prior passing %s result: %v", stage.Stage, err)
+		}
+		if _, err := f.db.ValidationStageAtMerge(f.ctx, candidate.ID, stage.Stage, reviewShaA, reviewShaB, configSHA, reviewShaC); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unrelated merge SHA accepted invalidated %s result: %v", stage.Stage, err)
 		}
 	}
 	if err := f.db.MarkValidationCandidateStale(f.ctx, candidate.ID, reviewShaC); err != nil {
@@ -91,6 +97,35 @@ func TestValidationCandidateCustodySurvivesSnapshotRebuild(t *testing.T) {
 	stagesAfter, err := f.db.ValidationStages(f.ctx, f.change)
 	if err != nil || !reflect.DeepEqual(stagesAfter, stagesBefore) {
 		t.Fatalf("stage history after rebuild = %+v, want %+v, err=%v", stagesAfter, stagesBefore, err)
+	}
+}
+
+func TestValidationStageAtMergeDoesNotAcceptInvalidatedFailure(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	candidate, err := f.db.CreateValidationCandidate(f.ctx, ValidationCandidate{
+		TaskID: f.change, SubmittedSHA: reviewShaA, CandidateSHA: reviewShaA, TargetSHA: reviewShaB,
+		ExpectedRemoteSHA: reviewShaA, RefName: "refs/posse/candidate/t1", WorktreePath: "/home/test/posse/projects/shop/tasks/t1/candidates/shop/g1",
+		Summary: "Candidate summary", Verification: "test -> failed", Proof: "test evidence", Risk: "Risk: low\nRollback: revert",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ActivateValidationCandidate(f.ctx, candidate.ID, reviewShaA); err != nil {
+		t.Fatal(err)
+	}
+	configSHA := strings.Repeat("f", 64)
+	if _, err := f.db.RecordValidationStage(f.ctx, ValidationStageResult{
+		TaskID: f.change, CandidateID: candidate.ID, Stage: "test", Status: "failed", CandidateSHA: reviewShaA, TargetSHA: reviewShaB,
+		ConfigSHA256: configSHA, Summary: "test failed", Evidence: "failed test evidence",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.InvalidateValidationStages(f.ctx, candidate.ID, reviewShaC); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := f.db.ValidationStageAtMerge(f.ctx, candidate.ID, "test", reviewShaA, reviewShaB, configSHA, reviewShaC)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalidated failed stage = %+v, %v; want no passing result", stage, err)
 	}
 }
 

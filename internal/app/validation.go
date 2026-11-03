@@ -271,7 +271,7 @@ func requireCandidateReviewPass(ctx context.Context, db *store.DB, project store
 	return nil
 }
 
-func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
+func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate, mergeSHA string) error {
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoted && candidate.State != store.ValidationCandidatePromoting && candidate.State != store.ValidationCandidateSuperseded {
 		return axi.Failure("candidate_not_active", lane.memberLabel("candidate is not eligible for full-pipeline promotion"), false)
 	}
@@ -290,10 +290,10 @@ func requireFullPipelineCandidateValidation(ctx context.Context, db *store.DB, l
 		}
 		return axi.Failure("validation_stale", lane.memberLabel("the frozen target moved after local validation"), false, "Submit a fresh candidate and rerun review -> test -> docs -> lint")
 	}
-	return requireFullPipelineCandidateResults(ctx, db, lane, candidate)
+	return requireFullPipelineCandidateResults(ctx, db, lane, candidate, mergeSHA)
 }
 
-func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
+func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate, mergeSHA string) error {
 	if err := requireCandidateReviewPass(ctx, db, lane.owner, lane.ownerTask, candidate); err != nil {
 		return err
 	}
@@ -302,7 +302,13 @@ func requireFullPipelineCandidateResults(ctx context.Context, db *store.DB, lane
 		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
 	}
 	for _, stage := range []string{"test", "docs", "lint"} {
-		if _, err := db.ValidationStage(ctx, candidate.ID, stage, candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256()); err != nil {
+		var err error
+		if mergeSHA == "" {
+			_, err = db.ValidationStage(ctx, candidate.ID, stage, candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256())
+		} else {
+			_, err = db.ValidationStageAtMerge(ctx, candidate.ID, stage, candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256(), mergeSHA)
+		}
+		if err != nil {
 			return axi.Failure("validation_stage_required", lane.memberLabel("candidate "+shortSHA(candidate.CandidateSHA)+" has no current passing "+stage+" result"), false, "Complete review -> test -> docs -> lint in the private candidate checkout before publishing")
 		}
 	}
@@ -435,7 +441,7 @@ func requireFullPipelineValidationAt(ctx context.Context, db *store.DB, project 
 			validated++
 			continue
 		}
-		if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate); err != nil {
+		if err := requireFullPipelineCandidateValidation(ctx, db, lane, candidate, mergeCommit); err != nil {
 			return err
 		}
 		validated++

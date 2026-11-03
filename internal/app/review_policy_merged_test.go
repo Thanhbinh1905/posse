@@ -221,7 +221,20 @@ func TestFullPipelineGatedMergeAfterCarriedReviewPassIsNotReportedAsPolicyViolat
 	if err := runCandidatePromotionForTest(t, fixture); err != nil {
 		t.Fatalf("promote carried-pass candidate: %v (%s)", err, fixture.output.String())
 	}
+	markTaskDone(t, fixture)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", candidate.CandidateSHA)
+	if notices := pollOpenPRNotices(t, fixture, candidate.CandidateSHA, 1); len(notices["merge_ready"]) != 1 {
+		t.Fatalf("merge gate did not accept refreshed candidate with carried Review and passing stages: %v", notices)
+	}
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	if code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "User approved the PR merge"); code != 0 {
+		t.Fatalf("merge refreshed carried-review candidate: code=%d output=%s stderr=%s", code, output, stderr)
+	}
 	merge := mergeOnOrigin(t, fixture, candidate.TargetSHA, candidate.CandidateSHA, false)
+	if err := fixture.db.InvalidateValidationStages(context.Background(), candidate.ID, merge); err != nil {
+		t.Fatalf("record target-move invalidation caused by the merge: %v", err)
+	}
 	if violations := pollMergedPR(t, fixture, candidate.CandidateSHA, merge); len(violations) != 0 {
 		t.Fatalf("Posse-validated merge with a carried Review pass reported as a policy violation: %q", violations)
 	}
