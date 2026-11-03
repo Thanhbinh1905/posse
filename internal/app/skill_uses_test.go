@@ -12,7 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
-func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
+func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	setupFollowupAgentPath(t, "pi", "claude")
 	f.fake.Results["server.agent_manifests"] = json.RawMessage(`{"agents":[{"kind":"pi","available":true},{"kind":"claude","available":true}]}`)
@@ -69,6 +69,21 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	markerPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", skillUseMarker)
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Chdir(f.repo)
+	f.fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"worker output"}}`)
+	unrecorded := outcomeCLI(t, f.service, 0, "show", "t1")
+	if !strings.Contains(unrecorded, "posse _skill-use <skill-name>") || !strings.Contains(unrecorded, "nothing recorded") {
+		t.Fatalf("show without persisted skill uses does not name the recording command:\n%s", unrecorded)
+	}
+	if err := os.WriteFile(markerPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv(workerHomeEnv, f.home)
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", task.PaneID)
@@ -121,7 +136,7 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	t.Chdir(f.repo)
 	shown := outcomeCLI(t, f.service, 0, "show", "t1")
-	for _, want := range []string{"skill_uses_recorded_by: claude hook", "role_skills[4]{skill,uses}:", "posse-tdd,1", "posse-deslop,2", "posse-no-comments,1", "posse-unslop,1"} {
+	for _, want := range []string{"skill_uses_recorded_by: Task skill-use records", "role_skills[4]{skill,uses}:", "posse-tdd,1", "posse-deslop,2", "posse-no-comments,1", "posse-unslop,1"} {
 		if !strings.Contains(shown, want) {
 			t.Fatalf("show lacks %q:\n%s", want, shown)
 		}
@@ -131,8 +146,13 @@ func TestClaudeWorkerRoleSkillsAreGuidedRecordedAndShown(t *testing.T) {
 		t.Fatal(err)
 	}
 	unhooked := outcomeCLI(t, f.service, 0, "show", "t1")
-	if !strings.Contains(unhooked, "skill_uses_recorded_by: \"nothing: Posse records skill uses only for claude Workers launched with the skill hook or pi Workers launched with skill-use recording\"") || strings.Contains(unhooked, "role_skills") {
-		t.Fatalf("show of a Task launched without the skill hook reports uses:\n%s", unhooked)
+	for _, want := range []string{"role_skills[4]{skill,uses}:", "posse-tdd,1", "posse-deslop,2", "posse-no-comments,1", "posse-unslop,1"} {
+		if !strings.Contains(unhooked, want) {
+			t.Fatalf("show lost recorded role-skill uses after the recording marker disappeared; missing %q:\n%s", want, unhooked)
+		}
+	}
+	if strings.Contains(unhooked, "not recorded") {
+		t.Fatalf("show marked persisted role-skill uses as not recorded:\n%s", unhooked)
 	}
 }
 
