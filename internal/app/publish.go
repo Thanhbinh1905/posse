@@ -274,7 +274,11 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, repo)
 	candidateCWD := candidateErr == nil && pathWithin(candidate.WorktreePath, cwd)
 	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
-		if candidateErr != nil || candidate.State != store.ValidationCandidatePromoting || !candidateCWD {
+		if candidateErr == nil && candidate.State == store.ValidationCandidatePromoting {
+			if !candidateCWD {
+				return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate %s for t%d is being promoted", shortSHA(candidate.CandidateSHA), task.Seq), true, "Resume its promotion by running `posse publish` from the private candidate checkout")
+			}
+		} else {
 			return axi.Usage("publish requires a Worker summary")
 		}
 	}

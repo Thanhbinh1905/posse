@@ -639,6 +639,9 @@ func TestCandidatePromotionResumesAfterCrashBetweenPushAndPullRequest(t *testing
 	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "status"); code != 1 || !strings.Contains(output, "candidate_promotion_in_progress") || !strings.Contains(output, candidateHead[:7]) || !strings.Contains(output, "posse publish") {
 		t.Fatalf("validation during promotion: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
+	if code, output, stderr := fixture.run("publish"); code != 1 || !strings.Contains(output, "candidate_promotion_in_progress") || !strings.Contains(output, candidateHead[:7]) || !strings.Contains(output, "posse publish") {
+		t.Fatalf("summary-free publish during promotion: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
 	if code, output, stderr := fixture.run("publish", "Candidate summary"); code != 1 || !strings.Contains(output, "candidate_promotion_in_progress") || !strings.Contains(output, candidateHead[:7]) || !strings.Contains(output, "posse publish") {
 		t.Fatalf("publish during promotion: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
