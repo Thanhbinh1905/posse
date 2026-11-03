@@ -51,7 +51,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		if notice.Kind == "review_cap_reached" && latestCapNotice[notice.TaskID] != notice.ID {
 			continue
 		}
-		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached", "quota_exhausted") {
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached", "quota_exhausted", "budget_exceeded") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
@@ -104,6 +104,25 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 				request.Question = "Discard " + taskIDString(task.Seq) + " (" + taskDisplayName(task) + ")? Its Sandbox is gone and the Task has prior work, so it cannot be relaunched. " + reason
 				request.Options = []string{"discard"}
 			}
+		case notice.Kind == "budget_exceeded":
+			var data struct {
+				Scope    string `json:"scope"`
+				ScopeKey string `json:"scope_key"`
+				Usage    int64  `json:"usage_tokens"`
+				Limit    int64  `json:"limit_tokens"`
+			}
+			if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+				return err
+			}
+			request.Kind = "budget"
+			if data.Scope == "daily" {
+				request.Origin = "budget:daily:" + data.ScopeKey
+				request.Question = fmt.Sprintf("Project daily token budget exceeded (%d of %d tokens). Continue for this Project day or interrupt %s?", data.Usage, data.Limit, taskIDString(task.Seq))
+			} else {
+				request.Origin = "budget:task:" + data.ScopeKey
+				request.Question = fmt.Sprintf("Task %s exceeded its token budget (%d of %d tokens). Continue this Task or interrupt it?", taskIDString(task.Seq), data.Usage, data.Limit)
+			}
+			request.Options = []string{"continue", "interrupt"}
 		case notice.Kind == "quota_exhausted" && store.QuotaDecisionState(task.State):
 			question, ok, err := quotaDecisionQuestion(task, notice)
 			if err != nil {
