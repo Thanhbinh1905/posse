@@ -806,6 +806,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 			return cfg, err
 		}
 	}
+	if err := s.evaluateBudgets(ctx, db, project, cfg); err != nil {
+		return cfg, err
+	}
 	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
 		return cfg, err
 	}
