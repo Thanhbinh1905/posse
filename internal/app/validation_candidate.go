@@ -379,11 +379,6 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 			if currentTarget == "" {
 				return axi.Failure("candidate_target_missing", "the frozen target branch is missing", false)
 			}
-			if currentTarget != candidate.TargetSHA {
-				if err := db.InvalidateValidationStages(ctx, candidate.ID, currentTarget); err != nil {
-					return err
-				}
-			}
 			if submittedSHA == candidate.PromotedSHA && currentTarget == candidate.TargetSHA {
 				return printPromotedCandidate(out, db, lane, candidate)
 			}
