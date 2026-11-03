@@ -102,6 +102,8 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 			err = s.recoverOpenPullRequestIntent(ctx, db, project, task, intent)
 		case "merge --execute":
 			err = s.recoverMergeIntent(ctx, db, project, cfg, task, intent)
+		case "publish":
+			err = finishInterruptedPromotionIntent(ctx, db, task, intent)
 		case workspaceMergeIntent:
 			err = s.recoverWorkspaceMergeIntent(ctx, db, project, task, intent)
 		case "teardown":
@@ -156,6 +158,30 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		}
 	}
 	return nil
+}
+
+func finishInterruptedPromotionIntent(ctx context.Context, db *store.DB, task store.Task, intent store.Intent) error {
+	candidates := []string{""}
+	repos, err := db.TaskRepos(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, repo := range repos {
+		candidates = append(candidates, repo.Repo)
+	}
+	for _, repo := range candidates {
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, repo)
+		if err != nil {
+			if store.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		if candidate.State == store.ValidationCandidatePromoting {
+			return db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+		}
+	}
+	return fmt.Errorf("interrupted publish has no promotion to resume")
 }
 
 func (s *Service) recoverOpenPullRequestIntent(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent) error {
