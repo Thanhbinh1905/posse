@@ -44,11 +44,11 @@ const noPollRule = "Never poll with sleep, `posse peek`, `posse list` or repeate
 
 const lowkeyReportingRule = "Lowkey mode on: message the User only about needs-decision, message_delivery_uncertain, notice_delivery_uncertain, merge_ready when autonomy.merge=ask, failed/lost, quota_exhausted, budget_exceeded, pr_closed, pr_merged_ungated, review_policy_violation, head_discontinuity, persistent pr_watch_failing/root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, quota_fallback, working notes, pr_watch_recovered, root_fetch_recovered, first pr_watch_failing, restarts) silently; group only if useful. Never answer a needs-decision Notice for the User. The wake includes the Notice text; don't run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
 
-const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`."
+const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`. Posse runs configured `notify.command` with JSON User-actionable Notices on stdin."
 
 func reportingRule(lowkey bool) string {
 	if lowkey {
-		return lowkeyReportingRule
+		return lowkeyReportingRule + " Posse runs configured `notify.command` with JSON User-actionable Notices on stdin."
 	}
 	return normalReportingRule
 }
