@@ -132,7 +132,7 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if len(members) == 0 {
 		fmt.Fprintf(&body, "Expected base head: %s\n", head.ExpectedBaseHead)
 		if head.checkout != "" {
-			fmt.Fprintf(&body, "Private candidate checkout: `%s`\n\nEdit and commit only in this private candidate checkout. Do not publish directly or edit the Task Sandbox branch. A new candidate head must complete Review -> test -> docs -> lint before `posse publish` can promote it.\n", head.checkout)
+			fmt.Fprintf(&body, "Private candidate checkout: `%s`\n\nEdit and commit only in this private candidate checkout. Do not publish directly. If the target advances before promotion and refresh reports private Review fix commits, merge the named commit(s) into the Task Sandbox branch, then run `posse publish --refresh` from the Sandbox to submit a fresh candidate. Refresh keeps the previous summary, verification, proof and risk unless replaced. A new candidate head must complete Review -> test -> docs -> lint before `posse publish` can promote it.\n", head.checkout)
 		} else {
 			body.WriteString("Fix the selected classes on the Task branch, commit the changes and signal done again.\n")
 		}

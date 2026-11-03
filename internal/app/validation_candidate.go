@@ -400,6 +400,20 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 		return err
 	}
 	if err == nil {
+		if refresh {
+			if summary == "" {
+				summary = candidate.Summary
+			}
+			if verification == "" {
+				verification = candidate.Verification
+			}
+			if proof == "" {
+				proof = candidate.Proof
+			}
+			if risk == "" {
+				risk = candidate.Risk
+			}
+		}
 		switch candidate.State {
 		case store.ValidationCandidatePreparing, store.ValidationCandidateActive:
 			if candidate.SubmittedSHA != submittedSHA {
@@ -743,6 +757,9 @@ func printCandidateSubmission(out *axi.Context, lane candidateLane, candidate st
 		help = "A later validation pass may promote this exact candidate; no target ref was changed by submission"
 	}
 	ignoredHelp := "Unlisted gitignored files are not copied; copy any others validation needs from the Sandbox, which never counts as a candidate change"
+	if candidate.Refresh {
+		help += "; previously recorded Review resolutions carry over, and no `--resolutions` is needed unless a new Review fix instruction is delivered"
+	}
 	if len(missing) > 0 {
 		help += "; configured files missing from the Sandbox were skipped: " + strings.Join(missing, ", ")
 	}
@@ -778,7 +795,7 @@ func printPromotedCandidate(out *axi.Context, db *store.DB, lane candidateLane, 
 	}
 	return out.Print(append(result,
 		axi.Field{Key: "pr_url", Value: prURL}, axi.Field{Key: "result", Value: fmt.Sprintf("already promoted: candidate %s at %s", taskIDString(task.Seq), shortSHA(candidate.PromotedSHA))},
-		axi.Field{Key: "help", Value: []any{"From the Task Sandbox, not the candidate checkout, run `posse publish" + lane.repoFlag() + " --refresh \"<summary>\"` with fresh --verify, --proof and --risk values to rewrite the Posse-owned PR/MR text; if the target has advanced, it submits a fresh candidate"}},
+		axi.Field{Key: "help", Value: []any{"From the Task Sandbox, run `posse publish" + lane.repoFlag() + " --refresh \"<summary>\"` when the target has advanced; refresh submits a fresh candidate and keeps the previous summary, verification, proof and risk unless you replace them"}},
 	))
 }
 
