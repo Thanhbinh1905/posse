@@ -280,7 +280,7 @@ func TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate(t *testing.T)
 		t.Fatalf("refresh without merging the private fix should print the required Task-branch merge step: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
 	gitTest(t, fixture.worktree, "merge", "--no-edit", fixSHA)
-	code, output, stderr = fixture.run("publish", "--refresh", "Refreshed candidate")
+	code, output, stderr = fixture.run("publish", "--refresh")
 	if code != 0 {
 		t.Fatalf("refresh after following the printed merge step: exit=%d output=%s stderr=%s", code, output, stderr)
 	}
@@ -291,7 +291,7 @@ func TestFullPipelineTargetRefreshKeepsReviewFixInPrivateCandidate(t *testing.T)
 	if _, err := gitOutput(context.Background(), refreshed.WorktreePath, "show", refreshed.CandidateSHA+":review-fix.txt"); err != nil {
 		t.Fatalf("refreshed candidate %s lost Review fix %s from prior candidate %s: %v", refreshed.CandidateSHA, fixSHA, candidate.CandidateSHA, err)
 	}
-	if refreshed.Summary != "Refreshed candidate" || refreshed.Verification != "go test ./... -> passed" || refreshed.Proof != "Intent proof: verified" || refreshed.Risk != "Risk: low\nRollback: revert" {
+	if refreshed.Summary != "Candidate summary" || refreshed.Verification != "go test ./... -> passed" || refreshed.Proof != "Intent proof: verified" || refreshed.Risk != "Risk: low\nRollback: revert" {
 		t.Fatalf("refresh discarded previous description fields: %+v", refreshed)
 	}
 	if !strings.Contains(output, "previously recorded Review resolutions carry over") {
