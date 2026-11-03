@@ -221,12 +221,18 @@ type Knowledge struct {
 	BudgetBytes int  `toml:"budget_bytes" json:"budget_bytes"`
 }
 
+type Budget struct {
+	DailyTokens int64 `toml:"daily_tokens" json:"daily_tokens"`
+	TaskTokens  int64 `toml:"task_tokens" json:"task_tokens"`
+}
+
 const DefaultKnowledgeBudgetBytes = 8192
 
 type Config struct {
 	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
 	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`
 	Knowledge           Knowledge                  `toml:"knowledge" json:"knowledge"`
+	Budget              Budget                     `toml:"budget" json:"budget"`
 	Skills              Skills                     `toml:"skills" json:"skills"`
 	Identity            Identity                   `toml:"identity" json:"identity"`
 	Lead                Lead                       `toml:"lead" json:"lead"`
