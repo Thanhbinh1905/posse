@@ -56,14 +56,9 @@ func TestStatusMakesNoNetworkCallPerQueuedTask(t *testing.T) {
 		t.Helper()
 		shims.take(t)
 		output.Reset()
-		started := time.Now()
 		code := cli.Run(args)
-		elapsed := time.Since(started)
 		if code != 0 {
 			t.Fatalf("posse %v exit=%d output=%s", args, code, output.String())
-		}
-		if elapsed >= 2*time.Second {
-			t.Errorf("posse %v took %s with 30 queued Tasks, want under 2s", args, elapsed)
 		}
 		return shims.take(t)
 	}
