@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -48,9 +49,32 @@ exit 1
 		t.Fatal(err)
 	}
 	previousTTL := forgeProbeCacheTTL
-	forgeProbeCacheTTL = 500 * time.Millisecond
+	forgeProbeCacheTTL = time.Hour
 	t.Cleanup(func() { forgeProbeCacheTTL = previousTTL })
-	entry := forgeProbeCacheEntry{CheckedAt: time.Now().Add(-100 * time.Millisecond), Outcome: forgeProbeOutcome{
+	baseTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	currentTime := baseTime
+	clockReached := make(chan struct{})
+	advanceClock := make(chan struct{})
+	clockCalls := 0
+	previousNow := forgeProbeNow
+	forgeProbeNow = func() time.Time {
+		clockMu.Lock()
+		clockCalls++
+		waitForAdvance := clockCalls == 2
+		if waitForAdvance {
+			close(clockReached)
+		}
+		clockMu.Unlock()
+		if waitForAdvance {
+			<-advanceClock
+		}
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return currentTime
+	}
+	t.Cleanup(func() { forgeProbeNow = previousNow })
+	entry := forgeProbeCacheEntry{CheckedAt: baseTime.Add(-100 * time.Millisecond), Outcome: forgeProbeOutcome{
 		GitHubChecked: true, GitLabChecked: true, GitHubAuthenticated: true, GitLabAuthenticated: true,
 	}}
 	data, err := json.Marshal(forgeProbeDiskCache{Entries: map[string]forgeProbeCacheEntry{key: entry}})
@@ -68,8 +92,6 @@ exit 1
 			writerDone <- err
 			return
 		}
-		// The reader has opened the FIFO after capturing its freshness time.
-		time.Sleep(forgeProbeCacheTTL + 100*time.Millisecond)
 		if _, err := writer.Write(data); err != nil {
 			_ = writer.Close()
 			writerDone <- err
@@ -91,7 +113,22 @@ exit 1
 		writerDone <- os.WriteFile(os.Getenv("FORGE_PROBE_READY"), nil, 0o600)
 	}()
 
-	first, err := cachedForgeProbe(context.Background(), root, "git.example", cfg, "gitlab")
+	type probeResult struct {
+		outcome forgeProbeOutcome
+		err     error
+	}
+	firstDone := make(chan probeResult, 1)
+	go func() {
+		first, err := cachedForgeProbe(context.Background(), root, "git.example", cfg, "gitlab")
+		firstDone <- probeResult{outcome: first, err: err}
+	}()
+	<-clockReached
+	clockMu.Lock()
+	currentTime = baseTime.Add(forgeProbeCacheTTL)
+	clockMu.Unlock()
+	close(advanceClock)
+	firstResult := <-firstDone
+	first, err := firstResult.outcome, firstResult.err
 	if err != nil {
 		t.Fatal(err)
 	}
