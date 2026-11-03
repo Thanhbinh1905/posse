@@ -195,7 +195,7 @@ func (db *DB) UpdateValidationCandidateDescription(ctx context.Context, id int64
 	if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET summary=?,verification=?,proof=?,risk=?,updated_at=? WHERE id=?`, next[0], next[1], next[2], next[3], time.Now().UnixMilli(), id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND stage IN ('docs','lint') AND status IN ('passed','failed')`, sha, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET invalidated_from_status=status,status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND stage IN ('docs','lint') AND status IN ('passed','failed')`, sha, id); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -239,7 +239,7 @@ func (db *DB) AdvanceValidationCandidate(ctx context.Context, id int64, expected
 		return ErrStateRace
 	}
 	if candidateSHA != expectedSHA {
-		if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, candidateSHA, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET invalidated_from_status=status,status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, candidateSHA, id); err != nil {
 			return err
 		}
 	}
@@ -273,7 +273,7 @@ func (db *DB) MarkValidationCandidateStale(ctx context.Context, id int64, observ
 		}
 		return ErrStateRace
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, observedSHA, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET invalidated_from_status=status,status='invalidated',invalidated_by_sha=? WHERE candidate_id=? AND status='passed'`, observedSHA, id); err != nil {
 		return err
 	}
 	var taskID int64

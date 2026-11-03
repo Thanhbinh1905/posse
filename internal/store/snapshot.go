@@ -1345,8 +1345,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if stage.TaskID != 0 && stage.TaskID != task.ID || stage.ID < 1 || stage.CandidateID < 1 || !validValidationSHA(stage.CandidateSHA) || !validValidationSHA(stage.TargetSHA) || len(stage.ConfigSHA256) != 64 {
 				return fmt.Errorf("invalid validation stage result in snapshot for t%d", task.Seq)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_stage_results(id,task_id,candidate_id,repo,stage,candidate_sha,target_sha,config_sha256,status,summary,evidence,coverage,invalidated_by_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				stage.ID, task.ID, stage.CandidateID, stage.Repo, stage.Stage, stage.CandidateSHA, stage.TargetSHA, stage.ConfigSHA256, stage.Status, stage.Summary, stage.Evidence, stage.Coverage, stage.InvalidatedSHA, stage.CreatedAt); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_stage_results(id,task_id,candidate_id,repo,stage,candidate_sha,target_sha,config_sha256,status,summary,evidence,coverage,invalidated_by_sha,invalidated_from_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				stage.ID, task.ID, stage.CandidateID, stage.Repo, stage.Stage, stage.CandidateSHA, stage.TargetSHA, stage.ConfigSHA256, stage.Status, stage.Summary, stage.Evidence, stage.Coverage, stage.InvalidatedSHA, stage.InvalidatedFromStatus, stage.CreatedAt); err != nil {
 				return fmt.Errorf("rebuild t%d validation stage: %w", task.Seq, err)
 			}
 		}

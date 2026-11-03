@@ -807,20 +807,21 @@ type ValidationFixRound struct {
 }
 
 type ValidationStageResult struct {
-	ID               int64
-	TaskID           int64
-	CandidateID      int64
-	Repo             string
-	Stage            string
-	CandidateSha     string
-	TargetSha        string
-	ConfigSha256     string
-	Status           string
-	Summary          string
-	Evidence         string
-	Coverage         string
-	InvalidatedBySha string
-	CreatedAt        int64
+	ID                    int64
+	TaskID                int64
+	CandidateID           int64
+	Repo                  string
+	Stage                 string
+	CandidateSha          string
+	TargetSha             string
+	ConfigSha256          string
+	Status                string
+	Summary               string
+	Evidence              string
+	Coverage              string
+	InvalidatedBySha      string
+	CreatedAt             int64
+	InvalidatedFromStatus string
 }
 
 type VerifiedPrHead struct {
