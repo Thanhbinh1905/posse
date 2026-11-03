@@ -17,6 +17,14 @@ type Approval struct {
 	BranchSha string
 }
 
+type BudgetCrossing struct {
+	ProjectID int64
+	Scope     string
+	ScopeKey  string
+	TaskID    int64
+	CreatedAt int64
+}
+
 type CiRerun struct {
 	ID          int64
 	ProjectID   int64
@@ -666,6 +674,16 @@ type Task struct {
 	PaneShellIdentity    string
 	AgentStatus          string
 	AgentStatusSince     int64
+}
+
+type TaskBudgetUsage struct {
+	TaskID      int64
+	Launch      int64
+	SessionID   string
+	SessionKind string
+	Tokens      int64
+	LocalDay    string
+	DayTokens   int64
 }
 
 type TaskLaunchIdentity struct {
