@@ -481,6 +481,48 @@ func TestFirstOutcomeDispatchAndStartWarnOnBriefSkillsTheRoleDoesNotLoad(t *test
 	}
 }
 
+func TestRelaunchPreservesUnpublishedCommitAndClaimsHead(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "author-progress")
+	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := filepath.Join(task.WorktreePath, "progress.txt")
+	if err := os.WriteFile(progress, []byte("committed progress\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, task.WorktreePath, "add", "progress.txt")
+	gitTest(t, task.WorktreePath, "commit", "-m", "save unpublished progress")
+	head, err := gitOutput(context.Background(), task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomeCLI(t, f.service, 0, "relaunch", "t1")
+
+	relaunched, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || relaunched.State != store.StateWorking || relaunched.WorktreePath != task.WorktreePath {
+		t.Fatalf("relaunch did not keep the Task checkout: %#v, %v", relaunched, err)
+	}
+	if got, err := gitOutput(context.Background(), task.WorktreePath, "rev-parse", "HEAD"); err != nil || got != head {
+		t.Fatalf("relaunch changed committed progress head: got=%s want=%s err=%v", got, head, err)
+	}
+	repository, err := gitCommonDir(context.Background(), task.WorktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := f.db.BranchAuthor(context.Background(), repository, task.Branch)
+	if err != nil || claim.Attempt != relaunched.Launches || claim.Generation != 2 || claim.HeadSHA != head {
+		t.Fatalf("relaunch claim = %#v, err=%v; want generation 2 at %s", claim, err, head)
+	}
+}
+
 func TestFirstOutcomeImplicitStartRelaunchAndRecovery(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	// This fixture has no origin, so Change delivery must be local.
