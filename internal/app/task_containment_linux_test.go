@@ -248,6 +248,7 @@ func TestTaskProcessContainmentPreservesDetachedSSHControlMaster(t *testing.T) {
 	root := t.TempDir()
 	marker := fmt.Sprintf("containment-test-%d-%s", os.Getpid(), filepath.Base(root))
 	pidPath := filepath.Join(root, "control-master.pid")
+	controlMaster := "ssh -M -S " + pidPath
 	t.Cleanup(func() {
 		pids, err := markedTaskPIDs(marker)
 		if err != nil {
@@ -271,23 +272,35 @@ os.setsid()
 pid = os.fork()
 if pid:
     os._exit(0)
-fd = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o600)
-os.write(fd, str(os.getpid()).encode())
-os.close(fd)
-os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sleep 300"])
+command = sys.argv[2]
+shell = 'printf \'%s\' "$$" > "$1"; printf ready; IFS= read -r release'
+os.execv("/bin/bash", [command, "-c", shell, command, sys.argv[1]])
 `
-	command := exec.Command("python3", "-c", script, pidPath)
+	readyRead, readyWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRead, releaseWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("python3", "-c", script, pidPath, controlMaster)
 	command.Env = taskContainmentTestEnvironment(marker, pidPath, 0)
-	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	command.Stdin, command.Stdout, command.Stderr = releaseRead, readyWrite, os.Stderr
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
+	_ = releaseRead.Close()
+	_ = readyWrite.Close()
 	if err := command.Wait(); err != nil {
 		t.Fatalf("launch detached fake ControlMaster: %v", err)
 	}
-	if !waitForTaskContainmentFile(5*time.Second, pidPath) {
-		t.Fatal("detached fake ControlMaster did not write its PID")
+	ready := make([]byte, len("ready"))
+	if _, err := io.ReadFull(readyRead, ready); err != nil || string(ready) != "ready" {
+		t.Fatalf("detached fake ControlMaster readiness = %q: %v", ready, err)
 	}
+	_ = readyRead.Close()
+	defer releaseWrite.Close()
 	pidBytes, err := os.ReadFile(pidPath)
 	if err != nil {
 		t.Fatal(err)
@@ -296,16 +309,9 @@ os.execv("/bin/bash", ["bash", "-c", "exec -a 'ssh -M -S " + sys.argv[1] + "' sl
 	if err != nil || pid <= 1 {
 		t.Fatalf("ControlMaster PID = %q: %v", pidBytes, err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		processes := processDetails([]int{pid})
-		if len(processes) == 1 && strings.Contains(processes[0].Command, "ssh -M -S") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("fake ControlMaster command did not exec: %#v", processes)
-		}
-		time.Sleep(20 * time.Millisecond)
+	processes := processDetails([]int{pid})
+	if len(processes) != 1 || !strings.Contains(processes[0].Command, controlMaster) {
+		t.Fatalf("fake ControlMaster command = %#v, want command line containing %q", processes, controlMaster)
 	}
 	handle, err := openSandboxProcessHandle(pid)
 	if err != nil {
