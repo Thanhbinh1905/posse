@@ -13,6 +13,15 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+var watchContentionObserved func(phase string)
+var watchReconcileRecovered func()
+
+func observeWatchContention(phase string) {
+	if watchContentionObserved != nil {
+		watchContentionObserved(phase)
+	}
+}
+
 func watchTabLabel(project store.Project) string { return "posse:" + project.Name + ":watch" }
 
 // lastFailures is keyed by phase: one persistent cause usually fails both
@@ -28,6 +37,7 @@ func recordWatchFailure(ctx *axi.Context, db *store.DB, projectID int64, lastFai
 			fmt.Fprintln(ctx.ErrOut, summary)
 			lastFailures[phase] = summary
 		}
+		observeWatchContention(phase)
 		return
 	}
 	visible := store.WithoutBusy(err)
