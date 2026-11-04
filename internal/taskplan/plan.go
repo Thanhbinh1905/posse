@@ -76,6 +76,15 @@ type UserChoice struct {
 	Fields      []string `json:"fields"`
 }
 
+// MemberAdmission records User approval scoped to one workspace Member.
+type MemberAdmission struct {
+	Repository string `json:"repository"`
+	Scope      string `json:"scope"`
+	Quote      string `json:"quote"`
+	Actor      string `json:"actor"`
+	Source     string `json:"source"`
+}
+
 func PreferenceFields(brief dispatch.Brief) []string {
 	var fields []string
 	if brief.MergeMode != "" {
@@ -153,31 +162,32 @@ func (loops ValidationLoops) MaxReviewRounds() int {
 
 type Plan struct {
 	// Original bytes retain the digest and provenance of admitted 0.14 plans.
-	legacyJSON      string
-	Version         int                       `json:"version"`
-	Revision        int                       `json:"revision"`
-	PreviousSHA256  string                    `json:"previous_sha256,omitempty"`
-	Type            string                    `json:"type"`
-	Outcome         string                    `json:"outcome"`
-	Executor        string                    `json:"executor"`
-	Execution       Execution                 `json:"execution"`
-	Review          string                    `json:"review"`
-	BudgetTokens    int64                     `json:"budget_tokens,omitempty"`
-	ReviewOf        int64                     `json:"review_of,omitempty"`
-	Dependencies    []dispatch.Dependency     `json:"dependencies,omitempty"`
-	Delivery        string                    `json:"delivery"`
-	Grants          []Grant                   `json:"grants"`
-	Preferences     []Preference              `json:"preferences,omitempty"`
-	UserChoice      *UserChoice               `json:"user_choice,omitempty"`
-	Inputs          []Input                   `json:"inputs"`
-	Paths           Paths                     `json:"paths"`
-	Launch          Launch                    `json:"launch"`
-	WorkflowJobs    bool                      `json:"workflow_jobs,omitempty"`
-	ValidationLoops *ValidationLoops          `json:"validation_loops,omitempty"`
-	Workflow        *config.WorkflowSelection `json:"workflow,omitempty"`
-	MergeMethod     string                    `json:"merge_method"`
-	ProseLanguage   string                    `json:"prose_language,omitempty"`
-	Pool            config.Pool               `json:"pool"`
+	legacyJSON       string
+	Version          int                       `json:"version"`
+	Revision         int                       `json:"revision"`
+	PreviousSHA256   string                    `json:"previous_sha256,omitempty"`
+	Type             string                    `json:"type"`
+	Outcome          string                    `json:"outcome"`
+	Executor         string                    `json:"executor"`
+	Execution        Execution                 `json:"execution"`
+	Review           string                    `json:"review"`
+	BudgetTokens     int64                     `json:"budget_tokens,omitempty"`
+	ReviewOf         int64                     `json:"review_of,omitempty"`
+	Dependencies     []dispatch.Dependency     `json:"dependencies,omitempty"`
+	Delivery         string                    `json:"delivery"`
+	Grants           []Grant                   `json:"grants"`
+	Preferences      []Preference              `json:"preferences,omitempty"`
+	UserChoice       *UserChoice               `json:"user_choice,omitempty"`
+	MemberAdmissions []MemberAdmission         `json:"member_admissions,omitempty"`
+	Inputs           []Input                   `json:"inputs"`
+	Paths            Paths                     `json:"paths"`
+	Launch           Launch                    `json:"launch"`
+	WorkflowJobs     bool                      `json:"workflow_jobs,omitempty"`
+	ValidationLoops  *ValidationLoops          `json:"validation_loops,omitempty"`
+	Workflow         *config.WorkflowSelection `json:"workflow,omitempty"`
+	MergeMethod      string                    `json:"merge_method"`
+	ProseLanguage    string                    `json:"prose_language,omitempty"`
+	Pool             config.Pool               `json:"pool"`
 	// DeleteBranchOnMerge is nil in plans admitted before the setting existed.
 	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
 }
@@ -475,6 +485,13 @@ func (p Plan) Validate() error {
 			return invalid("unsupported Member delivery")
 		}
 		seenNames[member.Name], seenPaths[member.Path] = true, true
+	}
+	seenAdmissions := map[string]bool{}
+	for _, admission := range p.MemberAdmissions {
+		if p.Type != "change" || p.Execution.Scope != "workspace" || admission.Repository == "" || !seenNames[admission.Repository] || seenAdmissions[admission.Repository] || admission.Scope != "member:"+admission.Repository || strings.TrimSpace(admission.Quote) == "" || admission.Actor != "lead" || admission.Source != "task add-member --user-approved" {
+			return invalid("invalid Member-admission approval")
+		}
+		seenAdmissions[admission.Repository] = true
 	}
 	if p.Launch.ProfileName == "" || p.Launch.Profile.Kind == "" {
 		return invalid("missing launch Profile or kind")
