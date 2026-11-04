@@ -23,7 +23,8 @@ func runPosseExpectingFailure(t *testing.T, f *workerTabsFixture, dir string, en
 }
 
 func workerSignalEnv(f *workerTabsFixture, task store.Task) []string {
-	return setEnv(setEnv(f.env, "HERDR_ENV", "1"), "HERDR_PANE_ID", task.PaneID)
+	env := setEnv(setEnv(f.env, "HERDR_ENV", "1"), "HERDR_PANE_ID", task.PaneID)
+	return taskAuthorGenerationEnv(env)
 }
 
 // TestNoChangeTaskFinishesAndTearsDownWithoutDiscard covers a Change Task whose
@@ -31,6 +32,9 @@ func workerSignalEnv(f *workerTabsFixture, task store.Task) []string {
 // the Lead tears it down without a User-approved discard.
 func TestNoChangeTaskFinishesAndTearsDownWithoutDiscard(t *testing.T) {
 	f := newWorkerTabsFixture(t)
+	if err := os.WriteFile(filepath.Join(f.root, "quiet-agent"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	task := f.start(t, "t1", "Already satisfied", "already-satisfied")
 	workerEnv := workerSignalEnv(f, task)
 
