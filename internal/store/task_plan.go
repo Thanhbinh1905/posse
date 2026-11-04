@@ -58,6 +58,14 @@ func (db *DB) TaskPlanRevisions(ctx context.Context, taskID int64) ([]string, er
 // ReviseTaskPlan compares the admitted revision before recording an explicit
 // launch reconfiguration. It invalidates merge-head evidence unless the Task is merging.
 func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan) error {
+	return db.reviseTaskPlan(ctx, task, plan, nil)
+}
+
+func (db *DB) ReviseTaskPlanWithRepo(ctx context.Context, task Task, plan taskplan.Plan, repo TaskRepo) error {
+	return db.reviseTaskPlan(ctx, task, plan, &repo)
+}
+
+func (db *DB) reviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan, repo *TaskRepo) error {
 	previous, err := task.AdmittedPlan()
 	if err != nil {
 		return err
@@ -89,6 +97,11 @@ func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='' WHERE task_id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state<>'merging')`, task.ID, task.ID); err != nil {
 		return err
+	}
+	if repo != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,target_branch,landing_mode,state,updated_at) VALUES(?,?,?,?,?,?,'open',?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.MergeMode, time.Now().UnixMilli()); err != nil {
+			return err
+		}
 	}
 	note := fmt.Sprintf("Execution plan revised from %d to %d; prior revision evidence invalidated", previous.Revision, plan.Revision)
 	if task.State == StateMerging {
