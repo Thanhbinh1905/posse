@@ -156,7 +156,8 @@ func TestBranchAuthorRelaunchPreservesEvidenceAtSameHead(t *testing.T) {
 
 func TestBranchAuthorClaimCanStartUnbornAndRecordFirstCommit(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(t.TempDir())
+	home := t.TempDir()
+	db, err := Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +173,16 @@ func TestBranchAuthorClaimCanStartUnbornAndRecordFirstCommit(t *testing.T) {
 	claim, err := db.ClaimBranchAuthor(ctx, "shop", "posse/t1", taskID, 1, "", "", false)
 	if err != nil || claim.Generation != 1 {
 		t.Fatalf("unborn branch claim = %#v, %v", claim, err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM branch_authorship`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+		t.Fatalf("rebuild unborn branch claim: %v", err)
+	}
+	claim, err = db.BranchAuthor(ctx, "shop", "posse/t1")
+	if err != nil || claim.HeadSHA != "" {
+		t.Fatalf("rebuilt unborn branch claim = %#v, %v", claim, err)
 	}
 	if err := db.UpdateBranchAuthorHead(ctx, "shop", "posse/t1", taskID, claim.Generation, "", branchAuthorTestSHA); err != nil {
 		t.Fatalf("record first commit: %v", err)

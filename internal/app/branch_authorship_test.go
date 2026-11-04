@@ -55,6 +55,10 @@ func TestBranchAuthorHandoffBundleCapturesScopeAndValidation(t *testing.T) {
 
 func TestBranchAuthorHeadUpdateRejectsRewind(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1 WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task.Launches = 1
 	repository, err := gitCommonDir(context.Background(), fixture.worktree)
 	if err != nil {
 		t.Fatal(err)

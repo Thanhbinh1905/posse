@@ -1157,7 +1157,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			return err
 		}
 		for _, claim := range snapshot.BranchAuthors {
-			if claim.TaskID != task.ID || claim.Repository == "" || claim.Branch == "" || claim.Generation < 1 || claim.Attempt < 1 || claim.HeadSHA == "" {
+			if claim.TaskID != task.ID || claim.Repository == "" || claim.Branch == "" || claim.Generation < 1 || claim.Attempt < 1 || !validBranchAuthorHead(claim.HeadSHA) {
 				return fmt.Errorf("invalid branch author claim in snapshot for t%d", task.Seq)
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO branch_authorship(repository,branch,task_id,attempt,generation,head_sha,updated_at) VALUES(?,?,?,?,?,?,?)`, claim.Repository, claim.Branch, task.ID, claim.Attempt, claim.Generation, claim.HeadSHA, task.UpdatedAt); err != nil {

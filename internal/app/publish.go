@@ -276,6 +276,14 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		}
 		pushOptions = append(pushOptions, "--force-with-lease="+ref+":"+previousRemoteHead)
 	}
+	requiredAuthorHead := ""
+	if rewrite {
+		requiredAuthorHead = previousRemoteHead
+	}
+	expectedAuthorHead, err := validateWorkerBranchAuthorHeadUpdate(out.Context, db, task, requiredAuthorHead, sha, rewrite)
+	if err != nil {
+		return axi.Failure("publish_refused", "the branch author claim cannot authorize this head update", false, err.Error())
+	}
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
 	}
@@ -290,7 +298,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
 	}
-	if err := updateWorkerBranchAuthorHead(out.Context, db, task, sha); err != nil {
+	if err := recordWorkerBranchAuthorHead(out.Context, db, task, expectedAuthorHead, sha, rewrite); err != nil {
 		return err
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
