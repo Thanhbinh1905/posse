@@ -145,6 +145,42 @@ func currentReviewCapHead(ctx context.Context, db *store.DB, project store.Proje
 	return reviewCapHead(ctx, db, project, task)
 }
 
+func requireReviewCapCandidateTargetsCurrent(ctx context.Context, db *store.DB, project store.Project, task store.Task, targets []store.ReviewTarget) error {
+	if task.State != store.StateDone {
+		return nil
+	}
+	for _, target := range targets {
+		repo := target.Repository
+		if !project.IsWorkspace() {
+			repo = ""
+		}
+		if !isFullPipelineTask(task, repo) {
+			continue
+		}
+		lane, err := resolveCandidateLane(ctx, db, project, task, repo)
+		if err != nil {
+			return err
+		}
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, repo)
+		if err != nil {
+			return err
+		}
+		targetHead, err := lane.targetHead(ctx)
+		if err != nil {
+			return err
+		}
+		if targetHead != candidate.TargetSHA {
+			command := "posse publish --refresh \"<summary>\""
+			if target.Repository != "" {
+				command = "posse publish --repo " + target.Repository + " --refresh \"<summary>\""
+			}
+			return axi.Failure("candidate_target_moved", fmt.Sprintf("Review cap acceptance cannot be applied because candidate %s was built against target %s, but the current target is %s", shortSHA(candidate.CandidateSHA), shortSHA(candidate.TargetSHA), shortSHA(targetHead)), false,
+				"From the Task Sandbox, run `"+command+"` to submit a fresh candidate for the current target, then complete the candidate turn. The refreshed head needs its own Review cap Decision")
+		}
+	}
+	return nil
+}
+
 func userDispositionBlockAt(task store.Task) string {
 	plan, err := task.AdmittedPlan()
 	if err == nil && plan != nil && plan.ValidationLoops != nil {
