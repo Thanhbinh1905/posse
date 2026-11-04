@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,27 +147,120 @@ func stewardPollFixture(t *testing.T) (*prMergeFixture, string) {
 	return f, prURL
 }
 
-// #805: `posse pr inspect` gave up after about a second while the Project
-// watch still held the poll claim, and named no cause.
-func TestPRInspectWaitsForAProjectPollHeldByAnotherProcess(t *testing.T) {
+func addStewardPollPRs(t *testing.T, f *prMergeFixture) {
+	t.Helper()
+	ctx := context.Background()
+	urls := []string{"https://github.com/acme/shop/pull/18", "https://github.com/acme/shop/pull/19"}
+	for i, prURL := range urls {
+		seq := i + 2
+		if _, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: seq, Type: "change", Title: "Watched change", State: store.StateSpawning, MergeMode: "pr", Branch: fmt.Sprintf("posse/t%d", seq), BaseRef: "main", PRURL: prURL, GatedSHA: f.headSHA, AutonomyMerge: "ask"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prs := map[string]any{}
+	for i, number := range []int{17, 18, 19} {
+		prs[fmt.Sprintf("pr%d", i+1)] = map[string]any{
+			"url": fmt.Sprintf("https://github.com/acme/shop/pull/%d", number), "state": "OPEN", "headRefOid": f.headSHA,
+			"baseRefName": "main", "mergeable": "MERGEABLE", "reviewDecision": "APPROVED",
+			"mergeCommit": map[string]any{"oid": ""}, "statusCheckRollup": map[string]any{"state": "SUCCESS", "contexts": map[string]any{"nodes": []any{}}},
+		}
+	}
+	encoded, err := json.Marshal(map[string]any{"data": map[string]any{"repo1": prs}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.ghState, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startSlowStewardProjectPoll(t *testing.T, f *prMergeFixture) <-chan error {
+	t.Helper()
+	t.Setenv("POSSE_TEST_GH_DELAY", "1")
+	t.Setenv("POSSE_TEST_GH_DELAY_ONCE", filepath.Join(f.root, "slow-poll-once"))
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		log, err := os.ReadFile(f.ghLog)
+		if err == nil && strings.Contains(string(log), "api graphql") {
+			if !strings.Contains(string(log), "pr2: pullRequest(number: 18)") || !strings.Contains(string(log), "pr3: pullRequest(number: 19)") {
+				t.Fatalf("Project poll did not query all three PRs: %s", log)
+			}
+			return done
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Project poll finished before querying PRs: %v", err)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Project poll did not start its GraphQL request")
+	return nil
+}
+
+func TestPRInspectWaitsForSlowProjectPollOfSeveralPRs(t *testing.T) {
 	f, _ := stewardPollFixture(t)
 	defer f.db.Close()
-	ctx := context.Background()
-	holder, err := f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), time.Minute, true)
-	if err != nil || holder == "" {
-		t.Fatalf("watch claim=%q err=%v", holder, err)
-	}
-	released := make(chan error, 1)
-	go func() {
-		time.Sleep(1500 * time.Millisecond)
-		released <- f.db.ReleasePRPoll(ctx, f.project.ID, holder)
-	}()
+	addStewardPollPRs(t, f)
+	previousBudget := stewardObserveBudget
+	stewardObserveBudget = 300 * time.Millisecond
+	defer func() { stewardObserveBudget = previousBudget }()
+	pollDone := startSlowStewardProjectPoll(t, f)
+	started := time.Now().UnixMilli()
 	code, output, stderr := f.run("pr", "inspect", "t1")
-	if err := <-released; err != nil {
-		t.Fatal(err)
+	if err := <-pollDone; err != nil {
+		t.Fatalf("Project poll: %v", err)
 	}
 	if code != 0 {
 		t.Fatalf("pr inspect: %d %s %s", code, output, stderr)
+	}
+	observation, err := f.db.LatestPRObservation(context.Background(), f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := f.db.PRObservationConfirmedAt(context.Background(), observation.ID)
+	if err != nil || confirmed < started {
+		t.Fatalf("inspect observation confirmed at %d, command started at %d, err=%v", confirmed, started, err)
+	}
+}
+
+func TestPRReleaseWaitsForSlowProjectPollOfSeveralPRs(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	defer f.db.Close()
+	f.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
+	if code, output, stderr := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, f)
+	removeFixtureTaskPane(f)
+	addStewardPollPRs(t, f)
+	previousBudget := stewardObserveBudget
+	stewardObserveBudget = 300 * time.Millisecond
+	defer func() { stewardObserveBudget = previousBudget }()
+	pollDone := startSlowStewardProjectPoll(t, f)
+	started := time.Now().UnixMilli()
+	code, output, stderr := f.run("pr", "release", "t1", "--policy", "release")
+	if err := <-pollDone; err != nil {
+		t.Fatalf("Project poll: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("pr release: %d %s %s", code, output, stderr)
+	}
+	observation, err := f.db.LatestPRObservation(context.Background(), f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := f.db.PRObservationConfirmedAt(context.Background(), observation.ID)
+	if err != nil || confirmed < started {
+		t.Fatalf("release observation confirmed at %d, command started at %d, err=%v", confirmed, started, err)
 	}
 }
 
@@ -384,12 +479,26 @@ func TestForgeUnavailableNamesAProjectPollClaimThatIsNeverReleased(t *testing.T)
 	if holder, err := f.db.ClaimPRPoll(ctx, f.project.ID, time.Now(), time.Minute, true); err != nil || holder == "" {
 		t.Fatalf("watch claim=%q err=%v", holder, err)
 	}
-	previous := stewardObserveBudget
-	stewardObserveBudget = 300 * time.Millisecond
-	defer func() { stewardObserveBudget = previous }()
+	previous, previousWait := stewardObserveBudget, stewardObserveWaitBudget
+	stewardObserveBudget, stewardObserveWaitBudget = 300*time.Millisecond, 300*time.Millisecond
+	defer func() { stewardObserveBudget, stewardObserveWaitBudget = previous, previousWait }()
 	code, output, stderr := f.run("pr", "inspect", "t1")
 	combined := output + stderr
 	if code == 0 || !strings.Contains(combined, "forge_unavailable") || !strings.Contains(combined, "poll claim") {
 		t.Fatalf("pr inspect: %d %s; want forge_unavailable naming the poll claim", code, combined)
+	}
+}
+
+func TestForgeUnavailableDoesNotBlameProjectPollClaimForForgeTimeout(t *testing.T) {
+	f, _ := stewardPollFixture(t)
+	defer f.db.Close()
+	t.Setenv("POSSE_TEST_GH_DELAY", "1")
+	previous := externalCommandTimeout
+	externalCommandTimeout = 100 * time.Millisecond
+	defer func() { externalCommandTimeout = previous }()
+	code, output, stderr := f.run("pr", "inspect", "t1")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "forge_unavailable") || strings.Contains(combined, "poll claim") {
+		t.Fatalf("pr inspect: %d %s; want forge_unavailable without blaming the Project poll claim", code, combined)
 	}
 }
