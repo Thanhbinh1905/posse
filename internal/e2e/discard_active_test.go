@@ -55,6 +55,7 @@ esac
 	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", task.PaneID)
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", tabOf(t, f.snapshot(t), task.PaneID))
+	workerEnv = taskAuthorGenerationEnv(workerEnv)
 	done := exec.Command(f.binary, "signal", "done", "Worker work is complete")
 	done.Dir, done.Env = task.WorktreePath, workerEnv
 	if output, err := done.CombinedOutput(); err != nil {

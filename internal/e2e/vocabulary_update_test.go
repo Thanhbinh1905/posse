@@ -318,6 +318,7 @@ func testEnvValue(env []string, key string) string {
 // Worker pane) is not among its ancestors, as in CI.
 func runReleaseCLI(t *testing.T, binary, cwd string, env []string, args ...string) (int, string) {
 	t.Helper()
+	env = taskAuthorGenerationEnv(env)
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "output")
 	command := exec.Command("sh", append([]string{"-c", `( "$@" >"$0" 2>&1 </dev/null; echo $? >"$0.status.tmp"; mv "$0.status.tmp" "$0.status" ) &`, outputPath, binary}, args...)...)

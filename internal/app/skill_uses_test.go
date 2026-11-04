@@ -87,6 +87,7 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 	t.Setenv(workerHomeEnv, f.home)
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	setTaskBranchAuthorEnv(t, f.db, task)
 	t.Chdir(task.WorktreePath)
 	for _, skill := range []string{"posse-launch-skills:posse-deslop", "posse-launch-skills:posse-deslop", "posse-unslop"} {
 		event, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "worker", "cwd": task.WorktreePath, "tool_name": "Skill", "tool_input": map[string]any{"skill": skill}})
@@ -180,6 +181,7 @@ func TestPiWorkerRoleSkillUsesAreRecorded(t *testing.T) {
 	t.Setenv(workerHomeEnv, f.home)
 	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("HERDR_PANE_ID", task.PaneID)
+	setTaskBranchAuthorEnv(t, f.db, task)
 	t.Chdir(task.WorktreePath)
 	var stderr bytes.Buffer
 	if code := f.service.RunSkillUse(&stderr, []string{"posse-deslop"}); code != 0 {

@@ -954,8 +954,13 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		t.Fatalf("relaunch relabeled a workspace or missed early harness metadata: workspace renamed=%v tab_created=%v metadata_before=%v metadata_after=%v calls=%#v", workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart, fake.Calls)
 	}
 	relaunchText, err := os.ReadFile(filepath.Join(home, "projects", "shop", "tasks", "t1", "relaunch.md"))
-	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse signal") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") {
-		t.Fatalf("relaunch instructions were not written: %q, %v", relaunchText, err)
+	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse signal") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") || !strings.Contains(string(relaunchText), "author-handoff-launch-1.json") {
+		t.Fatalf("relaunch instructions were not written with their branch author handoff: %q, %v", relaunchText, err)
+	}
+	bundlePath := filepath.Join(home, "projects", "shop", "tasks", "t1", "author-handoff-launch-1.json")
+	bundle, err := os.ReadFile(bundlePath)
+	if err != nil || !strings.Contains(string(bundle), `"scope": "worker instructions\n\nCurrent Worker turn token:`) || !strings.Contains(string(bundle), `"findings": []`) || !strings.Contains(string(bundle), `"candidates": []`) || !strings.Contains(string(bundle), `"evidence": []`) {
+		t.Fatalf("relaunch handoff bundle omitted its scope/findings/candidate/evidence: %q, %v", bundle, err)
 	}
 	// The queued instruction became undeliverable when the Task was lost, so
 	// the relaunch hands it to the new Worker in order.

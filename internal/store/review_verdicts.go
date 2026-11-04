@@ -135,10 +135,9 @@ func (db *DB) ReviewVerdict(ctx context.Context, taskID int64) (ReviewVerdict, e
 	return verdict, nil
 }
 
-// ReviewVerdictsFor lists the verdicts of every Review Task of a Change Task,
-// newest first.
+// ReviewVerdictsFor lists verdicts that remain valid for a Change Task, newest first.
 func (db *DB) ReviewVerdictsFor(ctx context.Context, changeTaskID int64) ([]ReviewVerdict, error) {
-	rows, err := db.QueryContext(ctx, `SELECT v.task_id FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=? ORDER BY v.created_at DESC, v.task_id DESC`, changeTaskID)
+	rows, err := db.QueryContext(ctx, `SELECT v.task_id FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=? AND NOT EXISTS(SELECT 1 FROM branch_author_invalidated_verdicts i WHERE i.task_id=v.task_id AND i.change_task_id=t.reviews_task_id) ORDER BY v.created_at DESC, v.task_id DESC`, changeTaskID)
 	if err != nil {
 		return nil, err
 	}

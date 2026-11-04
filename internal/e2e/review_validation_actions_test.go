@@ -365,6 +365,36 @@ func TestFullPipelineReviewCarryIsReviewOnlyAtPublication(t *testing.T) {
 	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
 
+func TestReviewCapAcceptHeadRefusesAfterCandidateTargetMoves(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
+	recordBlockingReviewFinding(t, f, changeSeq)
+	change := f.mustTask(t, changeSeq)
+	var decisionID int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
+		t.Fatal(err)
+	}
+
+	advanceMainWithFile(t, f, "target-moved.txt")
+	const quote = "Accept only after the candidate is refreshed for the current target."
+	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--user-approved", quote); code != 0 {
+		t.Fatalf("record User's cap choice: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 1 || !strings.Contains(output, "candidate_target_moved") || !strings.Contains(output, "posse publish") {
+		t.Fatalf("stale candidate acceptance did not refuse with refresh guidance: %d %s", code, output)
+	}
+	var dispositions, messages int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_dispositions WHERE ship_task_id=?`, change.ID).Scan(&dispositions); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND status IN ('queued','claimed')`, change.ID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if dispositions != 0 || messages != 0 {
+		t.Fatalf("stale acceptance partially applied: dispositions=%d queued_messages=%d", dispositions, messages)
+	}
+}
+
 func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")

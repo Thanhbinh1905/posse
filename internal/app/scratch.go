@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -148,5 +149,14 @@ func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMar
 	quotedCache := shellQuote(workerCache)
 	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker + " GOCACHE=" + quotedCache
 	_, err = s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
+	return err
+}
+
+func exportTaskAuthorGeneration(ctx context.Context, s *Service, paneID string, generation int64) error {
+	if paneID == "" || generation < 1 {
+		return fmt.Errorf("task author generation requires a pane and positive generation")
+	}
+	command := "export POSSE_TASK_GENERATION=" + strconv.FormatInt(generation, 10)
+	_, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
 	return err
 }
