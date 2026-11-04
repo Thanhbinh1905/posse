@@ -53,6 +53,42 @@ func TestBranchAuthorHandoffBundleCapturesScopeAndValidation(t *testing.T) {
 	}
 }
 
+func TestBranchAuthorHeadUpdateRejectsRewind(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	repository, err := gitCommonDir(context.Background(), fixture.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(fixture.worktree, "change.txt")
+	if err := os.WriteFile(file, []byte("advance the claimed head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "add", "change.txt")
+	gitTest(t, fixture.worktree, "commit", "-m", "advance author head")
+	head, err := gitOutput(context.Background(), fixture.worktree, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_GENERATION", "1")
+	if err := updateWorkerBranchAuthorHead(context.Background(), fixture.db, fixture.task, head); err != nil {
+		t.Fatalf("record descendant head: %v", err)
+	}
+	gitTest(t, fixture.worktree, "reset", "--hard", fixture.headSHA)
+	if err := updateWorkerBranchAuthorHead(context.Background(), fixture.db, fixture.task, fixture.headSHA); !errors.Is(err, store.ErrBranchAuthorHeadChanged) {
+		t.Fatalf("rewound branch author head update error = %v, want ErrBranchAuthorHeadChanged", err)
+	}
+	claim, err := fixture.db.BranchAuthor(context.Background(), repository, fixture.task.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.HeadSHA != head {
+		t.Fatalf("rewind changed recorded author head to %s, want %s", claim.HeadSHA, head)
+	}
+}
+
 func TestBranchAuthorTransferWaitsForActiveOperation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	repository, err := gitCommonDir(context.Background(), fixture.worktree)

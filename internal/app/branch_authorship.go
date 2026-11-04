@@ -161,6 +161,11 @@ func updateWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.
 	if err != nil || generation < 1 {
 		return store.ErrBranchAuthorStale
 	}
+	if claim.HeadSHA != "" && claim.HeadSHA != nextHead {
+		if err := requireBranchHeadAncestor(ctx, task.WorktreePath, claim.HeadSHA, nextHead); err != nil {
+			return err
+		}
+	}
 	return db.UpdateBranchAuthorHead(ctx, repository, task.Branch, task.ID, generation, claim.HeadSHA, nextHead)
 }
 
