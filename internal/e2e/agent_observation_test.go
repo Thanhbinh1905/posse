@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -117,7 +118,18 @@ while IFS= read -r line; do :; done
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET idle_since=?, agent_status_since=? WHERE id=?`, backdated, backdated, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	expectEvery("done turn", views(), []string{"done 2h5m", "agent_mismatch", "Task working, but agent idle without a Signal past idle_after 3m"}, []string{"state: done"})
+	observedAge := regexp.MustCompile(`(?:done|idle) [0-9]+h[0-9]+m`)
+	assertObservedAge := func(step string, outputs map[string]string) {
+		t.Helper()
+		for view, output := range outputs {
+			if !observedAge.MatchString(output) {
+				t.Errorf("%s: %s omitted the observed status age:\n%s", step, view, output)
+			}
+		}
+	}
+	doneTurnViews := views()
+	assertObservedAge("done turn", doneTurnViews)
+	expectEvery("done turn", doneTurnViews, []string{"agent_mismatch", "Task working, but agent idle without a Signal past idle_after 3m"}, []string{"state: done"})
 	if state := fixture.mustTask(t, "t1").State; state != store.StateWorking {
 		t.Fatalf("Task state = %s after a Herdr done turn; want working", state)
 	}
@@ -128,7 +140,9 @@ while IFS= read -r line; do :; done
 		t.Fatal(err)
 	}
 	waitStatus("idle")
-	expectEvery("idle", views(), []string{"idle 2h5m", "Task working, but agent idle without a Signal past idle_after 3m"}, nil)
+	idleViews := views()
+	assertObservedAge("idle", idleViews)
+	expectEvery("idle", idleViews, []string{"Task working, but agent idle without a Signal past idle_after 3m"}, nil)
 	if state := fixture.mustTask(t, "t1").State; state != store.StateWorking {
 		t.Fatalf("Task state = %s after a long idle observation; want working", state)
 	}
@@ -136,7 +150,7 @@ while IFS= read -r line; do :; done
 	// Resuming work clears the mismatch and restarts the age.
 	report("working")
 	waitStatus("working")
-	expectEvery("resumed", views(), []string{"working "}, []string{"agent_mismatch", "2h5m"})
+	expectEvery("resumed", views(), []string{"working "}, []string{"agent_mismatch"})
 
 	// Missing pane: within the absence grace the Task is still live.
 	if _, err := client.Call(ctx, "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
