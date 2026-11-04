@@ -17,6 +17,22 @@ type Approval struct {
 	BranchSha string
 }
 
+type BranchAuthorInvalidatedVerdict struct {
+	TaskID        int64
+	ChangeTaskID  int64
+	InvalidatedAt int64
+}
+
+type BranchAuthorship struct {
+	Repository string
+	Branch     string
+	TaskID     int64
+	Attempt    int64
+	Generation int64
+	HeadSha    string
+	UpdatedAt  int64
+}
+
 type BudgetCrossing struct {
 	ProjectID int64
 	Scope     string

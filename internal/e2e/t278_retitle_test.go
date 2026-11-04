@@ -31,6 +31,7 @@ func TestRetitleThenPublishKeepsTheConventionalPRTitle(t *testing.T) {
 	workerEnv := setEnv(fixture.leadEnv, "HERDR_PANE_ID", task.PaneID)
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", fixture.home)
+	workerEnv = taskAuthorGenerationEnv(workerEnv)
 	publish := func(summary string) {
 		t.Helper()
 		command := exec.Command(fixture.binary, "publish", summary)

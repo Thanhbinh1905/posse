@@ -275,6 +275,9 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 	if err := db.CompleteValidationCandidatePromotion(ctx, candidate.ID, candidate.CandidateSHA); err != nil {
 		return err
 	}
+	if err := updateWorkerBranchAuthorHead(ctx, db, task, candidate.CandidateSHA); err != nil {
+		return err
+	}
 	return out.Print(axi.Object{
 		{Key: "task", Value: taskIDString(task.Seq)}, {Key: "candidate_head", Value: candidate.CandidateSHA},
 		{Key: "pr_url", Value: prURL}, {Key: "result", Value: fmt.Sprintf("promoted: candidate %s at %s", taskIDString(task.Seq), shortSHA(candidate.CandidateSHA))},
@@ -330,6 +333,9 @@ func (s *Service) refreshPromotedPullRequest(out *axi.Context, db *store.DB, lan
 // no PR/MR is opened; Merge integrates the head into the target ref.
 func (s *Service) completeLocalPromotion(out *axi.Context, db *store.DB, lane candidateLane, candidate store.ValidationCandidate) error {
 	if err := db.CompleteValidationCandidatePromotion(out.Context, candidate.ID, candidate.CandidateSHA); err != nil {
+		return err
+	}
+	if err := updateWorkerBranchAuthorHead(out.Context, db, lane.task, candidate.CandidateSHA); err != nil {
 		return err
 	}
 	help := "Run `posse signal done \"<summary>\"`; Merge fast-forwards the target to this validated head"

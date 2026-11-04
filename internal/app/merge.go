@@ -75,6 +75,16 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
+	if !project.IsWorkspace() && task.WorktreePath != "" && task.Branch != "" {
+		lock, lockErr := acquireTaskBranchAuthorLock(ctx.Context, task.WorktreePath, task.Branch)
+		if lockErr != nil {
+			return axi.Failure("merge_refused", "could not acquire the branch author operation lock", true, lockErr.Error())
+		}
+		defer lock.Close()
+	}
+	if err := requireCurrentTaskBranchAuthor(ctx.Context, db, task); err != nil {
+		return axi.Failure("merge_refused", "Task does not hold the current branch author claim", false, err.Error())
+	}
 	if usesRemovedNoMistakes(task) {
 		return noMistakesRemoved(task)
 	}
