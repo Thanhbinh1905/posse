@@ -215,6 +215,9 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		}
 		switch decision.Answer {
 		case "accept-head":
+			if err := requireReviewCapCandidateTargetsCurrent(out.Context, db, project, task, actual.Targets); err != nil {
+				return err
+			}
 			heads := make([]string, len(actual.Targets))
 			for i, target := range actual.Targets {
 				heads[i] = target.Commit
