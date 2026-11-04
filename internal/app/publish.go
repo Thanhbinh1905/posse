@@ -336,12 +336,19 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	}
 	candidate, candidateErr := db.LatestValidationCandidate(ctx, task.ID, repo)
 	candidateCWD := candidateErr == nil && pathWithin(candidate.WorktreePath, cwd)
-	if len(parsed.Positionals) != 1 || strings.TrimSpace(parsed.Positionals[0]) == "" {
+	summary := ""
+	if len(parsed.Positionals) == 1 {
+		summary = parsed.Positionals[0]
+	}
+	if strings.TrimSpace(summary) == "" && parsed.Bool("refresh") && candidateErr == nil {
+		summary = candidate.Summary
+	}
+	if strings.TrimSpace(summary) == "" {
 		if candidateErr == nil && candidate.State == store.ValidationCandidatePromoting {
 			if !candidateCWD {
 				return axi.Failure("candidate_promotion_in_progress", fmt.Sprintf("candidate %s for t%d is being promoted", shortSHA(candidate.CandidateSHA), task.Seq), true, "Resume its promotion by running `posse publish` from the private candidate checkout")
 			}
-		} else {
+		} else if !(parsed.Bool("refresh") && candidateErr == nil) {
 			return axi.Usage("publish requires a Worker summary")
 		}
 	}
@@ -381,7 +388,7 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 			return axi.Failure("candidate_target_head_failed", "could not inspect the frozen target before refreshing the PR/MR", true, err.Error())
 		}
 		if targetHead == candidate.TargetSHA {
-			return s.refreshPromotedPullRequest(out, db, lane, cfg, candidate, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"))
+			return s.refreshPromotedPullRequest(out, db, lane, cfg, candidate, summary, strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"))
 		}
 	}
 	if candidateCWD {
@@ -390,7 +397,7 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 		}
 		return s.promotePrivateCandidate(out, db, home, lane, cfg)
 	}
-	return s.submitPrivateCandidate(out, db, home, lane, cfg, parsed.Positionals[0], strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
+	return s.submitPrivateCandidate(out, db, home, lane, cfg, summary, strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
 }
 
 // A workspace Signal must account for every changed PR-mode member, not just

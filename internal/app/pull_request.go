@@ -660,28 +660,34 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	if err := validateForgeMergeMethod(forge, cfg); err != nil {
 		return err
 	}
-	if _, err := forgeReference(task.PRURL, forge); err != nil {
+	number, err := forgeReference(task.PRURL, forge)
+	if err != nil {
 		return axi.Failure("pr_url_invalid", err.Error(), false)
 	}
 	output := ""
+	var prTitle string
 	if forge.Kind == "gitlab" {
-		number, _ := forgeReference(task.PRURL, forge)
 		mr, viewErr := gitlabMR(ctx, forge, number)
 		err = viewErr
+		prTitle = mr.Title
 		output = marshalJSON(struct {
 			HeadRefOID string `json:"headRefOid"`
 		}{mr.SHA})
 	} else {
-		output, err = commandOutputArgs(ctx, project.Root, "gh", "pr", "view", task.PRURL, "--json", "headRefOid")
+		output, err = commandOutputArgs(ctx, project.Root, "gh", "pr", "view", task.PRURL, "--json", "headRefOid,title")
 	}
 	if err != nil {
 		return axi.Failure("pr_view_failed", "could not verify the pull request head", true, strings.TrimSpace(output))
 	}
 	var head struct {
 		HeadRefOID string `json:"headRefOid"`
+		Title      string `json:"title"`
 	}
 	if err := json.Unmarshal([]byte(output), &head); err != nil || head.HeadRefOID == "" {
-		return axi.Failure("pr_view_failed", "gh pr view returned no headRefOid", true, strings.TrimSpace(output))
+		return axi.Failure("pr_view_failed", "could not verify the pull request head", true, strings.TrimSpace(output))
+	}
+	if forge.Kind == "gitlab" {
+		head.Title = prTitle
 	}
 	if head.HeadRefOID != task.GatedSHA {
 		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateDone, "cli", "Pull request head moved after its merge head was recorded"); err != nil {
@@ -725,18 +731,27 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")
 	if forge.Kind == "gitlab" {
-		number, _ := forgeReference(task.PRURL, forge)
 		args := []string{"mr", "merge", strconv.Itoa(number), "--repo", "https://" + forge.Host + "/" + forge.Path, "--sha", task.GatedSHA, "--yes", "--auto-merge=false"}
 		if method == "squash" {
-			args = append(args, "--squash")
+			args = append(args, "--squash", "--squash-message", mergeCommitSubject(head.Title, number))
 		}
 		if _, err := runOutputStep(ctx, db, intent, "pr.merge", forge.Root, "glab", args...); err != nil {
 			return axi.Failure("pr_merge_failed", "GitLab did not merge the merge request", true, err.Error())
 		}
-	} else if _, err := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", "pr", "merge", task.PRURL, "--"+method, "--match-head-commit", task.GatedSHA); err != nil {
-		return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, err.Error())
+	} else {
+		args := []string{"pr", "merge", task.PRURL, "--" + method, "--match-head-commit", task.GatedSHA}
+		if method == "squash" {
+			args = append(args, "--subject", mergeCommitSubject(head.Title, number))
+		}
+		if _, err := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", args...); err != nil {
+			return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, err.Error())
+		}
 	}
 	return ctxPrintMerge(out, task, "Run `posse` or `posse watch` to observe the merge")
+}
+
+func mergeCommitSubject(title string, number int) string {
+	return fmt.Sprintf("%s (#%d)", strings.TrimSpace(title), number)
 }
 
 // requireGreenObservation accepts only the newest observation of the recorded
@@ -1270,9 +1285,8 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 	}
 	behind := []behindPR{}
 	moved := false
-	// Without the current-target rule only conflicting PRs, and full-pipeline
-	// PRs whose validation a target move stales, ask the Worker to refresh,
-	// and they bypass the merge queue.
+	// Without the current-target rule, conflicting non-full-pipeline PRs bypass
+	// the queue; stale full-pipeline candidates use it to serialize refreshes.
 	conflicts := []behindPR{}
 	for _, task := range watched {
 		if taskErr := failedTasks[task.ID]; taskErr != nil {
@@ -1315,6 +1329,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			continue
 		}
+		retainGreenObservation := false
 		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || fullPipelineSelected(task, "")) {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
 			var beforeQuery prTargetFreshness
@@ -1327,7 +1342,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				}
 				continue
 			}
-			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget {
+			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget && observation.Mergeable == "CONFLICTING" && !fullPipelineSelected(task, "") {
 				conflicts = append(conflicts, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
 			} else if !freshness.Fresh {
 				// A target that advanced only during the query may hold this
@@ -1341,9 +1356,22 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 						return err
 					}
 					behind = append(behind, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
+					if fullPipelineSelected(task, "") && hasPrevious && previous.HeadSHA == observation.HeadSHA {
+						place, placeErr := db.PlaceInMergeQueue(ctx, task.ID, "", freshness.Branch, now.UnixMilli())
+						if placeErr != nil {
+							return placeErr
+						}
+						if !place.Head() {
+							observation.Checks = previous.Checks
+							failures = nil
+							retainGreenObservation = true
+						}
+					}
 				}
-				observation.Checks = stalePRChecks()
-				failures = nil
+				if !retainGreenObservation {
+					observation.Checks = stalePRChecks()
+					failures = nil
+				}
 			}
 		}
 		if observation.State == "MERGED" {
