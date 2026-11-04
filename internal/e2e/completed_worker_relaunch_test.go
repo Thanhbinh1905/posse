@@ -140,8 +140,11 @@ done
 				t.Fatalf("queued follow-up never reached the relaunched Worker: %s\nshow: %s", workerLog(), show)
 			}
 			var status string
-			if err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, before.ID, followUp).Scan(&status); err != nil || status != "delivered" {
-				t.Fatalf("follow-up status = %q, %v; want delivered", status, err)
+			if !waitForCondition(10*time.Second, func() bool {
+				err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, before.ID, followUp).Scan(&status)
+				return err == nil && status == "delivered"
+			}) {
+				t.Fatalf("follow-up status = %q; want delivered after Worker received it; log: %s", status, workerLog())
 			}
 			// The delivered follow-up reopens the Task as it does for a live
 			// pane, and the Worker's next done Signal records the amended head.
