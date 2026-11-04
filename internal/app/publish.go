@@ -119,6 +119,13 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if task.Type == "change" && !project.IsWorkspace() && task.WorktreePath != "" && task.Branch != "" {
+		lock, lockErr := acquireTaskBranchAuthorLock(out.Context, task.WorktreePath, task.Branch)
+		if lockErr != nil {
+			return axi.Failure("publish_refused", "could not acquire the branch author operation lock", true, lockErr.Error())
+		}
+		defer lock.Close()
+	}
 	if err := requireWorkerBranchAuthor(out.Context, db, task); err != nil {
 		return axi.Failure("publish_refused", "the Worker does not hold the current branch author claim", false, err.Error())
 	}

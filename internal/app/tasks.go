@@ -764,6 +764,19 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
+	if generation > 0 {
+		bundlePath := filepath.Join(taskHome, fmt.Sprintf("author-handoff-launch-%d.json", launch))
+		if err := s.runIntentStep(ctx.Context, db, intent, "branch-author.handoff", func() error {
+			bundle, err := buildBranchAuthorHandoffBundle(ctx.Context, db, home, project.Name, task, launch, generation)
+			if err != nil {
+				return err
+			}
+			return writeFile(bundlePath, bundle)
+		}); err != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+			return err
+		}
+	}
 	// Keep the existing opening-argument path for Codex and OpenCode.
 	openingPrompt := kind == "codex" || kind == "opencode"
 	openingText := "Read " + launchPath + " and follow it."
@@ -3179,7 +3192,19 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	if err := track("relaunch.write", func() error {
-		return writeFile(relaunchPath, relaunchInstructionsFor(task, gitStateReport, messages, currentTurn))
+		instructions := relaunchInstructionsFor(task, gitStateReport, messages, currentTurn)
+		if generation > 0 {
+			bundle, err := buildBranchAuthorHandoffBundle(ctx, db, home, project.Name, task, launch, generation)
+			if err != nil {
+				return err
+			}
+			bundlePath := filepath.Join(filepath.Dir(relaunchPath), fmt.Sprintf("author-handoff-launch-%d.json", launch))
+			if err := writeFile(bundlePath, bundle); err != nil {
+				return err
+			}
+			instructions = append(instructions, []byte(fmt.Sprintf("\nBranch author handoff bundle: `%s`. It contains the exact Task scope, current findings, candidate state, validation evidence, and branch head for this launch.\n", bundlePath))...)
+		}
+		return writeFile(relaunchPath, instructions)
 	}); err != nil {
 		return failure(err)
 	}

@@ -949,6 +949,12 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err := os.WriteFile(expiredBundle, bundleContents, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	authorHandoff := filepath.Join(home, "projects", "shop", "tasks", "t2", "author-handoff-launch-1.json")
+	authorHandoffInfo, err := os.Stat(authorHandoff)
+	if err != nil {
+		t.Fatalf("read retained branch author handoff: %v", err)
+	}
+	artifactBytes := int64(len(bundleContents)) + authorHandoffInfo.Size()
 	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET updated_at=? WHERE id=?`, time.Now().Add(-91*24*time.Hour).UnixMilli(), secondTask.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -984,7 +990,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	pruneDryRun := runPosse(t, posseBinary, repo, leadEnv, "pool", "prune")
-	artifactRow := fmt.Sprintf("t2,artifacts,%s,Task artifacts exceeded retention,%d,torn-down", filepath.Join(home, "projects", "shop", "tasks", "t2"), len(bundleContents))
+	artifactRow := fmt.Sprintf("t2,artifacts,%s,Task artifacts exceeded retention,%d,torn-down", filepath.Join(home, "projects", "shop", "tasks", "t2"), artifactBytes)
 	if !strings.Contains(pruneDryRun, "sandbox-2") || !strings.Contains(pruneDryRun, "t999,scratch,") || !strings.Contains(pruneDryRun, "Task no longer exists,4,orphan") || !strings.Contains(pruneDryRun, artifactRow) || !strings.Contains(pruneDryRun, "dry_run: true") || !strings.Contains(pruneDryRun, "prune[3]") {
 		t.Fatalf("prune dry run did not list exactly the extra Sandbox, orphan scratch and expired discard bundle with sizes: %s", pruneDryRun)
 	}

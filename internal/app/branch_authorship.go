@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -20,6 +22,11 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 	if task.WorktreePath == "" || task.Branch == "" {
 		return 0, fmt.Errorf("task has no author branch checkout")
 	}
+	lock, err := acquireTaskBranchAuthorLock(ctx, task.WorktreePath, task.Branch)
+	if err != nil {
+		return 0, err
+	}
+	defer lock.Close()
 	repository, err := gitCommonDir(ctx, task.WorktreePath)
 	if err != nil {
 		return 0, err
@@ -77,6 +84,16 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 		return 0, err
 	}
 	return claim.Generation, nil
+}
+
+func acquireTaskBranchAuthorLock(ctx context.Context, worktree, branch string) (*os.File, error) {
+	commonDir, err := repositoryCommonDir(ctx, worktree)
+	if err != nil {
+		return nil, fmt.Errorf("resolve branch author lock directory: %w", err)
+	}
+	scope := sha256.Sum256([]byte(branch))
+	path := filepath.Join(commonDir, fmt.Sprintf("posse-branch-author-%x.lock", scope[:12]))
+	return acquireFileLockWithin(ctx, path, fileLockWaitBudget)
 }
 
 func taskBranchAuthorHead(ctx context.Context, worktree, branch string) (string, error) {
