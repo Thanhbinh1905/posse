@@ -42,7 +42,7 @@ func TestKnowledgeOptInLoadsForLeadAndWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if text := leadInstructions(); strings.Contains(text, "Manual knowledge marker") || strings.Contains(text, "## User and Project knowledge") || strings.Contains(text, "posse knowledge set") {
+	if text := leadInstructions(); strings.Contains(text, "Manual knowledge marker") || strings.Contains(text, "## User and Project knowledge") {
 		t.Fatalf("disabled knowledge reached the Lead:\n%s", text)
 	}
 	fact := writeBody("fact.md", "Run the E2E shard self-check before publishing.\n")

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -631,7 +632,20 @@ func TestFinalizeLeadRenamesDetectedAgentAndDeliversFallbackInstructions(t *test
 	fake.SnapshotValue = herdr.Snapshot{FocusedPaneID: "w1:p1", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Agent: "claude", AgentStatus: "idle", Focused: true}}}
 	fake.ErrorQueue["agent.prompt"] = []error{stalled(), nil}
 	service := testService(home, fake)
-	plan := leadExecPlan{ProjectID: project.ID, PaneID: "w1:p1", WorkspaceID: "w1", AgentName: "posse-shop-lead-1", Kind: "codex", NeedsPrompt: true}
+	pendingHandoff := writeTestHandoff(t, home, project, "Initial startup must retain the prompt-only handoff.\n")
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Kinds["custom"] = config.Kind{}
+	launch, err := service.prepareLeadLaunch(home, project, cfg, "custom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := leadExecPlan{
+		ProjectID: project.ID, PaneID: "w1:p1", WorkspaceID: "w1", AgentName: "posse-shop-lead-1",
+		Kind: "custom", NeedsPrompt: launch.TypedPrompt != "", HandoffLoaded: launch.HandoffLoaded,
+	}
 	payload, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
@@ -652,6 +666,9 @@ func TestFinalizeLeadRenamesDetectedAgentAndDeliversFallbackInstructions(t *test
 	// The focused calling pane still gets the prompt, resent after one dropped submission.
 	if !renamed || prompts != 2 {
 		t.Fatalf("finalizer did not track and initialize the Lead: %#v", fake.Calls)
+	}
+	if _, err := os.Stat(pendingHandoff); err != nil {
+		t.Fatalf("initial prompt-only startup consumed the handoff before posse lead returned it: %v", err)
 	}
 }
 

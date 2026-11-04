@@ -43,6 +43,7 @@ type Service struct {
 	teardownMu           sync.Mutex
 	teardowns            map[string]chan struct{}
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
+	checkQueuedBranch    func(context.Context, *store.DB, store.Project, string, []taskMember) error
 	// DetachQueuedLaunch runs each queued Task start in its own session. The
 	// posse binary sets it; unit tests keep the start in-process.
 	DetachQueuedLaunch bool
@@ -140,6 +141,9 @@ func (s *Service) commands() *axi.Command {
 			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
 			{Name: "archive", Usage: "$ knowledge archive <id> --reason <why> [--project <name>|--user]", Summary: "Move an entry to the never-loaded archive with provenance.", Handler: s.knowledgeArchive},
 		}},
+		{Name: "handoff", Summary: "Preserve conversation-only context for the next Lead.", Subcommands: []*axi.Command{
+			{Name: "write", Usage: "$ handoff write --file <file.md>", Summary: "Queue a bounded handoff note for the next Lead start.", Handler: s.handoffWrite},
+		}},
 		{Name: "preferences", Summary: "Inspect and update layered User and Project preferences.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ preferences show [--project <name>]", Summary: "Show effective Lead and Worker preferences with their sources.", Handler: s.preferencesShow},
 			{Name: "path", Usage: "$ preferences path <lead|worker> [--project <name>]", Summary: "Show canonical and legacy source paths for a role.", Handler: s.preferencesPath},
@@ -164,7 +168,7 @@ func (s *Service) commands() *axi.Command {
 		}},
 		{Name: "start", Usage: "$ start <brief.md> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>] [--queue]", Summary: "Start a Worker from a Brief with an optional display name. Positional paths and `--brief <file>` are accepted. `--user-approved` scopes consent to explicit Brief preferences; `--queue` admits it durably until prerequisites and capacity permit dispatch.", Handler: s.spawn},
 		{Name: "signal", Usage: "$ signal <working|needs-decision|done|failed> <note> [--turn <token>] [--findings <file>] [--resolutions <file>] [--report <file>] [--no-change]", Summary: "Record a Worker's Signal; done requires the current turn token and is refused while queued instructions remain undelivered.", Handler: s.signal},
-		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] [--rewrite --user-approved <User's words>] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Repeated --verify, --proof and --risk values are retained in order. Risk must state how to roll back, for example a `Rollback: <how to revert>` line. Under full-pipeline, publishing an unchanged candidate head again replaces the stored description fields you pass.", Handler: s.publish},
+		{Name: "publish", Usage: "$ publish [--repo <member>] [--refresh] [--rewrite --user-approved <User's words>] <summary> [--verify <command -> result>]... [--proof <markdown>]... [--risk <markdown>]...", Summary: "Publish or submit this PR-mode Change Task according to its frozen review mode. Use --refresh from the Task Sandbox after the target advances; it submits a fresh candidate and preserves prior summary, verification, proof and risk unless replaced. Repeated --verify, --proof and --risk values are retained in order. Risk must state how to roll back, for example a `Rollback: <how to revert>` line. Under full-pipeline, publishing an unchanged candidate head again replaces the stored description fields you pass.", Handler: s.publish},
 		{Name: "validate", Usage: "$ validate <status|test|docs|lint> [--repo <member>] [stage evidence flags]", Summary: "Record ordered, exact-head full-pipeline evidence from the private candidate checkout. Each --verify value must contain a command and result separated by ->.", Handler: s.validateCandidate},
 		{Name: "candidate", Summary: "Manage a full-pipeline Task's private candidates.", Subcommands: []*axi.Command{
 			{Name: "abandon", Usage: "$ candidate abandon <task> [--repo <member>] --reason <why>", Summary: "Discard the pending unpromoted candidate and return to the promoted head the Task branch is reset to; recorded in Task history.", Handler: s.abandonCandidate},

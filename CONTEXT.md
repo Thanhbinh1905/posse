@@ -228,6 +228,10 @@ _Avoid_: Alias, nickname
 Opt-in curated facts and lessons for a Lead or Worker, with a source, a last-verified date and a User or Project scope, stored under `<POSSE_HOME>/knowledge/` and `<POSSE_HOME>/projects/<project>/knowledge/`. Knowledge is reference context, not authority: it cannot answer Decisions, grant Autonomy or run commands. Task outcomes point to their Report instead of being copied. A startup budget shared with preferences is enforced at write time by curation, never by truncation.
 _Avoid_: Memory, learnings, notes
 
+**Conversation handoff**:
+A bounded, one-time transfer of conversation-only context to a replacement Lead. The pending Project note is loaded into the next Lead's startup instructions and archived. It does not replace Preferences or Knowledge, or duplicate Tasks, Decisions, Notices, Reports or PRs.
+_Avoid_: Memory, Notice handoff, conversation history
+
 **Preferences**:
 User-authored how-to-work guidance for a Lead or Worker, layered from `<POSSE_HOME>/preferences/` and `<POSSE_HOME>/projects/<project>/preferences/`. Project guidance follows User guidance and can change default workflow advice, but cannot grant authority or override runtime obligations. The User writes it with `posse preferences set`; a Lead's write requires User consent recorded with the quote, and Workers cannot write it. Deprecated `playbook/` paths remain readable until explicitly moved.
 _Avoid_: Playbook, workflow framework, policy

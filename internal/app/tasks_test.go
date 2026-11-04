@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,6 +284,125 @@ use = "claude"
 	}
 	if fixture.fake.CallCount("tab.create") != 0 || fixture.fake.CallCount("agent.start") != 0 {
 		t.Fatalf("queued Task cancellation touched Herdr: %#v", fixture.fake.Calls)
+	}
+}
+
+func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
+	fixture := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Current Worker", ShortName: "current-worker", State: store.StateSpawning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "race-probe", "--queue"}); code != 0 {
+		t.Fatalf("queue admission exit=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	queued, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, activeID, store.StateSpawning, store.StateFailed, "cli", "fixture Worker finished"); err != nil {
+		t.Fatal(err)
+	}
+	firstAtBranchCheck := make(chan struct{})
+	secondAtBranchCheck := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var checkMu sync.Mutex
+	branchChecks := 0
+	fixture.service.checkQueuedBranch = func(ctx context.Context, db *store.DB, project store.Project, branch string, members []taskMember) error {
+		checkMu.Lock()
+		branchChecks++
+		check := branchChecks
+		checkMu.Unlock()
+		if check == 1 {
+			close(firstAtBranchCheck)
+			<-releaseFirst
+		}
+		if check == 2 {
+			close(secondAtBranchCheck)
+			<-releaseSecond
+		}
+		return taskBranchAvailableForBranch(ctx, db, project, branch, members)
+	}
+	tabCreated := make(chan struct{}, 1)
+	fixture.fake.BeforeCall = func(method string) {
+		if method == "tab.create" {
+			select {
+			case tabCreated <- struct{}{}:
+			default:
+			}
+		}
+	}
+	logPath := filepath.Join(fixture.home, "projects", fixture.project.Name, "launch.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan int, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			results <- fixture.service.RunQueuedLaunch([]string{strconv.FormatInt(fixture.project.ID, 10), strconv.FormatInt(queued.ID, 10)}, logFile)
+		}()
+	}
+	close(start)
+	waitFor := func(ch <-chan struct{}, event string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s", event)
+		}
+	}
+	waitFor(firstAtBranchCheck, "first queued launch branch check")
+	waitFor(secondAtBranchCheck, "second queued launch branch check")
+	close(releaseFirst)
+	waitFor(tabCreated, "first Worker tab creation")
+	close(releaseSecond)
+	launchExit := 0
+	for range 2 {
+		if code := <-results; code != 0 {
+			launchExit = code
+		}
+	}
+	if err := logFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	launchLog, err := os.ReadFile(logPath)
+	if launchExit != 0 || err != nil || strings.Contains(string(launchLog), "queued Task launch failed") {
+		t.Fatalf("concurrent launch exit=%d launch.log=%q err=%v", launchExit, launchLog, err)
+	}
+	started, err := db.TaskByID(ctx, fixture.project.ID, queued.ID)
+	if err != nil || started.State != store.StateWorking || fixture.fake.CallCount("tab.create") != 1 {
+		t.Fatalf("concurrent launches started task=%+v tab.create=%d err=%v", started, fixture.fake.CallCount("tab.create"), err)
+	}
+	var declines int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM queued_task_declines WHERE task_id=?`, queued.ID).Scan(&declines); err != nil || declines != 0 {
+		t.Fatalf("losing launch recorded %d queued declines, err=%v", declines, err)
+	}
+	notices, err := db.Notices(ctx, fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "pr_watch_failing") != 0 {
+		t.Fatalf("losing launch Notices=%#v err=%v", notices, err)
 	}
 }
 
