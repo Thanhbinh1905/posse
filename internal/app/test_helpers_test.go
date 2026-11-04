@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,6 +19,19 @@ import (
 	"github.com/thanhbinh1905/posse/internal/research"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func setTaskBranchAuthorEnv(t *testing.T, db *store.DB, task store.Task) {
+	t.Helper()
+	repository, err := gitCommonDir(context.Background(), task.WorktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := db.BranchAuthor(context.Background(), repository, task.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_GENERATION", strconv.FormatInt(claim.Generation, 10))
+}
 
 func TestMain(m *testing.M) {
 	if code, sharded := runAppTestShards(); sharded {

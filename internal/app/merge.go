@@ -75,6 +75,9 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
+	if err := requireCurrentTaskBranchAuthor(ctx.Context, db, task); err != nil {
+		return axi.Failure("merge_refused", "Task does not hold the current branch author claim", false, err.Error())
+	}
 	if usesRemovedNoMistakes(task) {
 		return noMistakesRemoved(task)
 	}

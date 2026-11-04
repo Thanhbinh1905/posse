@@ -56,6 +56,8 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		`DROP TABLE task_turn_tokens`,
 		`ALTER TABLE lead_start_claims DROP COLUMN pid`,
 		`ALTER TABLE lead_start_claims DROP COLUMN holder`,
+		`DROP TABLE branch_author_invalidated_verdicts`,
+		`DROP TABLE branch_authorship`,
 		`ALTER TABLE notices DROP COLUMN command_notified_at`,
 		`DROP TABLE budget_crossings`,
 		`DROP TABLE task_budget_usage`,
