@@ -68,6 +68,20 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	if err != nil || !s.workerCaller(context.Background(), home) {
 		return 0
 	}
+	db, openErr := store.OpenReadOnly(home)
+	if openErr != nil {
+		fmt.Fprintf(stderr, "posse: refused Worker action because branch authorship could not be verified: %v\n", openErr)
+		return guardExitBlocked
+	}
+	task, taskErr := s.workerTask(context.Background(), db)
+	if taskErr == nil {
+		taskErr = requireWorkerBranchAuthor(context.Background(), db, task)
+	}
+	_ = db.Close()
+	if taskErr != nil && (os.Getenv("POSSE_TASK_GENERATION") != "" || taskErr == store.ErrBranchAuthorStale) {
+		fmt.Fprintf(stderr, "posse: refused Worker action because this attempt no longer holds the branch author claim: %v\n", taskErr)
+		return guardExitBlocked
+	}
 	cwd := input.CWD
 	if cwd == "" {
 		cwd, _ = os.Getwd()

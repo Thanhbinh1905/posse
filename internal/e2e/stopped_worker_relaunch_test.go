@@ -3,9 +3,12 @@
 package e2e
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +52,15 @@ func TestStoppedWorkerPaneCanBeRelaunched(t *testing.T) {
 				current := fixture.mustTask(t, "t1")
 				if current.Launches != initial.Launches+attempt || current.State != store.StateWorking || current.PaneID != initial.PaneID || current.WorktreePath != initial.WorktreePath {
 					t.Fatalf("relaunch %d/%d changed Worker identity or Sandbox: initial=%#v current=%#v output=%s", attempt, attempts, initial, current, output)
+				}
+				claims, err := fixture.db.BranchAuthorsForTask(context.Background(), current.ID)
+				if err != nil || len(claims) != 1 || claims[0].TaskID != current.ID || claims[0].Attempt != current.Launches {
+					t.Fatalf("relaunch branch author claims = %+v, %v", claims, err)
+				}
+				bundlePath := filepath.Join(fixture.home, "projects", "shop", "tasks", "t1", fmt.Sprintf("author-handoff-launch-%d.json", current.Launches))
+				bundle, err := os.ReadFile(bundlePath)
+				if err != nil || !strings.Contains(string(bundle), `"scope":`) || !strings.Contains(string(bundle), `"findings":`) || !strings.Contains(string(bundle), `"candidates":`) || !strings.Contains(string(bundle), `"evidence":`) {
+					t.Fatalf("relaunch handoff bundle is incomplete: %q, %v", bundle, err)
 				}
 				t.Logf("relaunch %d/%d completed in %s", attempt, attempts, time.Since(started))
 			}

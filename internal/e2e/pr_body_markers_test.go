@@ -289,6 +289,7 @@ func t205NewPRFixture(t *testing.T, forge string) *t205PRFixture {
 
 func (f *t205PRFixture) publish(t *testing.T, env []string, args ...string) (string, error) {
 	t.Helper()
+	env = taskAuthorGenerationEnv(env)
 	command := exec.Command(f.binary, append([]string{"publish"}, args...)...)
 	command.Dir, command.Env = f.task.WorktreePath, env
 	output, err := command.CombinedOutput()
