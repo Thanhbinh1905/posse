@@ -26,8 +26,22 @@ func newPublishedRewriteFixture(t *testing.T) *prMergeFixture {
 	if code, output, stderr := f.run("publish", "Worker completion summary"); code != 0 {
 		t.Fatalf("first publish: %d %s %s", code, output, stderr)
 	}
+	repository, err := gitCommonDir(context.Background(), f.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
 	recordCandidateReviewPass(t, f, f.headSHA)
 	queueDeliveredValidationFix(t, f)
+	currentTask, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.task.Launches = currentTask.Launches
+	claim, err := f.db.ClaimBranchAuthor(context.Background(), repository, f.task.Branch, f.task.ID, currentTask.Launches, f.headSHA, f.headSHA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_GENERATION", fmt.Sprint(claim.Generation))
 	return f
 }
 
@@ -103,12 +117,45 @@ func TestPublishRefusesRewriteWithoutApprovalAndRecordsApprovedRewrite(t *testin
 	if got := f.originHead(t); got != newHead {
 		t.Fatalf("approved rewrite left origin at %s, want %s", got, newHead)
 	}
+	repository, err := gitCommonDir(context.Background(), f.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := f.db.BranchAuthor(context.Background(), repository, f.task.Branch)
+	if err != nil || claim.HeadSHA != newHead {
+		t.Fatalf("approved rewrite claim = %#v, %v; want head %s", claim, err, newHead)
+	}
 	rewrites := f.rewriteNotices(t)
 	if len(rewrites) != 1 || rewrites[0]["from_head"] != oldHead || rewrites[0]["to_head"] != newHead || rewrites[0]["user_quote"] != rewriteQuote {
 		t.Fatalf("rewrite record = %#v", rewrites)
 	}
 	if code, output, _ := f.run("publish", "--rewrite", "--user-approved", rewriteQuote, "Worker completion summary"); code != 1 || !strings.Contains(output, "rewrite_not_needed") {
 		t.Fatalf("rewrite of an already published head: exit=%d output=%s", code, output)
+	}
+}
+
+func TestPublishRewriteRefusesClaimHeadMismatchBeforePushing(t *testing.T) {
+	f := newPublishedRewriteFixture(t)
+	oldHead := f.originHead(t)
+	baseHead := strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", oldHead+"^"))
+	repository, err := gitCommonDir(context.Background(), f.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE branch_authorship SET head_sha=? WHERE repository=? AND branch=?`, baseHead, repository, f.task.Branch); err != nil {
+		t.Fatal(err)
+	}
+	f.amend(t, false)
+
+	code, output, _ := f.run("publish", "--rewrite", "--user-approved", rewriteQuote, "Worker completion summary")
+	if code == 0 || !strings.Contains(output, "branch head changed since the previous author claim") {
+		t.Fatalf("rewrite with a stale claim head was not refused: exit=%d output=%s", code, output)
+	}
+	if got := f.originHead(t); got != oldHead {
+		t.Fatalf("refused rewrite moved origin to %s, want %s", got, oldHead)
+	}
+	if rewrites := f.rewriteNotices(t); len(rewrites) != 0 {
+		t.Fatalf("refused rewrite recorded notices: %#v", rewrites)
 	}
 }
 

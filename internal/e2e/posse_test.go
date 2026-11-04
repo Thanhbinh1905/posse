@@ -949,6 +949,12 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err := os.WriteFile(expiredBundle, bundleContents, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	authorHandoff := filepath.Join(home, "projects", "shop", "tasks", "t2", "author-handoff-launch-1.json")
+	authorHandoffInfo, err := os.Stat(authorHandoff)
+	if err != nil {
+		t.Fatalf("read retained branch author handoff: %v", err)
+	}
+	artifactBytes := int64(len(bundleContents)) + authorHandoffInfo.Size()
 	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET updated_at=? WHERE id=?`, time.Now().Add(-91*24*time.Hour).UnixMilli(), secondTask.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -984,7 +990,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	pruneDryRun := runPosse(t, posseBinary, repo, leadEnv, "pool", "prune")
-	artifactRow := fmt.Sprintf("t2,artifacts,%s,Task artifacts exceeded retention,%d,torn-down", filepath.Join(home, "projects", "shop", "tasks", "t2"), len(bundleContents))
+	artifactRow := fmt.Sprintf("t2,artifacts,%s,Task artifacts exceeded retention,%d,torn-down", filepath.Join(home, "projects", "shop", "tasks", "t2"), artifactBytes)
 	if !strings.Contains(pruneDryRun, "sandbox-2") || !strings.Contains(pruneDryRun, "t999,scratch,") || !strings.Contains(pruneDryRun, "Task no longer exists,4,orphan") || !strings.Contains(pruneDryRun, artifactRow) || !strings.Contains(pruneDryRun, "dry_run: true") || !strings.Contains(pruneDryRun, "prune[3]") {
 		t.Fatalf("prune dry run did not list exactly the extra Sandbox, orphan scratch and expired discard bundle with sizes: %s", pruneDryRun)
 	}
@@ -1881,6 +1887,7 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", task.HerdrWorkspaceID)
 	workerEnv = setEnv(workerEnv, "HERDR_SOCKET_PATH", herdr.SocketPath(callerEnv))
 	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", home)
+	workerEnv = taskAuthorGenerationEnv(workerEnv)
 	for _, args := range [][]string{{"project", "add", "--name", "stray"}, {"start", "--brief", filepath.Join(root, "change.md")}, {"config", "set", "defaults.max_workers", "2"}, {"list"}} {
 		command := exec.Command(posseBinary, args...)
 		command.Dir = repo
@@ -2047,8 +2054,44 @@ func killServer(t *testing.T, process *herdr.ServerProcess) {
 	}
 }
 
+func taskAuthorGenerationEnv(env []string) []string {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "POSSE_TASK_GENERATION=") {
+			return env
+		}
+	}
+	paneID := testEnvValue(env, "HERDR_PANE_ID")
+	home := testEnvValue(env, "POSSE_WORKER_HOME")
+	if home == "" {
+		home = testEnvValue(env, "POSSE_HOME")
+	}
+	if paneID == "" || home == "" {
+		return env
+	}
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return env
+	}
+	defer db.Close()
+	task, err := db.TaskByPane(context.Background(), paneID)
+	if err != nil || task.Type != "change" {
+		return env
+	}
+	claims, err := db.BranchAuthorsForTask(context.Background(), task.ID)
+	if err != nil {
+		return env
+	}
+	for _, claim := range claims {
+		if claim.Branch == task.Branch && claim.Attempt == task.Launches {
+			return setEnv(env, "POSSE_TASK_GENERATION", strconv.FormatInt(claim.Generation, 10))
+		}
+	}
+	return env
+}
+
 func runPosse(t *testing.T, binary, cwd string, env []string, args ...string) string {
 	t.Helper()
+	env = taskAuthorGenerationEnv(env)
 	command := exec.Command(binary, args...)
 	command.Dir = cwd
 	command.Env = env

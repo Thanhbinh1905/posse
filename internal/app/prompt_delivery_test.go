@@ -422,6 +422,14 @@ func TestFailedAgentStartCanRelaunchOnSameSandbox(t *testing.T) {
 	if err != nil || after.State != store.StateWorking || after.SandboxID != before.SandboxID || after.WorktreePath != before.WorktreePath || result.Pane == "" {
 		t.Fatalf("relaunch did not keep the Task Sandbox: before=%#v after=%#v result=%#v err=%v", before, after, result, err)
 	}
+	repository, err := gitCommonDir(context.Background(), after.WorktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := db.BranchAuthor(context.Background(), repository, after.Branch)
+	if err != nil || claim.TaskID != after.ID || claim.Attempt != after.Launches || claim.Generation != 2 {
+		t.Fatalf("relaunch author claim = %#v, err=%v", claim, err)
+	}
 	requireInterventions(t, fixture.home, fixture.project.ID, store.InterventionRelaunch, "lead")
 }
 

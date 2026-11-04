@@ -430,7 +430,7 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 		{command: "start", step: "task.create", phase: "before"},
 		{command: "start", step: "task.create", phase: "after"},
 	}
-	for _, step := range []string{"scratch.create", "sandbox.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "agent.prompt", "pane.metadata", "task.working"} {
+	for _, step := range []string{"scratch.create", "sandbox.acquire", "pane.open", "pane.record", "scratch.environment", "repository.prepare", "agent.sequence", "agent.record", "pane.label", "agent.start", "brief.write", "launch.write", "branch-author.handoff", "agent.prompt", "pane.metadata", "task.working"} {
 		steps = append(steps, struct {
 			command string
 			step    string

@@ -690,6 +690,17 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
+	generation := int64(0)
+	if task.Type == "change" {
+		generation, err = claimTaskBranchAuthor(ctx.Context, db, task, launch, false)
+		if err == nil && generation > 0 {
+			err = exportTaskAuthorGeneration(ctx.Context, s, opened.PaneID, generation)
+		}
+		if err != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+			return err
+		}
+	}
 	workerName := agentName(project.Name, sequence, launch)
 	if err := s.runIntentStep(ctx.Context, db, intent, "agent.record", func() error {
 		return db.UpdateTaskLaunch(ctx.Context, taskID, worktreePath, opened.WorkspaceID, opened.PaneID, worktreeLabel, workerName)
@@ -752,6 +763,19 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
+	}
+	if generation > 0 {
+		bundlePath := filepath.Join(taskHome, fmt.Sprintf("author-handoff-launch-%d.json", launch))
+		if err := s.runIntentStep(ctx.Context, db, intent, "branch-author.handoff", func() error {
+			bundle, err := buildBranchAuthorHandoffBundle(ctx.Context, db, home, project.Name, task, launch, generation)
+			if err != nil {
+				return err
+			}
+			return writeFile(bundlePath, bundle)
+		}); err != nil {
+			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+			return err
+		}
 	}
 	// Keep the existing opening-argument path for Codex and OpenCode.
 	openingPrompt := kind == "codex" || kind == "opencode"
@@ -1877,6 +1901,15 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
+	if verb == "done" && task.Type == "change" && !project.IsWorkspace() && task.MergeMode == "local" && !noChange && !fullPipelineSelected(task, "") {
+		head, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if err := updateWorkerBranchAuthorHead(ctx.Context, db, task, head); err != nil {
+			return err
+		}
+	}
 	var state store.State
 	if noChange {
 		// No candidate or head to validate: the Task changed nothing.
@@ -2098,6 +2131,9 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
+	}
+	if err := requireCurrentTaskBranchAuthor(ctx.Context, db, task); err != nil {
+		return axi.Failure("message_refused", "Task does not hold the current branch author claim", false, err.Error())
 	}
 	// Plain sends refresh PR state best-effort to retain the merged-PR guard,
 	// but refresh failures must not prevent delivery using the last observation.
@@ -3093,6 +3129,16 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}); err != nil {
 		return failure(err)
 	}
+	generation := int64(0)
+	if task.Type == "change" {
+		generation, err = claimTaskBranchAuthor(ctx, db, task, launch, true)
+		if err == nil && generation > 0 {
+			err = exportTaskAuthorGeneration(ctx, s, pane.PaneID, generation)
+		}
+		if err != nil {
+			return failure(err)
+		}
+	}
 	workerName := agentName(project.Name, task.Seq, launch)
 	turnToken := fmt.Sprintf("launch:%d", launch)
 	if err := track("turn.protocol", func() error { return updateTaskWorkerTurnProtocol(home, project, task, turnToken) }); err != nil {
@@ -3146,7 +3192,19 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	if err := track("relaunch.write", func() error {
-		return writeFile(relaunchPath, relaunchInstructionsFor(task, gitStateReport, messages, currentTurn))
+		instructions := relaunchInstructionsFor(task, gitStateReport, messages, currentTurn)
+		if generation > 0 {
+			bundle, err := buildBranchAuthorHandoffBundle(ctx, db, home, project.Name, task, launch, generation)
+			if err != nil {
+				return err
+			}
+			bundlePath := filepath.Join(filepath.Dir(relaunchPath), fmt.Sprintf("author-handoff-launch-%d.json", launch))
+			if err := writeFile(bundlePath, bundle); err != nil {
+				return err
+			}
+			instructions = append(instructions, []byte(fmt.Sprintf("\nBranch author handoff bundle: `%s`. It contains the exact Task scope, current findings, candidate state, validation evidence, and branch head for this launch.\n", bundlePath))...)
+		}
+		return writeFile(relaunchPath, instructions)
 	}); err != nil {
 		return failure(err)
 	}
