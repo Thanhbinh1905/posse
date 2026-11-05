@@ -37,6 +37,13 @@ func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, 
 		return BranchAuthorClaim{}, err
 	}
 	defer tx.Rollback()
+	var superseded bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_adoptions WHERE source_task_id=?)`, taskID).Scan(&superseded); err != nil {
+		return BranchAuthorClaim{}, err
+	}
+	if superseded {
+		return BranchAuthorClaim{}, ErrBranchAuthorStale
+	}
 	claim := BranchAuthorClaim{Repository: repository, Branch: branch, TaskID: taskID, Attempt: attempt, HeadSHA: nextHead}
 	var ownerTask int64
 	var ownerAttempt int
@@ -83,6 +90,10 @@ func (db *DB) ClaimBranchAuthor(ctx context.Context, repository, branch string, 
 }
 
 func invalidateBranchAuthorEvidenceTx(ctx context.Context, tx *writeTx, taskID int64, head string) error {
+	return invalidateBranchAuthorEvidenceWithObservationsTx(ctx, tx, taskID, head, false)
+}
+
+func invalidateBranchAuthorEvidenceWithObservationsTx(ctx context.Context, tx *writeTx, taskID int64, head string, preserveObservations bool) error {
 	now := time.Now().UnixMilli()
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha='',updated_at=? WHERE id=?`, now, taskID); err != nil {
 		return err
@@ -96,8 +107,10 @@ func invalidateBranchAuthorEvidenceTx(ctx context.Context, tx *writeTx, taskID i
 	if _, err := tx.ExecContext(ctx, `UPDATE review_rounds SET status='void',verdict=NULL WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pr_observations WHERE task_id=?`, taskID); err != nil {
-		return err
+	if !preserveObservations {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pr_observations WHERE task_id=?`, taskID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='stale',updated_at=? WHERE task_id=? AND state IN ('preparing','active','promoting')`, now, taskID); err != nil {
 		return err

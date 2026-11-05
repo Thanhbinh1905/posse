@@ -36,6 +36,7 @@ type TaskSnapshot struct {
 	// can report legacy or interrupted history as unknown rather than infer it.
 	LaunchIdentities          []TaskLaunchIdentity `toml:"launch_identities,omitempty"`
 	BranchAuthors             []BranchAuthorClaim  `toml:"branch_authors,omitempty"`
+	TaskAdoptions             []TaskAdoption       `toml:"task_adoptions,omitempty"`
 	InvalidatedReviewVerdicts []int64              `toml:"invalidated_review_verdicts,omitempty"`
 	ReportReviews             []ReportReview       `toml:"report_reviews,omitempty"`
 	ReportAcceptance          *ReportAcceptance    `toml:"report_acceptance,omitempty"`
@@ -305,6 +306,10 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	adoptions, err := db.TaskAdoptions(ctx, taskID)
+	if err != nil {
+		return err
+	}
 	branchAuthors, err := db.BranchAuthorsForTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -396,7 +401,7 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, BranchAuthors: branchAuthors, InvalidatedReviewVerdicts: invalidatedReviewVerdicts, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, BranchAuthors: branchAuthors, TaskAdoptions: adoptions, InvalidatedReviewVerdicts: invalidatedReviewVerdicts, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1111,7 +1116,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1155,6 +1160,21 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,agent_status,agent_status_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.AgentStatus, task.AgentStatusSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity); err != nil {
 			return err
+		}
+		for _, a := range snapshot.TaskAdoptions {
+			if a.TaskID != task.ID && a.SourceTaskID != task.ID {
+				return fmt.Errorf("invalid adoption lineage for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO task_adoptions(task_id,source_task_id,repository,branch,pr_url,head_sha,generation,created_at) VALUES(?,?,?,?,?,?,?,?)`, a.TaskID, a.SourceTaskID, a.Repository, a.Branch, a.PRURL, a.HeadSHA, a.Generation, a.CreatedAt); err != nil {
+				return err
+			}
+			var matches bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_adoptions WHERE task_id=? AND source_task_id=? AND repository=? AND branch=? AND pr_url=? AND head_sha=? AND generation=? AND created_at=?)`, a.TaskID, a.SourceTaskID, a.Repository, a.Branch, a.PRURL, a.HeadSHA, a.Generation, a.CreatedAt).Scan(&matches); err != nil {
+				return err
+			}
+			if !matches {
+				return fmt.Errorf("conflicting adoption lineage for t%d", task.Seq)
+			}
 		}
 		for _, claim := range snapshot.BranchAuthors {
 			if claim.TaskID != task.ID || claim.Repository == "" || claim.Branch == "" || claim.Generation < 1 || claim.Attempt < 1 || !validBranchAuthorHead(claim.HeadSHA) {

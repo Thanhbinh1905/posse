@@ -477,6 +477,29 @@ func (s *Service) listSandboxes(ctx *axi.Context) error {
 }
 
 func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, task store.Task, home string, cleanMode string, setup []string) (store.Sandbox, error) {
+	adoptions, err := db.TaskAdoptions(ctx, task.ID)
+	if err != nil {
+		return store.Sandbox{}, err
+	}
+	adopted := false
+	for _, a := range adoptions {
+		if a.TaskID == task.ID {
+			adopted = true
+			break
+		}
+	}
+	if adopted && task.SandboxID != 0 {
+		var sandbox store.Sandbox
+		err := withSandboxStateLock(ctx, db, func() error {
+			var err error
+			sandbox, err = db.SandboxByTask(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			return lockClaimedSandbox(ctx, db, project, sandbox, task)
+		})
+		return sandbox, err
+	}
 	base := poolProjectPath(home, project.Name)
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return store.Sandbox{}, err
@@ -581,7 +604,11 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 			if err != nil {
 				return sandbox, err
 			}
-			if _, err := gitOutput(ctx, sandbox.Path, "checkout", "-b", task.Branch, base); err != nil {
+			args := []string{"checkout", "-b", task.Branch, base}
+			if adopted {
+				args = []string{"checkout", task.Branch}
+			}
+			if _, err := gitOutput(ctx, sandbox.Path, args...); err != nil {
 				return sandbox, err
 			}
 		}
