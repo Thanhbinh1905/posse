@@ -80,6 +80,8 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 		{"teardown", "t1"},
 		{"accept", "t1"},
 		{"list"},
+		{"show", "t1"},
+		{"show", "t99"},
 		{},
 	}
 	for _, caller := range []struct {
