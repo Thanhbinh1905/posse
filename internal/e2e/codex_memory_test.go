@@ -54,7 +54,7 @@ func TestCodexMemoryCannotReopenCompletedAuthorDuringReview(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), 400)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		data, _ := json.Marshal(body)
@@ -105,7 +105,7 @@ func TestCodexMemoryCannotReopenCompletedAuthorDuringReview(t *testing.T) {
 			case <-r.Context().Done():
 				return
 			case <-time.After(30 * time.Second):
-				http.Error(w, "start barrier timed out", 408)
+				http.Error(w, "start barrier timed out", http.StatusRequestTimeout)
 				return
 			}
 		}
@@ -114,7 +114,7 @@ func TestCodexMemoryCannotReopenCompletedAuthorDuringReview(t *testing.T) {
 				t.Logf("Real Phase 2 request SHA-256: %x", sha256.Sum256(data))
 			}
 			if !strings.Contains(string(data), "Memory Writing Agent: Phase 2") {
-				http.Error(w, "missing real prompt", 400)
+				http.Error(w, "missing real prompt", http.StatusBadRequest)
 				return
 			}
 			select {
@@ -122,7 +122,7 @@ func TestCodexMemoryCannotReopenCompletedAuthorDuringReview(t *testing.T) {
 			case <-r.Context().Done():
 				return
 			case <-time.After(45 * time.Second):
-				http.Error(w, "memory barrier timed out", 408)
+				http.Error(w, "memory barrier timed out", http.StatusRequestTimeout)
 				return
 			}
 		}
