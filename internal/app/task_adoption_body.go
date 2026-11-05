@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 

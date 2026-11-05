@@ -39,8 +39,14 @@ func TestAdmissionTransfersBranchAndDeliveryCustody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, _ := db.TaskByID(ctx, p.ID, source)
-	next, _ := db.TaskByID(ctx, p.ID, id)
+	old, err := db.TaskByID(ctx, p.ID, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := db.TaskByID(ctx, p.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if old.PRURL != "" || old.State != StateTornDown || old.GatedSHA != "" || next.PRURL != url {
 		t.Fatalf("source=%+v successor=%+v", old, next)
 	}
