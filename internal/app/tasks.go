@@ -187,6 +187,8 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if project.IsDirectory() {
 		return axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false, "Register a Git repository with `posse project add`")
 	}
+	var adoption *store.TaskAdoptionRequest
+	var adoptionSource *store.Task
 	if brief.Adopt != "" {
 		source, err := db.Task(ctx.Context, project.ID, brief.Adopt)
 		if err != nil && !store.IsNotFound(err) {
@@ -209,6 +211,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		if pane, found := findTaskPane(snapshot.Panes, source); found && pane.Agent != "" {
 			return axi.Failure("adoption_refused", "the source Task still has a live executor; stop it before adoption", false)
 		}
+		lock, err := acquireTaskBranchAuthorLock(ctx.Context, project.Root, source.Branch)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		adoption, err = s.prepareTaskAdoption(ctx.Context, db, project, cfg, source)
+		if err != nil {
+			return err
+		}
+		adoptionSource = &source
 	}
 	var supersededTask *store.Task
 	if brief.Supersedes != "" {
@@ -252,11 +264,17 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	// Review Rounds are exempt from max_workers: done Change Tasks hold slots
 	// until merge, so gating the rounds that unblock those merges deadlocks.
+	if adoptionSource != nil && (adoptionSource.State == store.StateDone || adoptionSource.State == store.StateWorking || adoptionSource.State == store.StateSpawning || adoptionSource.State == store.StateStalled || adoptionSource.State == store.StateBlocked || adoptionSource.State == store.StateNeedsDecision) {
+		count--
+	}
 	atCapacity := count >= cfg.Defaults.MaxWorkers && generated == nil
 	if atCapacity && !parsed.Bool("queue") && len(unmetDependencies) == 0 {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
 	}
 	queued := atCapacity || len(unmetDependencies) > 0
+	if adoption != nil && (queued || parsed.Bool("queue") || brief.Base != "" || brief.Target != "" || parsed.Flags["from-orphan"] != "" || brief.Supersedes != "") {
+		return axi.Failure("adoption_refused", "adopt cannot be queued or combined with base, target, supersedes or from-orphan", false)
+	}
 	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		return profileError(err)
@@ -285,9 +303,15 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		tightening.MergeMode = ""
 	}
 	deliveryDefault := projectMergeMode(ctx.Context, project, cfg)
+	if adoption != nil {
+		deliveryDefault = "pr"
+	}
 	mode, autonomy, err := dispatch.ResolveDelivery(tightening, deliveryDefault, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
+	}
+	if adoption != nil && mode != "pr" {
+		return axi.Failure("adoption_refused", "adopt requires PR delivery", false)
 	}
 	if hasLandedPrerequisite(brief.After) && (brief.Base != "" || len(brief.BaseByRepo) != 0) {
 		return briefError(&dispatch.BriefError{Field: "base", Reason: "a Change Task after a landed prerequisite must start from the default branch"})
@@ -488,7 +512,12 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		}
 	}
 	branch := ""
-	if !queued {
+	if adoption != nil {
+		branch = adoption.Branch
+		baseRef = adoptionSource.BaseRef
+		targetBranch = taskTargetBranch(project, *adoptionSource)
+	}
+	if !queued && adoption == nil {
 		sequenceCandidate, err := nextTaskSequence(ctx.Context, db, project, home)
 		if err != nil {
 			return err
@@ -505,7 +534,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning, ReportKind: brief.ReportKind,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, MergeMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyMerge: defaultValue(autonomy.Merge, "ask"),
-		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
+		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets, Adoption: adoption,
 	}
 	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice, workflow)
 	if err != nil {
@@ -536,14 +565,17 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	// Admission must finish before preparation can recover other Workers or
 	// allocate this Task's scratch, Sandbox, branch or pane.
-	if !queued {
+	if adoption != nil && plan.Execution.Mode != "sandbox" && plan.Execution.Mode != "" {
+		return axi.Failure("adoption_refused", "adopt requires Sandbox execution", false)
+	}
+	if !queued && adoption == nil {
 		if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
 			_, err := s.prepareProjectForTask(ctx.Context, db, project)
 			return err
 		}); err != nil {
 			return err
 		}
-	} else {
+	} else if queued {
 		task.State = store.StateQueued
 		task.Branch = ""
 	}
@@ -571,6 +603,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	if errors.Is(err, store.ErrWorkerLimit) {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s reached max_workers=%d during Task admission", project.Name, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or use `--queue` to admit the Task without starting")
+	}
+	if errors.Is(err, store.ErrTaskAdoptionChanged) {
+		return axi.Failure("adoption_refused", err.Error(), false)
 	}
 	if errors.Is(err, store.ErrTaskBranchExists) {
 		return branchTaken(branch, "in Project "+project.Name+" Task history")
@@ -715,7 +750,24 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	}
 	generation := int64(0)
 	if task.Type == "change" {
-		generation, err = claimTaskBranchAuthor(ctx.Context, db, task, launch, false)
+		adoptions, adoptErr := db.TaskAdoptions(ctx.Context, task.ID)
+		if adoptErr != nil {
+			return adoptErr
+		}
+		adopted := false
+		for _, a := range adoptions {
+			if a.TaskID == task.ID && launch == 1 {
+				generation = a.Generation
+				if err := db.RequireBranchAuthor(ctx.Context, a.Repository, a.Branch, task.ID, generation); err != nil {
+					return err
+				}
+				adopted = true
+				break
+			}
+		}
+		if !adopted {
+			generation, err = claimTaskBranchAuthor(ctx.Context, db, task, launch, false)
+		}
 		if err == nil && generation > 0 {
 			err = exportTaskAuthorGeneration(ctx.Context, s, opened.PaneID, generation)
 		}

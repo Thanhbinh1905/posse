@@ -708,6 +708,23 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
+	adoptions, err := db.TaskAdoptions(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, a := range adoptions {
+		otherID := a.SourceTaskID
+		key := "adopted_from"
+		if a.SourceTaskID == task.ID {
+			otherID = a.TaskID
+			key = "adopted_by"
+		}
+		other, err := db.TaskByID(ctx.Context, project.ID, otherID)
+		if err != nil {
+			return err
+		}
+		view[key] = map[string]any{"task": taskIDString(other.Seq), "pr_url": a.PRURL, "head_sha": a.HeadSHA, "generation": a.Generation}
+	}
 	if agent, mismatch := agentObservation(task, cfg, time.Now()); agent != "" {
 		view["agent"] = agent
 		if mismatch != "" {

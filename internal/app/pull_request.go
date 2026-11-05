@@ -494,18 +494,26 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 	if err := requirePullRequestOwnedByTask(ctx, db, task, prURL, existingBody, marker, markerErr == nil); err != nil {
 		return err
 	}
-	if store.IsNotFound(markerErr) && hasUnownedTokenizedPublishMarkerPair(existingBody) {
+	oldToken, err := adoptedPullRequestBodyToken(ctx, db, task, prURL, existingBody)
+	if err != nil {
+		return err
+	}
+	if store.IsNotFound(markerErr) && hasUnownedTokenizedPublishMarkerPair(existingBody) && oldToken == "" {
 		return missingPRBodyMarkerError()
 	}
 	token, err := db.EnsurePRBodyMarker(ctx, task.ID, member, prURL)
 	if err != nil {
 		return err
 	}
+	if oldToken != "" {
+		existingBody = strings.ReplaceAll(existingBody, publishBodyMarker("start", oldToken), publishBodyMarker("start", token))
+		existingBody = strings.ReplaceAll(existingBody, publishBodyMarker("end", oldToken), publishBodyMarker("end", token))
+	}
 	nextBody, err = refreshPublishBody(existingBody, nextBody, token, refreshLegacy)
 	if err != nil {
 		return err
 	}
-	if existingTitle == title && existingBody == nextBody {
+	if oldToken == "" && existingTitle == title && existingBody == nextBody {
 		return nil
 	}
 	if forge.Kind == "gitlab" {
@@ -521,12 +529,17 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 	return nil
 }
 
-// requirePullRequestOwnedByTask refuses to adopt an open PR/MR on the Task
-// branch unless its stored marker binds it to this Task and member, or its
-// body carries this Task's token. A body whose tokens belong to another Task,
-// including a torn-down one, or to no Task this home knows, is never adopted.
-// A body without tokens falls through to the legacy-template rules.
+// requirePullRequestOwnedByTask accepts a stored marker, this Task's token,
+// or a prior token authorized by explicit custody transfer. Unmarked bodies
+// fall through to the legacy-template rules.
 func requirePullRequestOwnedByTask(ctx context.Context, db *store.DB, task store.Task, prURL, body string, marker store.PRBodyMarker, hasMarker bool) error {
+	oldToken, err := adoptedPullRequestBodyToken(ctx, db, task, prURL, body)
+	if err != nil {
+		return err
+	}
+	if oldToken != "" {
+		return nil
+	}
 	tokens := tokenizedPublishMarkerPairs(body)
 	if hasMarker && (marker.PRURL == prURL || slices.Contains(tokens, marker.Token)) {
 		return nil

@@ -693,6 +693,17 @@ type Task struct {
 	AgentStatusSince     int64
 }
 
+type TaskAdoption struct {
+	TaskID       int64
+	SourceTaskID int64
+	Repository   string
+	Branch       string
+	PrUrl        string
+	HeadSha      string
+	Generation   int64
+	CreatedAt    int64
+}
+
 type TaskBudgetUsage struct {
 	TaskID      int64
 	Launch      int64
