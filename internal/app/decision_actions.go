@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -222,10 +223,10 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			for i, target := range actual.Targets {
 				heads[i] = target.Commit
 			}
-			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, heads, decision.UserQuote, userDispositionBlockAt(task)); err != nil {
+			if err := db.RecordReviewDisposition(out.Context, task.ID, decision.ID, heads, decision.UserQuote, userDispositionBlockAt(task), decision.AnswerActor, decision.AnswerReason); err != nil {
 				return err
 			}
-			if err := queueSettledReviewStep(out.Context, db, project, task, "User accepted the candidate head at the Review cap of Task "+taskIDString(task.Seq)); err != nil {
+			if err := queueSettledReviewStep(out.Context, db, project, task, "Authorized acceptance of the candidate head at the Review cap of Task "+taskIDString(task.Seq)); err != nil {
 				return err
 			}
 			if len(actual.Targets) > 1 {
@@ -233,18 +234,43 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "head", Value: expectedHead}})
 		case "final-fix":
+			var granted bool
+			if err := db.QueryRowContext(out.Context, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='review_cap_final_review')`, task.ID).Scan(&granted); err != nil {
+				return err
+			}
+			if granted {
+				return axi.Failure("review_final_fix_spent", "the one final repair and Review allowance has already been granted; choose rethink, accept-head or discard", false)
+			}
 			queued, err := s.queueReviewFix(out.Context, db, project, task, nil, true)
+			var failure *axi.Error
+			empty := errors.As(err, &failure) && failure.Code == "review_fix_empty"
+			duplicate := failure != nil && failure.Code == "review_fix_duplicate"
+			if err != nil && !empty && !duplicate {
+				return err
+			}
+			usage, err := db.ReviewCapUsage(out.Context, task.ID)
 			if err != nil {
 				return err
 			}
-			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "final-fix-queued"}, {Key: "message", Value: queued.MessageID}, {Key: "patterns", Value: queued.Selected}})
+			if _, err := db.CreateNotice(out.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "review_cap_final_review", Summary: "One final independent Review authorized; this is not head acceptance", DataJSON: marshalJSON(map[string]any{"decision": id, "round": usage.ReviewRounds + 1})}); err != nil {
+				return err
+			}
+			state := "final-fix-queued"
+			if empty {
+				state = "final-review-ready"
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: state}, {Key: "message", Value: queued.MessageID}, {Key: "patterns", Value: queued.Selected}, {Key: "help", Value: []any{"After repair, run `posse review start " + taskIDString(task.Seq) + "`; one final Review is allowed, not acceptance"}}})
 		case "rethink":
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "rethink"}, {Key: "help", Value: []any{"Create a new Change Brief with `supersedes: " + taskIDString(task.Seq) + "`, then run `posse start --brief <file>`; inherited findings stay visible without being reported again.", "The capped Task remains unchanged; use the normal discard or Orphan path when appropriate."}}})
 		case "discard":
 			if task.State == store.StateTornDown {
 				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 			}
-			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote); err != nil {
+			option := teardownOptions{}
+			if decision.AnswerActor == "lead" {
+				option.capDecision = decision.ID
+			}
+			if _, err := s.teardownTask(out.Context, db, project, cfg, task, true, decision.UserQuote, option); err != nil {
 				return err
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})

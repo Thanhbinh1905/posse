@@ -154,10 +154,23 @@ SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 			anyNewHead = true
 		}
 	}
-	if !anyNewHead {
+	var finalReview bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='review_cap_final_review' AND CAST(json_extract(data_json,'$.round') AS INTEGER)=?)`, admission.ChangeTaskID, admission.Round).Scan(&finalReview); err != nil {
+		return err
+	}
+	if finalReview {
+		var pending bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='review' AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0))`, admission.ChangeTaskID, admission.ChangeTaskID).Scan(&pending); err != nil {
+			return err
+		}
+		if pending {
+			return ErrReviewRoundActive
+		}
+	}
+	if !anyNewHead && !finalReview {
 		return ErrReviewRoundUnchanged
 	}
-	if used+repairs >= admission.MaxRounds {
+	if used+repairs >= admission.MaxRounds && !finalReview {
 		return ErrReviewRoundCap
 	}
 	return nil

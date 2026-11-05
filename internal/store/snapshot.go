@@ -143,6 +143,8 @@ type decisionSnapshot struct {
 	Options        []string `toml:"options"`
 	Answer         string   `toml:"answer"`
 	UserQuote      string   `toml:"user_quote"`
+	AnswerActor    string   `toml:"answer_actor"`
+	AnswerReason   string   `toml:"answer_reason"`
 	CreatedAt      int64    `toml:"created_at"`
 	AnsweredAt     int64    `toml:"answered_at"`
 	Kind           string   `toml:"kind"`
@@ -1350,11 +1352,14 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, disposition := range snapshot.ReviewDispositions {
+			if disposition.Actor == "" {
+				disposition.Actor = "user"
+			}
 			if disposition.ChangeTaskID != 0 && disposition.ChangeTaskID != task.ID {
 				return fmt.Errorf("review disposition in snapshot for t%d belongs to Task %d", task.Seq, disposition.ChangeTaskID)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?,?)`,
-				disposition.ID, task.ID, disposition.HeadSHA, nullableID(disposition.DecisionID), disposition.UserQuote, disposition.At); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at,actor,reason) VALUES(?,?,?,?,?,?,?,?)`,
+				disposition.ID, task.ID, disposition.HeadSHA, nullableID(disposition.DecisionID), disposition.UserQuote, disposition.At, disposition.Actor, disposition.Reason); err != nil {
 				return fmt.Errorf("rebuild t%d review disposition: %w", task.Seq, err)
 			}
 		}
@@ -1469,13 +1474,16 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, decision := range state.Decisions {
+			if decision.AnswerActor == "" {
+				decision.AnswerActor = "user"
+			}
 			options, err := json.Marshal(decision.Options)
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id,project_id,task_id,origin,question,options_json,answer,user_quote,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id,project_id,task_id,origin,question,options_json,answer,user_quote,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason,answer_actor,answer_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				decision.ID, decision.ProjectID, decision.TaskID, decision.Origin, decision.Question, string(options), decision.Answer, decision.UserQuote,
-				decision.CreatedAt, decision.AnsweredAt, decision.Kind, decision.TaskLaunches, decision.ObsoleteAt, decision.ObsoleteReason); err != nil {
+				decision.CreatedAt, decision.AnsweredAt, decision.Kind, decision.TaskLaunches, decision.ObsoleteAt, decision.ObsoleteReason, decision.AnswerActor, decision.AnswerReason); err != nil {
 				return err
 			}
 		}

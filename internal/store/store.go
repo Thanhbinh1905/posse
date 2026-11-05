@@ -699,8 +699,8 @@ func (db *DB) TransitionNeverStarted(ctx context.Context, taskID int64, note str
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
-	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
+func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string, delegatedDecision ...int64) error {
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || (source != "user" && (source != "lead" || len(delegatedDecision) != 1 || delegatedDecision[0] == 0)) || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
 	}
 	tx, err := db.beginTxWithRetry(ctx)
@@ -708,6 +708,15 @@ func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expecte
 		return err
 	}
 	defer tx.Rollback()
+	if source == "lead" {
+		var authorized bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE id=? AND task_id=? AND kind='review_cap' AND answer='discard' AND answer_actor='lead' AND answer_reason<>'' AND user_quote='')`, delegatedDecision[0], taskID).Scan(&authorized); err != nil {
+			return err
+		}
+		if !authorized {
+			return ErrInvalidApprovedDiscardTransition
+		}
+	}
 	count, err := db.queries.WithTx(tx.Tx).CountApproval(ctx, dbgen.CountApprovalParams{TaskID: taskID, Action: action})
 	if err != nil {
 		return err

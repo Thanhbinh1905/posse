@@ -107,7 +107,7 @@ A Worker's own declaration of where its Task stands, such as done, needs-decisio
 _Avoid_: Status, report, event
 
 **Decision**:
-A question put to the User that only the User may answer, such as whether to Merge, relaunch or discard Sandbox work; answered once and recorded.
+A question answered once and recorded with its authority; normally the User answers, while YOLO delegates Review-cap outcomes to the Lead.
 _Avoid_: Approval (for the question itself), prompt, needs-decision (that is a Signal to the Lead)
 
 **Brief**:
@@ -153,7 +153,7 @@ Formerly: Landing Mode.
 _Avoid_: Delivery mode
 
 **Autonomy**:
-A standing grant the User gives a Project that lets the Lead decide review findings, Merge, or both without asking; `yolo` grants both.
+A standing grant the User gives a Project that lets the Lead decide review findings, Merge, or both without asking; `yolo` grants both and delegates Review-cap recovery.
 _Avoid_: Permission, auto mode
 
 **Watch**:

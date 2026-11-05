@@ -395,6 +395,132 @@ func TestReviewCapAcceptHeadRefusesAfterCandidateTargetMoves(t *testing.T) {
 	}
 }
 
+func TestYoloReviewCapDiscardUsesDelegatedAuthority(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
+	_, _, seq := startPrivateReviewChange(t, f, "1")
+	recordBlockingReviewFinding(t, f, seq)
+	change := f.mustTask(t, seq)
+	var id int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, change.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(id), "discard", "--lead-reason", "Abandon the capped approach under YOLO"); code != 0 {
+		t.Fatal(out)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code != 0 {
+		t.Fatalf("delegated discard: %d %s", code, out)
+	}
+	var actor string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT source FROM transitions WHERE task_id=? AND to_state='torn-down' ORDER BY id DESC LIMIT 1`, change.ID).Scan(&actor); err != nil || actor != "lead" {
+		t.Fatalf("discard actor=%s err=%v", actor, err)
+	}
+}
+
+func TestReviewCapFinalFixWithoutOpenPatternsNeedsReview(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, _, seq := startPrivateReviewChange(t, f, "1")
+	recordBlockingReviewFinding(t, f, seq)
+	change := f.mustTask(t, seq)
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE review_findings SET state='fixed' WHERE ship_task_id=?`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, change.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(id), "final-fix", "--user-approved", "Verify the final repair"); code != 0 {
+		t.Fatal(out)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code != 0 || !strings.Contains(out, "final-review-ready") {
+		t.Fatalf("empty patterns recovery: %d %s", code, out)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code == 0 {
+		t.Fatalf("repeated grant: %s", out)
+	}
+	recordReviewRound(t, f, seq, "inconclusive", `{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`)
+	if code, out := runReviewIdentityCLI(t, f, "review", "start", seq, "--profile", "reviewer"); code == 0 {
+		t.Fatalf("final Review allowance was reused: %s", out)
+	}
+	var dispositions int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_dispositions WHERE ship_task_id=?`, change.ID).Scan(&dispositions); err != nil || dispositions != 0 {
+		t.Fatalf("final-fix is not acceptance: %d %v", dispositions, err)
+	}
+}
+
+func TestReviewCapRecoveryKeepsOriginalAnswer(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
+	_, _, seq := startPrivateReviewChange(t, f, "1")
+	recordBlockingReviewFinding(t, f, seq)
+	change := f.mustTask(t, seq)
+	var id int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, change.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(id), "final-fix", "--user-approved", "One last repair"); code != 0 {
+		t.Fatal(out)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(id), "rethink", "--recover", "--lead-reason", "Final repair was not applicable; replace the approach"); code != 0 {
+		t.Fatalf("recover cap: %d %s", code, out)
+	}
+	var answer string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT answer FROM decisions WHERE id=?`, id).Scan(&answer); err != nil || answer != "final-fix" {
+		t.Fatalf("old answer=%s err=%v", answer, err)
+	}
+	var count int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM decisions WHERE task_id=? AND kind='review_cap' AND answer='rethink' AND answer_actor='lead' AND user_quote=''`, change.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recovery audit count=%d err=%v", count, err)
+	}
+}
+
+func TestYoloLeadCanResolveReviewCapWithoutUserAnswer(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop", "--user-approved", "User enabled YOLO")
+	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
+	recordBlockingReviewFinding(t, f, changeSeq)
+	change := f.mustTask(t, changeSeq)
+	var decisionID int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "rethink"); code != 1 || !strings.Contains(output, "user_only") {
+		t.Fatalf("expected current YOLO review-cap refusal, got %d %s", code, output)
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	if code, out := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "decide", fmt.Sprint(decisionID), "accept-head", "--lead-reason", "Worker cannot grant authority"); code == 0 {
+		t.Fatalf("Worker acquired Lead authority: %s", out)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--lead-reason", "The exact candidate head is acceptable under the standing YOLO grant"); code != 0 {
+		t.Fatalf("YOLO Lead could not record an audited acceptance: %d %s", code, output)
+	}
+	var answer, quote, actor, reason string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT answer,user_quote,answer_actor,answer_reason FROM decisions WHERE id=?`, decisionID).Scan(&answer, &quote, &actor, &reason); err != nil || answer != "accept-head" || quote != "" || actor != "lead" || reason == "" {
+		t.Fatalf("Lead resolution answer=%q user_quote=%q actor=%q reason=%q err=%v; want audited Lead choice without a fabricated User answer", answer, quote, actor, reason, err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "accepted-head") {
+		t.Fatalf("apply Lead's exact-head resolution: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 {
+		t.Fatalf("idempotent acceptance: %d %s", code, output)
+	}
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "working", "Validate the accepted review head"); code != 0 {
+		t.Fatal(out)
+	}
+	if code, out := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "Accepted review only"); code == 0 || !strings.Contains(out, "validation_stage_required") {
+		t.Fatalf("delegated acceptance skipped stages: %d %s", code, out)
+	}
+	var dispositionActor, dispositionReason, dispositionHead string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT actor,reason,head_sha FROM review_dispositions WHERE ship_task_id=?`, change.ID).Scan(&dispositionActor, &dispositionReason, &dispositionHead); err != nil || dispositionActor != "lead" || dispositionReason == "" || dispositionHead != candidate.CandidateSHA {
+		t.Fatalf("Lead disposition=(%s,%s,%s), candidate=%s, err=%v", dispositionActor, dispositionReason, dispositionHead, candidate.CandidateSHA, err)
+	}
+}
+
 func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")
@@ -436,6 +562,9 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	}
 	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head"); code != 1 || !strings.Contains(output, "user_only") {
 		t.Fatalf("Lead answered a User-only Decision without a User quote: %d %s", code, output)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--lead-reason", "Not authorized without YOLO"); code == 0 {
+		t.Fatalf("non-YOLO delegated answer: %s", out)
 	}
 	const quote = "Accept this exact candidate head despite the blocking finding."
 	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--user-approved", quote); code != 0 {
@@ -600,6 +729,9 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
 	if err != nil || nextID == decisionID || !strings.HasSuffix(nextOrigin, candidate.CandidateSHA) {
 		t.Fatalf("next-head cap Decision id=%d origin=%s candidate=%s err=%v", nextID, nextOrigin, candidate.CandidateSHA, err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 {
+		t.Fatalf("final-fix must allow one fresh independent Review: %d %s", code, output)
 	}
 	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }

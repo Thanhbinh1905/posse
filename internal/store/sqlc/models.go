@@ -107,6 +107,8 @@ type Decision struct {
 	TaskLaunches   int64
 	ObsoleteAt     int64
 	ObsoleteReason string
+	AnswerActor    string
+	AnswerReason   string
 }
 
 type DecisionNoticeCursor struct {
@@ -527,6 +529,8 @@ type ReviewDisposition struct {
 	DecisionID   sql.NullInt64
 	UserQuote    string
 	At           int64
+	Actor        string
+	Reason       string
 }
 
 type ReviewFinding struct {

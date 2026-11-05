@@ -439,7 +439,7 @@ func TestValidationStatusUsesMergeReviewEvidence(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := fixture.db.RecordReviewDisposition(context.Background(), fixture.task.ID, 0, []string{candidate.CandidateSHA}, "User accepted this head", "P1"); err != nil {
+			} else if err := fixture.db.RecordReviewDisposition(context.Background(), fixture.task.ID, 0, []string{candidate.CandidateSHA}, "User accepted this head", "P1", "user", ""); err != nil {
 				t.Fatal(err)
 			}
 			recordCandidateStages(t, fixture)

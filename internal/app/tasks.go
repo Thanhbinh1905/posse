@@ -232,7 +232,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			return axi.Failure("brief_invalid", "supersedes must identify a prior Change Task", false)
 		}
 		var authorized bool
-		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND answer='rethink' AND user_quote<>'')`, source.ID).Scan(&authorized); err != nil {
+		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND answer='rethink' AND (user_quote<>'' OR (answer_actor='lead' AND answer_reason<>'')))`, source.ID).Scan(&authorized); err != nil {
 			return err
 		}
 		if !authorized {

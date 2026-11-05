@@ -30,6 +30,8 @@ type Decision struct {
 	Options        []string `json:"options"`
 	Answer         string   `json:"answer"`
 	UserQuote      string   `json:"user_quote"`
+	AnswerActor    string   `json:"answer_actor"`
+	AnswerReason   string   `json:"answer_reason"`
 	CreatedAt      int64    `json:"created_at"`
 	AnsweredAt     int64    `json:"answered_at"`
 	Kind           string   `json:"kind"`
@@ -254,8 +256,15 @@ func (db *DB) QueueDecisionMessage(ctx context.Context, decision Decision, targe
 // AnswerDecision records one answer and one Notice atomically. A second answer
 // cannot overwrite either the answer or the User's words.
 func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, userQuote string) (Decision, error) {
-	if strings.TrimSpace(userQuote) == "" {
-		return Decision{}, fmt.Errorf("user quote is required")
+	return db.AnswerDecisionAs(ctx, projectID, id, option, "user", userQuote, "")
+}
+
+func (db *DB) AnswerDecisionAs(ctx context.Context, projectID, id int64, option, actor, userQuote, reason string) (Decision, error) {
+	if actor != "user" && actor != "lead" {
+		return Decision{}, fmt.Errorf("invalid Decision actor %q", actor)
+	}
+	if actor == "user" && strings.TrimSpace(userQuote) == "" || actor == "lead" && strings.TrimSpace(reason) == "" {
+		return Decision{}, fmt.Errorf("Decision requires a User quote or Lead reason")
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
@@ -265,6 +274,9 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 	decision, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=?`, projectID, id))
 	if err != nil {
 		return Decision{}, err
+	}
+	if actor == "lead" && (decision.Kind != "review_cap" || userQuote != "") {
+		return Decision{}, fmt.Errorf("delegated Lead answers require review_cap and no User quote")
 	}
 	if decision.AnsweredAt != 0 {
 		return Decision{}, fmt.Errorf("decision %d is already answered", id)
@@ -294,10 +306,10 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 		return Decision{}, fmt.Errorf("%q is not a Decision option", option)
 	}
 	at := time.Now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `UPDATE decisions SET answer=?,user_quote=?,answered_at=? WHERE id=? AND answered_at=0`, option, userQuote, at, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE decisions SET answer=?,user_quote=?,answer_actor=?,answer_reason=?,answered_at=? WHERE id=? AND answered_at=0`, option, userQuote, actor, reason, at, id); err != nil {
 		return Decision{}, err
 	}
-	data, err := json.Marshal(map[string]any{"decision_id": id, "option": option, "user_quote": userQuote})
+	data, err := json.Marshal(map[string]any{"decision_id": id, "option": option, "answer_actor": actor, "answer_reason": reason, "user_quote": userQuote})
 	if err != nil {
 		return Decision{}, err
 	}
@@ -307,7 +319,7 @@ func (db *DB) AnswerDecision(ctx context.Context, projectID, id int64, option, u
 	if err := tx.Commit(); err != nil {
 		return Decision{}, err
 	}
-	decision.Answer, decision.UserQuote, decision.AnsweredAt = option, userQuote, at
+	decision.Answer, decision.UserQuote, decision.AnswerActor, decision.AnswerReason, decision.AnsweredAt = option, userQuote, actor, reason, at
 	if err := db.PersistProject(ctx, projectID); err != nil {
 		return Decision{}, err
 	}
@@ -558,14 +570,14 @@ func (db *DB) listDecisions(ctx context.Context, projectID int64, pendingOnly bo
 	return decisions, rows.Err()
 }
 
-const decisionSelect = `SELECT id,project_id,task_id,origin,question,options_json,answer,user_quote,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason FROM decisions`
+const decisionSelect = `SELECT id,project_id,task_id,origin,question,options_json,answer,user_quote,answer_actor,answer_reason,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason FROM decisions`
 
 type decisionScanner interface{ Scan(...any) error }
 
 func decisionRow(row decisionScanner) (Decision, error) {
 	var decision Decision
 	var options string
-	err := row.Scan(&decision.ID, &decision.ProjectID, &decision.TaskID, &decision.Origin, &decision.Question, &options, &decision.Answer, &decision.UserQuote, &decision.CreatedAt, &decision.AnsweredAt, &decision.Kind, &decision.TaskLaunches, &decision.ObsoleteAt, &decision.ObsoleteReason)
+	err := row.Scan(&decision.ID, &decision.ProjectID, &decision.TaskID, &decision.Origin, &decision.Question, &options, &decision.Answer, &decision.UserQuote, &decision.AnswerActor, &decision.AnswerReason, &decision.CreatedAt, &decision.AnsweredAt, &decision.Kind, &decision.TaskLaunches, &decision.ObsoleteAt, &decision.ObsoleteReason)
 	if err == nil {
 		err = json.Unmarshal([]byte(options), &decision.Options)
 	}

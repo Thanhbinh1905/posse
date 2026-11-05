@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -284,7 +285,7 @@ func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.
 	return map[string]any{
 		"id": d.ID, "project_id": d.ProjectID, "task_id": noticeTaskID(ctx, db, projectID, d.TaskID),
 		"origin": d.Origin, "question": d.Question, "options": d.Options,
-		"answer": d.Answer, "user_quote": d.UserQuote, "created_at": d.CreatedAt,
+		"answer": d.Answer, "user_quote": d.UserQuote, "answer_actor": d.AnswerActor, "answer_reason": d.AnswerReason, "created_at": d.CreatedAt,
 		"answered_at": d.AnsweredAt, "kind": d.Kind, "task_launches": d.TaskLaunches,
 		"obsolete_at": d.ObsoleteAt, "obsolete_reason": d.ObsoleteReason,
 	}
@@ -302,7 +303,7 @@ func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project s
 }
 
 func (s *Service) decide(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("decide", args, map[string]flagSpec{"user-approved": {}})
+	parsed, err := parseArgs("decide", args, map[string]flagSpec{"user-approved": {}, "lead-reason": {}, "recover": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -313,7 +314,7 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	if err != nil || id < 1 {
 		return axi.Usage("Decision id must be a positive number")
 	}
-	db, _, err := s.openDB()
+	db, home, err := s.openDB()
 	if err != nil {
 		return err
 	}
@@ -326,7 +327,63 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 		return err
 	}
 	quote := parsed.Flags["user-approved"]
-	if s.configCallerRole(ctx.Context, db) == "lead" && strings.TrimSpace(quote) == "" {
+	if _, supplied := parsed.Flags["lead-reason"]; supplied && (strings.TrimSpace(parsed.Flags["lead-reason"]) == "" || quote != "") {
+		return axi.Usage("--lead-reason requires a non-empty reason and cannot be combined with --user-approved")
+	}
+	role := s.configCallerRole(ctx.Context, db)
+	decisionBefore, err := db.Decision(ctx.Context, project.ID, id)
+	if err != nil {
+		return axi.Failure("decision_unknown", "Decision not found in this Project", false, "Run `posse decisions` to list pending Decisions")
+	}
+	if parsed.Bool("recover") {
+		if decisionBefore.Kind != "review_cap" || decisionBefore.Answer != "final-fix" || parsed.Positionals[1] != "rethink" {
+			return axi.Failure("decision_refused", "recovery requires an answered final-fix Review-cap Decision and a new explicit rethink choice", false)
+		}
+		task, err := db.TaskByID(ctx.Context, project.ID, decisionBefore.TaskID)
+		if err != nil {
+			return err
+		}
+		binding, err := currentReviewCapHead(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			return err
+		}
+		if role == "lead" && !(cfg.Autonomy.Yolo && strings.TrimSpace(parsed.Flags["lead-reason"]) != "") && strings.TrimSpace(quote) == "" {
+			return axi.Failure("user_only", "recovery requires a new User choice or an audited YOLO Lead choice", false)
+		}
+		recovered, err := db.RaiseDecision(ctx.Context, store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Kind: "review_cap", Origin: reviewCapOrigin(task, binding.Head) + ":recovery:" + strconv.FormatInt(id, 10), Question: fmt.Sprintf("Rethink after final-fix Decision #%d; prior answers remain unchanged", id), Options: []string{"rethink"}})
+		if err != nil {
+			return err
+		}
+		id, decisionBefore = recovered.ID, recovered
+	}
+	if reason := strings.TrimSpace(parsed.Flags["lead-reason"]); reason != "" {
+		cfg, cfgErr := config.Load(home, project.Name)
+		task, taskErr := db.TaskByID(ctx.Context, project.ID, decisionBefore.TaskID)
+		if role != "lead" || decisionBefore.Kind != "review_cap" || cfgErr != nil || !cfg.Autonomy.Yolo || taskErr != nil {
+			return axi.Failure("decision_refused", "--lead-reason is only available to a Lead for a review_cap Decision under delegated review autonomy", false)
+		}
+		_, expected, valid := parseReviewCapOrigin(decisionBefore.Origin)
+		binding, err := currentReviewCapHead(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		if !valid || binding.Head != expected {
+			return axi.Failure("decision_refused", "Review-cap head changed; refresh Decisions before selecting an outcome", false)
+		}
+		decision, err := db.AnswerDecisionAs(ctx.Context, project.ID, id, parsed.Positionals[1], "lead", "", reason)
+		if err != nil {
+			return axi.Failure("decision_refused", err.Error(), false, "Run `posse decisions` to inspect valid options")
+		}
+		if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "decision", Value: decisionOutput(ctx.Context, db, project.ID, decision)}, {Key: "help", Value: []any{"The Lead's review-cap choice is recorded with its reason and exact-head binding"}}})
+	}
+	if role == "lead" && strings.TrimSpace(quote) == "" {
 		return axi.Failure("user_only", "only the User answers a Decision; the Lead must quote the User", false, "Pass `--user-approved \"<User's words>\"` after the User answers")
 	}
 	if quote == "" {
