@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,71 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestResearchNoticeAcknowledgementTearsDownUnbornRepository(t *testing.T) {
+	f := newWorkerTabsFixtureWithOptions(t, workerTabsOptions{emptyFolder: true})
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[defaults]\nauto_teardown = \"finished\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	researchBrief := filepath.Join(f.root, "research.md")
+	if err := os.WriteFile(researchBrief, []byte("---\ntype: research\ntitle: Survey the empty Project\ndone_when: report.md is complete\n---\nWrite a concise Report.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, taskID := range []string{"t1", "t2", "t3"} {
+		name := "research-" + taskID
+		if output := runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", researchBrief, "--name", name); !strings.Contains(output, taskID) {
+			t.Fatalf("start %s: %s", taskID, output)
+		}
+		f.waitState(t, taskID, store.StateWorking)
+		task := f.task(t, taskID)
+		if err := os.WriteFile(filepath.Join(task.WorktreePath, "report.md"), []byte(taskID+" reviewed the empty Project.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPosse(t, f.binary, task.WorktreePath, workerSignalEnv(f, task), "signal", "done", "Report ready", "--report", "report.md")
+		f.waitState(t, taskID, store.StateReported)
+		notices, err := db.Notices(context.Background(), f.projectID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var noticeID string
+		for _, notice := range notices {
+			if notice.TaskID == task.ID && notice.Kind == "task_done" {
+				noticeID = fmt.Sprint(notice.ID)
+				break
+			}
+		}
+		if noticeID == "" {
+			t.Fatalf("%s has no task_done Notice: %#v", taskID, notices)
+		}
+		if taskID == "t1" {
+			gitTest(t, f.env, f.repo, "symbolic-ref", "HEAD", "refs/heads/not-main")
+			runPosseExpectingFailure(t, f, f.repo, f.leadEnv, "teardown_incomplete", "ack", noticeID)
+			f.waitState(t, taskID, store.StateReported)
+			sandbox, err := db.SandboxByTask(context.Background(), task.ID)
+			if err != nil || sandbox.State != "held" {
+				t.Fatalf("failed teardown did not preserve the held Sandbox: %#v %v", sandbox, err)
+			}
+			gitTest(t, f.env, f.repo, "symbolic-ref", "HEAD", "refs/heads/main")
+			if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", taskID); !strings.Contains(output, "torn-down") {
+				t.Fatalf("retry teardown %s: %s", taskID, output)
+			}
+		} else {
+			output := runPosse(t, f.binary, f.repo, f.leadEnv, "ack", noticeID)
+			if !strings.Contains(output, "acknowledged: 1") {
+				t.Fatalf("ack %s: %s", noticeID, output)
+			}
+		}
+		f.waitState(t, taskID, store.StateTornDown)
+		if _, err := gitCommand(f.env, f.repo, "rev-parse", "--verify", "refs/heads/main^{commit}"); err == nil {
+			t.Fatalf("%s teardown created a commit on unborn main", taskID)
+		}
+	}
+}
 
 // Reproduce #699: Posse starts in a new folder without manual git setup, runs
 // Tasks before the first commit and lands the first commit by fast-forward.
