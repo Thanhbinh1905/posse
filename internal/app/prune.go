@@ -387,6 +387,15 @@ func mergedOrDiscardedBranchItems(ctx context.Context, db *store.DB, home string
 }
 
 func taskBranchPruneBlocked(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	adoptions, err := db.TaskAdoptions(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, a := range adoptions {
+		if a.SourceTaskID == task.ID {
+			return true, nil
+		}
+	}
 	if _, err := db.IntentByTask(ctx, task.ID); err == nil {
 		return true, nil
 	} else if !store.IsNotFound(err) {
