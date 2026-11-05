@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,9 +92,10 @@ type failedCheck struct {
 }
 
 type checkSnapshot struct {
-	State    string        `json:"state"`
-	Running  bool          `json:"running,omitempty"`
-	Failures []failedCheck `json:"failures"`
+	State          string        `json:"state"`
+	Running        bool          `json:"running,omitempty"`
+	MergeRequested bool          `json:"merge_requested,omitempty"`
+	Failures       []failedCheck `json:"failures"`
 	// Noticed is the failure list the last pr_checks_failed Notice for this head named.
 	Noticed []failedCheck `json:"noticed,omitempty"`
 }
@@ -679,20 +681,23 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	}
 	output := ""
 	var prTitle string
+	var mrState string
 	if forge.Kind == "gitlab" {
 		mr, viewErr := gitlabMR(ctx, forge, number)
 		err = viewErr
 		prTitle = mr.Title
+		mrState = strings.ToUpper(mr.State)
 		output = marshalJSON(struct {
 			HeadRefOID string `json:"headRefOid"`
 		}{mr.SHA})
 	} else {
-		output, err = commandOutputArgs(ctx, project.Root, "gh", "pr", "view", task.PRURL, "--json", "headRefOid,title")
+		output, err = commandOutputArgs(ctx, project.Root, "gh", "pr", "view", task.PRURL, "--json", "state,headRefOid,title")
 	}
 	if err != nil {
 		return axi.Failure("pr_view_failed", "could not verify the pull request head", true, strings.TrimSpace(output))
 	}
 	var head struct {
+		State      string `json:"state"`
 		HeadRefOID string `json:"headRefOid"`
 		Title      string `json:"title"`
 	}
@@ -701,6 +706,43 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 	}
 	if forge.Kind == "gitlab" {
 		head.Title = prTitle
+	} else {
+		mrState = strings.ToUpper(head.State)
+	}
+	if mrState == "CLOSED" {
+		return axi.Failure("pr_closed", "the pull request was closed without merging", false)
+	}
+	if mrState == "OPEN" || mrState == "OPENED" {
+		observation, observationErr := db.LatestPRObservation(ctx, task.ID)
+		if observationErr != nil && !errors.Is(observationErr, sql.ErrNoRows) {
+			return observationErr
+		}
+		if observationErr == nil && head.HeadRefOID == task.GatedSHA && observation.PRURL == task.PRURL && observation.HeadSHA == task.GatedSHA && decodeChecks(observation.Checks).MergeRequested {
+			return ctxPrintMerge(out, task, "The forge accepted the merge request; wait for Posse to observe the merge instead of retrying")
+		}
+	}
+	if mrState == "MERGED" {
+		if head.HeadRefOID != task.GatedSHA {
+			return axi.Failure("pr_merged_ungated", "the pull request merged a head other than the gated commit", false)
+		}
+		if err := requireGreenObservation(ctx, db, task); err != nil {
+			return err
+		}
+		if err := requireSelectedReviewAt(ctx, db, project, cfg, task, task.GatedSHA); err != nil {
+			return err
+		}
+		if userQuote != "" {
+			if err := db.RecordApproval(ctx, task.ID, "merge", userQuote); err != nil {
+				return err
+			}
+		}
+		confirmed, confirmErr := s.reconcileMergedPullRequest(ctx, db, project, cfg, task, forge, number)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if confirmed {
+			return ctxPrintMerge(out, task, "The pull request was already merged and Posse recorded the verified merge")
+		}
 	}
 	if head.HeadRefOID != task.GatedSHA {
 		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateDone, "cli", "Pull request head moved after its merge head was recorded"); err != nil {
@@ -748,19 +790,133 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		if method == "squash" {
 			args = append(args, "--squash", "--squash-message", mergeCommitSubject(head.Title, number))
 		}
-		if _, err := runOutputStep(ctx, db, intent, "pr.merge", forge.Root, "glab", args...); err != nil {
-			return axi.Failure("pr_merge_failed", "GitLab did not merge the merge request", true, err.Error())
+		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge", forge.Root, "glab", args...)
+		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already been merged") {
+			return axi.Failure("pr_merge_failed", "GitLab did not merge the merge request", true, mergeErr.Error())
+		}
+		confirmed, confirmErr := s.reconcileMergedPullRequest(ctx, db, project, cfg, task, forge, number)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if confirmed {
+			return ctxPrintMerge(out, task, "GitLab confirmed the gated merge")
+		}
+		if mergeErr != nil {
+			pending, pendingErr := pullRequestMergeRequested(ctx, db, task)
+			if pendingErr != nil {
+				return pendingErr
+			}
+			if pending {
+				return ctxPrintMerge(out, task, "GitLab reports the merge request as merged; wait for Posse to observe a fresh confirmation")
+			}
+			return axi.Failure("pr_merge_failed", "GitLab reported an already-merged request that does not match the gated head", false, mergeErr.Error())
 		}
 	} else {
 		args := []string{"pr", "merge", task.PRURL, "--" + method, "--match-head-commit", task.GatedSHA}
 		if method == "squash" {
 			args = append(args, "--subject", mergeCommitSubject(head.Title, number))
 		}
-		if _, err := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", args...); err != nil {
-			return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, err.Error())
+		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", args...)
+		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already merged") {
+			return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, mergeErr.Error())
+		}
+		confirmed, confirmErr := s.reconcileMergedPullRequest(ctx, db, project, cfg, task, forge, number)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if confirmed {
+			return ctxPrintMerge(out, task, "The forge confirmed the gated merge")
+		}
+		if mergeErr != nil {
+			pending, pendingErr := pullRequestMergeRequested(ctx, db, task)
+			if pendingErr != nil {
+				return pendingErr
+			}
+			if pending {
+				return ctxPrintMerge(out, task, "The forge reports the pull request as merged; wait for Posse to observe a fresh confirmation")
+			}
+			return axi.Failure("pr_merge_failed", "the forge reported an already-merged request that does not match the gated head", false, mergeErr.Error())
 		}
 	}
 	return ctxPrintMerge(out, task, "Run `posse` or `posse watch` to observe the merge")
+}
+
+func pullRequestMergeRequested(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	observation, err := db.LatestPRObservation(ctx, task.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return observation.PRURL == task.PRURL && observation.HeadSHA == task.GatedSHA && decodeChecks(observation.Checks).MergeRequested, nil
+}
+
+func (s *Service) reconcileMergedPullRequest(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, forge repositoryForge, number int) (bool, error) {
+	var state, head, target, mergeCommit string
+	if forge.Kind == "gitlab" {
+		mr, err := gitlabMR(ctx, forge, number)
+		if err != nil {
+			return false, axi.Failure("pr_view_failed", "could not verify the merge request after the merge command", true, err.Error())
+		}
+		state, head, target, mergeCommit = mr.State, mr.SHA, mr.TargetBranch, gitlabMergedCommit(mr)
+	} else {
+		output, err := commandOutputArgs(ctx, project.Root, "gh", "pr", "view", task.PRURL, "--json", "state,headRefOid,baseRefName,mergeCommit")
+		if err != nil {
+			return false, axi.Failure("pr_view_failed", "could not verify the pull request after the merge command", true, strings.TrimSpace(output))
+		}
+		var view struct {
+			State       string `json:"state"`
+			HeadRefOID  string `json:"headRefOid"`
+			BaseRefName string `json:"baseRefName"`
+			MergeCommit *struct {
+				OID string `json:"oid"`
+			} `json:"mergeCommit"`
+		}
+		if err := json.Unmarshal([]byte(output), &view); err != nil {
+			return false, axi.Failure("pr_view_failed", "gh pr view returned an invalid merge response", true, strings.TrimSpace(output))
+		}
+		state, head, target = view.State, view.HeadRefOID, view.BaseRefName
+		if view.MergeCommit != nil {
+			mergeCommit = view.MergeCommit.OID
+		}
+	}
+	if !strings.EqualFold(state, "merged") {
+		if strings.EqualFold(state, "closed") {
+			return false, axi.Failure("pr_closed", "the pull request was closed without merging", false)
+		}
+		if (strings.EqualFold(state, "opened") || strings.EqualFold(state, "open")) && head == task.GatedSHA && target == taskTargetBranch(project, task) {
+			observation, err := db.LatestPRObservation(ctx, task.ID)
+			if err != nil {
+				return false, err
+			}
+			if observation.PRURL == task.PRURL && observation.HeadSHA == task.GatedSHA {
+				checks := decodeChecks(observation.Checks)
+				checks.MergeRequested = true
+				observation.Checks = marshalJSON(checks)
+				observation.ObservedAt = time.Now().UnixMilli()
+				_, err = db.RecordPRObservation(ctx, observation, store.PRObservationEffect{}, task)
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	if head != task.GatedSHA || target != taskTargetBranch(project, task) || mergeCommit == "" {
+		return false, axi.Failure("pr_merged_ungated", "the forge reports a merged request, but its head, target, or merge commit does not match the gated request", false)
+	}
+	if err := requireSelectedReviewForMerge(ctx, db, project, cfg, task, head, mergeCommit); err != nil {
+		return false, err
+	}
+	observation, err := db.LatestPRObservation(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	previous := observation
+	observation.State, observation.MergeCommit = "MERGED", mergeCommit
+	observation.ObservedAt = time.Now().UnixMilli()
+	effect := prObservationEffect(project, task, observation, nil, previous, true)
+	_, err = db.RecordPRObservation(ctx, observation, effect, task)
+	return err == nil, err
 }
 
 func mergeCommitSubject(title string, number int) string {
@@ -1447,6 +1603,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		}
 	}
 	for _, observed := range observations {
+		observed.current = preserveMergeRequest(observed.current, observed.previous, observed.hasBefore)
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
 		// merge_ready tells the Lead to merge, so it waits for the review
 		// gate `posse merge` applies to the same head.
@@ -1855,7 +2012,7 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			break
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
-		if ready && (task.State == store.StateDone || task.State == store.StateMerging) {
+		if ready && !checks.MergeRequested && (task.State == store.StateDone || task.State == store.StateMerging) {
 			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge head "+shortSHA(current.HeadSHA), map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}
@@ -1894,6 +2051,15 @@ func sameFailures(left, right []failedCheck) bool {
 		}
 	}
 	return true
+}
+
+func preserveMergeRequest(current, previous store.PRObservation, hasPrevious bool) store.PRObservation {
+	if hasPrevious && current.State == "OPEN" && current.HeadSHA == previous.HeadSHA && decodeChecks(previous.Checks).MergeRequested {
+		checks := decodeChecks(current.Checks)
+		checks.MergeRequested = true
+		current.Checks = marshalJSON(checks)
+	}
+	return current
 }
 
 func decodeChecks(value string) checkSnapshot {
