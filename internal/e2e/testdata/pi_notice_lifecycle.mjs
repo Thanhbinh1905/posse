@@ -58,14 +58,18 @@ let watchStarts = 0;
 let delayNextKill;
 let releaseDelayedKill;
 let currentSession = "initial-session";
+let inspectUnavailable = false;
 
 let stateWrite = Promise.resolve();
-function updateState(destination, stage = "") {
+let currentStage = "";
+function updateState(destination, stage) {
+  if (stage !== undefined) currentStage = stage;
+  const reportedStage = currentStage;
   destinations.push(destination);
   stateWrite = stateWrite.then(() => writeFile(statePath, JSON.stringify({
     session: destination.slice("pi:".length),
     activeWatches,
-    stage,
+    stage: reportedStage,
   })));
   return stateWrite;
 }
@@ -137,7 +141,10 @@ const ui = {
 };
 const sessionManager = (id) => ({
   getSessionId: () => id,
-  getEntries: () => entries,
+  getEntries: () => {
+    if (inspectUnavailable) throw new Error("session inspection unavailable");
+    return entries;
+  },
 });
 
 function nextNotice() {
@@ -159,6 +166,7 @@ function loadExtension() {
       }
       if (message.details?.type === "delivery-uncertain") {
         uncertaintyMessages.push(message);
+        entries.push({ type: "custom_message", customType: message.customType, details: message.details });
         return;
       }
       if (message.details?.type !== "notice") return;
@@ -277,6 +285,30 @@ const replacementUncertaintyIDs = uncertainty.details.ids;
 const replacementUncertaintyKeptIDs = uncertainty.details.delivery_id === replacementDeliveryID && uncertainty.details.batch_id === replacementBatchID && JSON.stringify(replacementUncertaintyIDs) === JSON.stringify(replacementMessage.details.ids);
 const replacementUncertaintyContent = uncertainty.content;
 if (!replacementPendingRetained || !replacementUncertaintyKeptIDs || !replacementUncertaintyContent.includes("Notice count: 1") || replacementUncertaintyContent.includes("Notice IDs")) throw new Error("unconsumed replacement batch lost recoverable IDs or showed an unbounded warning");
+await instance.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "reload" });
+inspectUnavailable = true;
+instance = await startSession("reload", currentSession);
+await waitFor(() => runtime.blocked);
+if (runtime.continueFresh) throw new Error("unsupported inspection continued delivery");
+inspectUnavailable = false;
+await instance.commands.get("posse-notices").handler("retry", { ui });
+await updateState(`pi:${currentSession}`, "ready-fresh");
+const freshNoticeIDs = [];
+const freshKinds = new Set();
+while (freshKinds.size < 3) {
+  const fresh = await Promise.race([
+    nextNotice(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("old uncertain receipt blocked fresh completion/quota delivery")), 8000)),
+  ]);
+  entries.push({ type: "custom_message", customType: fresh.customType, details: fresh.details });
+  const acceptedBefore = outcomes.filter((outcome) => outcome === "accepted").length;
+  instance.handlers.get("agent_settled")({}, { ui, isIdle: () => true });
+  await waitFor(() => outcomes.filter((outcome) => outcome === "accepted").length > acceptedBefore);
+  if (uncertaintyMessages.length !== 2) throw new Error("warning repeated after inspection recovery");
+  if (fresh.details.ids.includes(replacementMessage.details.ids[0])) throw new Error("held batch replayed");
+  freshNoticeIDs.push(...fresh.details.ids);
+  for (const notice of fresh.details.notices) if (["task_done", "merge_ready", "quota_exhausted"].includes(notice.kind)) freshKinds.add(notice.kind);
+}
 await instance.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
 reasons.push("quit");
 await waitFor(() => activeWatches === 0);
@@ -288,9 +320,13 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 if (failedWatchAttempts !== 5 || healthMessages.length !== 1) {
   throw new Error(`watch failure episode attempts=${failedWatchAttempts} notices=${healthMessages.length}`);
 }
+await failureInstance.commands.get("posse-notices").handler("retry", { ui });
+await waitFor(() => activeWatches === 1);
+if (healthMessages.length !== 1) throw new Error("health retry flooded the Lead");
 await failureInstance.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
 
 process.stdout.write(JSON.stringify({
+  freshNoticeIDs,
   reasons,
   destinations,
   maxActiveWatches,

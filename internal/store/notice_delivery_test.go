@@ -446,10 +446,10 @@ func TestDestinationRetriesOldestExpiredBatchWithoutBlockingNewClaims(t *testing
 	if _, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[2]}, "opencode:session", "generation", "owner-third", 1020, 100); err != nil || claimed {
 		t.Fatalf("third claim exceeded destination bound: claimed=%t err=%v", claimed, err)
 	}
-	if _, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1099); err != nil || found {
+	if _, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1099, false); err != nil || found {
 		t.Fatalf("unexpired destination receipt found=%t err=%v", found, err)
 	}
-	firstRetry, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1100)
+	firstRetry, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1100, false)
 	if err != nil || !found || firstRetry.DeliveryID != first.DeliveryID {
 		t.Fatalf("oldest expired destination receipt = %+v found=%t err=%v", firstRetry, found, err)
 	}
@@ -463,10 +463,10 @@ func TestDestinationRetriesOldestExpiredBatchWithoutBlockingNewClaims(t *testing
 	if _, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{ids[2]}, "opencode:session", "generation", "owner-third", 1102, 100); err != nil || !claimed {
 		t.Fatalf("claim after capacity freed: claimed=%t err=%v", claimed, err)
 	}
-	if _, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1109); err != nil || found {
+	if _, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1109, false); err != nil || found {
 		t.Fatalf("next receipt returned before expiry: found=%t err=%v", found, err)
 	}
-	secondRetry, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1110)
+	secondRetry, found, err := db.NoticeDeliveryForDestinationRetry(ctx, project.ID, "opencode:session", 1110, false)
 	if err != nil || !found || secondRetry.DeliveryID != second.DeliveryID {
 		t.Fatalf("next expired destination receipt = %+v found=%t err=%v", secondRetry, found, err)
 	}
@@ -529,7 +529,7 @@ func TestReplacementSessionHoldsPrintedBatchAsUncertain(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET lease_until=0 WHERE delivery_id=?`, old.DeliveryID); err != nil {
 		t.Fatal(err)
 	}
-	prior, found, err := db.NoticeDeliveryForOtherSession(ctx, project.ID, "pi:new-session")
+	prior, found, err := db.NoticeDeliveryForOtherSession(ctx, project.ID, "pi:new-session", false)
 	if err != nil || !found || prior.DeliveryID != old.DeliveryID || prior.NoticeIDs[0] != noticeID {
 		t.Fatalf("replacement lookup = %#v found=%v err=%v", prior, found, err)
 	}

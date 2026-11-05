@@ -308,7 +308,7 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGTERM)
 	defer signal.Stop(stopSignals)
-	parsed, err := parseArgs("watch", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}, "status": {boolean: true}})
+	parsed, err := parseArgs("watch", args, map[string]flagSpec{"timeout": {}, "ack": {}, "requeue": {}, "destination": {}, "receipt": {}, "receipt-outcome": {}, "receipt-token": {}, "continue-fresh": {boolean: true}, "handoff": {boolean: true}, "quiet-routine": {boolean: true}, "poll-only": {boolean: true}, "repair": {boolean: true}, "status": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -322,6 +322,9 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			return axi.Usage("--timeout must be a positive number of milliseconds")
 		}
 		timeout = time.Duration(milliseconds) * time.Millisecond
+	}
+	if parsed.Bool("continue-fresh") && (!parsed.Bool("handoff") || !strings.HasPrefix(parsed.Flags["destination"], "pi:") || parsed.Bool("repair") || parsed.Bool("status") || parsed.Bool("poll-only") || parsed.Flags["receipt"] != "") {
+		return axi.Usage("--continue-fresh requires a Pi handoff destination and keeps uncertain batches held")
 	}
 	if parsed.Bool("repair") && (parsed.Flags["timeout"] != "" || parsed.Flags["ack"] != "" || parsed.Flags["requeue"] != "" || parsed.Flags["destination"] != "" || parsed.Flags["receipt"] != "" || parsed.Flags["receipt-outcome"] != "" || parsed.Flags["receipt-token"] != "" || parsed.Bool("handoff") || parsed.Bool("quiet-routine") || parsed.Bool("poll-only")) {
 		return axi.Usage("--repair cannot be combined with Watch wait or delivery options")
@@ -460,14 +463,14 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 		var retryDelivery *store.NoticeDelivery
 		var notices []store.Notice
 		if parsed.Bool("handoff") {
-			existing, found, err := db.NoticeDeliveryForDestinationRetry(ctx.Context, project.ID, parsed.Flags["destination"], currentTime())
+			existing, found, err := db.NoticeDeliveryForDestinationRetry(ctx.Context, project.ID, parsed.Flags["destination"], currentTime(), parsed.Bool("continue-fresh"))
 			if err != nil {
 				return err
 			}
 			if found && existing.State == "uncertain" {
 				return ctx.Print(noticeDeliveryUncertaintyResult(existing, "Inspect that Lead session before retrying"))
 			}
-			prior, priorFound, err := db.NoticeDeliveryForOtherSession(ctx.Context, project.ID, parsed.Flags["destination"])
+			prior, priorFound, err := db.NoticeDeliveryForOtherSession(ctx.Context, project.ID, parsed.Flags["destination"], parsed.Bool("continue-fresh"))
 			if err != nil {
 				return err
 			}
