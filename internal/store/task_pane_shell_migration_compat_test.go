@@ -66,6 +66,7 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		`ALTER TABLE decisions DROP COLUMN answer_actor`,
 		`ALTER TABLE review_dispositions DROP COLUMN reason`,
 		`ALTER TABLE review_dispositions DROP COLUMN actor`,
+		`DROP TABLE review_cap_grants`,
 		`DELETE FROM goose_db_version WHERE version_id >= 56`,
 		`DELETE FROM posse_migration_checksums WHERE version >= 56`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(56,1)`,

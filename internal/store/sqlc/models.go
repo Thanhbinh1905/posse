@@ -512,6 +512,14 @@ type ResourceLease struct {
 	AcquiredAt     int64
 }
 
+type ReviewCapGrant struct {
+	TaskID     int64
+	DecisionID int64
+	Round      int64
+	ResultJson string
+	CreatedAt  int64
+}
+
 type ReviewCarry struct {
 	ChangeTaskID    int64
 	Repository      string

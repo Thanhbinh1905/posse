@@ -13,7 +13,7 @@ posse apply <cap-id>
 
 The same flag supports `final-fix`, `rethink`, and `discard`. Without YOLO, record the User's new choice with `--user-approved` instead. Review acceptance does not complete test, docs, lint, or forge checks.
 
-`final-fix` permits one final repair and one independent Review beyond the frozen cap. When no blocking patterns remain, it grants Review without a repair. Run `posse review start <change>` after repair. One verdict consumes the allowance; an inconclusive verdict does not renew it. Repeated final-fix cannot grant another allowance.
+`final-fix` permits one final repair and one independent Review beyond the frozen cap. When no blocking patterns remain, it grants Review without a repair. Run `posse review start <change>` after repair. One verdict consumes the allowance; an inconclusive verdict does not renew it. Retrying the same Decision returns its stored application result. A distinct Decision cannot grant another allowance. The grant and its authorizing Decision survive snapshot rebuild even after notification history ages out.
 
 ## Recovery for t984
 
@@ -44,10 +44,12 @@ Red-before evidence:
 - `--lead-reason` and `--recover` were unknown flags.
 - Review after the final repair returned `review_round_cap` at two used rounds against a frozen cap of one.
 
+Review-fix regression checks reproduce retries returning `review_final_fix_spent` before the fix. The CLI tests now retry both repair and empty-pattern applications, age an acknowledged Notice beyond 128 historical entries, rebuild snapshots, and verify that the existing allowance survives without renewal. A distinct Decision remains refused.
+
 Green checks are recorded in the candidate description and validation stages.
 
 ## Risk and rollback
 
-Migration 94 adds audit fields to Decisions and head dispositions, plus a unique final-Review grant index. Historical records retain User attribution; legacy snapshots default missing attribution to User. Delegated discard keeps the existing stopped-writer, exact-instance, PR validation, and closure checks, and records its Decision in the teardown intent.
+Migration 94 adds audit fields to Decisions and head dispositions. Migration 95 stores the one-time final Review grant and application result in `review_cap_grants`, included in Task snapshots. The notification Notice is not authority. Historical records retain User attribution; legacy snapshots default missing attribution to User. Delegated discard keeps the existing stopped-writer, exact-instance, PR validation, and closure checks, and records its Decision in the teardown intent.
 
 Rollback: stop Posse activity, back up the Posse home, and revert this commit. Preserve the audit columns and Decision history when returning to an older binary; do not delete delegated Decisions to make an older schema appear current. Restoring a pre-migration home loses later activity and requires an explicit User recovery choice.

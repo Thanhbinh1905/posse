@@ -155,7 +155,7 @@ SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 		}
 	}
 	var finalReview bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='review_cap_final_review' AND CAST(json_extract(data_json,'$.round') AS INTEGER)=?)`, admission.ChangeTaskID, admission.Round).Scan(&finalReview); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_cap_grants WHERE task_id=? AND round=?)`, admission.ChangeTaskID, admission.Round).Scan(&finalReview); err != nil {
 		return err
 	}
 	if finalReview {

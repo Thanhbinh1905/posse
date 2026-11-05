@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -207,6 +208,22 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		if !ok || taskRef != taskIDString(task.Seq) || task.Type != "change" {
 			return axi.Failure("decision_refused", "Review cap Decision binding is invalid", false)
 		}
+		if decision.Answer == "final-fix" {
+			grant, err := db.ReviewCapGrant(out.Context, task.ID)
+			if err == nil {
+				if grant.DecisionID != decision.ID {
+					return axi.Failure("review_final_fix_spent", "the one final repair and Review allowance belongs to another Decision", false)
+				}
+				var result axi.Object
+				if err := json.Unmarshal([]byte(grant.ResultJSON), &result); err != nil {
+					return err
+				}
+				return out.Print(result)
+			}
+			if !store.IsNotFound(err) {
+				return err
+			}
+		}
 		actual, err := currentReviewCapHead(out.Context, db, project, task)
 		if err != nil {
 			return err
@@ -234,13 +251,6 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			}
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "head", Value: expectedHead}})
 		case "final-fix":
-			var granted bool
-			if err := db.QueryRowContext(out.Context, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='review_cap_final_review')`, task.ID).Scan(&granted); err != nil {
-				return err
-			}
-			if granted {
-				return axi.Failure("review_final_fix_spent", "the one final repair and Review allowance has already been granted; choose rethink, accept-head or discard", false)
-			}
 			queued, err := s.queueReviewFix(out.Context, db, project, task, nil, true)
 			var failure *axi.Error
 			empty := errors.As(err, &failure) && failure.Code == "review_fix_empty"
@@ -252,14 +262,19 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := db.CreateNotice(out.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "review_cap_final_review", Summary: "One final independent Review authorized; this is not head acceptance", DataJSON: marshalJSON(map[string]any{"decision": id, "round": usage.ReviewRounds + 1})}); err != nil {
-				return err
-			}
 			state := "final-fix-queued"
 			if empty {
 				state = "final-review-ready"
 			}
-			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: state}, {Key: "message", Value: queued.MessageID}, {Key: "patterns", Value: queued.Selected}, {Key: "help", Value: []any{"After repair, run `posse review start " + taskIDString(task.Seq) + "`; one final Review is allowed, not acceptance"}}})
+			result := axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: state}, {Key: "message", Value: queued.MessageID}, {Key: "patterns", Value: queued.Selected}, {Key: "help", Value: []any{"After repair, run `posse review start " + taskIDString(task.Seq) + "`; one final Review is allowed, not acceptance"}}}
+			grant, err := db.RecordReviewCapGrant(out.Context, store.ReviewCapGrant{TaskID: task.ID, DecisionID: decision.ID, Round: usage.ReviewRounds + 1, ResultJSON: marshalJSON(result)})
+			if err != nil {
+				return err
+			}
+			if _, err := db.CreateNotice(out.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "review_cap_final_review", Summary: "One final independent Review authorized; this is not head acceptance", DataJSON: marshalJSON(map[string]any{"decision": id, "round": grant.Round})}); err != nil {
+				return err
+			}
+			return out.Print(result)
 		case "rethink":
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "rethink"}, {Key: "help", Value: []any{"Create a new Change Brief with `supersedes: " + taskIDString(task.Seq) + "`, then run `posse start --brief <file>`; inherited findings stay visible without being reported again.", "The capped Task remains unchanged; use the normal discard or Orphan path when appropriate."}}})
 		case "discard":

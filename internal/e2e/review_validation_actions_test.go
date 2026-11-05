@@ -435,12 +435,47 @@ func TestReviewCapFinalFixWithoutOpenPatternsNeedsReview(t *testing.T) {
 	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code != 0 || !strings.Contains(out, "final-review-ready") {
 		t.Fatalf("empty patterns recovery: %d %s", code, out)
 	}
-	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code == 0 {
-		t.Fatalf("repeated grant: %s", out)
+	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code != 0 || !strings.Contains(out, "final-review-ready") {
+		t.Fatalf("retry must return the existing application: %d %s", code, out)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE notices SET acked_at=1,delivered_at=1 WHERE task_id=? AND kind='review_cap_final_review'`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 140; i++ {
+		if _, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: change.ID, Kind: "test-history", Summary: "Advance retained history", DataJSON: "{}", AckedAt: 1, DeliveredAt: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.db.PersistTask(context.Background(), change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RebuildFromSnapshots(context.Background(), f.home); err != nil {
+		t.Fatal(err)
+	}
+	var notices int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='review_cap_final_review'`, change.ID).Scan(&notices); err != nil || notices != 0 {
+		t.Fatalf("grant Notice was not aged out: %d %v", notices, err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(id)); code != 0 || !strings.Contains(out, "final-review-ready") {
+		t.Fatalf("retry after rebuild: %d %s", code, out)
 	}
 	recordReviewRound(t, f, seq, "inconclusive", `{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`)
 	if code, out := runReviewIdentityCLI(t, f, "review", "start", seq, "--profile", "reviewer"); code == 0 {
 		t.Fatalf("final Review allowance was reused: %s", out)
+	}
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.db.RaiseDecision(context.Background(), store.DecisionRequest{ProjectID: f.project.ID, TaskID: change.ID, Kind: "review_cap", Origin: "review_cap:" + seq + ":" + candidate.CandidateSHA + ":recovery:999", Question: "Another final repair?", Options: []string{"final-fix"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(other.ID), "final-fix", "--user-approved", "Try another repair"); code != 0 {
+		t.Fatal(out)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(other.ID)); code == 0 || !strings.Contains(out, "review_final_fix_spent") {
+		t.Fatalf("distinct Decision renewed allowance: %d %s", code, out)
 	}
 	var dispositions int
 	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_dispositions WHERE ship_task_id=?`, change.ID).Scan(&dispositions); err != nil || dispositions != 0 {
@@ -689,8 +724,12 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "final-fix-queued") {
 		t.Fatalf("apply final-fix: %d %s", code, output)
 	}
-	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code == 0 || strings.Contains(output, "final-fix-queued") {
-		t.Fatalf("duplicate final-fix must not report a newly queued instruction: %d %s", code, output)
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "final-fix-queued") {
+		t.Fatalf("retry final-fix must return the existing application: %d %s", code, output)
+	}
+	var repairs int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, change.ID).Scan(&repairs); err != nil || repairs != 1 {
+		t.Fatalf("retry queued %d repair rounds: %v", repairs, err)
 	}
 	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)

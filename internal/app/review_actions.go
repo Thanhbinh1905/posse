@@ -207,7 +207,7 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 		return reviewFixQueued{}, axi.Failure("review_fix_budget_exhausted", "the frozen Review fix-round budget is exhausted", false)
 	}
 	if !result.Queued {
-		return reviewFixQueued{}, axi.Failure("review_fix_duplicate", "the same whole-pattern fix instruction already exists for this head", false)
+		return reviewFixQueued{MessageID: result.MessageID, Seq: result.Seq, Selected: patternNames}, axi.Failure("review_fix_duplicate", "the same whole-pattern fix instruction already exists for this head", false)
 	}
 	return reviewFixQueued{MessageID: result.MessageID, Seq: result.Seq, Selected: patternNames}, nil
 }
