@@ -13,6 +13,7 @@ var (
 	ErrBranchAuthorWriterActive = errors.New("previous branch author is still active")
 	ErrBranchAuthorHeadChanged  = errors.New("branch head changed since the previous author claim")
 	ErrBranchAuthorStale        = errors.New("branch author claim is stale")
+	ErrBranchAuthorForeign      = errors.New("another Task owns the branch author claim")
 )
 
 type BranchAuthorClaim struct {

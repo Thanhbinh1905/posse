@@ -310,6 +310,187 @@ func TestPRExecutorPoliciesAreRecordedSeparatelyFromMergeAndTeardown(t *testing.
 	}
 }
 
+func TestRelaunchAfterExecutorReleaseOrSuspendReacquiresBranchAuthor(t *testing.T) {
+	for _, variant := range []string{"release", "release-pruned", "suspend"} {
+		t.Run(variant, func(t *testing.T) {
+			policy := strings.TrimSuffix(variant, "-pruned")
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			defer fixture.db.Close()
+			if variant == "release-pruned" {
+				pooled := filepath.Join(fixture.home, "pool", "shop", "sandbox-1")
+				if err := os.MkdirAll(filepath.Dir(pooled), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, fixture.repo, "worktree", "move", fixture.worktree, pooled)
+				if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET worktree_path=? WHERE id=?`, pooled, fixture.task.ID); err != nil {
+					t.Fatal(err)
+				}
+				fixture.worktree, fixture.task.WorktreePath = pooled, pooled
+			}
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR: %d %s %s", code, output, stderr)
+			}
+			attachPRFixtureSandbox(t, fixture)
+			repository, err := gitCommonDir(context.Background(), fixture.worktree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(fixture.home, "config.toml")
+			configBody, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, append(configBody, []byte("\n[profiles.worker]\nkind = \"claude\"\n")...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET profile='worker',launches=1 WHERE id=?`, fixture.task.ID); err != nil {
+				t.Fatal(err)
+			}
+			if policy == "release" {
+				removeFixtureTaskPane(fixture)
+			}
+			fake := fixture.service.Herdr.(*herdr.Fake)
+			fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true}}`)
+			fake.BeforeCall = func(method string) {
+				if method != "agent.start" {
+					return
+				}
+				for i := range fake.SnapshotValue.Panes {
+					if fake.SnapshotValue.Panes[i].Label == fixture.task.PaneLabel {
+						fake.SnapshotValue.Panes[i].Agent = "claude"
+						fake.SnapshotValue.Panes[i].AgentStatus = "working"
+						return
+					}
+				}
+				fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "working"})
+			}
+			if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", policy); code != 0 {
+				t.Fatalf("set %s policy: %d %s %s", policy, code, output, stderr)
+			}
+			if variant == "release-pruned" {
+				if err := os.WriteFile(configPath, append(configBody, []byte("\n[profiles.worker]\nkind = \"claude\"\n\n[pool]\nkeep_idle = 0\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if code, output, stderr := fixture.run("pool", "prune", "--yes"); code != 0 {
+					t.Fatalf("prune released Sandbox: %d %s %s", code, output, stderr)
+				}
+				if _, err := os.Stat(fixture.worktree); !os.IsNotExist(err) {
+					t.Fatalf("former Sandbox still exists after prune: %v", err)
+				}
+			}
+			if code, output, stderr := fixture.run("relaunch", "t1"); code != 0 {
+				t.Fatalf("relaunch after %s: %d %s %s", policy, code, output, stderr)
+			}
+			relaunched, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+			if err != nil || relaunched.Launches != 2 || relaunched.State != store.StateMerging {
+				t.Fatalf("relaunched Task = %#v, err=%v", relaunched, err)
+			}
+			sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID)
+			if err != nil || sandbox.State != "held" || sandbox.TaskID != fixture.task.ID {
+				t.Fatalf("relaunch Sandbox = %#v, err=%v", sandbox, err)
+			}
+			claim, err := fixture.db.BranchAuthor(context.Background(), repository, fixture.task.Branch)
+			if err != nil || claim.Generation != 2 || claim.Attempt != 2 || claim.HeadSHA != fixture.headSHA {
+				t.Fatalf("relaunch author claim = %#v, err=%v", claim, err)
+			}
+		})
+	}
+}
+
+func TestRelaunchAfterReleaseRefusesWhenTheHeadClaimOrStoppedWriterCannotBeVerified(t *testing.T) {
+	for _, refusal := range []string{"head", "branch-advanced", "claim-lock", "writer-active", "foreign-author"} {
+		t.Run(refusal, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			defer fixture.db.Close()
+			fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+			if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR: %d %s %s", code, output, stderr)
+			}
+			attachPRFixtureSandbox(t, fixture)
+			repository, err := gitCommonDir(context.Background(), fixture.worktree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(fixture.home, "config.toml")
+			configBody, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, append(configBody, []byte("\n[profiles.worker]\nkind = \"claude\"\n")...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET profile='worker',launches=1 WHERE id=?`, fixture.task.ID); err != nil {
+				t.Fatal(err)
+			}
+			removeFixtureTaskPane(fixture)
+			if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+				t.Fatalf("release executor: %d %s %s", code, output, stderr)
+			}
+			switch refusal {
+			case "head":
+				if _, err := fixture.db.ExecContext(context.Background(), `UPDATE branch_authorship SET head_sha=? WHERE repository=? AND branch=?`, strings.Repeat("f", 40), repository, fixture.task.Branch); err != nil {
+					t.Fatal(err)
+				}
+			case "branch-advanced":
+				tree, err := gitOutput(context.Background(), fixture.repo, "rev-parse", fixture.headSHA+"^{tree}")
+				if err != nil {
+					t.Fatal(err)
+				}
+				advancedHead, err := gitOutput(context.Background(), fixture.repo, "commit-tree", tree, "-p", fixture.headSHA, "-m", "unexpected post-release commit")
+				if err != nil {
+					t.Fatal(err)
+				}
+				gitTest(t, fixture.repo, "update-ref", "refs/heads/"+fixture.task.Branch, advancedHead)
+			case "claim-lock":
+				lock, err := acquireTaskBranchAuthorLock(context.Background(), fixture.worktree, fixture.task.Branch)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lock.Close()
+			case "foreign-author":
+				other, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "competing author", State: store.StateSpawning, Branch: fixture.task.Branch})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, other, 1, fixture.headSHA, fixture.headSHA, true); err != nil {
+					t.Fatal(err)
+				}
+			case "writer-active":
+				fake := fixture.service.Herdr.(*herdr.Fake)
+				fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: fixture.task.PaneID, WorkspaceID: fixture.task.HerdrWorkspaceID, Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "working"})
+			}
+			fake := fixture.service.Herdr.(*herdr.Fake)
+			fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true}}`)
+			fake.BeforeCall = func(method string) {
+				if method == "agent.start" {
+					fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "working"})
+				}
+			}
+			code, output, stderr := fixture.run("relaunch", "t1")
+			if code == 0 {
+				t.Fatalf("relaunch ignored %s refusal: %s %s", refusal, output, stderr)
+			}
+			if _, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID); !store.IsNotFound(err) {
+				t.Fatalf("refused relaunch acquired Sandbox: err=%v", err)
+			}
+			unchanged, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+			if err != nil || unchanged.Launches != 1 {
+				t.Fatalf("refused relaunch changed Task attempt: %#v err=%v", unchanged, err)
+			}
+			if got := fixture.service.Herdr.(*herdr.Fake).CallCount("agent.start"); got != 0 {
+				t.Fatalf("refused relaunch started %d agents", got)
+			}
+		})
+	}
+}
+
 func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()

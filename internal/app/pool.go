@@ -477,6 +477,14 @@ func (s *Service) listSandboxes(ctx *axi.Context) error {
 }
 
 func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, task store.Task, home string, cleanMode string, setup []string) (store.Sandbox, error) {
+	return acquireSandboxWithBranch(ctx, db, project, task, home, cleanMode, setup, false)
+}
+
+func acquireSandboxForExistingBranch(ctx context.Context, db *store.DB, project store.Project, task store.Task, home string, cleanMode string, setup []string) (store.Sandbox, error) {
+	return acquireSandboxWithBranch(ctx, db, project, task, home, cleanMode, setup, true)
+}
+
+func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.Project, task store.Task, home string, cleanMode string, setup []string, existingBranch bool) (store.Sandbox, error) {
 	base := poolProjectPath(home, project.Name)
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return store.Sandbox{}, err
@@ -577,12 +585,21 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 				}
 				continue
 			}
-			base, err := taskCheckoutBase(ctx, project.Root, task, "", task.BaseRef)
-			if err != nil {
-				return sandbox, err
-			}
-			if _, err := gitOutput(ctx, sandbox.Path, "checkout", "-b", task.Branch, base); err != nil {
-				return sandbox, err
+			if existingBranch {
+				if _, err := gitOutput(ctx, project.Root, "show-ref", "--verify", "--quiet", "refs/heads/"+task.Branch); err != nil {
+					return sandbox, errors.Join(err, abandonUnpreparedSandbox(ctx, db, project, task, sandbox))
+				}
+				if _, err := gitOutput(ctx, sandbox.Path, "checkout", task.Branch); err != nil {
+					return sandbox, errors.Join(err, abandonUnpreparedSandbox(ctx, db, project, task, sandbox))
+				}
+			} else {
+				base, err := taskCheckoutBase(ctx, project.Root, task, "", task.BaseRef)
+				if err != nil {
+					return sandbox, err
+				}
+				if _, err := gitOutput(ctx, sandbox.Path, "checkout", "-b", task.Branch, base); err != nil {
+					return sandbox, err
+				}
 			}
 		}
 		if err := db.UpdateTaskSandboxPath(ctx, task.ID, sandbox.ID, sandbox.Path); err != nil {
