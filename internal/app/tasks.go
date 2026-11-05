@@ -266,9 +266,6 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return briefError(err)
 	}
-	if hasLandedPrerequisite(brief.After) && (brief.Base != "" || len(brief.BaseByRepo) != 0) {
-		return briefError(&dispatch.BriefError{Field: "base", Reason: "a Change Task after a landed prerequisite must start from the default branch"})
-	}
 	if !project.IsWorkspace() && brief.Type == "change" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("remote_missing", "Project "+project.Name+" has no origin remote to open a pull request against", false,
 			"Add one with `git remote add origin <url>` and push "+project.DefaultBranch+", or remove `merge_mode: pr` from the Brief to Merge locally")
