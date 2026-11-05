@@ -1016,7 +1016,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	for _, call := range fake.Calls {
 		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
 			args := call.Params["args"].([]string)
-			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "{name}", "SKILL.md"))
+			freshStart = len(args) == 9 && equalStrings(args[:7], []string{"--disable", "memories", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[7] == "-c" && strings.HasPrefix(args[8], "developer_instructions=") && strings.Contains(args[8], filepath.Join(skillRoots[0], "skills", "{name}", "SKILL.md"))
 		}
 	}
 	deliveredRelaunch := false
