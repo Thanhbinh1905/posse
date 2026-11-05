@@ -489,7 +489,16 @@ func acquireSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 		}
 	}
 	if adopted && task.SandboxID != 0 {
-		return db.SandboxByTask(ctx, task.ID)
+		var sandbox store.Sandbox
+		err := withSandboxStateLock(ctx, db, func() error {
+			var err error
+			sandbox, err = db.SandboxByTask(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			return lockClaimedSandbox(ctx, db, project, sandbox, task)
+		})
+		return sandbox, err
 	}
 	base := poolProjectPath(home, project.Name)
 	if err := os.MkdirAll(base, 0o700); err != nil {

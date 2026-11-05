@@ -9,9 +9,20 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
 func TestMaintenanceAdoptsReleasedPRBranch(t *testing.T) {
+	testMaintenanceAdoptsPRBranch(t, true)
+}
+
+func TestMaintenanceAdoptsLockedPRBranch(t *testing.T) {
+	testMaintenanceAdoptsPRBranch(t, false)
+}
+
+func testMaintenanceAdoptsPRBranch(t *testing.T, released bool) {
+	t.Helper()
 	f := newPRLifecycleFixture(t)
 	brief := filepath.Join(f.root, "source.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Source PR\ndone_when: committed change\n---\n"), 0600); err != nil {
@@ -21,7 +32,19 @@ func TestMaintenanceAdoptsReleasedPRBranch(t *testing.T) {
 	stopBackgroundWatch(t, f)
 	head := strings.TrimSpace(gitTest(t, f.env, source.WorktreePath, "rev-parse", "HEAD"))
 	f.writeGraphQLPulls(t, fakePull{alias: "pr1", state: "OPEN", checks: "PENDING", review: "REVIEW_REQUIRED", mergeable: "MERGEABLE", head: head})
-	runPosse(t, f.binary, f.repo, f.leadEnv, "pr", "release", "t1", "--policy", "release")
+	if released {
+		runPosse(t, f.binary, f.repo, f.leadEnv, "pr", "release", "t1", "--policy", "release")
+	} else {
+		locks := gitTest(t, f.env, f.repo, "worktree", "list", "--porcelain")
+		if !strings.Contains(locks, "locked posse: held by t1") {
+			t.Fatalf("source is not normally locked: %s", locks)
+		}
+		f.exitWorker(t, "t1")
+		client := herdr.NewWithEnv("herdr", f.env)
+		if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": source.PaneID}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	adoption := filepath.Join(f.root, "adopt.md")
 	if err := os.WriteFile(adoption, []byte("---\ntype: change\ntitle: Maintain existing PR\ndone_when: maintenance committed\nadopt: t1\n---\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -31,6 +54,16 @@ func TestMaintenanceAdoptsReleasedPRBranch(t *testing.T) {
 		t.Fatalf("admission did not retain branch: %s", output)
 	}
 	next := f.mustTask(t, "t2")
+	if !released {
+		if next.SandboxID != source.SandboxID || next.WorktreePath != source.WorktreePath {
+			t.Fatalf("held checkout was not transferred: %+v", next)
+		}
+		locks := gitTest(t, f.env, f.repo, "worktree", "list", "--porcelain")
+		if !strings.Contains(locks, "locked posse: held by t2") {
+			t.Fatalf("lock was not transferred: %s", locks)
+		}
+		runPosse(t, f.binary, f.repo, f.leadEnv, "list")
+	}
 	if next.Branch != source.Branch || next.PRURL != source.PRURL {
 		t.Fatalf("adopting Task lost custody: %+v", next)
 	}
