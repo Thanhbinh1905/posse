@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -36,7 +35,7 @@ func noticeDeliveryUncertaintyResult(delivery store.NoticeDelivery, reason strin
 	return axi.Object{
 		{Key: "state", Value: "uncertain"},
 		{Key: "delivery", Value: noticeDeliveryRow(delivery, false)},
-		{Key: "warning", Value: fmt.Sprintf("Receipt %s for Notice batch %s may have reached %s. %s for Notice IDs %s. Resolve it only after confirming the outcome with `posse watch --receipt %s --receipt-outcome accepted|rejected`.", delivery.DeliveryID, delivery.BatchID, delivery.Destination, reason, strings.Join(int64Strings(delivery.NoticeIDs), ","), delivery.DeliveryID)},
+		{Key: "warning", Value: fmt.Sprintf("Notice delivery is uncertain. Notice count: %d. %s. Inspect the Lead session before retrying. Resolve receipt %s only after confirming the outcome with `posse watch --receipt %s --receipt-outcome accepted|rejected`.", len(delivery.NoticeIDs), reason, delivery.DeliveryID, delivery.DeliveryID)},
 		{Key: "help", Value: []any{"Inspect the adapter session or recorded effect; do not retry the Notice blindly", fmt.Sprintf("Resolve the confirmed outcome with `posse watch --receipt %s --receipt-outcome accepted|rejected`", delivery.DeliveryID)}},
 	}
 }

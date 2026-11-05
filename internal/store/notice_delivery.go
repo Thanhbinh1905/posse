@@ -658,18 +658,14 @@ func markNoticeDeliveryUncertainTx(ctx context.Context, tx interface {
 		return err
 	}
 	if exists == 0 {
-		_, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'notice_delivery_uncertain',?,?,?)`, delivery.ProjectID, fmt.Sprintf("Notice receipt %s for batch %s may have reached %s; inspect the Lead session before retrying IDs %s, then explicitly resolve the receipt as accepted or rejected", delivery.DeliveryID, delivery.BatchID, delivery.Destination, formatNoticeIDs(delivery.NoticeIDs)), string(data), at)
+		_, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'notice_delivery_uncertain',?,?,?)`, delivery.ProjectID, noticeDeliveryUncertaintySummary(delivery), string(data), at)
 		return err
 	}
 	return nil
 }
 
-func formatNoticeIDs(ids []int64) string {
-	parts := make([]string, len(ids))
-	for i, id := range ids {
-		parts[i] = fmt.Sprint(id)
-	}
-	return strings.Join(parts, ",")
+func noticeDeliveryUncertaintySummary(delivery NoticeDelivery) string {
+	return fmt.Sprintf("Notice delivery is uncertain. Notice count: %d. Inspect the Lead session before retrying, then resolve only after confirming accepted or rejected", len(delivery.NoticeIDs))
 }
 
 func (db *DB) PersistNoticeDeliverySnapshotIfPresent(ctx context.Context, projectID int64) error {
