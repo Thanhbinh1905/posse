@@ -187,6 +187,29 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if project.IsDirectory() {
 		return axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false, "Register a Git repository with `posse project add`")
 	}
+	if brief.Adopt != "" {
+		source, err := db.Task(ctx.Context, project.ID, brief.Adopt)
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+		if store.IsNotFound(err) || source.Type != "change" || source.PRURL == "" {
+			return axi.Failure("adoption_refused", "adopt must identify an existing Change Task with an open PR/MR", false)
+		}
+		var pendingDecision bool
+		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND answered_at=0)`, source.ID).Scan(&pendingDecision); err != nil {
+			return err
+		}
+		if pendingDecision {
+			return axi.Failure("adoption_refused", "the source Task holds custody under an unanswered Decision", false)
+		}
+		snapshot, err := s.snapshot(ctx.Context)
+		if err != nil {
+			return err
+		}
+		if pane, found := findTaskPane(snapshot.Panes, source); found && pane.Agent != "" {
+			return axi.Failure("adoption_refused", "the source Task still has a live executor; stop it before adoption", false)
+		}
+	}
 	var supersededTask *store.Task
 	if brief.Supersedes != "" {
 		source, err := s.currentTask(ctx.Context, db, project, brief.Supersedes)
