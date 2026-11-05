@@ -50,8 +50,8 @@ func TestStoppedWorkerPaneCanBeRelaunched(t *testing.T) {
 					t.Fatalf("relaunch %d/%d failed: %v\n%s", attempt, attempts, err, output)
 				}
 				current := fixture.mustTask(t, "t1")
-				if current.Launches != initial.Launches+attempt || current.State != store.StateWorking || current.PaneID != initial.PaneID || current.WorktreePath != initial.WorktreePath {
-					t.Fatalf("relaunch %d/%d changed Worker identity or Sandbox: initial=%#v current=%#v output=%s", attempt, attempts, initial, current, output)
+				if current.ID != initial.ID || current.Launches != initial.Launches+attempt || current.State != store.StateWorking || current.PaneLabel != initial.PaneLabel || current.WorktreePath != initial.WorktreePath || current.SandboxID != initial.SandboxID || current.Branch != initial.Branch || current.HerdrWorkspaceID != initial.HerdrWorkspaceID {
+					t.Fatalf("relaunch %d/%d changed Task or Sandbox identity: initial=%#v current=%#v output=%s", attempt, attempts, initial, current, output)
 				}
 				claims, err := fixture.db.BranchAuthorsForTask(context.Background(), current.ID)
 				if err != nil || len(claims) != 1 || claims[0].TaskID != current.ID || claims[0].Attempt != current.Launches {

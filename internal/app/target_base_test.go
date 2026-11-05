@@ -69,6 +69,220 @@ func TestRepositoryTaskWithOnlyTargetStartsFromFrozenTarget(t *testing.T) {
 	}
 }
 
+func TestLandedPrerequisiteAllowsExplicitExistingFeatureBase(t *testing.T) {
+	f := newStartFixture(t)
+	gitTest(t, f.repo, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(f.repo, "feature.txt"), []byte("prerequisite landed\\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "add", "feature.txt")
+	gitTest(t, f.repo, "commit", "-m", "land prerequisite on feature")
+	featureTip := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "feature"))
+	gitTest(t, f.repo, "checkout", "main")
+	ctx := context.Background()
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Prerequisite", ShortName: "prerequisite", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", TargetBranch: "feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateDone, "worker", "fixture Worker completed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateDone, store.StateMerged, "cli", "fixture prerequisite landed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nbase: feature\ntarget: feature\nafter: t1:landed\n---\nBuild on the landed feature.\n"
+	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := f.start(t)
+	if code != 0 {
+		t.Fatalf("start with a landed feature prerequisite: %d %s", code, output)
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, f.project.ID, "t2")
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(gitTest(t, task.WorktreePath, "rev-parse", "HEAD")); got != featureTip {
+		t.Fatalf("follow-up started at %s, want feature tip", got)
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" || plan.Execution.Base != "refs/heads/feature" {
+		t.Fatalf("landed prerequisite was not retained with the explicit base: plan=%#v err=%v", plan, err)
+	}
+}
+
+func TestQueuedFeatureBaseAndPrerequisiteSurviveStoreRestart(t *testing.T) {
+	f := newStartFixture(t)
+	gitTest(t, f.repo, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(f.repo, "feature.txt"), []byte("prerequisite landed\\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "add", "feature.txt")
+	gitTest(t, f.repo, "commit", "-m", "land prerequisite on feature")
+	featureCommit := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "feature"))
+	gitTest(t, f.repo, "checkout", "main")
+	ctx := context.Background()
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Prerequisite", ShortName: "prerequisite", MergeMode: "local", TargetBranch: "feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nbase: feature\ntarget: feature\nafter: t1:landed\n---\nBuild on the landed feature.\n"
+	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, f.service, "start", "--brief", f.brief, "--name", "follow-up")
+	if code != 0 {
+		t.Fatalf("queue feature-base Task: %d %s", code, output)
+	}
+	checkPlan := func() {
+		t.Helper()
+		db, err := store.Open(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		task, err := db.Task(ctx, f.project.ID, "t2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := task.AdmittedPlan()
+		if err != nil || plan == nil || task.State != store.StateQueued || task.Branch != "" || task.WorktreePath != "" || task.SandboxID != 0 || plan.Execution.Base != "refs/heads/feature" || plan.Execution.BaseCommit != featureCommit || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" {
+			t.Fatalf("queued plan lost its feature base or prerequisite: task=%+v plan=%#v err=%v", task, plan, err)
+		}
+	}
+	checkPlan()
+	if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("queued dependent acquired Worker resources before its prerequisite landed: %#v", f.fake.Calls)
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := db.Task(ctx, f.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerged, "cli"}} {
+		if err := db.Transition(ctx, predecessorID, transition.from, transition.to, transition.source, "fixture prerequisite landed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(f.home, f.fake)
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.ProjectByID(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.retryPendingLaunches(ctx, db, project, cfg, f.fake.SnapshotValue); err != nil {
+		t.Fatalf("reconcile queued feature-base Task after restart: %v", err)
+	}
+	started, err := db.Task(ctx, f.project.ID, "t2")
+	if err != nil || started.State != store.StateWorking || started.Branch != store.TaskBranchName(queued.Seq) || started.SandboxID == 0 {
+		t.Fatalf("queued dependent did not launch after restart: task=%+v err=%v", started, err)
+	}
+	if got := strings.TrimSpace(gitTest(t, started.WorktreePath, "rev-parse", "HEAD")); got != featureCommit {
+		t.Fatalf("restarted dependent started at %s, want admitted feature commit %s", got, featureCommit)
+	}
+	plan, err := started.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" || plan.Execution.BaseCommit != featureCommit {
+		t.Fatalf("restarted dependent lost its admitted base or prerequisite: plan=%#v err=%v", plan, err)
+	}
+	unmet, err := db.UnmetTaskDependencies(ctx, project.ID, plan.Dependencies)
+	if err != nil || len(unmet) != 0 {
+		t.Fatalf("landed prerequisite remains unmet: %#v %v", unmet, err)
+	}
+}
+
+func TestMissingExplicitBaseRefusesLandedDependencyBeforeEffects(t *testing.T) {
+	f := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Prerequisite", ShortName: "prerequisite", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerged, "cli"}} {
+		if err := db.Transition(ctx, predecessorID, transition.from, transition.to, transition.source, "fixture prerequisite landed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nbase: missing\ntarget: main\nafter: t1:landed\n---\nBuild on the landed feature.\n"
+	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, f.service, "start", "--brief", f.brief, "--name", "follow-up")
+	if code == 0 || !strings.Contains(output, "base branch") || !strings.Contains(output, "does not exist") {
+		t.Fatalf("start accepted a missing base: code=%d output=%s", code, output)
+	}
+	if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
+		t.Fatalf("invalid base acquired Worker resources: calls=%#v", f.fake.Calls)
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if tasks, err := db.Tasks(ctx, f.project.ID, true); err != nil || len(tasks) != 1 {
+		t.Fatalf("invalid base left Tasks %#v (%v)", tasks, err)
+	}
+	if sandboxes, err := db.Sandboxes(ctx, f.project.ID); err != nil || len(sandboxes) != 0 {
+		t.Fatalf("invalid base acquired Sandboxes %#v (%v)", sandboxes, err)
+	}
+	if branches := strings.TrimSpace(gitTest(t, f.repo, "branch", "--list", "posse/t2")); branches != "" {
+		t.Fatalf("invalid base claimed a Task branch: %q", branches)
+	}
+}
+
 func TestRepositoryTaskExplicitBaseWinsOverTargetAndWarns(t *testing.T) {
 	f := newStartFixture(t)
 	addOrigin(t, f.repo)
@@ -102,6 +316,128 @@ func TestRepositoryTaskWithoutBranchSelectionStillStartsFromDefaultBranch(t *tes
 	task, _ := f.onlyTask(t)
 	if plan, err := task.AdmittedPlan(); err != nil || plan == nil || plan.Execution.BaseCommit != "" || task.BaseRef != "main" {
 		t.Fatalf("default branch base changed: base_ref=%s plan=%#v err=%v", task.BaseRef, plan, err)
+	}
+}
+
+func TestWorkspaceLandedPrerequisiteAllowsExplicitMemberBase(t *testing.T) {
+	fastLaunchRetries(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	workspace := workspaceFixture(t, root)
+	workerRoot := filepath.Join(workspace, "worker")
+	stagingAhead(t, workerRoot)
+	home := filepath.Join(root, "posse")
+	if err := os.MkdirAll(filepath.Join(home, "projects", "stack"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configText := "[defaults]\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detected, err := detectProject(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := registerDetected(ctx, db, detected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Prerequisite", ShortName: "prerequisite", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture prerequisite started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTaskRepos(ctx, predecessorID, []store.TaskRepo{{Repo: "worker", TargetBranch: "staging", MergeMode: "local"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:stack:lead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:stack:lead", Agent: "claude", AgentStatus: "idle"}}}
+	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t2","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2"}}`)
+	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
+	service := testService(home, fake)
+	t.Chdir(workspace)
+	brief := filepath.Join(root, "brief.md")
+	text := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nrepos: [worker]\nbase: {worker: staging}\ntarget: {worker: staging}\nafter: t1:landed\n---\nBuild on the landed feature.\n"
+	if err := os.WriteFile(brief, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, service, "start", "--brief", brief, "--name", "follow-up")
+	if code != 0 {
+		t.Fatalf("queue workspace Task with a landed prerequisite pending: %d %s", code, output)
+	}
+	if fake.CallCount("tab.create") != 0 || fake.CallCount("agent.start") != 0 {
+		t.Fatalf("queued workspace Task acquired Worker resources before its prerequisite landed: %#v", fake.Calls)
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := db.Task(ctx, project.ID, "t2")
+	if err != nil || queued.State != store.StateQueued || queued.Branch != "" || queued.WorktreePath != "" || queued.SandboxID != 0 {
+		t.Fatalf("workspace Task was not queued without resources: task=%+v err=%v", queued, err)
+	}
+	plan, err := queued.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" {
+		t.Fatalf("queued workspace plan lost its prerequisite: plan=%#v err=%v", plan, err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerged, "cli"}} {
+		if err := db.Transition(ctx, predecessorID, transition.from, transition.to, transition.source, "fixture prerequisite landed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service = testService(home, fake)
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err = db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.retryPendingLaunches(ctx, db, project, cfg, fake.SnapshotValue); err != nil {
+		t.Fatalf("reconcile queued workspace Task after restart: %v", err)
+	}
+	started, err := db.Task(ctx, project.ID, "t2")
+	if err != nil || started.State != store.StateWorking || started.SandboxID == 0 {
+		t.Fatalf("queued workspace Task did not launch: task=%+v err=%v", started, err)
+	}
+	repos, err := db.TaskRepos(ctx, started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureCommit := strings.TrimSpace(gitTest(t, workerRoot, "rev-parse", "staging"))
+	if len(repos) != 1 || repos[0].BaseRef != featureCommit || repos[0].TargetBranch != "staging" {
+		t.Fatalf("launched workspace member lost its feature base: %#v", repos)
+	}
+	if got := strings.TrimSpace(gitTest(t, filepath.Join(started.WorktreePath, "worker"), "rev-parse", "HEAD")); got != featureCommit {
+		t.Fatalf("workspace Member started at %s, want admitted feature commit %s", got, featureCommit)
+	}
+	plan, err = started.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" {
+		t.Fatalf("restarted workspace Task lost its prerequisite: plan=%#v err=%v", plan, err)
 	}
 }
 
