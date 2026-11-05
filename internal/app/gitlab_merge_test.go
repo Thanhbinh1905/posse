@@ -93,6 +93,7 @@ value['merge_commit_sha']=commit
 with open(path,'w') as f: json.dump(value,f)
 PY
    fi
+   if [ "${POSSE_TEST_GLAB_MERGE_ALREADY:-0}" = "1" ]; then printf 'This merge request has already been merged.\n' >&2; exit 1; fi
    printf 'Merged\n' ;;
  "auth status "*) printf 'authenticated\n' ;;
  *) printf 'unexpected glab invocation: %s\n' "$*" >&2; exit 90 ;;
@@ -740,6 +741,11 @@ func TestGitLabMergeMethodsAndFastForwardObservation(t *testing.T) {
 			if err := f.pollGitLab(t); err != nil {
 				t.Fatal(err)
 			}
+			if method == "merge" {
+				t.Setenv("POSSE_TEST_GLAB_MERGE_CONFIRMS", "1")
+				t.Setenv("POSSE_TEST_GLAB_MERGE_ALREADY", "1")
+				t.Setenv("POSSE_TEST_GLAB_MERGE_COMMIT", "")
+			}
 			if code, output, stderr := f.run("merge", "t1", "--execute", "--user-approved", "Approved"); code != 0 {
 				t.Fatalf("merge: %d %s %s", code, output, stderr)
 			}
@@ -757,11 +763,6 @@ func TestGitLabMergeMethodsAndFastForwardObservation(t *testing.T) {
 				t.Fatalf("wrong merge strategy: %q", mergeCall)
 			}
 			if method == "merge" {
-				f.setGitLabState(t, "merged", "mergeable", "success", f.headSHA)
-				// Fast-forward merges can omit both merge_commit_sha and squash_commit_sha.
-				if err := os.WriteFile(f.ghState, []byte(`{"web_url":"https://git.example.com/group/sub/shop/-/merge_requests/17","state":"merged","sha":"`+f.headSHA+`","target_branch":"main"}`), 0o600); err != nil {
-					t.Fatal(err)
-				}
 				if err := f.pollGitLab(t); err != nil {
 					t.Fatal(err)
 				}

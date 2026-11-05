@@ -520,15 +520,16 @@ func (s *Service) reconcileGitLabMergedMember(ctx context.Context, db *store.DB,
 		}
 		return false, nil
 	}
-	if mr.SHA != member.repo.GatedSHA || mr.TargetBranch != taskTargetBranch(member.project, member.task) || mr.MergeCommitSHA == "" {
+	mergeCommit := gitlabMergedCommit(mr)
+	if mr.SHA != member.repo.GatedSHA || mr.TargetBranch != taskTargetBranch(member.project, member.task) || mergeCommit == "" {
 		return false, axi.Failure("pr_merged_ungated", member.repo.Repo+": GitLab reports a merged request, but its head, target, or merge commit does not match the gated request", false)
 	}
 	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
 		return false, prefixFailure(member.repo.Repo, err)
 	}
-	observation := store.PRObservation{ProjectID: project.ID, TaskID: task.ID, PRURL: member.repo.PRURL, HeadSHA: mr.SHA, State: "MERGED", MergeCommit: mr.MergeCommitSHA, ObservedAt: time.Now().UnixMilli()}
-	notice := store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_merged", Summary: member.repo.Repo + ": " + task.Title + ": pull request merged", DataJSON: marshalJSON(map[string]any{"repo": member.repo.Repo, "url": member.repo.PRURL, "head_sha": mr.SHA, "merge_commit": mr.MergeCommitSHA}), CreatedAt: observation.ObservedAt}
-	_, err = db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, store.MemberPREffect{RepoState: store.TaskRepoMerged, MergedRef: mr.MergeCommitSHA, Notices: []store.Notice{notice}})
+	observation := store.PRObservation{ProjectID: project.ID, TaskID: task.ID, PRURL: member.repo.PRURL, HeadSHA: mr.SHA, State: "MERGED", MergeCommit: mergeCommit, ObservedAt: time.Now().UnixMilli()}
+	notice := store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_merged", Summary: member.repo.Repo + ": " + task.Title + ": pull request merged", DataJSON: marshalJSON(map[string]any{"repo": member.repo.Repo, "url": member.repo.PRURL, "head_sha": mr.SHA, "merge_commit": mergeCommit}), CreatedAt: observation.ObservedAt}
+	_, err = db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, store.MemberPREffect{RepoState: store.TaskRepoMerged, MergedRef: mergeCommit, Notices: []store.Notice{notice}})
 	return err == nil, err
 }
 

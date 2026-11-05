@@ -312,6 +312,19 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 	return "", false, axi.Failure("pr_create_failed", "glab returned no merge request URL", true, created)
 }
 
+func gitlabMergedCommit(mr gitlabMergeRequest) string {
+	if mr.MergeCommitSHA != "" {
+		return mr.MergeCommitSHA
+	}
+	if mr.SquashCommitSHA != "" {
+		return mr.SquashCommitSHA
+	}
+	if strings.EqualFold(mr.State, "merged") {
+		return mr.SHA
+	}
+	return ""
+}
+
 func gitlabObservation(ctx context.Context, forge repositoryForge, task store.Task, expectedTarget string, now int64) (store.PRObservation, []failedCheck, error) {
 	return gitlabObservationWithChecks(ctx, forge, task, expectedTarget, now, true)
 }
@@ -393,13 +406,6 @@ func gitlabObservationWithChecks(ctx context.Context, forge repositoryForge, tas
 		mergeable = "MERGEABLE"
 	}
 	encoded := marshalJSON(checks)
-	commit := mr.MergeCommitSHA
-	if commit == "" {
-		commit = mr.SquashCommitSHA
-	}
-	if state == "MERGED" && commit == "" {
-		// Fast-forward merges do not have a distinct merge or squash commit.
-		commit = mr.SHA
-	}
+	commit := gitlabMergedCommit(mr)
 	return store.PRObservation{ProjectID: task.ProjectID, TaskID: task.ID, PRURL: task.PRURL, HeadSHA: mr.SHA, State: state, Checks: encoded, Review: review, Mergeable: mergeable, MergeCommit: commit, ObservedAt: now}, checks.Failures, nil
 }

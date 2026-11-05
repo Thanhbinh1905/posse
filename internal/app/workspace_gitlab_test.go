@@ -122,7 +122,7 @@ esac
 	}
 	t.Setenv("POSSE_TEST_GLAB_MERGE_CONFIRMS", "1")
 	t.Setenv("POSSE_TEST_GLAB_MERGE_ALREADY", "1")
-	t.Setenv("POSSE_TEST_GLAB_MERGE_COMMIT", head)
+	t.Setenv("POSSE_TEST_GLAB_MERGE_COMMIT", "")
 	if code := f.run("merge", "t1", "--execute", "--user-approved", "merge both"); code != 0 {
 		t.Fatalf("merge members: %d %s", code, f.out.String())
 	}

@@ -859,7 +859,7 @@ func (s *Service) reconcileMergedPullRequest(ctx context.Context, db *store.DB, 
 		if err != nil {
 			return false, axi.Failure("pr_view_failed", "could not verify the merge request after the merge command", true, err.Error())
 		}
-		state, head, target, mergeCommit = mr.State, mr.SHA, mr.TargetBranch, mr.MergeCommitSHA
+		state, head, target, mergeCommit = mr.State, mr.SHA, mr.TargetBranch, gitlabMergedCommit(mr)
 	} else {
 		output, err := commandOutputArgs(ctx, project.Root, "gh", "pr", "view", task.PRURL, "--json", "state,headRefOid,baseRefName,mergeCommit")
 		if err != nil {
