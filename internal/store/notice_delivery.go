@@ -279,11 +279,11 @@ func (db *DB) NoticeDeliveryForDestination(ctx context.Context, projectID int64,
 	return delivery, true, err
 }
 
-func (db *DB) NoticeDeliveryForDestinationRetry(ctx context.Context, projectID int64, destination string, now int64) (NoticeDelivery, bool, error) {
+func (db *DB) NoticeDeliveryForDestinationRetry(ctx context.Context, projectID int64, destination string, now int64, skipHeld bool) (NoticeDelivery, bool, error) {
 	var deliveryID string
 	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
-		WHERE project_id=? AND destination=? AND (state IN ('rejected','uncertain') OR state IN ('claimed','printed') AND lease_until<=?)
-		ORDER BY CASE WHEN state='uncertain' THEN 0 WHEN state IN ('claimed','printed') THEN 1 ELSE 2 END,created_at,delivery_id LIMIT 1`, projectID, destination, now).Scan(&deliveryID)
+		WHERE project_id=? AND destination=? AND (state IN ('rejected','uncertain') OR state IN ('claimed','printed') AND lease_until<=?) AND (state<>'uncertain' OR NOT ?)
+		ORDER BY CASE WHEN state='uncertain' THEN 0 WHEN state IN ('claimed','printed') THEN 1 ELSE 2 END,created_at,delivery_id LIMIT 1`, projectID, destination, now, skipHeld).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NoticeDelivery{}, false, nil
 	}
@@ -294,7 +294,7 @@ func (db *DB) NoticeDeliveryForDestinationRetry(ctx context.Context, projectID i
 	return delivery, true, err
 }
 
-func (db *DB) NoticeDeliveryForOtherSession(ctx context.Context, projectID int64, destination string) (NoticeDelivery, bool, error) {
+func (db *DB) NoticeDeliveryForOtherSession(ctx context.Context, projectID int64, destination string, skipHeld bool) (NoticeDelivery, bool, error) {
 	adapter, _, ok := strings.Cut(destination, ":")
 	if !ok || strings.TrimSpace(adapter) == "" {
 		return NoticeDelivery{}, false, errors.New("Notice delivery destination must name an adapter session")
@@ -302,8 +302,8 @@ func (db *DB) NoticeDeliveryForOtherSession(ctx context.Context, projectID int64
 	var deliveryID string
 	adapterPrefix := adapter + ":"
 	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
-		WHERE project_id=? AND destination<>? AND substr(destination,1,?)=? AND state IN ('claimed','printed','uncertain')
-		ORDER BY CASE state WHEN 'uncertain' THEN 0 WHEN 'printed' THEN 1 ELSE 2 END,updated_at,delivery_id LIMIT 1`, projectID, destination, len([]rune(adapterPrefix)), adapterPrefix).Scan(&deliveryID)
+		WHERE project_id=? AND destination<>? AND substr(destination,1,?)=? AND state IN ('claimed','printed','uncertain') AND (state<>'uncertain' OR NOT ?)
+		ORDER BY CASE state WHEN 'uncertain' THEN 0 WHEN 'printed' THEN 1 ELSE 2 END,updated_at,delivery_id LIMIT 1`, projectID, destination, len([]rune(adapterPrefix)), adapterPrefix, skipHeld).Scan(&deliveryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NoticeDelivery{}, false, nil
 	}

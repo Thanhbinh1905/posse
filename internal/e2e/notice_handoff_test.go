@@ -230,6 +230,11 @@ esac
 	piReplacementEnv := setEnv(harnessEnv, "POSSE_E2E_PI_EXTENSION", filepath.Join(moduleRoot(t), "internal/app/lead_pi_extension.ts"))
 	piReplacementEnv = setEnv(piReplacementEnv, "POSSE_E2E_OLD_DELIVERY_ID", piPriorDelivery.DeliveryID)
 	piReplacementEnv = setEnv(piReplacementEnv, "POSSE_E2E_OLD_BATCH_ID", piPriorDelivery.BatchID)
+	piNoticeIDs, err := json.Marshal(piPriorDelivery.NoticeIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	piReplacementEnv = setEnv(piReplacementEnv, "POSSE_E2E_OLD_NOTICE_IDS", string(piNoticeIDs))
 	piReplacement := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/pi_notice_replacement.mjs"))
 	piReplacement.Dir = repo
 	piReplacement.Env = piReplacementEnv
