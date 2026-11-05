@@ -152,6 +152,25 @@ func (s *Service) abandonCandidate(out *axi.Context, args []string) (returnErr e
 // pendingCandidateFailure refuses Merge and withholds merge_ready while a lane
 // has a candidate that was neither promoted nor abandoned, since the head
 // Merge would deliver is no longer the Task's latest submission.
+func candidateValidationInProgress(ctx context.Context, db *store.DB, task store.Task, candidate store.ValidationCandidate) (bool, error) {
+	if candidate.State == store.ValidationCandidatePromoting {
+		return true, nil
+	}
+	if candidate.State != store.ValidationCandidateActive {
+		return false, nil
+	}
+	stages, err := db.ValidationStages(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, stage := range stages {
+		if stage.CandidateID == candidate.ID && stage.CandidateSHA == candidate.CandidateSHA && stage.TargetSHA == candidate.TargetSHA && stage.Status != "invalidated" {
+			return true, nil
+		}
+	}
+	return db.ValidationCandidateQueued(ctx, task.ProjectID, task.ID, candidate.ID, candidate.CandidateSHA)
+}
+
 func pendingCandidateFailure(ctx context.Context, db *store.DB, task store.Task) error {
 	candidates, err := db.LiveValidationCandidates(ctx, task.ID)
 	if err != nil || len(candidates) == 0 {
@@ -165,6 +184,13 @@ func pendingCandidateFailure(ctx context.Context, db *store.DB, task store.Task)
 		return err
 	}
 	message := "newer candidate " + shortSHA(candidate.SubmittedSHA) + " is pending and not promoted"
+	validationInProgress, err := candidateValidationInProgress(ctx, db, task, candidate)
+	if err != nil {
+		return err
+	}
+	if validationInProgress {
+		return axi.Failure("candidate_pending", message+"; candidate validation is already underway", false, "Wait for the Worker to finish candidate validation and promotion; do not start another Review or publish instruction")
+	}
 	if delivered != "" {
 		message += "; Merge would deliver " + shortSHA(delivered)
 	}

@@ -318,14 +318,30 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 	if currentPRURL != observation.PRURL || currentRepoState == TaskRepoMerged {
 		return false, nil
 	}
-	recoveredWatch, err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.ObservedAt)
+	var previous PRObservation
+	err = tx.QueryRowContext(ctx, `SELECT id, project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit, observed_at FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
+		Scan(&previous.ID, &previous.ProjectID, &previous.TaskID, &previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit, &previous.ObservedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if err == nil && previous.PRURL == observation.PRURL && observation.ObservedAt < previous.ObservedAt {
+		return false, nil
+	}
+	mergeRequested, err := preserveMergeRequestedObservation(previous, &observation)
 	if err != nil {
 		return false, err
 	}
-	var previous PRObservation
-	err = tx.QueryRowContext(ctx, `SELECT id, project_id, task_id, pr_url, head_sha, state, checks, review, mergeable, merge_commit FROM pr_observations WHERE task_id=? AND repo=? ORDER BY id DESC LIMIT 1`, observation.TaskID, repo).
-		Scan(&previous.ID, &previous.ProjectID, &previous.TaskID, &previous.PRURL, &previous.HeadSHA, &previous.State, &previous.Checks, &previous.Review, &previous.Mergeable, &previous.MergeCommit)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if mergeRequested {
+		filtered := effect.Notices[:0]
+		for _, notice := range effect.Notices {
+			if notice.Kind != "merge_ready" {
+				filtered = append(filtered, notice)
+			}
+		}
+		effect.Notices = filtered
+	}
+	recoveredWatch, err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, repo, observation.PRURL, observation.ObservedAt)
+	if err != nil {
 		return false, err
 	}
 	unchanged := err == nil && samePRObservation(previous, observation)

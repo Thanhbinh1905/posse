@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -394,13 +395,14 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 	if err != nil {
 		return axi.Failure("pr_url_invalid", repo.Repo+": "+err.Error(), false)
 	}
-	var headSHA, prTitle string
+	var headSHA, prTitle, mrState string
 	if forge.Kind == "gitlab" {
 		mr, viewErr := gitlabMR(ctx, forge, number)
 		if viewErr != nil {
 			return axi.Failure("pr_view_failed", repo.Repo+": could not verify the merge request head", true, viewErr.Error())
 		}
 		headSHA, prTitle = mr.SHA, mr.Title
+		mrState = strings.ToUpper(mr.State)
 	} else {
 		output, viewErr := commandOutputArgs(ctx, member.target.Root, "gh", "pr", "view", repo.PRURL, "--json", "headRefOid,title")
 		if viewErr != nil {
@@ -414,6 +416,27 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 			return axi.Failure("pr_view_failed", repo.Repo+": gh pr view returned no headRefOid", true, strings.TrimSpace(output))
 		}
 		headSHA, prTitle = head.HeadRefOID, head.Title
+	}
+	if forge.Kind == "gitlab" && strings.EqualFold(mrState, "closed") {
+		return prefixFailure(member.repo.Repo, axi.Failure("pr_closed", "the merge request was closed without merging", false))
+	}
+	if forge.Kind == "gitlab" && mrState != "MERGED" {
+		observation, observationErr := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+		if observationErr != nil && !errors.Is(observationErr, sql.ErrNoRows) {
+			return observationErr
+		}
+		if observationErr == nil && headSHA == member.repo.GatedSHA && observation.PRURL == member.repo.PRURL && observation.HeadSHA == member.repo.GatedSHA && decodeChecks(observation.Checks).MergeRequested {
+			return nil
+		}
+	}
+	if mrState == "MERGED" {
+		confirmed, confirmErr := s.reconcileGitLabMergedMember(ctx, db, project, cfg, task, member, forge, number)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if confirmed {
+			return nil
+		}
 	}
 	if headSHA != repo.GatedSHA {
 		if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Pull request head in "+repo.Repo+" moved after its merge head was recorded"); err != nil {
@@ -442,8 +465,23 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 		if method == "squash" {
 			args = append(args, "--squash", "--squash-message", mergeCommitSubject(prTitle, number))
 		}
-		if _, err := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, forge.Root, "glab", args...); err != nil {
-			return axi.Failure("pr_merge_failed", repo.Repo+": GitLab did not merge the merge request", true, err.Error())
+		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, forge.Root, "glab", args...)
+		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already been merged") {
+			return axi.Failure("pr_merge_failed", repo.Repo+": GitLab did not merge the merge request", true, mergeErr.Error())
+		}
+		confirmed, confirmErr := s.reconcileGitLabMergedMember(ctx, db, project, cfg, task, member, forge, number)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed && mergeErr != nil {
+			observation, observationErr := db.LatestMemberPRObservation(ctx, task.ID, repo.Repo)
+			if observationErr != nil && !errors.Is(observationErr, sql.ErrNoRows) {
+				return observationErr
+			}
+			if observationErr == nil && observation.PRURL == repo.PRURL && observation.HeadSHA == repo.GatedSHA && decodeChecks(observation.Checks).MergeRequested {
+				return nil
+			}
+			return axi.Failure("pr_merge_failed", repo.Repo+": GitLab reported an already-merged request that does not match the gated head", false, mergeErr.Error())
 		}
 	} else {
 		args := []string{"pr", "merge", repo.PRURL, "--" + method, "--match-head-commit", repo.GatedSHA}
@@ -455,6 +493,43 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 		}
 	}
 	return nil
+}
+
+func (s *Service) reconcileGitLabMergedMember(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member memberMerge, forge repositoryForge, number int) (bool, error) {
+	mr, err := gitlabMR(ctx, forge, number)
+	if err != nil {
+		return false, axi.Failure("pr_view_failed", member.repo.Repo+": could not verify the merge request after the merge command", true, err.Error())
+	}
+	if !strings.EqualFold(mr.State, "merged") {
+		if strings.EqualFold(mr.State, "closed") {
+			return false, prefixFailure(member.repo.Repo, axi.Failure("pr_closed", "the merge request was closed without merging", false))
+		}
+		if strings.EqualFold(mr.State, "opened") && mr.SHA == member.repo.GatedSHA && mr.TargetBranch == taskTargetBranch(member.project, member.task) {
+			observation, err := db.LatestMemberPRObservation(ctx, task.ID, member.repo.Repo)
+			if err != nil {
+				return false, err
+			}
+			if observation.PRURL == member.repo.PRURL && observation.HeadSHA == member.repo.GatedSHA {
+				checks := decodeChecks(observation.Checks)
+				checks.MergeRequested = true
+				observation.Checks = marshalJSON(checks)
+				observation.ObservedAt = time.Now().UnixMilli()
+				_, err = db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, store.MemberPREffect{})
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	if mr.SHA != member.repo.GatedSHA || mr.TargetBranch != taskTargetBranch(member.project, member.task) || mr.MergeCommitSHA == "" {
+		return false, axi.Failure("pr_merged_ungated", member.repo.Repo+": GitLab reports a merged request, but its head, target, or merge commit does not match the gated request", false)
+	}
+	if err := requireSelectedReview(ctx, db, project, cfg, task); err != nil {
+		return false, prefixFailure(member.repo.Repo, err)
+	}
+	observation := store.PRObservation{ProjectID: project.ID, TaskID: task.ID, PRURL: member.repo.PRURL, HeadSHA: mr.SHA, State: "MERGED", MergeCommit: mr.MergeCommitSHA, ObservedAt: time.Now().UnixMilli()}
+	notice := store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "pr_merged", Summary: member.repo.Repo + ": " + task.Title + ": pull request merged", DataJSON: marshalJSON(map[string]any{"repo": member.repo.Repo, "url": member.repo.PRURL, "head_sha": mr.SHA, "merge_commit": mr.MergeCommitSHA}), CreatedAt: observation.ObservedAt}
+	_, err = db.RecordMemberPRObservation(ctx, member.repo.Repo, observation, store.MemberPREffect{RepoState: store.TaskRepoMerged, MergedRef: mr.MergeCommitSHA, Notices: []store.Notice{notice}})
+	return err == nil, err
 }
 
 // reopenWorkspaceTask sends a merging Task back to done when one member's branch
@@ -883,7 +958,7 @@ func (s *Service) pollWorkspacePullRequestsForRepo(ctx context.Context, db *stor
 			}
 			continue
 		}
-		observation := result.observation
+		observation := preserveMergeRequest(result.observation, result.target.previous, result.target.hasPrev)
 		previous, hasPrevious := result.target.previous, result.target.hasPrev
 		if strings.EqualFold(observation.Mergeable, "UNKNOWN") && hasPrevious {
 			observation.Mergeable = previous.Mergeable

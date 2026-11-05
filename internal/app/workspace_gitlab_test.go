@@ -34,7 +34,19 @@ case "$*" in
   *"/approvals"*) printf '{"approved":true,"approvals_left":0}\n' ;;
   *"/merge_requests/17"*) cat "$POSSE_TEST_GLAB_STATE" ;;
   "mr create "*) printf 'https://git.example.com/group/worker/-/merge_requests/17\n' ;;
-  "mr merge "*) printf 'Merged\n' ;;
+  "mr merge "*)
+    if [ "${POSSE_TEST_GLAB_MERGE_CONFIRMS:-0}" = "1" ]; then
+      python3 - "$POSSE_TEST_GLAB_STATE" "$POSSE_TEST_GLAB_MERGE_COMMIT" <<'PY'
+import json,sys
+path,commit=sys.argv[1:]
+with open(path) as f: value=json.load(f)
+value['state']='merged'
+value['merge_commit_sha']=commit
+with open(path,'w') as f: json.dump(value,f)
+PY
+    fi
+    if [ "${POSSE_TEST_GLAB_MERGE_ALREADY:-0}" = "1" ]; then printf 'This merge request has already been merged.\n' >&2; exit 1; fi
+    printf 'Merged\n' ;;
   *) printf 'unexpected glab call: %s\n' "$*" >&2; exit 90 ;;
 esac
 `
@@ -108,17 +120,26 @@ esac
 	if f.repos()["worker"].State != store.TaskRepoMerge {
 		t.Fatalf("worker MR not open: %#v", f.repos())
 	}
+	t.Setenv("POSSE_TEST_GLAB_MERGE_CONFIRMS", "1")
+	t.Setenv("POSSE_TEST_GLAB_MERGE_ALREADY", "1")
+	t.Setenv("POSSE_TEST_GLAB_MERGE_COMMIT", head)
 	if code := f.run("merge", "t1", "--execute", "--user-approved", "merge both"); code != 0 {
 		t.Fatalf("merge members: %d %s", code, f.out.String())
 	}
-	if f.state() != store.StateMerging || f.repos()["e2e-tool"].State != store.TaskRepoMerged {
-		t.Fatalf("premature Merge: %s %#v", f.state(), f.repos())
+	if f.state() != store.StateMerged || f.repos()["worker"].State != store.TaskRepoMerged || f.repos()["e2e-tool"].State != store.TaskRepoMerged {
+		t.Fatalf("successful member merges were not reconciled: %s %#v", f.state(), f.repos())
 	}
 	if err := f.service.pollWorkspacePullRequests(context.Background(), f.db, f.project, f.config(), true); err != nil {
 		t.Fatal(err)
 	}
-	if f.state() != store.StateMerging {
-		t.Fatalf("running pipeline Merged: %s", f.state())
+	notices, err := f.db.Notices(context.Background(), f.project.ID, true)
+	if err != nil || countNoticeKind(notices, "pr_merged") != 1 {
+		t.Fatalf("post-merge Notices = %#v err=%v, want one pr_merged Notice", notices, err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "merge_ready" && strings.Contains(notice.Summary, "worker") {
+			t.Fatalf("successful GitLab merge raised merge_ready for worker: %+v", notice)
+		}
 	}
 	gitTest(t, memberWorktree, "push", "origin", "HEAD:refs/heads/staging")
 	writeMR("merged", "success")

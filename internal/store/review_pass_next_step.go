@@ -24,6 +24,33 @@ type ReviewPassCandidate struct {
 	SHA        string `json:"head_sha"`
 }
 
+// ValidationCandidateQueued reports whether Review queued this candidate for validation.
+func (db *DB) ValidationCandidateQueued(ctx context.Context, projectID, taskID, candidateID int64, candidateSHA string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT data_json FROM notices WHERE project_id=? AND task_id=? AND kind='candidate_validation_queued' ORDER BY id DESC`, projectID, taskID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var data struct {
+			Candidates []ReviewPassCandidate `json:"candidates"`
+		}
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			continue
+		}
+		for _, candidate := range data.Candidates {
+			if candidate.ID == candidateID && candidate.SHA == candidateSHA {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
+}
+
 // queueReviewPassNextStepTx queues step and raises its Notice when the Change
 // Task is still done and every named candidate is still the active reviewed
 // head. Otherwise the Worker is already acting, or a new head needs Review.

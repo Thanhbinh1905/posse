@@ -82,7 +82,18 @@ PY
      shift
    done
    printf 'Creating merge request...\n%s\n' 'https://git.example.com/group/sub/shop/-/merge_requests/17' ;;
- "mr merge "*) printf 'Merged\n' ;;
+ "mr merge "*)
+   if [ "${POSSE_TEST_GLAB_MERGE_CONFIRMS:-0}" = "1" ]; then
+     python3 - "$POSSE_TEST_GH_STATE" "$POSSE_TEST_GLAB_MERGE_COMMIT" <<'PY'
+import json,sys
+path,commit=sys.argv[1:]
+with open(path) as f: value=json.load(f)
+value['state']='merged'
+value['merge_commit_sha']=commit
+with open(path,'w') as f: json.dump(value,f)
+PY
+   fi
+   printf 'Merged\n' ;;
  "auth status "*) printf 'authenticated\n' ;;
  *) printf 'unexpected glab invocation: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -455,12 +466,61 @@ auto_teardown = "finished"
 	if code, output, stderr := f.run("merge", "t1", "--execute", "--user-approved", "User approved MR"); code != 0 {
 		t.Fatalf("merge: %d %s %s", code, output, stderr)
 	}
+	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	observation, observationErr := f.db.LatestPRObservation(context.Background(), f.task.ID)
+	if err != nil || observationErr != nil || task.State != store.StateMerging || !decodeChecks(observation.Checks).MergeRequested {
+		t.Fatalf("delayed forge confirmation was not retained: task=%+v observation=%+v errors=%v/%v", task, observation, err, observationErr)
+	}
+	logBeforeRetry, err := os.ReadFile(f.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("merge", "t1", "--execute", "--user-approved", "User approved MR"); code != 0 || !strings.Contains(output, "accepted the merge request") {
+		t.Fatalf("repeat merge while confirmation is pending: %d %s %s", code, output, stderr)
+	}
+	logAfterRetry, err := os.ReadFile(f.ghLog)
+	if err != nil || strings.Count(string(logAfterRetry), "mr merge ") != strings.Count(string(logBeforeRetry), "mr merge ") {
+		t.Fatalf("repeat merge called the forge merge again: before=%q after=%q err=%v", logBeforeRetry, logAfterRetry, err)
+	}
+	if err := f.pollGitLab(t); err != nil {
+		t.Fatal(err)
+	}
+	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err = f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil || task.State != store.StateMerging || countNoticeKind(notices, "pr_merged") != 0 || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("delayed OPEN poll changed merge state or Notice: task=%+v notices=%+v err=%v", task, notices, err)
+	}
+	f.setGitLabState(t, "merged", "mergeable", "success", task.GatedSHA)
+	if err := f.pollGitLab(t); err != nil {
+		t.Fatal(err)
+	}
+	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err = f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil || task.State != store.StateMerged || countNoticeKind(notices, "pr_merged") != 1 || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("merge Notices after forge confirmation = %+v err=%v, want merged and one pr_merged Notice", notices, err)
+	}
+	logBeforeMergedRetry, err := os.ReadFile(f.ghLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("merge", "t1", "--execute", "--user-approved", "User approved MR"); code != 0 || !strings.Contains(output, "already merged") {
+		t.Fatalf("repeat merge after confirmed completion: %d %s %s", code, output, stderr)
+	}
+	logAfterMergedRetry, err := os.ReadFile(f.ghLog)
+	if err != nil || strings.Count(string(logAfterMergedRetry), "mr merge ") != strings.Count(string(logBeforeMergedRetry), "mr merge ") {
+		t.Fatalf("repeat merge after completion called the forge again: before=%q after=%q err=%v", logBeforeMergedRetry, logAfterMergedRetry, err)
+	}
 	log, err := os.ReadFile(f.ghLog)
 	if err != nil || !strings.Contains(string(log), "--sha "+task.GatedSHA) || !strings.Contains(string(log), "--squash") || !strings.Contains(string(log), "--squash-message fix: E2E PR title (#17)") || !strings.Contains(string(log), "--auto-merge=false") {
 		t.Fatalf("unprotected merge: %q %v", log, err)
 	}
 	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/staging")
-	t.Setenv("POSSE_TEST_GLAB_MERGE_COMMIT", task.GatedSHA)
 	f.setGitLabState(t, "merged", "mergeable", "success", task.GatedSHA)
 	if err := f.pollGitLab(t); err != nil {
 		t.Fatal(err)

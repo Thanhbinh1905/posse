@@ -28,6 +28,35 @@ type PRObservation struct {
 	ObservedAt  int64
 }
 
+func preserveMergeRequestedObservation(previous PRObservation, current *PRObservation) (bool, error) {
+	if current.State != "OPEN" || previous.PRURL != current.PRURL || previous.HeadSHA != current.HeadSHA {
+		return false, nil
+	}
+	var previousChecks map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(previous.Checks), &previousChecks); err != nil {
+		return false, nil
+	}
+	var requested bool
+	if err := json.Unmarshal(previousChecks["merge_requested"], &requested); err != nil || !requested {
+		return false, nil
+	}
+	var currentChecks map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(current.Checks), &currentChecks); err != nil || currentChecks == nil {
+		return false, errors.New("invalid PR checks while preserving a merge request")
+	}
+	encoded, err := json.Marshal(true)
+	if err != nil {
+		return false, err
+	}
+	currentChecks["merge_requested"] = encoded
+	encoded, err = json.Marshal(currentChecks)
+	if err != nil {
+		return false, err
+	}
+	current.Checks = string(encoded)
+	return true, nil
+}
+
 type PRTaskWatchFailure struct {
 	ProjectID           int64
 	TaskID              int64
@@ -729,6 +758,22 @@ func (db *DB) RecordPRObservation(ctx context.Context, observation PRObservation
 	}
 	if current.PRURL != observation.PRURL || current.State != expected.State || current.GatedSHA != expected.GatedSHA || current.PRURL != expected.PRURL {
 		return false, nil
+	}
+	if previous.PRURL == observation.PRURL && observation.ObservedAt < previous.ObservedAt {
+		return false, nil
+	}
+	mergeRequested, err := preserveMergeRequestedObservation(previous, &observation)
+	if err != nil {
+		return false, err
+	}
+	if mergeRequested {
+		filtered := effect.Notices[:0]
+		for _, notice := range effect.Notices {
+			if notice.Kind != "merge_ready" {
+				filtered = append(filtered, notice)
+			}
+		}
+		effect.Notices = filtered
 	}
 	recoveredWatch, err := resetPRTaskWatchFailuresTx(ctx, tx, observation.ProjectID, observation.TaskID, "", observation.PRURL, observation.ObservedAt)
 	if err != nil {
