@@ -66,6 +66,7 @@ type TaskSnapshot struct {
 	ReviewFindings       []ReviewFinding         `toml:"review_findings,omitempty"`
 	ReviewFindingEvents  []ReviewFindingEvent    `toml:"review_finding_events,omitempty"`
 	ReviewCarries        []ReviewCarry           `toml:"review_carries,omitempty"`
+	ReviewCapGrant       *ReviewCapGrant         `toml:"review_cap_grant,omitempty"`
 	ReviewDispositions   []ReviewDisposition     `toml:"review_dispositions,omitempty"`
 	ValidationFixRounds  []ValidationFixRound    `toml:"validation_fix_rounds,omitempty"`
 	ValidationCandidates []ValidationCandidate   `toml:"validation_candidates,omitempty"`
@@ -143,6 +144,8 @@ type decisionSnapshot struct {
 	Options        []string `toml:"options"`
 	Answer         string   `toml:"answer"`
 	UserQuote      string   `toml:"user_quote"`
+	AnswerActor    string   `toml:"answer_actor"`
+	AnswerReason   string   `toml:"answer_reason"`
 	CreatedAt      int64    `toml:"created_at"`
 	AnsweredAt     int64    `toml:"answered_at"`
 	Kind           string   `toml:"kind"`
@@ -432,6 +435,12 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		snapshot.ReviewFindingEvents = validationState.ReviewFindingEvents
 		snapshot.ReviewCarries = validationState.ReviewCarries
 		snapshot.ReviewDispositions = validationState.ReviewDispositions
+		grant, err := db.ReviewCapGrant(ctx, taskID)
+		if err == nil {
+			snapshot.ReviewCapGrant = &grant
+		} else if !IsNotFound(err) {
+			return err
+		}
 		snapshot.ValidationFixRounds = validationState.ValidationFixRounds
 	}
 	if project.IsWorkspace() {
@@ -637,7 +646,7 @@ func (db *DB) projectLiveStateSnapshot(ctx context.Context, projectID int64) (pr
 // recent Notices to state.
 func (db *DB) readProjectHistorySnapshot(ctx context.Context, projectID int64, state *projectStateSnapshot) error {
 	decisionRows, err := db.QueryContext(ctx, decisionSelect+` WHERE project_id=? AND
-		(answered_at=0 AND obsolete_at=0 OR id IN (
+		(answered_at=0 AND obsolete_at=0 OR id IN (SELECT decision_id FROM review_cap_grants) OR id IN (
 			SELECT id FROM decisions WHERE project_id=? ORDER BY id DESC LIMIT ?
 		)) ORDER BY id`, projectID, projectID, projectSnapshotHistoryLimit)
 	if err != nil {
@@ -1116,7 +1125,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1349,12 +1358,23 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("rebuild t%d review carry: %w", task.Seq, err)
 			}
 		}
+		if grant := snapshot.ReviewCapGrant; grant != nil {
+			if grant.TaskID != task.ID {
+				return fmt.Errorf("review cap grant belongs to another Task")
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_cap_grants(task_id,decision_id,round,result_json,created_at) VALUES(?,?,?,?,?)`, task.ID, grant.DecisionID, grant.Round, grant.ResultJSON, grant.CreatedAt); err != nil {
+				return err
+			}
+		}
 		for _, disposition := range snapshot.ReviewDispositions {
+			if disposition.Actor == "" {
+				disposition.Actor = "user"
+			}
 			if disposition.ChangeTaskID != 0 && disposition.ChangeTaskID != task.ID {
 				return fmt.Errorf("review disposition in snapshot for t%d belongs to Task %d", task.Seq, disposition.ChangeTaskID)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?,?)`,
-				disposition.ID, task.ID, disposition.HeadSHA, nullableID(disposition.DecisionID), disposition.UserQuote, disposition.At); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(id,ship_task_id,head_sha,decision_id,user_quote,at,actor,reason) VALUES(?,?,?,?,?,?,?,?)`,
+				disposition.ID, task.ID, disposition.HeadSHA, nullableID(disposition.DecisionID), disposition.UserQuote, disposition.At, disposition.Actor, disposition.Reason); err != nil {
 				return fmt.Errorf("rebuild t%d review disposition: %w", task.Seq, err)
 			}
 		}
@@ -1469,13 +1489,16 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			}
 		}
 		for _, decision := range state.Decisions {
+			if decision.AnswerActor == "" {
+				decision.AnswerActor = "user"
+			}
 			options, err := json.Marshal(decision.Options)
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id,project_id,task_id,origin,question,options_json,answer,user_quote,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO decisions(id,project_id,task_id,origin,question,options_json,answer,user_quote,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason,answer_actor,answer_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				decision.ID, decision.ProjectID, decision.TaskID, decision.Origin, decision.Question, string(options), decision.Answer, decision.UserQuote,
-				decision.CreatedAt, decision.AnsweredAt, decision.Kind, decision.TaskLaunches, decision.ObsoleteAt, decision.ObsoleteReason); err != nil {
+				decision.CreatedAt, decision.AnsweredAt, decision.Kind, decision.TaskLaunches, decision.ObsoleteAt, decision.ObsoleteReason, decision.AnswerActor, decision.AnswerReason); err != nil {
 				return err
 			}
 		}

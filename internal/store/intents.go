@@ -106,9 +106,6 @@ func (db *DB) UpdateIntentPayload(ctx context.Context, intentID int64, processID
 // interrupted discard. The approval row and intent payload commit atomically,
 // so retrying approval.record cannot authorize later branch movement.
 func (db *DB) RecordDiscardApprovalForIntent(ctx context.Context, intentID int64, processID int, taskID int64, quote, branchSHA string) (string, error) {
-	if strings.TrimSpace(quote) == "" {
-		return "", fmt.Errorf("user approval quote is required")
-	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return "", err
@@ -133,6 +130,19 @@ func (db *DB) RecordDiscardApprovalForIntent(ctx context.Context, intentID int64
 	var intentQuote string
 	if err := json.Unmarshal(payload["user_quote"], &intentQuote); err != nil || intentQuote != quote {
 		return "", fmt.Errorf("discard approval does not match the User quote recorded in its intent")
+	}
+	if strings.TrimSpace(quote) == "" {
+		var decisionID int64
+		if err := json.Unmarshal(payload["review_cap_decision"], &decisionID); err != nil || decisionID == 0 {
+			return "", fmt.Errorf("discard requires User approval or delegated Review-cap authority")
+		}
+		var authorized bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE id=? AND task_id=? AND kind='review_cap' AND answer='discard' AND answer_actor='lead' AND answer_reason<>'' AND user_quote='')`, decisionID, taskID).Scan(&authorized); err != nil {
+			return "", err
+		}
+		if !authorized {
+			return "", fmt.Errorf("invalid delegated discard Decision")
+		}
 	}
 	var recorded bool
 	if raw := payload["discard_approval_recorded"]; len(raw) > 0 {

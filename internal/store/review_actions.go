@@ -322,10 +322,10 @@ func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64) ([]strin
 	return heads, rows.Err()
 }
 
-// RecordReviewDisposition binds an explicit User acceptance to exact heads,
+// RecordReviewDisposition binds an authorized acceptance to exact heads,
 // one per changed repository, and appends its finding-state events atomically.
-func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID int64, heads []string, quote, blockAt string) error {
-	if taskID < 1 || len(heads) == 0 || strings.TrimSpace(quote) == "" || !oneOf(blockAt, "P0", "P1", "P2") {
+func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID int64, heads []string, quote, blockAt, actor, reason string) error {
+	if taskID < 1 || len(heads) == 0 || (actor == "user" && strings.TrimSpace(quote) == "") || (actor == "lead" && strings.TrimSpace(reason) == "") || !oneOf(actor, "user", "lead") || !oneOf(blockAt, "P0", "P1", "P2") {
 		return fmt.Errorf("invalid Review disposition")
 	}
 	for _, head := range heads {
@@ -338,7 +338,7 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 		return err
 	}
 	defer tx.Rollback()
-	if err := insertReviewDispositionsTx(ctx, tx, taskID, decisionID, heads, quote); err != nil {
+	if err := insertReviewDispositionsTx(ctx, tx, taskID, decisionID, heads, quote, actor, reason); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT f.id,f.seq,f.severity,f.origin,f.in_scope,f.state FROM review_findings f WHERE f.ship_task_id=? ORDER BY f.seq`, taskID)
@@ -381,7 +381,7 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 		if _, err := tx.ExecContext(ctx, `UPDATE review_findings SET state=? WHERE id=? AND ship_task_id=?`, state, value.id, taskID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO review_finding_events(finding_id,round,event,actor,note,user_quote,at) VALUES(?,0,?,'user','accepted at review cap',?,?)`, value.id, event, quote, time.Now().UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO review_finding_events(finding_id,round,event,actor,note,user_quote,at) VALUES(?,0,?,?,?,?,?)`, value.id, event, actor, "accepted at review cap", quote, time.Now().UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -391,14 +391,14 @@ func (db *DB) RecordReviewDisposition(ctx context.Context, taskID, decisionID in
 	return db.PersistTask(ctx, taskID)
 }
 
-func insertReviewDispositionsTx(ctx context.Context, tx *writeTx, taskID, decisionID int64, heads []string, quote string) error {
+func insertReviewDispositionsTx(ctx context.Context, tx *writeTx, taskID, decisionID int64, heads []string, quote, actor, reason string) error {
 	for _, head := range heads {
 		var existing bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, head).Scan(&existing); err != nil {
 			return err
 		}
 		if !existing {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at) VALUES(?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli()); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at,actor,reason) VALUES(?,?,?,?,?,?,?)`, taskID, head, nullableDecisionID(decisionID), quote, time.Now().UnixMilli(), actor, reason); err != nil {
 				return err
 			}
 		}
@@ -415,7 +415,7 @@ func (db *DB) RecordReviewHeadDisposition(ctx context.Context, taskID int64, hea
 		return err
 	}
 	defer tx.Rollback()
-	if err := insertReviewDispositionsTx(ctx, tx, taskID, 0, heads, note); err != nil {
+	if err := insertReviewDispositionsTx(ctx, tx, taskID, 0, heads, note, "system", ""); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

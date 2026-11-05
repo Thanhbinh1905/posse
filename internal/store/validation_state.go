@@ -98,6 +98,8 @@ type ReviewDisposition struct {
 	DecisionID   int64  `toml:"decision_id"`
 	UserQuote    string `toml:"user_quote"`
 	At           int64  `toml:"at"`
+	Actor        string `toml:"actor"`
+	Reason       string `toml:"reason"`
 }
 
 // ValidationFixRound records one queued automatic validation instruction.
@@ -562,14 +564,14 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 		return state, err
 	}
 
-	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,head_sha,decision_id,user_quote,at FROM review_dispositions WHERE ship_task_id=? ORDER BY id`, taskID)
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,head_sha,decision_id,user_quote,at,actor,reason FROM review_dispositions WHERE ship_task_id=? ORDER BY id`, taskID)
 	if err != nil {
 		return state, err
 	}
 	for rows.Next() {
 		var value ReviewDisposition
 		var decisionID sql.NullInt64
-		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.HeadSHA, &decisionID, &value.UserQuote, &value.At); err != nil {
+		if err := rows.Scan(&value.ID, &value.ChangeTaskID, &value.HeadSHA, &decisionID, &value.UserQuote, &value.At, &value.Actor, &value.Reason); err != nil {
 			_ = rows.Close()
 			return state, err
 		}

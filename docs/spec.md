@@ -1244,20 +1244,22 @@ Admission (through `posse review start <change>` or a Brief with `review_of:`) r
 
 CI fixes, review fixes and target merges are author changes, never rounds. They enter the next round's delta.
 
-**Cap.** Posse raises `review_cap_reached` and one User-only `review_cap` Decision (origin `review_cap:<change>:<head>`; in a workspace, `<head>` is a SHA-256 digest of every changed Member's candidate head when more than one Member changed) when round `max_rounds` records a verdict other than `pass`, or when a Review fix round or other author change appears after the last allowed round. A CI fix never raises it. Options:
+**Cap.** Posse raises `review_cap_reached` and one `review_cap` Decision (origin `review_cap:<change>:<head>`; in a workspace, `<head>` is a SHA-256 digest of every changed Member's candidate head when more than one Member changed) when round `max_rounds` records a verdict other than `pass`, or when a Review fix round or other author change appears after the last allowed round. A CI fix never raises it. The User answers by default. Under the Project's standing `autonomy.yolo = true` grant, the Lead may resolve this Decision with `posse decide <id> <option> --lead-reason <reason>`. The answer records actor and reason without a User quote, and remains bound to the Decision's exact candidate head. This delegation applies only to Review-cap outcomes. Options:
 
 | Option | `posse apply` effect |
 |---|---|
-| `accept-head` | Records a `review_dispositions` row binding the current Change head, or each changed Member's head in a workspace, with the User quote. Open blocking findings become `accepted`, and open non-blocking ones become `deferred` pending follow-up issues. Satisfies the review component for that exact head only, with visible User acceptance rather than a clean pass; it never substitutes for full-pipeline test/docs/lint or CI evidence. |
-| `final-fix` | Queues one fix round (25.5) for the open blocking patterns; the next done Signal raises a new `review_cap` Decision for the resulting head. |
+| `accept-head` | Records a `review_dispositions` row binding the current Change head, or each changed Member's head in a workspace, with the User quote or audited Lead reason. Open blocking findings become `accepted`, and open non-blocking ones become `deferred` pending follow-up issues. Satisfies the review component for that exact head only, with visible acceptance rather than a clean pass; it never substitutes for full-pipeline test/docs/lint or CI evidence. |
+| `final-fix` | Grants one final independent Review for this Task and queues one fix round (25.5) for open blocking patterns. If no blocking patterns remain, returns `final-review-ready` without a repair or acceptance. After repair, run `posse review start <change>`. The allowance is consumed by one verdict-recorded Review, including `inconclusive`; void attempts do not consume it. Retrying the same Decision returns its stored application result without another repair or allowance. A different Decision requesting `final-fix` refuses with `review_final_fix_spent`. The grant and its Decision survive Task snapshots independently of retained Notice history. |
 | `rethink` | Prints the command to start a new Change Task with `supersedes: <change>`. The new Task gets a fresh cap and inherits the ledger's findings as `inherited` entries so they are not reported again. The old Task follows the normal discard or Orphan path. |
 | `discard` | Tears down with the recorded discard approval. |
 
-Autonomy never answers a `review_cap` Decision.
+Other Autonomy settings do not answer a `review_cap` Decision. Without YOLO, the Lead must record a new User choice with `--user-approved`.
 
-Once the cap is spent, `posse review dispose` refuses any action that would leave an introduced blocking finding unfixed (`accept`, `defer`, `withdraw`, or a `reclassify` below `block_at`) with `review_cap_decision_required`, even with `--user-approved`. Such a head merges only after the User answers its `review_cap` Decision with `accept-head`.
+An answered `final-fix` can be followed by an explicit rethink using `posse decide <original-cap-id> rethink --recover --lead-reason <reason>` under YOLO. Without YOLO, use a new `--user-approved <quote>` instead. Recovery creates a new exact-head `review_cap` Decision whose origin links the original Decision; the original answer remains unchanged. This supports a recovery mistakenly recorded as a `worker_question`: the Lead makes a new authorized choice, rather than treating that answer or its historical quote as review-cap authority. `supersedes` accepts the new audited rethink Decision. Recovery is limited to rethink after final-fix, and repeating the command cannot overwrite the new answer.
 
-Under `full-pipeline`, a spent cap also blocks republication: publishing or recording a later stage for an unreviewed candidate is refused with `review_cap_reached` until the User's Decision is applied.
+Once the cap is spent, `posse review dispose` refuses any action that would leave an introduced blocking finding unfixed (`accept`, `defer`, `withdraw`, or a `reclassify` below `block_at`) with `review_cap_decision_required`, even with `--user-approved`. Such a head merges only after its `review_cap` Decision is answered with `accept-head` by the User or, under YOLO, the Lead.
+
+Under `full-pipeline`, a spent cap also blocks republication: publishing or recording a later stage for an unreviewed candidate is refused with `review_cap_reached` until the authorized Decision is applied.
 
 ### 25.3 Scope
 
@@ -1357,7 +1359,7 @@ For `full-pipeline`, this review evidence is necessary but not sufficient: test,
 
 ### 25.9 Roles
 
-Every round is a fresh Review Task subject to the independent Review identity rule (section 13). Consecutive rounds may use the same Review Profile. The Reviewer never edits; the Change Worker applies every fix, and fixes are reviewed as author code. The Lead dispatches rounds, selects fix rounds and records dispositions within its Autonomy. The User answers `review_cap` Decisions and accepts blocking risk.
+Every round is a fresh Review Task subject to the independent Review identity rule (section 13). Consecutive rounds may use the same Review Profile. The Reviewer never edits; the Change Worker applies every fix, and fixes are reviewed as author code. The Lead dispatches rounds, selects fix rounds and records dispositions within its Autonomy. The User answers `review_cap` Decisions and accepts blocking risk, or delegates these outcomes through YOLO.
 
 ### 25.10 State
 
