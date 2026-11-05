@@ -79,6 +79,8 @@ if (outcomes.length !== 0) {
 
 const notice = followUps.find((message) => message.details?.type === "notice");
 if (!notice) throw new Error("queued follow-up disappeared");
+const expectedKind = process.env.POSSE_E2E_EXPECT_NOTICE;
+if (expectedKind && !notice.details.notices.some((item) => item.kind === expectedKind)) throw new Error(`missing actionable ${expectedKind}: ${JSON.stringify(notice)}`);
 // Pi persists a busy-session follow-up only when the run consumes it. Model
 // that lifecycle ordering explicitly without credentials or a provider call.
 entries.push({

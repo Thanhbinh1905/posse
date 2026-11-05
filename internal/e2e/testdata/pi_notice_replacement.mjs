@@ -11,7 +11,7 @@ const messages = [];
 const entries = [{
   type: "custom_message",
   customType: "posse-notices",
-  details: { delivery_id: deliveryID, batch_id: batchID },
+  details: { origin: "posse", type: "notice", ids: JSON.parse(process.env.POSSE_E2E_OLD_NOTICE_IDS), delivery_id: deliveryID, batch_id: batchID },
 }];
 const handlers = new Map();
 const source = (await readFile(extensionPath, "utf8"))
