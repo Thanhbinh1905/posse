@@ -3068,6 +3068,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(axi.Failure("in_place_removed", "in-place execution was removed; this legacy Task cannot be relaunched", false, "Existing in-place Tasks remain readable and can be torn down"))
 	}
 	sandbox, sandboxErr := db.SandboxByTask(ctx, task.ID)
+	releasedSandbox := false
 	if sandboxErr != nil || sandbox.State != "held" || sandbox.TaskID != task.ID {
 		neverStarted, err := taskNeverStarted(ctx, db, task)
 		if err != nil {
@@ -3076,7 +3077,26 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if neverStarted && plan != nil {
 			return s.relaunchNeverStarted(ctx, db, home, project, task, plan, revision)
 		}
-		return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
+		if !store.IsNotFound(sandboxErr) || task.SandboxID != 0 || task.Type != "change" {
+			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
+		}
+		deliveries, err := db.TaskDeliveries(ctx, task.ID)
+		if err != nil {
+			return failure(err)
+		}
+		for i := len(deliveries) - 1; i >= 0; i-- {
+			policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[i].ID)
+			if err != nil {
+				return failure(err)
+			}
+			if policy == "release" {
+				releasedSandbox = true
+				break
+			}
+		}
+		if !releasedSandbox {
+			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
+		}
 	}
 	if task.State == store.StateFailed && (task.SandboxID == 0 || task.SandboxID != sandbox.ID) {
 		return failure(axi.Failure("relaunch_sandbox_missing", "failed Task no longer owns its Sandbox", false))
@@ -3084,6 +3104,8 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if task.WorktreePath == "" || task.Branch == "" {
 		return failure(axi.Failure("relaunch_sandbox_missing", "Task has no recorded Sandbox or branch", false))
 	}
+	launch := task.Launches + 1
+	generation := int64(0)
 	payload := `{}`
 	if automatic {
 		payload = `{"automatic_recovery":true}`
@@ -3094,6 +3116,51 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
 	track := func(step string, action func() error) error { return s.runIntentStep(ctx, db, intent, step, action) }
+	if releasedSandbox {
+		snapshot, err := s.snapshot(ctx)
+		if err != nil {
+			return failure(err)
+		}
+		pane, found := findTaskPane(snapshot.Panes, task)
+		if !found {
+			pane.PaneID = task.PaneID
+		}
+		if pane.PaneID == "" || pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
+			return failure(prReleaseRefused("the released Task executor is still present and cannot be verified as stopped", true))
+		}
+		preserved := task
+		preserved.WorktreePath = project.Root
+		if err := requireReleasedTaskBranchHead(ctx, preserved); err != nil {
+			return failure(err)
+		}
+		generation, err = claimTaskBranchAuthor(ctx, db, preserved, launch, true)
+		if err != nil {
+			return failure(err)
+		}
+		sandbox, err = acquireSandboxForExistingBranch(ctx, db, project, task, home, cfg.Pool.Clean, cfg.Pool.Setup)
+		if err != nil {
+			return failure(err)
+		}
+		task.SandboxID, task.WorktreePath = sandbox.ID, sandbox.Path
+		repository, err := gitCommonDir(ctx, sandbox.Path)
+		if err != nil {
+			_, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
+			return failure(errors.Join(err, releaseErr))
+		}
+		claim, err := db.BranchAuthor(ctx, repository, task.Branch)
+		if err != nil {
+			_, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
+			return failure(errors.Join(err, releaseErr))
+		}
+		head, err := taskBranchAuthorHead(ctx, sandbox.Path, task.Branch)
+		if err != nil || head != claim.HeadSHA {
+			_, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
+			if err == nil {
+				err = store.ErrBranchAuthorHeadChanged
+			}
+			return failure(errors.Join(err, releaseErr))
+		}
+	}
 	if revision != nil {
 		if err := track("plan.revise", func() error { return db.ReviseTaskPlan(ctx, task, *revision) }); err != nil {
 			return failure(err)
@@ -3152,6 +3219,17 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			}
 		}
 	}
+	if task.Type == "change" {
+		if generation == 0 {
+			generation, err = claimTaskBranchAuthor(ctx, db, task, launch, true)
+		}
+		if err == nil && generation > 0 {
+			err = exportTaskAuthorGeneration(ctx, s, pane.PaneID, generation)
+		}
+		if err != nil {
+			return failure(err)
+		}
+	}
 	if prepareChanged || kindConfig.Prepare != "" {
 		if err := track("repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
@@ -3193,23 +3271,12 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}); err != nil {
 		return failure(err)
 	}
-	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error
 		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
 		return launchErr
 	}); err != nil {
 		return failure(err)
-	}
-	generation := int64(0)
-	if task.Type == "change" {
-		generation, err = claimTaskBranchAuthor(ctx, db, task, launch, true)
-		if err == nil && generation > 0 {
-			err = exportTaskAuthorGeneration(ctx, s, pane.PaneID, generation)
-		}
-		if err != nil {
-			return failure(err)
-		}
 	}
 	workerName := agentName(project.Name, task.Seq, launch)
 	turnToken := fmt.Sprintf("launch:%d", launch)
