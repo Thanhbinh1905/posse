@@ -275,7 +275,8 @@ await waitFor(() => uncertaintyMessages.length === 1);
 const uncertainty = uncertaintyMessages[0];
 const replacementUncertaintyIDs = uncertainty.details.ids;
 const replacementUncertaintyKeptIDs = uncertainty.details.delivery_id === replacementDeliveryID && uncertainty.details.batch_id === replacementBatchID && JSON.stringify(replacementUncertaintyIDs) === JSON.stringify(replacementMessage.details.ids);
-if (!replacementPendingRetained || !replacementUncertaintyKeptIDs) throw new Error("unconsumed replacement batch lost its recoverable receipt IDs");
+const replacementUncertaintyContent = uncertainty.content;
+if (!replacementPendingRetained || !replacementUncertaintyKeptIDs || !replacementUncertaintyContent.includes("Notice count: 1") || replacementUncertaintyContent.includes("Notice IDs")) throw new Error("unconsumed replacement batch lost recoverable IDs or showed an unbounded warning");
 await instance.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
 reasons.push("quit");
 await waitFor(() => activeWatches === 0);
@@ -303,6 +304,7 @@ process.stdout.write(JSON.stringify({
   replacementBatchID,
   replacementPendingRetained,
   replacementUncertaintyIDs,
+  replacementUncertaintyContent,
   failedWatchAttempts,
   healthEpisodes: healthMessages.length,
 }) + "\n");

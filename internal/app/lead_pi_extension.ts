@@ -400,10 +400,10 @@ export default function (pi) {
 				retry(generation);
 				return;
 			}
-			const ids = delivery.notice_ids?.join(",") ?? "unknown";
+			const count = delivery.notice_ids?.length ?? 0;
 			const warning = persisted === undefined
-				? `Pi could not inspect its session receipt for batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${ids}. Inspect the Lead session before retrying.`
-				: `Pi did not persist queued batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${ids} before its run settled. Inspect the Lead session before retrying.`;
+				? `Pi could not inspect the session receipt. Notice count: ${count}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`
+				: `Pi did not persist the queued Notice batch before its run settled. Notice count: ${count}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`;
 			notifyUncertainty(warning, delivery);
 			return;
 		}
@@ -453,7 +453,7 @@ export default function (pi) {
 					}
 					return;
 				}
-				const warning = result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying the recorded Notice IDs.";
+				const warning = result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying the receipt.";
 				notifyUncertainty(warning, delivery);
 				return;
 			}
@@ -474,7 +474,7 @@ export default function (pi) {
 				const recorded = await settleReceipt(delivery, "uncertain", generation);
 				if (!isCurrent(generation)) return;
 				if (!recorded) retry(generation);
-				notifyUncertainty(`Pi could not inspect its session receipt for Notice batch ${delivery.batch_id}. Inspect the Lead session before retrying the recorded Notice IDs.`, delivery);
+				notifyUncertainty(`Pi could not inspect the session receipt. Notice count: ${delivery.notice_ids?.length ?? 0}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`, delivery);
 				return;
 			}
 			if (previouslyAccepted) {
@@ -521,7 +521,7 @@ export default function (pi) {
 					retry(generation);
 				} else if (await settleReceipt(delivery, "uncertain", generation)) {
 					if (!isCurrent(generation)) return;
-					notifyUncertainty(`Pi could not verify whether batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${delivery.notice_ids.join(",")} reached the session. Inspect the session before retrying.`, delivery);
+					notifyUncertainty(`Pi could not verify delivery. Notice count: ${delivery.notice_ids.length}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`, delivery);
 				} else retry(generation);
 				return;
 			}

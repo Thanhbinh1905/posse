@@ -6,9 +6,29 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestNoticeDeliveryUncertaintySummaryStaysBounded(t *testing.T) {
+	ids := make([]int64, 5000)
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	summary := noticeDeliveryUncertaintySummary(NoticeDelivery{
+		DeliveryID:  "receipt-123",
+		BatchID:     "batch-456",
+		Destination: "pi:lead-session",
+		NoticeIDs:   ids,
+	})
+	if len(summary) > 250 || summary == "" {
+		t.Fatalf("uncertainty summary is not concise: length=%d summary=%q", len(summary), summary)
+	}
+	if !strings.Contains(summary, "Notice count: 5000") || strings.Contains(summary, "1,2,3") {
+		t.Fatalf("uncertainty summary omitted the count or expanded Notice IDs: %q", summary)
+	}
+}
 
 func TestNoticeDeliveryOwnershipAndExactRetry(t *testing.T) {
 	ctx := context.Background()

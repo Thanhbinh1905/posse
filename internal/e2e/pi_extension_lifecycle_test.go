@@ -187,7 +187,7 @@ func TestPiExtensionSessionReplacementOwnsOneWatchGeneration(t *testing.T) {
 	if result.FailedWatchAttempts != 5 || result.HealthEpisodes != 1 {
 		t.Fatalf("watch spawn failure retries/health episode = %d/%d, want 5/1", result.FailedWatchAttempts, result.HealthEpisodes)
 	}
-	if !reflect.DeepEqual(result.ReplacementNoticeIDs, []int64{replacementID}) || !reflect.DeepEqual(result.ReplacementUncertaintyIDs, []int64{replacementID}) || !result.ReplacementPendingRetained || result.ReplacementDeliveryID == "" || result.ReplacementBatchID == "" {
+	if !reflect.DeepEqual(result.ReplacementNoticeIDs, []int64{replacementID}) || !reflect.DeepEqual(result.ReplacementUncertaintyIDs, []int64{replacementID}) || !result.ReplacementPendingRetained || result.ReplacementDeliveryID == "" || result.ReplacementBatchID == "" || !strings.Contains(result.ReplacementUncertaintyContent, "Notice count: 1") || strings.Contains(result.ReplacementUncertaintyContent, "Notice IDs") {
 		t.Fatalf("accepted-but-unconsumed replacement lost recoverable IDs: notice=%d result=%#v", replacementID, result)
 	}
 	replacementReceipt, err := db.NoticeDelivery(ctx, result.ReplacementDeliveryID)
@@ -207,19 +207,20 @@ type piLifecycleState struct {
 }
 
 type piLifecycleResult struct {
-	Reasons                    []string `json:"reasons"`
-	Destinations               []string `json:"destinations"`
-	MaxActiveWatches           int      `json:"maxActiveWatches"`
-	AutoRearmedWatches         int      `json:"autoRearmedWatches"`
-	DeliveredNoticeIDs         []int64  `json:"deliveredNoticeIDs"`
-	SendFailureNoticeIDs       []int64  `json:"sendFailureNoticeIDs"`
-	SendFailureAttempts        int      `json:"sendFailureAttempts"`
-	SendFailureKeptStableID    bool     `json:"sendFailureKeptStableID"`
-	ReplacementNoticeIDs       []int64  `json:"replacementNoticeIDs"`
-	ReplacementDeliveryID      string   `json:"replacementDeliveryID"`
-	ReplacementBatchID         string   `json:"replacementBatchID"`
-	ReplacementPendingRetained bool     `json:"replacementPendingRetained"`
-	ReplacementUncertaintyIDs  []int64  `json:"replacementUncertaintyIDs"`
-	FailedWatchAttempts        int      `json:"failedWatchAttempts"`
-	HealthEpisodes             int      `json:"healthEpisodes"`
+	Reasons                       []string `json:"reasons"`
+	Destinations                  []string `json:"destinations"`
+	MaxActiveWatches              int      `json:"maxActiveWatches"`
+	AutoRearmedWatches            int      `json:"autoRearmedWatches"`
+	DeliveredNoticeIDs            []int64  `json:"deliveredNoticeIDs"`
+	SendFailureNoticeIDs          []int64  `json:"sendFailureNoticeIDs"`
+	SendFailureAttempts           int      `json:"sendFailureAttempts"`
+	SendFailureKeptStableID       bool     `json:"sendFailureKeptStableID"`
+	ReplacementNoticeIDs          []int64  `json:"replacementNoticeIDs"`
+	ReplacementDeliveryID         string   `json:"replacementDeliveryID"`
+	ReplacementBatchID            string   `json:"replacementBatchID"`
+	ReplacementPendingRetained    bool     `json:"replacementPendingRetained"`
+	ReplacementUncertaintyIDs     []int64  `json:"replacementUncertaintyIDs"`
+	ReplacementUncertaintyContent string   `json:"replacementUncertaintyContent"`
+	FailedWatchAttempts           int      `json:"failedWatchAttempts"`
+	HealthEpisodes                int      `json:"healthEpisodes"`
 }

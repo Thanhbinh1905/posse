@@ -8,9 +8,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestNoticeDeliveryUncertaintyWarningStaysBounded(t *testing.T) {
+	ids := make([]int64, 5000)
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	delivery := store.NoticeDelivery{
+		DeliveryID:  "receipt-123",
+		BatchID:     "batch-456",
+		Destination: "pi:lead-session",
+		NoticeIDs:   ids,
+	}
+	result := noticeDeliveryUncertaintyResult(delivery, "the session receipt could not be inspected")
+	var warning string
+	var structuredIDs []int64
+	for _, field := range result {
+		switch field.Key {
+		case "warning":
+			warning, _ = field.Value.(string)
+		case "delivery":
+			row, _ := field.Value.(axi.Object)
+			for _, rowField := range row {
+				if rowField.Key == "notice_ids" {
+					structuredIDs, _ = rowField.Value.([]int64)
+				}
+			}
+		}
+	}
+	if len(warning) == 0 || len(warning) > 300 || strings.Contains(warning, "Notice IDs") {
+		t.Fatalf("uncertainty warning is not concise: length=%d warning=%q", len(warning), warning)
+	}
+	if !strings.Contains(warning, "Notice count: 5000") || len(structuredIDs) != len(ids) || structuredIDs[0] != ids[0] || structuredIDs[len(ids)-1] != ids[len(ids)-1] {
+		t.Fatalf("warning or structured recovery data lost batch details: warning=%q IDs=%d", warning, len(structuredIDs))
+	}
+}
 
 func TestWatchExposesAmbiguousNoticeDelivery(t *testing.T) {
 	ctx := context.Background()
