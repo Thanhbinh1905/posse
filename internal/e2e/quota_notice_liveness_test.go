@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,10 +15,16 @@ import (
 )
 
 func TestMidTaskQuotaNoticeReachesPiPastHeldReceipt(t *testing.T) {
+	t.Run("working", func(t *testing.T) { testQuotaNoticeReachesPi(t, "quota-silent") })
+	t.Run("background completion then weekly dialog", func(t *testing.T) { testQuotaNoticeReachesPi(t, "quota-background") })
+}
+
+func testQuotaNoticeReachesPi(t *testing.T, model string) {
+	t.Helper()
 	fixture := newQuotaFixture(t, [][2]string{
 		{"defaults.stall_after", "1s"},
 		{"profiles.primary.kind", "claude"},
-		{"profiles.primary.model", "quota-silent"},
+		{"profiles.primary.model", model},
 	})
 	task := fixture.startWithoutEmittingQuota(t)
 	fixture.waitLog(t, "primary claude "+filepath.Clean(task.WorktreePath))
@@ -50,6 +57,15 @@ func TestMidTaskQuotaNoticeReachesPiPastHeldReceipt(t *testing.T) {
 	defer func() { _ = watch.Process.Kill(); _ = watch.Wait() }()
 	fixture.emitQuota(t, 1)
 	notice := fixture.waitNotice(t, "quota_exhausted")
+	if model == "quota-background" {
+		var data map[string]any
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data["resets"] != "Nov 7, 4am (Asia/Bangkok)" || data["line"] != "You've hit your weekly limit · resets Nov 7, 4am (Asia/Bangkok)" {
+			t.Fatalf("quota Notice classified the completion event instead of the weekly dialog: %+v", data)
+		}
+	}
 	env := setEnv(fixture.base.leadEnv, "POSSE_E2E_PI_EXTENSION", filepath.Join(moduleRoot(t), "internal/app/lead_pi_extension.ts"))
 	env = setEnv(env, "POSSE_E2E_EXPECT_NOTICE", "quota_exhausted")
 	command := exec.Command("node", filepath.Join(moduleRoot(t), "internal/e2e/testdata/pi_notice_busy_followup.mjs"))
