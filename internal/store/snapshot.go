@@ -1360,7 +1360,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		if grant := snapshot.ReviewCapGrant; grant != nil {
 			if grant.TaskID != task.ID {
-				return fmt.Errorf("Review cap grant belongs to another Task")
+				return fmt.Errorf("review cap grant belongs to another Task")
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO review_cap_grants(task_id,decision_id,round,result_json,created_at) VALUES(?,?,?,?,?)`, task.ID, grant.DecisionID, grant.Round, grant.ResultJSON, grant.CreatedAt); err != nil {
 				return err
