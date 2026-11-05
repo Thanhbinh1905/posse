@@ -88,6 +88,13 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if usesRemovedNoMistakes(task) {
 		return noMistakesRemoved(task)
 	}
+	if parsed.Bool("execute") && task.State == store.StateMerged {
+		fields := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "result", Value: "Task is already merged"}}
+		if task.MergedRef != "" {
+			fields = append(fields, axi.Field{Key: "merged_ref", Value: task.MergedRef})
+		}
+		return ctx.Print(fields)
+	}
 	if task.State == store.StateDone && !project.IsWorkspace() {
 		work, err := s.unmergedWork(ctx.Context, db, project, task)
 		if err != nil {

@@ -27,6 +27,18 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 		return printPromotedCandidate(out, db, lane, candidate)
 	}
 	if candidate.State != store.ValidationCandidateActive && candidate.State != store.ValidationCandidatePromoting {
+		if candidate.State == store.ValidationCandidateStale {
+			repoFlag := ""
+			if repoName != "" {
+				repoFlag = " --repo " + repoName
+			}
+			target := task.TargetBranch
+			if target == "" {
+				target = "<target-branch>"
+			}
+			help := fmt.Sprintf("From the Task Sandbox, merge each private repair commit into the Task branch with `git merge <repair-commit>`. Run `git fetch origin`, then merge `origin/%s`. Run `posse publish%s --refresh` to submit a fresh candidate. This keeps the repair commits; do not reset or discard the candidate checkout", target, repoFlag)
+			return candidateSubmissionError(task, candidate, "candidate_not_promotable", "candidate is stale and cannot be promoted", false, help)
+		}
 		return candidateSubmissionError(task, candidate, "candidate_not_promotable", "candidate is not active", false)
 	}
 	if task.State != store.StateWorking && task.State != store.StateStalled && task.State != store.StateDone {

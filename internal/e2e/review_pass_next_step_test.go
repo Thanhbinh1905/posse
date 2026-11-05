@@ -98,6 +98,9 @@ func TestFullPipelineReviewPassQueuesWorkerToValidateAndPublish(t *testing.T) {
 
 	passCandidateReview(t, f, f.repo, change, "t2")
 	requireReviewPassNextStep(t, f, f.leadEnv, f.repo, change, candidate.WorktreePath)
+	if code, output := runFixtureCLI(t, f, f.repo, "merge", "t1"); code == 0 || !strings.Contains(output, "candidate validation is already underway") || strings.Contains(output, "posse review start") {
+		t.Fatalf("Merge duplicated the delivered validation instruction: %d %s", code, output)
+	}
 	if change = f.mustTask(t, "t1"); change.State != store.StateWorking {
 		t.Fatalf("Change Task state=%s after the next step was delivered, want working", change.State)
 	}

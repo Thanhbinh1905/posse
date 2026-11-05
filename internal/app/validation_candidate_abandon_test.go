@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -15,8 +16,8 @@ import (
 // naming that head, unless a newer candidate is pending; then Merge refuses
 // too, naming the pending head.
 func TestWorkspaceMemberMergeReadyWithheldWhileCandidatePending(t *testing.T) {
-	for _, pending := range []bool{false, true} {
-		t.Run(map[bool]string{false: "no candidate", true: "pending candidate"}[pending], func(t *testing.T) {
+	for _, scenario := range []string{"no candidate", "validation queued and delivered", "validation stage recorded", "candidate promoting", "unrelated historical instruction"} {
+		t.Run(scenario, func(t *testing.T) {
 			f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nreview = \"none\"\nauto_teardown = \"never\"\n\n[repositories.worker]\nforge = \"gitlab\"\n", []string{"worker"}, []string{"worker"})
 			ctx := context.Background()
 			bin := filepath.Join(f.root, "bin")
@@ -67,12 +68,47 @@ esac
 			}
 			t.Setenv("POSSE_TEST_GLAB_STATE", state)
 			scoped := strings.Repeat("9", 40)
-			if pending {
-				if _, err := f.db.CreateValidationCandidate(ctx, store.ValidationCandidate{
-					TaskID: f.task.ID, Repo: "worker", SubmittedSHA: scoped, CandidateSHA: scoped, TargetSHA: gated,
+			if scenario != "no candidate" {
+				candidate, err := f.db.CreateValidationCandidate(ctx, store.ValidationCandidate{
+					TaskID: f.task.ID, Repo: "worker", Generation: 0, SubmittedSHA: scoped, CandidateSHA: scoped, TargetSHA: gated,
 					RefName: "refs/posse/candidate/t1", WorktreePath: filepath.Join(f.root, "candidate"), Summary: "Scoped candidate",
-				}); err != nil {
+				})
+				if err != nil {
 					t.Fatal(err)
+				}
+				if err := f.db.ActivateValidationCandidate(ctx, candidate.ID, scoped); err != nil {
+					t.Fatal(err)
+				}
+				messageID, err := f.db.QueueMessage(ctx, f.task.ID, "Continue the full-pipeline sequence now; no further Review request is needed.", true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "validation queued and delivered" {
+					if _, err := f.db.CreateNotice(ctx, store.Notice{
+						ProjectID: f.project.ID,
+						TaskID:    f.task.ID,
+						Kind:      "candidate_validation_queued",
+						Summary:   "Queued candidate validation",
+						DataJSON:  marshalJSON(map[string]any{"message_id": messageID, "candidates": []store.ReviewPassCandidate{{ID: candidate.ID, Repository: "worker", SHA: scoped}}}),
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := f.db.ExecContext(ctx, `UPDATE messages SET status='delivered',delivered_at=? WHERE id=?`, time.Now().UnixMilli(), messageID); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "validation stage recorded" {
+					if _, err := f.db.RecordValidationStage(ctx, store.ValidationStageResult{
+						TaskID: f.task.ID, CandidateID: candidate.ID, Repo: "worker", Stage: "test", Status: "passed",
+						CandidateSHA: scoped, TargetSHA: gated, ConfigSHA256: strings.Repeat("a", 64), Summary: "test passed", Evidence: "test evidence",
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if scenario == "candidate promoting" {
+					if err := f.db.BeginValidationCandidatePromotion(ctx, candidate.ID); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 
@@ -83,12 +119,21 @@ esac
 			if err != nil {
 				t.Fatal(err)
 			}
-			if pending {
+			if scenario != "no candidate" {
 				if countNoticeKind(notices, "merge_ready") != 0 {
 					t.Fatalf("merge_ready raised while candidate %s is pending: %+v", scoped, notices)
 				}
-				if code := f.run("merge", "t1", "--execute", "--user-approved", "merge it"); code != 1 || !strings.Contains(f.out.String(), "candidate_pending") || !strings.Contains(f.out.String(), shortSHA(scoped)) || !strings.Contains(f.out.String(), "posse review start t1") {
-					t.Fatalf("merge with a pending candidate exit=%d output=%s", code, f.out.String())
+				code := f.run("merge", "t1", "--execute", "--user-approved", "merge it")
+				output := f.out.String()
+				if code != 1 || !strings.Contains(output, "candidate_pending") || !strings.Contains(output, shortSHA(scoped)) {
+					t.Fatalf("merge with candidate exit=%d output=%s", code, output)
+				}
+				if scenario == "validation queued and delivered" || scenario == "validation stage recorded" || scenario == "candidate promoting" {
+					if !strings.Contains(output, "candidate validation is already underway") || !strings.Contains(strings.ToLower(output), "wait") || strings.Contains(output, "posse review start") {
+						t.Fatalf("merge duplicated validation guidance: %s", output)
+					}
+				} else if !strings.Contains(output, "posse review start") || strings.Contains(output, "already underway") {
+					t.Fatalf("unrelated historical message changed guidance: %s", output)
 				}
 				if calls, err := os.ReadFile(log); err != nil || strings.Contains(string(calls), "mr merge") {
 					t.Fatalf("Member head was merged while a candidate is pending: %q %v", calls, err)

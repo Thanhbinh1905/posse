@@ -213,6 +213,24 @@ func TestFullPipelineStaleCandidateDoneNamesStaleStateAndNextStep(t *testing.T) 
 	}
 }
 
+func TestPublishingStaleCandidateNamesCommitPreservingRecovery(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.MarkValidationCandidateStale(context.Background(), candidate.ID, candidate.TargetSHA); err != nil {
+		t.Fatal(err)
+	}
+	code, output, stderr := runCandidateCLI(t, fixture, candidate, "publish", "--refresh")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "candidate_not_promotable") || !strings.Contains(combined, "merge") || !strings.Contains(combined, "--refresh") || !strings.Contains(combined, "Task Sandbox") {
+		t.Fatalf("stale candidate recovery guidance: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestFullPipelineStaleCandidateWithUnchangedAuthorAllowsDoneSignal(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)

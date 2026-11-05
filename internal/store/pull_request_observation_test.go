@@ -78,6 +78,73 @@ func TestWorkspaceMergeReadyNoticeRepeatsOnlyForNewCompletion(t *testing.T) {
 	}
 }
 
+func TestMemberPRObservationRejectsPollStartedBeforeMergeRequest(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Workspace PR", MergeMode: "pr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to State
+		source   string
+	}{{StateSpawning, StateWorking, "cli"}, {StateWorking, StateDone, "worker"}, {StateDone, StateMerging, "cli"}} {
+		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "merge lifecycle"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.CreateTaskRepos(ctx, taskID, []TaskRepo{{Repo: "api", MergeMode: "pr"}}); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/acme/api/pull/17"
+	if err := db.UpdateTaskRepo(ctx, TaskRepo{TaskID: taskID, Repo: "api", MergeMode: "pr", State: TaskRepoMerge, GatedSHA: "head", PRURL: prURL}); err != nil {
+		t.Fatal(err)
+	}
+	latest := PRObservation{ProjectID: project.ID, TaskID: taskID, PRURL: prURL, HeadSHA: "head", State: "OPEN", Checks: `{"state":"SUCCESS","merge_requested":true,"failures":[]}`, Review: "APPROVED", Mergeable: "MERGEABLE", ObservedAt: 20}
+	if accepted, err := db.RecordMemberPRObservation(ctx, "api", latest, MemberPREffect{}); err != nil || !accepted {
+		t.Fatalf("merge request observation accepted=%t err=%v", accepted, err)
+	}
+	stale := latest
+	stale.Checks = `{"state":"SUCCESS","failures":[]}`
+	stale.ObservedAt = 15
+	notice := Notice{ProjectID: project.ID, TaskID: taskID, Kind: "merge_ready", Summary: "ready"}
+	if accepted, err := db.RecordMemberPRObservation(ctx, "api", stale, MemberPREffect{Notices: []Notice{notice}}); err != nil || accepted {
+		t.Fatalf("delayed pre-merge poll accepted=%t err=%v, want rejected", accepted, err)
+	}
+	got, err := db.LatestMemberPRObservation(ctx, taskID, "api")
+	if err != nil || got.ObservedAt != latest.ObservedAt || !json.Valid([]byte(got.Checks)) || got.Checks != latest.Checks {
+		t.Fatalf("latest observation after stale poll = %+v err=%v", got, err)
+	}
+	stale.ObservedAt = 25
+	if accepted, err := db.RecordMemberPRObservation(ctx, "api", stale, MemberPREffect{Notices: []Notice{notice}}); err != nil || !accepted {
+		t.Fatalf("delayed in-flight poll accepted=%t err=%v, want recorded without merge_ready", accepted, err)
+	}
+	got, err = db.LatestMemberPRObservation(ctx, taskID, "api")
+	var checks struct {
+		MergeRequested bool `json:"merge_requested"`
+	}
+	if err != nil || json.Unmarshal([]byte(got.Checks), &checks) != nil || !checks.MergeRequested {
+		t.Fatalf("delayed poll lost merge request marker: %+v err=%v", got, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "merge_ready" {
+			t.Fatalf("delayed poll raised merge_ready: %+v", notice)
+		}
+	}
+}
+
 func TestPRObservationResetsFailureStreakOnlyWhenAccepted(t *testing.T) {
 	for _, test := range []struct {
 		name      string
