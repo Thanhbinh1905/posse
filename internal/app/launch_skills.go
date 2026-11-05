@@ -425,6 +425,10 @@ func writeFrozenSkillWith(root, path string, contents []byte, writeContents func
 	return nil
 }
 
+func disableCodexWorkerMemories(args []string) []string {
+	return append([]string{"--disable", "memories"}, args...)
+}
+
 func appendPosseSkillLaunchArgs(kind string, args []string, skills posseLaunchSkills) ([]string, error) {
 	switch kind {
 	case "claude":

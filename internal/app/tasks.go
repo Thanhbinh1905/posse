@@ -812,6 +812,9 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return skillErr
 		}
 	}
+	if kind == "codex" {
+		argsForAgent = disableCodexWorkerMemories(argsForAgent)
+	}
 	reviewFiles := admittedReviewRoundFiles(plan)
 	if len(reviewFiles) > 0 {
 		briefData = []byte(withReviewDir(string(briefData), taskHome))
@@ -3312,6 +3315,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if skillErr != nil {
 			return failure(skillErr)
 		}
+	}
+	if kind == "codex" {
+		startArgs = disableCodexWorkerMemories(startArgs)
 	}
 	if plan != nil {
 		if err := track("launch.restore", func() error { return restoreAdmittedLaunchFiles(home, project, task, plan) }); err != nil {
