@@ -139,8 +139,24 @@ func TestClaudeResearchHookAcceptsWebFetchAndRefusesGeneralPurpose(t *testing.T)
 	if !found {
 		t.Fatalf("web-fetch was not registered with only the WebFetch tool: %+v", attempts)
 	}
-	if code, _, stderr := f.hook(agentCall("tool-general", "general-purpose", nil)); code != guardExitBlocked || !strings.Contains(stderr, "refused") {
-		t.Fatalf("general-purpose: code=%d stderr=%s", code, stderr)
+	if code, _, stderr := f.hook(agentCall("tool-general", "general-purpose", nil)); code != guardExitBlocked || !strings.Contains(stderr, "refused") || !strings.Contains(stderr, "only Explore, Plan") || strings.Contains(stderr, "concurrency budget") {
+		t.Fatalf("general-purpose type refusal: code=%d stderr=%s", code, stderr)
+	}
+}
+
+func TestClaudeResearchBudgetRefusalIdentifiesCapacityAndNextStep(t *testing.T) {
+	f := newResearchFixture(t)
+	for i, id := range []string{"explore-1", "explore-2"} {
+		if code, _, stderr := f.hook(agentCall(id, "Explore", nil)); code != 0 {
+			t.Fatalf("register %s: code=%d stderr=%s", id, code, stderr)
+		}
+		if code, _, stderr := f.hook(map[string]any{"hook_event_name": "SubagentStart", "agent_id": fmt.Sprintf("agent-%d", i+1), "agent_type": "Explore"}); code != 0 {
+			t.Fatalf("start %s: code=%d stderr=%s", id, code, stderr)
+		}
+	}
+	code, _, stderr := f.hook(agentCall("explore-3", "Explore", nil))
+	if code != guardExitBlocked || !strings.Contains(stderr, "research concurrency budget is exhausted") || !strings.Contains(stderr, "limit applies to Explore agents") || !strings.Contains(stderr, "wait for a child to finish") || strings.Contains(stderr, "Use a read-only Explore") {
+		t.Fatalf("full research budget refusal is misleading: code=%d stderr=%s", code, stderr)
 	}
 }
 
