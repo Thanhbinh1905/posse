@@ -79,7 +79,22 @@ func ensureHeldSandboxLocks(ctx context.Context, db *store.DB, project store.Pro
 			if reason, registered := lockReasons[sandbox.Path]; registered && reason == fmt.Sprintf("posse: held by t%d", task.Seq) {
 				continue
 			}
-			if err := lockSandbox(ctx, project.Root, sandbox.Path, task.Seq); err != nil {
+			adoptions, err := db.TaskAdoptions(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			adopted := false
+			for _, a := range adoptions {
+				if a.TaskID == task.ID {
+					adopted = true
+					break
+				}
+			}
+			if adopted {
+				if err := lockClaimedSandbox(ctx, db, project, sandbox, task); err != nil {
+					return err
+				}
+			} else if err := lockSandbox(ctx, project.Root, sandbox.Path, task.Seq); err != nil {
 				return err
 			}
 		}
