@@ -43,8 +43,11 @@ func TestPosseRejectsRemovedDirectoryExecution(t *testing.T) {
 	command := exec.Command(binary, "project", "add", "--directory")
 	command.Dir, command.Env = directory, env
 	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "Directory Projects are no longer supported") {
+	if err == nil || !strings.Contains(string(output), "project_directory_removed") || !strings.Contains(string(output), "registers a folder without Git as a Directory Project automatically") {
 		t.Fatalf("directory registration refusal: err=%v output=%s", err, output)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("refused legacy flag created Git metadata: %v", err)
 	}
 }
 func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {

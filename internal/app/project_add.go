@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -18,7 +20,7 @@ func (s *Service) projectAdd(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if parsed.Bool("directory") {
-		return axi.Failure("project_directory_removed", "Directory Projects are no longer supported", false, "Register a Git repository with `posse project add`")
+		return axi.Failure("project_directory_removed", "`--directory` was removed: `posse project add` registers a folder without Git as a Directory Project automatically", false, "Run `posse project add` without `--directory`")
 	}
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("project add takes no positional arguments")
@@ -104,6 +106,9 @@ func (s *Service) projectScan(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if project.IsDirectory() {
+		return s.scanDirectoryProject(ctx, db, home, project)
+	}
 	if !project.IsWorkspace() {
 		return axi.Failure("project_not_workspace", "Project "+project.Name+" is not a Workspace and has no members to scan", false, "Run `posse project show` to inspect it")
 	}
@@ -127,6 +132,58 @@ func (s *Service) projectScan(ctx *axi.Context, args []string) error {
 		{Key: "repos", Value: repos},
 		{Key: "help", Value: []any{"Name members in a Brief's `repos:` field to work on them"}},
 	})
+}
+
+func (s *Service) scanDirectoryProject(ctx *axi.Context, db *store.DB, home string, project store.Project) error {
+	detected, err := detectProject(ctx.Context, project.Root)
+	if err != nil {
+		return err
+	}
+	if detected.Kind == store.ProjectKindDirectory {
+		return ctx.Print(axi.Object{
+			{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "converted", Value: false},
+			{Key: "capabilities", Value: projectCapabilities(project.Kind)},
+			{Key: "help", Value: []any{"Initialize Git in " + project.Root + " or add repositories inside it, then run `posse project scan` again to enable Tasks"}},
+		})
+	}
+	if detected.Root != project.Root {
+		return axi.Failure("project_scan_root_changed", fmt.Sprintf("Directory Project %s is now inside the Git repository %s", project.Name, detected.Root), false, "Keep this Directory Project, or remove it and register "+detected.Root+" with `posse project add`")
+	}
+	repos := []store.ProjectRepo{}
+	if detected.Kind == store.ProjectKindWorkspace {
+		for _, repo := range detected.Repos {
+			repos = append(repos, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch, OriginHost: savedOriginHost(repo.Remote)})
+		}
+	}
+	if err := db.ConvertDirectoryProject(ctx.Context, project.ID, detected.Kind, detected.DefaultBranch, repos); err != nil {
+		if !errors.Is(err, store.ErrDirectoryProjectBusy) {
+			return err
+		}
+		tasks, listErr := db.Tasks(ctx.Context, project.ID, false)
+		if listErr != nil {
+			return listErr
+		}
+		return directoryScanBlocked(project, tasks)
+	}
+	if err := s.regenerateProjects(ctx.Context, db); err != nil {
+		return err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
+	}
+	result := detectionObject(detected, cfg)
+	result = append(axi.Object{{Key: "project", Value: project.Name}, {Key: "kind", Value: detected.Kind}, {Key: "converted", Value: true}}, result...)
+	result = append(result, axi.Field{Key: "help", Value: []any{"Run `posse lead` in the Lead pane to reload its instructions for this " + detected.Kind + " Project"}})
+	return ctx.Print(result)
+}
+
+func directoryScanBlocked(project store.Project, tasks []store.Task) error {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, taskIDString(task.Seq))
+	}
+	return axi.Failure("project_scan_blocked", fmt.Sprintf("Directory Project %s still has unfinished legacy Tasks: %s", project.Name, strings.Join(ids, ", ")), false, "Inspect them with `posse show <task>` and tear them down with `posse teardown <task>`, then run `posse project scan` again")
 }
 
 type rescanResult struct {

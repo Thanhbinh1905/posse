@@ -492,7 +492,8 @@ type workerTabsOptions struct {
 	manualWatchOwner bool
 	// emptyFolder starts the Lead in a folder with no Git repository and no
 	// configured Merge Mode.
-	emptyFolder bool
+	emptyFolder   bool
+	prepareFolder func(repo string, env []string)
 }
 
 func newWorkerTabsFixture(t *testing.T) *workerTabsFixture {
@@ -613,6 +614,9 @@ esac
 		initRepository(t, repo, filepath.Join(root, "origin.git"), env)
 	}
 
+	if options.prepareFolder != nil {
+		options.prepareFolder(repo, env)
+	}
 	client := herdr.NewWithEnv("herdr", env)
 	t.Cleanup(func() {
 		if t.Failed() {

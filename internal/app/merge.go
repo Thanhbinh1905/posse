@@ -60,6 +60,9 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
+	if project.IsDirectory() {
+		return executionUnavailable(project)
+	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err

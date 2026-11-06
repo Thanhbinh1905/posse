@@ -173,12 +173,16 @@ The User's explicit `posse up --all` that brings back the Lead, Workers and Watc
 _Avoid_: Auto-recovery, recover
 
 **Project**:
-One Git repository or one Workspace of repositories, with its own Tasks, state and policy.
+One Git repository, one Workspace of repositories or one Directory Project, with its own Lead, Tasks, state and policy.
 _Avoid_: Repo (in prose), home
 
 **Workspace**:
 A Project whose root is a plain folder and whose Members are the repositories directly inside it; one Task may change several Members.
 _Avoid_: Monorepo, stack, multi-repo
+
+**Directory Project**:
+A Project whose root is a folder without Git; its Lead explores and plans with the User, and no Task runs there.
+_Avoid_: Plain folder project, non-Git project
 
 **Member**:
 One repository of a Workspace, with its own default branch, remote and Merge Mode.

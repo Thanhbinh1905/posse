@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. [ADR 0024](0024-built-in-validation-replaces-no-mistakes.md) and spec section 25.17 record the removal of no-mistakes (V15, #305); the `no-mistakes` exception below no longer exists.
+Accepted. [ADR 0024](0024-built-in-validation-replaces-no-mistakes.md) and spec section 25.17 record the removal of no-mistakes (V15, #305); the `no-mistakes` exception below no longer exists. [ADR 0038](0038-directory-projects-start-a-lead-without-execution.md) lets a folder without Git register as a Directory Project with a Lead but no Task execution; in-place execution stays removed.
 
 ## Decision
 

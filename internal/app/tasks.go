@@ -53,7 +53,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		return briefError(err)
 	}
 	if project.IsDirectory() {
-		return axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false, "Register a Git repository with `posse project add`")
+		return executionUnavailable(project)
 	}
 	workflow, err := resolveWorkflowForBrief(ctx.Context, db, project, cfg, brief)
 	if err != nil {
@@ -185,7 +185,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		return briefError(err)
 	}
 	if project.IsDirectory() {
-		return axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false, "Register a Git repository with `posse project add`")
+		return executionUnavailable(project)
 	}
 	var adoption *store.TaskAdoptionRequest
 	var adoptionSource *store.Task

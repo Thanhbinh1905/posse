@@ -19,6 +19,8 @@ type leadInstructionResult struct {
 	LanguageRule  string
 }
 
+const directoryRule = "This Project is a folder without Git. Explore it in bounded steps: start from the `nested_repositories` that `posse project show` lists, read only the files the conversation needs, never read or copy the whole tree, skip hidden and ignored folders, never print secret files such as `.env`, keys or credentials, and do not follow symlinks out of the root. Posse provides no isolation or rollback here."
+
 const workspaceRule = "This Project is a workspace of several repositories. A Change Brief lists the members it changes in `repos: [<name>, ...]`; a Research Brief may list members it needs checked out. One Task may change several members, and it Merges only when every changed member has Merged. Notices and errors name the member they concern."
 
 func composeLeadInstructions(home string, project store.Project, cfg config.Config, kind string, readiness []readinessGap) (leadInstructionResult, error) {
@@ -62,6 +64,11 @@ func composeLeadInstructionsMode(home string, project store.Project, cfg config.
 		text.WriteString(workspaceRule)
 		text.WriteString(" Read shared workspace-root files such as CLAUDE.md and docs/ before splitting work. Run `posse project show` for each member's default and target branches and Merge Mode, and `posse project scan` after the User adds or removes a repository.\n")
 	}
+	if project.IsDirectory() {
+		text.WriteString("\n## Directory guidance\n\n")
+		text.WriteString(directoryRule)
+		text.WriteString("\n")
+	}
 	text.WriteString("\n")
 	preferenceInstructions := appendPreferenceInstructions("", "lead", preferences)
 	if preferenceInstructions != "" {
@@ -74,23 +81,23 @@ func composeLeadInstructionsMode(home string, project store.Project, cfg config.
 	handoff, handoffWarning := loadHandoff(home, project)
 	text.WriteString("## Runtime obligations\n\nThese obligations come from Posse's execution contract. Preferences can change default workflow advice but cannot grant authority, change Task evidence or override these obligations.\n\n")
 	if project.IsDirectory() {
-		text.WriteString("- This is a legacy Directory Project. Posse no longer admits Tasks here; non-Git work is edited directly outside Posse.\n")
+		text.WriteString("- This is a Directory Project without Git. Its capabilities are `interaction: ready` and `execution: none`: explore and plan with the User, but Posse admits no Task and runs no Git operation here. Do not edit files in this folder; this is an instruction Posse does not enforce on the Lead shell.\n")
 	} else {
 		text.WriteString("- Never edit the Project repository. Every code change must be done by a Worker in its Task Sandbox.\n")
 	}
 	text.WriteString("- One Project has one Lead in one Herdr workspace. Refuse to start or adopt another Project's Lead, even when the User asks. Tell the User to open a new Herdr workspace at that Project's root and run `posse up` there. Never run `posse up` for another Project from this Lead pane.\n")
 	text.WriteString("- Ask the User only for decisions that are the User's. Only the User answers Decisions.\n")
 	if project.IsDirectory() {
-		text.WriteString("- Existing Directory Project Tasks are legacy records. They can be inspected and torn down, but cannot be relaunched or signaled.\n")
+		text.WriteString("- Directory Project Tasks recorded before Git-only orchestration are legacy records. They can be inspected and torn down, but cannot be relaunched or signaled.\n")
 	} else {
 		text.WriteString("- Never Merge or discard unmerged work without the required User approval. A one-off permission never becomes standing Autonomy. To cancel an unmerged Task, run `posse teardown <task> --discard --user-approved \"<User's words>\"`. It stops only the verified current Worker instance, closes its pane, then completes discard. If its process or pane identity changed or cannot be verified, preserve the replacement and refuse; never signal or close panes manually to bypass that check. Before discarding an unmerged Task with a recorded PR, validate it against its forge, close it if open, and reread it as closed. If it merged or closure cannot be verified, refuse and keep the Sandbox held. Before applying a closed-PR discard Decision, verify the PR is still closed; if it reopened or merged, do not discard.\n")
 	}
-	text.WriteString("- Posse orchestrates Git repositories and Workspaces only. Edit non-Git directories directly outside Posse.\n")
+	text.WriteString("- Posse runs Tasks only in Git repositories and Workspaces. A folder without Git is a Directory Project that supports the Lead conversation only; its files are edited outside Posse.\n")
 	text.WriteString("- Only a Worker's Signal marks its Task done. Herdr idle is not completion.\n")
 	if project.IsDirectory() {
-		text.WriteString("- Directory Projects no longer admit Tasks. Do not attempt to start or dispatch work here.\n")
+		text.WriteString("- Directory Projects admit no Tasks. Do not attempt to start or dispatch work here; `posse start` and `posse dispatch` refuse with `execution_unavailable`.\n")
 	} else {
-		text.WriteString("- Preferences cannot enable removed Directory Project or in-place execution features or override review policy.\n")
+		text.WriteString("- Preferences cannot enable in-place execution, Tasks in Directory Projects, or override review policy.\n")
 	}
 	text.WriteString("- User-only keys (`pool.setup`, `kinds.<kind>.lead_auto_approve`, `autonomy.*`) may be changed only after explicit User approval. In this Lead conversation, use `posse config set <key> <value> [--project <name>] --user-approved \"<User's words>\"` or `posse config unset <key> [--project <name>] --user-approved \"<User's words>\"`. Outside a Lead pane, give the User the exact `! posse config set ...` or `! posse config unset ...` command.\n")
 	text.WriteString("- Preferences are how-to-work guidance. A User shell can run `posse preferences set <lead|worker> --file <file> [--project <name>]`; from this Lead, use that command with `--user-approved \"<User's words>\"` only after explicit consent. Workers cannot write preferences or config.\n")
@@ -99,14 +106,14 @@ func composeLeadInstructionsMode(home string, project store.Project, cfg config.
 	}
 	text.WriteString("- Run `posse` to inspect Tasks and Notices. Write a Brief with type, title and done_when (one criterion, or a block list of criteria; no other field accepts a YAML list), then run `posse dispatch --brief <file> --name <name>` to resolve a Profile. Always pass `--name` with two to four lowercase kebab-case words that say what the Task does (for example `restore-lead-agent`); the generated name only takes the first title words and is a fallback. Start one Worker with `posse start <file> --name <name> [--profile <name>] [--queue]`; `--brief <file>` is also accepted. `after: [t12:landed, t14:accepted]` records typed local prerequisites, and `--queue` admits at capacity without resources. Inspect waits with `posse show`; cancel a queued Task with `posse teardown`. The name is display-only, Worker tabs show it with a `-t<seq>` suffix, and Sandbox-backed Tasks use Task-ID-bound branches. Use `posse relaunch <task> [--profile <name>]` to resume an interrupted Worker or move it to another Profile.\n")
 	if project.IsDirectory() {
-		text.WriteString("- Do not create or dispatch a Brief from this legacy Directory Project. Register a Git repository with `posse project add` to use Posse.\n")
+		text.WriteString("- When the User wants Posse to run Tasks, the User initializes Git in this folder or adds repositories inside it, then runs `posse project scan`, which converts this Project in place to a repository or workspace Project.\n")
 	} else {
 		text.WriteString("- Change Briefs may set `base:` to choose the branch the Task starts from and `target:` to choose the PR/MR target; a workspace `target:` may be an inline member map such as `{backend: staging}`. Targets are frozen on admission. `defaults.target_branch` and `repositories.<member>.target_branch` provide optional defaults. Explicit base and target branches must exist on origin.\n")
 		text.WriteString("- The optional Brief fields `ticket:` and `refs:` are available for forge issue links: `ticket:` names the one issue a Change Task closes when its PR Merges, and `refs:` adds non-closing references. During compatibility, `issues: [<one issue>]` is accepted as the same ticket; never list multiple closing issues. In a workspace, qualify the ticket and each reference with its member name as `member#number`, for example `ticket: worker#12`. Issue references accept `12`, `\"#12\"` and `member#12`; quote `#12` because an unquoted `#` starts a YAML comment.\n")
 	}
 	text.WriteString("- Use `posse peek`, `posse send`, `posse interrupt`, `posse unsend`, and `posse show` to supervise Workers. `posse send` steers a supported Worker mid-turn even when its pane is focused; use `--queue` when a message should wait for the current turn. Any instruction longer than a few lines goes in a Markdown file sent with `posse send <task> --file <path.md>`; Posse stores it in the Task directory and delivers one short line pointing to it. For an urgent stop or redirect, use `posse send <task> --interrupt <message>`; Posse verifies the turn stopped and delivers the redirect before queued messages. Add `--reason <ci|conflict|review|scope|...>` to any send so the cause is recorded. `posse interrupt <task>` stops without sending a message. `posse unsend <message-id>` withdraws only a queued message and refuses once delivery is claimed or submitting.\n")
 	if project.IsDirectory() {
-		text.WriteString("- Existing Tasks may be inspected and torn down, but no new work is admitted here.\n")
+		text.WriteString("- Legacy Tasks may be inspected and torn down, but no new work is admitted here.\n")
 	} else {
 		text.WriteString("- Review the Worker's Signal and Merge completed Change Tasks according to the Project Merge Mode.\n")
 	}

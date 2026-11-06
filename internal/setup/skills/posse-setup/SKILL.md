@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # posse setup
 
-The fastest start is `posse up` in a Herdr pane in a Git repository or Workspace folder, then state the first request. Non-Git directories are edited directly outside Posse. Posse selects a sole available harness and uses its default model and effort for Workers when no Dispatch Rules or default are configured. The Lead raises only consequential gaps inline. This skill is the optional full configuration tour, not a prerequisite to the first outcome.
+The fastest start is `posse up` in a Herdr pane in a Git repository, Workspace folder or any other folder, then state the first request. A folder without Git becomes a Directory Project for exploration and planning only. Posse selects a sole available harness and uses its default model and effort for Workers when no Dispatch Rules or default are configured. The Lead raises only consequential gaps inline. This skill is the optional full configuration tour, not a prerequisite to the first outcome.
 
 You are the User's setup assistant. The User decides every value; you recommend, explain the trade-off in one line, and write their answer through the CLI. Talk with the User in their language; write config values exactly as `posse config schema` defines them.
 
@@ -37,7 +37,7 @@ Done when every topic has either a written value or the User's explicit "keep th
 
 ## 3. Each Project
 
-Ask which Git repositories or Workspace folder the User wants Posse to manage. Non-Git directories are edited directly outside Posse. A Workspace Project lets one Task change several Members. For each Project, from its root:
+Ask which Git repositories or Workspace folder the User wants Posse to manage. A folder without Git can host a Directory Project Lead for exploration and planning, but Posse runs no Tasks there. A Workspace Project lets one Task change several Members. For each Project, from its root:
 
 1. Run `posse project add` for a repository or Workspace (add `--name` if the User wants a different name, or on `name_taken`). Show the User the detected Members; for a Workspace, ask whether any Member should Merge differently and set `repositories.<repo>.merge_mode` with `--project`.
 2. Ask about the Project-level keys, each with `--project <name>`: for every Project, `defaults.max_workers` and a Project-specific `lead.kind` if different. Also ask about `defaults.merge_mode`, `defaults.forge` (and `repositories.<repository>.forge` for Member repositories), and `pool.setup` (user-only: commands that prepare a fresh Sandbox, such as installing dependencies). Explain that PR delivery uses forge CI at `gated_sha`, while local delivery has no automated verification and leaves checking to the User. Ask about `defaults.review` (user-only): `none` (default), `quick` for exact-head review before Merge, or `full-pipeline` for private review, test, docs and lint before every publication; with `full-pipeline`, `full_pipeline.run_workflows` (user-only) lets lint run the repository CI workflow jobs locally.

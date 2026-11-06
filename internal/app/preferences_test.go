@@ -486,8 +486,8 @@ func TestDirectoryLeadInstructionsRefuseNewTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, "Posse no longer admits Tasks here") || !strings.Contains(result.Text, "Existing Tasks may be inspected and torn down") {
-		t.Fatalf("legacy Directory instructions omit the compatibility boundary: %s", result.Text)
+	if !strings.Contains(result.Text, "Posse admits no Task and runs no Git operation here") || !strings.Contains(result.Text, "Legacy Tasks may be inspected and torn down") {
+		t.Fatalf("Directory instructions omit the admission boundary: %s", result.Text)
 	}
 	for _, removed := range []string{"execution: in-place", "non-overlapping relative `paths:`", "in-place recovery Decision", "path leases", "approved checks"} {
 		if strings.Contains(result.Text, removed) {

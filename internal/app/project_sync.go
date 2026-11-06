@@ -499,6 +499,9 @@ func (s *Service) sync(ctx *axi.Context, args []string) error {
 	if err := s.requireLead(ctx.Context, db, project); err != nil {
 		return err
 	}
+	if project.IsDirectory() {
+		return executionUnavailable(project)
+	}
 	home, err := s.homePath()
 	if err != nil {
 		return err

@@ -10,7 +10,8 @@ import (
 )
 
 // Project kinds. A repo Project is one Git repository; a workspace Project is a
-// plain folder whose direct child repositories are its members.
+// plain folder whose direct child repositories are its members; a directory
+// Project is a folder without Git that admits no Tasks.
 const (
 	ProjectKindRepo      = "repo"
 	ProjectKindWorkspace = "workspace"
@@ -139,6 +140,44 @@ func (db *DB) CreateWorkspaceProject(ctx context.Context, name, root string, rep
 		return Project{}, err
 	}
 	return project, nil
+}
+
+var ErrDirectoryProjectBusy = errors.New("directory Project has unfinished Tasks")
+
+// ConvertDirectoryProject turns a Directory Project into a repo or workspace
+// Project in place, so its id, name, root and UUID stay the same.
+func (db *DB) ConvertDirectoryProject(ctx context.Context, projectID int64, kind, defaultBranch string, repos []ProjectRepo) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var unfinished bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id=? AND state NOT IN ('merged', 'reported', 'torn-down'))`, projectID).Scan(&unfinished); err != nil {
+		return err
+	}
+	if unfinished {
+		return ErrDirectoryProjectBusy
+	}
+	now := time.Now().UnixMilli()
+	result, err := tx.ExecContext(ctx, `UPDATE projects SET kind=?, default_branch=?, last_activity_at=? WHERE id=? AND kind=?`, kind, defaultBranch, now, projectID, ProjectKindDirectory)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return fmt.Errorf("project %d is no longer a Directory Project: %w", projectID, ErrNotFound)
+	}
+	for _, repo := range repos {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_repos(project_id, name, path, default_branch, status, created_at, updated_at, origin_host) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`, projectID, repo.Name, repo.Path, repo.DefaultBranch, now, now, repo.OriginHost); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
 }
 
 // ProjectRepos lists a Project's members by name, including missing ones.
