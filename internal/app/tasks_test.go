@@ -28,6 +28,22 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestResearchAndReviewWorkerProtocolsKeepAttachmentListingWithLead(t *testing.T) {
+	project := store.Project{Name: "shop"}
+	brief := dispatch.Brief{DoneWhen: "Report is complete"}
+	for _, taskType := range []string{"research", "review"} {
+		t.Run(taskType, func(t *testing.T) {
+			protocol := workerProtocol("/posse", project, store.Task{Seq: 7, Type: taskType}, brief, "/brief.md", "/scratch", "")
+			if !strings.Contains(protocol, "The Lead can list saved attachments with `posse show <task>`") {
+				t.Fatalf("%s protocol omitted Lead attachment guidance: %s", taskType, protocol)
+			}
+			if strings.Contains(protocol, "`posse show <task>` lists saved attachments") {
+				t.Fatalf("%s protocol still instructs Worker to run the forbidden command: %s", taskType, protocol)
+			}
+		})
+	}
+}
+
 func TestWorkerAgentArgsWithoutConfiguredArgumentsMarshalAsEmptyArray(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[profiles.pi]\nkind = \"pi\"\n"), 0o600); err != nil {
@@ -1000,7 +1016,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	for _, call := range fake.Calls {
 		if call.Method == "agent.start" && call.Params["kind"] == "codex" {
 			args := call.Params["args"].([]string)
-			freshStart = len(args) == 7 && equalStrings(args[:5], []string{"--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[5] == "-c" && strings.HasPrefix(args[6], "developer_instructions=") && strings.Contains(args[6], filepath.Join(skillRoots[0], "skills", "{name}", "SKILL.md"))
+			freshStart = len(args) == 9 && equalStrings(args[:7], []string{"--disable", "memories", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5", "-c", "model_reasoning_effort=high"}) && args[7] == "-c" && strings.HasPrefix(args[8], "developer_instructions=") && strings.Contains(args[8], filepath.Join(skillRoots[0], "skills", "{name}", "SKILL.md"))
 		}
 	}
 	deliveredRelaunch := false

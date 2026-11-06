@@ -291,12 +291,21 @@ case "$*" in
 esac
 report working
 case " $* " in
-  *" quota-primary "*|*" quota-silent "*|*" quota-exit "*|*" quota-autocontinue "*)
+  *" quota-primary "*|*" quota-silent "*|*" quota-exit "*|*" quota-autocontinue "*|*" quota-background "*)
     printf 'work before the quota ran out\n' > quota-work.txt
     printf 'primary %[1]s %%s\n' "$PWD" >> "$POSSE_TEST_ROOT/quota.log"
     attempt=$(grep -c '^primary ' "$POSSE_TEST_ROOT/quota.log")
     while [ ! -e "$POSSE_TEST_ROOT/emit-quota-$attempt" ]; do sleep 0.02; done
-    case " $* " in *" quota-autocontinue "*) printf '%%s' %[3]s ;; *) printf '%%s' %[2]s ;; esac
+    case " $* " in
+      *" quota-background "*)
+        printf 'Background command completed\nYou\047ve hit your weekly limit · resets Nov 7, 4am (Asia/Bangkok)\n'
+        report blocked
+        while IFS= read -r line; do :; done
+        exit 0
+        ;;
+      *" quota-autocontinue "*) printf '%%s' %[3]s ;;
+      *) printf '%%s' %[2]s ;;
+    esac
     # A quota-silent harness never reports the end of its turn, so Herdr keeps
     # showing it working, as Claude did during the 2026-10-25 stall.
     case " $* " in *" quota-silent "*) continue_silently=1 ;; *) continue_silently=0 ;; esac

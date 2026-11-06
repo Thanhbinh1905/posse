@@ -20,6 +20,7 @@ import (
 func TestTaskViewsShowObservedAgentStatusBesideTaskState(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
+	stopBackgroundWatch(t, fixture)
 	ctx := context.Background()
 
 	fakeAgent := `#!/bin/sh

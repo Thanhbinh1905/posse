@@ -8,6 +8,16 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 )
 
+func TestMaintenanceAdoptionBriefField(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Continue branch\ndone_when: changes are complete\nadopt: t12\n---\n")
+	if err != nil || brief.Adopt != "t12" {
+		t.Fatalf("parse adoption Brief = %#v, %v", brief, err)
+	}
+	if _, err := ParseBriefText("---\ntype: change\ntitle: Continue branch\ndone_when: changes are complete\nadopt: \"\"\n---\n"); err == nil {
+		t.Fatal("empty adoption target accepted")
+	}
+}
+
 func TestWorkflowRunBriefFields(t *testing.T) {
 	valid := "---\ntype: research\ntitle: Continue workflow\ndone_when: Report complete\nworkflow_run: w12\nstage: Plan\n---\n"
 	brief, err := ParseBriefText(valid)

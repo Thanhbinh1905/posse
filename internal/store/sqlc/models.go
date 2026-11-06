@@ -107,6 +107,8 @@ type Decision struct {
 	TaskLaunches   int64
 	ObsoleteAt     int64
 	ObsoleteReason string
+	AnswerActor    string
+	AnswerReason   string
 }
 
 type DecisionNoticeCursor struct {
@@ -510,6 +512,14 @@ type ResourceLease struct {
 	AcquiredAt     int64
 }
 
+type ReviewCapGrant struct {
+	TaskID     int64
+	DecisionID int64
+	Round      int64
+	ResultJson string
+	CreatedAt  int64
+}
+
 type ReviewCarry struct {
 	ChangeTaskID    int64
 	Repository      string
@@ -527,6 +537,8 @@ type ReviewDisposition struct {
 	DecisionID   sql.NullInt64
 	UserQuote    string
 	At           int64
+	Actor        string
+	Reason       string
 }
 
 type ReviewFinding struct {
@@ -691,6 +703,17 @@ type Task struct {
 	PaneShellIdentity    string
 	AgentStatus          string
 	AgentStatusSince     int64
+}
+
+type TaskAdoption struct {
+	TaskID       int64
+	SourceTaskID int64
+	Repository   string
+	Branch       string
+	PrUrl        string
+	HeadSha      string
+	Generation   int64
+	CreatedAt    int64
 }
 
 type TaskBudgetUsage struct {

@@ -481,6 +481,140 @@ func TestFirstOutcomeDispatchAndStartWarnOnBriefSkillsTheRoleDoesNotLoad(t *test
 	}
 }
 
+func TestRelaunchRefusesAChangedClaimedHeadWithoutStartingAnotherAttempt(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "author-progress")
+	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(task.WorktreePath, "progress.txt")
+	if err := os.WriteFile(file, []byte("claimed progress\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, task.WorktreePath, "add", "progress.txt")
+	gitTest(t, task.WorktreePath, "commit", "-m", "record claimed progress")
+	progressHead, err := gitOutput(context.Background(), task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_GENERATION", "1")
+	if err := updateWorkerBranchAuthorHead(context.Background(), f.db, task, progressHead); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, task.WorktreePath, "reset", "--hard", "main")
+	file = filepath.Join(task.WorktreePath, "divergent.txt")
+	if err := os.WriteFile(file, []byte("unexpected rewrite\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, task.WorktreePath, "add", "divergent.txt")
+	gitTest(t, task.WorktreePath, "commit", "-m", "diverge from claimed head")
+	changedHead, err := gitOutput(context.Background(), task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"relaunch", "t1"}); code == 0 || !strings.Contains(output.String(), "branch") {
+		t.Fatalf("relaunch accepted a changed claimed head: code=%d output=%s", code, output.String())
+	}
+	unchanged, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Launches != task.Launches {
+		t.Fatalf("refused relaunch incremented attempts from %d to %d", task.Launches, unchanged.Launches)
+	}
+	if got, err := gitOutput(context.Background(), task.WorktreePath, "rev-parse", "HEAD"); err != nil || got != changedHead {
+		t.Fatalf("refused relaunch changed branch head: got=%s want=%s err=%v", got, changedHead, err)
+	}
+}
+
+func TestRelaunchRefusesWhenTheBranchClaimIsHeldWithoutStartingAnotherAttempt(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "author-progress")
+	task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireTaskBranchAuthorLock(context.Background(), task.WorktreePath, task.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"relaunch", "t1"}); code == 0 || !strings.Contains(output.String(), "busy") {
+		t.Fatalf("relaunch ignored the active branch claim operation: code=%d output=%s", code, output.String())
+	}
+	unchanged, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Launches != task.Launches {
+		t.Fatalf("refused relaunch incremented attempts from %d to %d", task.Launches, unchanged.Launches)
+	}
+}
+
+func TestRelaunchRefusesWhenAnotherTaskOwnsTheBranchClaim(t *testing.T) {
+	f := newFirstOutcomeFixture(t)
+	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")
+	f.fake.BeforeCall = func(method string) {
+		if method == "agent.start" && len(f.fake.SnapshotValue.Panes) == 1 {
+			f.fake.SnapshotValue.Panes = append(f.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: "posse:shop:t1", Agent: "pi", AgentStatus: "working"})
+		}
+	}
+	outcomeCLI(t, f.service, 0, "start", "--brief", f.brief, "--name", "author-progress")
+	ctx := context.Background()
+	task, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := gitCommonDir(ctx, task.WorktreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "change", Title: "competing author", State: store.StateSpawning, Branch: task.Branch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ClaimBranchAuthor(ctx, repository, task.Branch, other, 1, head, head, true); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"relaunch", "t1"}); code == 0 || !strings.Contains(output.String(), "another Task owns the branch author claim") {
+		t.Fatalf("relaunch took over another Task's branch claim: code=%d output=%s", code, output.String())
+	}
+	claim, err := f.db.BranchAuthor(ctx, repository, task.Branch)
+	if err != nil || claim.TaskID != other {
+		t.Fatalf("refused relaunch changed the branch claim: %#v err=%v", claim, err)
+	}
+	unchanged, err := f.db.Task(ctx, f.project.ID, "t1")
+	if err != nil || unchanged.Launches != task.Launches {
+		t.Fatalf("refused relaunch changed attempts: %#v err=%v", unchanged, err)
+	}
+}
+
 func TestRelaunchPreservesUnpublishedCommitAndClaimsHead(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	outcomeCLI(t, f.service, 0, "config", "set", "defaults.merge_mode", "local", "--project", "shop")

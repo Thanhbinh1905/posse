@@ -128,6 +128,7 @@ func (s *Service) admitClaudeChild(ctx context.Context, db *store.DB, home strin
 		IdempotencyKey: claudeToolKey(input), AgentType: launch.SubagentType, Model: launch.Model, Scope: input.CWD,
 		PromptDigest: digestText(launch.Prompt), State: string(research.Registered),
 	}
+	refusalGuidance := "Use a read-only Explore or Plan agent, or ask a Worker to do write work."
 	refuse := func(reason string) (string, string, error) {
 		attempt.State, attempt.Note = string(research.Refused), reason
 		attempt.IdempotencyKey = ""
@@ -135,7 +136,7 @@ func (s *Service) admitClaudeChild(ctx context.Context, db *store.DB, home strin
 		if err != nil {
 			return "", "", err
 		}
-		return fmt.Sprintf("research child refused (%s): %s. Use a read-only Explore or Plan agent, or ask a Worker to do write work.", research.AttemptID(refused.ID), reason), "", nil
+		return fmt.Sprintf("research child refused (%s): %s. %s", research.AttemptID(refused.ID), reason, refusalGuidance), "", nil
 	}
 	if input.SessionID == "" || input.ToolUseID == "" {
 		return refuse("the hook input has no session or tool use identity")
@@ -176,7 +177,8 @@ func (s *Service) admitClaudeChild(ctx context.Context, db *store.DB, home strin
 	}
 	registered, created, err := db.CreateResearchAttempt(ctx, attempt, cfg.Research.MaxActive)
 	if errors.Is(err, store.ErrResearchBudget) {
-		return refuse(err.Error() + "; wait for a child to finish or cancel one with `posse research cancel`")
+		refusalGuidance = "The limit applies to Explore agents too; wait for a child to finish or cancel one with `posse research cancel`."
+		return refuse(err.Error())
 	}
 	if err != nil {
 		return "", "", err

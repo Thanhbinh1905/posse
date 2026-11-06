@@ -11,6 +11,21 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func requireReleasedTaskBranchHead(ctx context.Context, task store.Task) error {
+	if task.GatedSHA == "" {
+		return store.ErrBranchAuthorHeadChanged
+	}
+	head, err := taskBranchAuthorHead(ctx, task.WorktreePath, task.Branch)
+	if err != nil || head != task.GatedSHA {
+		return store.ErrBranchAuthorHeadChanged
+	}
+	remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
+	if err != nil || remoteHead != task.GatedSHA {
+		return store.ErrBranchAuthorHeadChanged
+	}
+	return nil
+}
+
 func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, attempt int, previousWriterStopped bool) (int64, error) {
 	project, err := db.ProjectByID(ctx, task.ProjectID)
 	if err != nil {
@@ -39,10 +54,18 @@ func claimTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task, a
 	if previousErr != nil && previousErr != store.ErrNotFound {
 		return 0, previousErr
 	}
+	if previousErr == nil && previousWriterStopped && previous.TaskID != task.ID {
+		return 0, store.ErrBranchAuthorForeign
+	}
 	previousHead := head
 	if previousErr == nil {
 		previousHead = previous.HeadSHA
 		if task.PRURL != "" {
+			if previousHead != "" {
+				if err := requireBranchHeadAncestor(ctx, task.WorktreePath, previousHead, head); err != nil {
+					return 0, err
+				}
+			}
 			remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
 			if err != nil {
 				return 0, err

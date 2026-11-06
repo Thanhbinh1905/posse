@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,12 +119,7 @@ done
 				t.Fatalf("relaunched Worker did not receive the relaunch prompt: %s", workerLog())
 			}
 
-			// A Herdr restart again, plus an out-of-band amend and force push.
 			killPane(first.PaneID)
-			gitTest(t, fixture.env, before.WorktreePath, "commit", "--amend", "-m", "worker change t1 (reworded)")
-			amended := strings.TrimSpace(gitTest(t, fixture.env, before.WorktreePath, "rev-parse", "HEAD"))
-			gitTest(t, fixture.env, before.WorktreePath, "push", "--force", "origin", "HEAD:"+before.Branch)
-
 			const followUp = "T595 follow-up queued while the Worker pane was gone"
 			sent := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "send", "t1", followUp)
 			for _, expected := range []string{"state: queued", "reason: worker_pane_missing", "posse relaunch t1"} {
@@ -131,6 +127,25 @@ done
 					t.Fatalf("send to %s Task without a pane omitted %q: %s", state, expected, sent)
 				}
 			}
+			gitTest(t, fixture.env, before.WorktreePath, "commit", "--amend", "-m", "worker change t1 (reworded)")
+			rewrittenHead := strings.TrimSpace(gitTest(t, fixture.env, before.WorktreePath, "rev-parse", "HEAD"))
+			command := exec.Command(fixture.binary, "relaunch", "t1")
+			command.Dir, command.Env = fixture.repo, fixture.leadEnv
+			if output, err := command.CombinedOutput(); err == nil || !strings.Contains(string(output), "branch head changed since the previous author claim") {
+				t.Fatalf("relaunch accepted an unapproved rewrite: err=%v output=%s", err, output)
+			}
+			refused := fixture.mustTask(t, "t1")
+			if refused.Launches != first.Launches || refused.PaneID != first.PaneID || refused.GatedSHA != first.GatedSHA || refused.State != first.State {
+				t.Fatalf("refused relaunch changed the Task: before=%#v after=%#v", first, refused)
+			}
+			if got := strings.TrimSpace(gitTest(t, fixture.env, before.WorktreePath, "rev-parse", "HEAD")); got != rewrittenHead {
+				t.Fatalf("refused relaunch changed the rewritten head: got %s, want %s", got, rewrittenHead)
+			}
+			gitTest(t, fixture.env, before.WorktreePath, "reset", "--hard", head)
+			gitTest(t, fixture.env, before.WorktreePath, "commit", "--allow-empty", "-m", "worker follow-up t1")
+			nextHead := strings.TrimSpace(gitTest(t, fixture.env, before.WorktreePath, "rev-parse", "HEAD"))
+			gitTest(t, fixture.env, before.WorktreePath, "push", "origin", "HEAD:"+before.Branch)
+
 			relaunch()
 			if !waitForCondition(20*time.Second, func() bool {
 				runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t1")
@@ -140,21 +155,22 @@ done
 				t.Fatalf("queued follow-up never reached the relaunched Worker: %s\nshow: %s", workerLog(), show)
 			}
 			var status string
-			if err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, before.ID, followUp).Scan(&status); err != nil || status != "delivered" {
-				t.Fatalf("follow-up status = %q, %v; want delivered", status, err)
+			if !waitForCondition(10*time.Second, func() bool {
+				err := fixture.db.QueryRowContext(context.Background(), `SELECT status FROM messages WHERE task_id=? AND body=?`, before.ID, followUp).Scan(&status)
+				return err == nil && status == "delivered"
+			}) {
+				t.Fatalf("follow-up status = %q; want delivered after Worker received it; log: %s", status, workerLog())
 			}
-			// The delivered follow-up reopens the Task as it does for a live
-			// pane, and the Worker's next done Signal records the amended head.
 			fixture.waitTaskState(t, "t1", store.StateDone)
 			var discontinuities int
 			if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='head_discontinuity'`, before.ID).Scan(&discontinuities); err != nil || discontinuities != 0 {
 				t.Fatalf("head_discontinuity Notices = %d, %v; log: %s", discontinuities, err, workerLog())
 			}
 			if state == store.StateMerging {
-				fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", amended)
+				fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", nextHead)
 				runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1")
-				if current := fixture.mustTask(t, "t1"); current.State != store.StateMerging || current.GatedSHA != amended {
-					t.Fatalf("Merge after relaunch gated %q in state %s; want %s merging", current.GatedSHA, current.State, amended)
+				if current := fixture.mustTask(t, "t1"); current.State != store.StateMerging || current.GatedSHA != nextHead {
+					t.Fatalf("Merge after relaunch gated %q in state %s; want %s merging", current.GatedSHA, current.State, nextHead)
 				}
 			}
 		})

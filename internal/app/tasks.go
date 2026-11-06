@@ -187,6 +187,41 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if project.IsDirectory() {
 		return axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false, "Register a Git repository with `posse project add`")
 	}
+	var adoption *store.TaskAdoptionRequest
+	var adoptionSource *store.Task
+	if brief.Adopt != "" {
+		source, err := db.Task(ctx.Context, project.ID, brief.Adopt)
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+		if store.IsNotFound(err) || source.Type != "change" || source.PRURL == "" {
+			return axi.Failure("adoption_refused", "adopt must identify an existing Change Task with an open PR/MR", false)
+		}
+		var pendingDecision bool
+		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND answered_at=0)`, source.ID).Scan(&pendingDecision); err != nil {
+			return err
+		}
+		if pendingDecision {
+			return axi.Failure("adoption_refused", "the source Task holds custody under an unanswered Decision", false)
+		}
+		snapshot, err := s.snapshot(ctx.Context)
+		if err != nil {
+			return err
+		}
+		if pane, found := findTaskPane(snapshot.Panes, source); found && pane.Agent != "" {
+			return axi.Failure("adoption_refused", "the source Task still has a live executor; stop it before adoption", false)
+		}
+		lock, err := acquireTaskBranchAuthorLock(ctx.Context, project.Root, source.Branch)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		adoption, err = s.prepareTaskAdoption(ctx.Context, db, project, cfg, source)
+		if err != nil {
+			return err
+		}
+		adoptionSource = &source
+	}
 	var supersededTask *store.Task
 	if brief.Supersedes != "" {
 		source, err := s.currentTask(ctx.Context, db, project, brief.Supersedes)
@@ -197,7 +232,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			return axi.Failure("brief_invalid", "supersedes must identify a prior Change Task", false)
 		}
 		var authorized bool
-		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND answer='rethink' AND user_quote<>'')`, source.ID).Scan(&authorized); err != nil {
+		if err := db.QueryRowContext(ctx.Context, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind='review_cap' AND answer='rethink' AND (user_quote<>'' OR (answer_actor='lead' AND answer_reason<>'')))`, source.ID).Scan(&authorized); err != nil {
 			return err
 		}
 		if !authorized {
@@ -229,11 +264,17 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	// Review Rounds are exempt from max_workers: done Change Tasks hold slots
 	// until merge, so gating the rounds that unblock those merges deadlocks.
+	if adoptionSource != nil && (adoptionSource.State == store.StateDone || adoptionSource.State == store.StateWorking || adoptionSource.State == store.StateSpawning || adoptionSource.State == store.StateStalled || adoptionSource.State == store.StateBlocked || adoptionSource.State == store.StateNeedsDecision) {
+		count--
+	}
 	atCapacity := count >= cfg.Defaults.MaxWorkers && generated == nil
 	if atCapacity && !parsed.Bool("queue") && len(unmetDependencies) == 0 {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
 	}
 	queued := atCapacity || len(unmetDependencies) > 0
+	if adoption != nil && (queued || parsed.Bool("queue") || brief.Base != "" || brief.Target != "" || parsed.Flags["from-orphan"] != "" || brief.Supersedes != "") {
+		return axi.Failure("adoption_refused", "adopt cannot be queued or combined with base, target, supersedes or from-orphan", false)
+	}
 	resolution, err := s.resolveDispatch(ctx.Context, project, cfg, brief.Type, parsed.Flags["profile"])
 	if err != nil {
 		return profileError(err)
@@ -262,12 +303,15 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		tightening.MergeMode = ""
 	}
 	deliveryDefault := projectMergeMode(ctx.Context, project, cfg)
+	if adoption != nil {
+		deliveryDefault = "pr"
+	}
 	mode, autonomy, err := dispatch.ResolveDelivery(tightening, deliveryDefault, cfg.Autonomy, choice != nil)
 	if err != nil {
 		return briefError(err)
 	}
-	if hasLandedPrerequisite(brief.After) && (brief.Base != "" || len(brief.BaseByRepo) != 0) {
-		return briefError(&dispatch.BriefError{Field: "base", Reason: "a Change Task after a landed prerequisite must start from the default branch"})
+	if adoption != nil && mode != "pr" {
+		return axi.Failure("adoption_refused", "adopt requires PR delivery", false)
 	}
 	if !project.IsWorkspace() && brief.Type == "change" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("remote_missing", "Project "+project.Name+" has no origin remote to open a pull request against", false,
@@ -465,7 +509,12 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		}
 	}
 	branch := ""
-	if !queued {
+	if adoption != nil {
+		branch = adoption.Branch
+		baseRef = adoptionSource.BaseRef
+		targetBranch = taskTargetBranch(project, *adoptionSource)
+	}
+	if !queued && adoption == nil {
 		sequenceCandidate, err := nextTaskSequence(ctx.Context, db, project, home)
 		if err != nil {
 			return err
@@ -482,7 +531,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		Type: brief.Type, ReviewsTaskID: reviewsTaskID, Title: brief.Title, ShortName: name, State: store.StateSpawning, ReportKind: brief.ReportKind,
 		Profile: resolution.Profile, DispatchRule: resolution.Rule, MergeMode: mode,
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyMerge: defaultValue(autonomy.Merge, "ask"),
-		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets,
+		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets, Adoption: adoption,
 	}
 	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice, workflow)
 	if err != nil {
@@ -513,14 +562,17 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	// Admission must finish before preparation can recover other Workers or
 	// allocate this Task's scratch, Sandbox, branch or pane.
-	if !queued {
+	if adoption != nil && plan.Execution.Mode != "sandbox" && plan.Execution.Mode != "" {
+		return axi.Failure("adoption_refused", "adopt requires Sandbox execution", false)
+	}
+	if !queued && adoption == nil {
 		if err := retryBusy(ctx.Context, admissionPreparationAttempts, admissionPreparationDelay, func() error {
 			_, err := s.prepareProjectForTask(ctx.Context, db, project)
 			return err
 		}); err != nil {
 			return err
 		}
-	} else {
+	} else if queued {
 		task.State = store.StateQueued
 		task.Branch = ""
 	}
@@ -548,6 +600,9 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	}
 	if errors.Is(err, store.ErrWorkerLimit) {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s reached max_workers=%d during Task admission", project.Name, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or use `--queue` to admit the Task without starting")
+	}
+	if errors.Is(err, store.ErrTaskAdoptionChanged) {
+		return axi.Failure("adoption_refused", err.Error(), false)
 	}
 	if errors.Is(err, store.ErrTaskBranchExists) {
 		return branchTaken(branch, "in Project "+project.Name+" Task history")
@@ -692,7 +747,24 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	}
 	generation := int64(0)
 	if task.Type == "change" {
-		generation, err = claimTaskBranchAuthor(ctx.Context, db, task, launch, false)
+		adoptions, adoptErr := db.TaskAdoptions(ctx.Context, task.ID)
+		if adoptErr != nil {
+			return adoptErr
+		}
+		adopted := false
+		for _, a := range adoptions {
+			if a.TaskID == task.ID && launch == 1 {
+				generation = a.Generation
+				if err := db.RequireBranchAuthor(ctx.Context, a.Repository, a.Branch, task.ID, generation); err != nil {
+					return err
+				}
+				adopted = true
+				break
+			}
+		}
+		if !adopted {
+			generation, err = claimTaskBranchAuthor(ctx.Context, db, task, launch, false)
+		}
 		if err == nil && generation > 0 {
 			err = exportTaskAuthorGeneration(ctx.Context, s, opened.PaneID, generation)
 		}
@@ -739,6 +811,9 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, skillErr.Error())
 			return skillErr
 		}
+	}
+	if kind == "codex" {
+		argsForAgent = disableCodexWorkerMemories(argsForAgent)
 	}
 	reviewFiles := admittedReviewRoundFiles(plan)
 	if len(reviewFiles) > 0 {
@@ -1326,10 +1401,10 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	} else {
 		signal += " --report <file-in-task-scratch>"
 		if project.IsWorkspace() && rootContext != "legacy" && rootContext != "" {
-			work += " Put `report.md` in this Task's scratch directory. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside it at their worktree-relative paths. `.git` metadata is excluded. Shared-root files are not writable; use repeatable `--attach <file-or-directory>` for ignored Member evidence or unchanged files in an explicitly selected read-only root context. If a required Member baseline or Git listing cannot be read, Teardown refuses and keeps the Sandbox. `posse show <task>` lists saved attachments."
+			work += " Put `report.md` in this Task's scratch directory. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside it at their worktree-relative paths. `.git` metadata is excluded. Shared-root files are not writable; use repeatable `--attach <file-or-directory>` for ignored Member evidence or unchanged files in an explicitly selected read-only root context. If a required Member baseline or Git listing cannot be read, Teardown refuses and keeps the Sandbox. The Lead can list saved attachments with `posse show <task>`."
 		} else {
 			signal = "posse signal done \"<summary>\" --report <file-in-worktree-or-task-scratch>"
-			work += " Put Report attachments in the Sandbox at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside report.md at those paths. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Sandbox. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence. `posse show <task>` lists saved attachments."
+			work += " Put Report attachments in the Sandbox at the relative paths named in the Report. Teardown saves non-ignored uncommitted and untracked Member files, plus committed changes beyond each selected Member's Task base, beside report.md at those paths. `.git` metadata is excluded. If a required baseline or nested Git listing cannot be read, Teardown refuses and keeps the Sandbox. Use repeatable `--attach <file-or-directory>` on the done Signal for ignored Member evidence. The Lead can list saved attachments with `posse show <task>`."
 			if project.IsWorkspace() {
 				work += " Legacy workspace Tasks also save edited shared-root files and unrequested Member commits against their Sandbox-acquisition snapshot."
 			}
@@ -2996,6 +3071,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(axi.Failure("in_place_removed", "in-place execution was removed; this legacy Task cannot be relaunched", false, "Existing in-place Tasks remain readable and can be torn down"))
 	}
 	sandbox, sandboxErr := db.SandboxByTask(ctx, task.ID)
+	releasedSandbox := false
 	if sandboxErr != nil || sandbox.State != "held" || sandbox.TaskID != task.ID {
 		neverStarted, err := taskNeverStarted(ctx, db, task)
 		if err != nil {
@@ -3004,7 +3080,26 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if neverStarted && plan != nil {
 			return s.relaunchNeverStarted(ctx, db, home, project, task, plan, revision)
 		}
-		return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
+		if !store.IsNotFound(sandboxErr) || task.SandboxID != 0 || task.Type != "change" {
+			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
+		}
+		deliveries, err := db.TaskDeliveries(ctx, task.ID)
+		if err != nil {
+			return failure(err)
+		}
+		for i := len(deliveries) - 1; i >= 0; i-- {
+			policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[i].ID)
+			if err != nil {
+				return failure(err)
+			}
+			if policy == "release" {
+				releasedSandbox = true
+				break
+			}
+		}
+		if !releasedSandbox {
+			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
+		}
 	}
 	if task.State == store.StateFailed && (task.SandboxID == 0 || task.SandboxID != sandbox.ID) {
 		return failure(axi.Failure("relaunch_sandbox_missing", "failed Task no longer owns its Sandbox", false))
@@ -3012,6 +3107,8 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	if task.WorktreePath == "" || task.Branch == "" {
 		return failure(axi.Failure("relaunch_sandbox_missing", "Task has no recorded Sandbox or branch", false))
 	}
+	launch := task.Launches + 1
+	generation := int64(0)
 	payload := `{}`
 	if automatic {
 		payload = `{"automatic_recovery":true}`
@@ -3022,6 +3119,51 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	defer func() { _ = db.FinishIntent(ctx, intent.ID, intent.ProcessID) }()
 	track := func(step string, action func() error) error { return s.runIntentStep(ctx, db, intent, step, action) }
+	if releasedSandbox {
+		snapshot, err := s.snapshot(ctx)
+		if err != nil {
+			return failure(err)
+		}
+		pane, found := findTaskPane(snapshot.Panes, task)
+		if !found {
+			pane.PaneID = task.PaneID
+		}
+		if pane.PaneID == "" || pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
+			return failure(prReleaseRefused("the released Task executor is still present and cannot be verified as stopped", true))
+		}
+		preserved := task
+		preserved.WorktreePath = project.Root
+		if err := requireReleasedTaskBranchHead(ctx, preserved); err != nil {
+			return failure(err)
+		}
+		generation, err = claimTaskBranchAuthor(ctx, db, preserved, launch, true)
+		if err != nil {
+			return failure(err)
+		}
+		sandbox, err = acquireSandboxForExistingBranch(ctx, db, project, task, home, cfg.Pool.Clean, cfg.Pool.Setup)
+		if err != nil {
+			return failure(err)
+		}
+		task.SandboxID, task.WorktreePath = sandbox.ID, sandbox.Path
+		repository, err := gitCommonDir(ctx, sandbox.Path)
+		if err != nil {
+			_, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
+			return failure(errors.Join(err, releaseErr))
+		}
+		claim, err := db.BranchAuthor(ctx, repository, task.Branch)
+		if err != nil {
+			_, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
+			return failure(errors.Join(err, releaseErr))
+		}
+		head, err := taskBranchAuthorHead(ctx, sandbox.Path, task.Branch)
+		if err != nil || head != claim.HeadSHA {
+			_, releaseErr := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
+			if err == nil {
+				err = store.ErrBranchAuthorHeadChanged
+			}
+			return failure(errors.Join(err, releaseErr))
+		}
+	}
 	if revision != nil {
 		if err := track("plan.revise", func() error { return db.ReviseTaskPlan(ctx, task, *revision) }); err != nil {
 			return failure(err)
@@ -3080,6 +3222,17 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			}
 		}
 	}
+	if task.Type == "change" {
+		if generation == 0 {
+			generation, err = claimTaskBranchAuthor(ctx, db, task, launch, true)
+		}
+		if err == nil && generation > 0 {
+			err = exportTaskAuthorGeneration(ctx, s, pane.PaneID, generation)
+		}
+		if err != nil {
+			return failure(err)
+		}
+	}
 	if prepareChanged || kindConfig.Prepare != "" {
 		if err := track("repository.prepare", func() error {
 			if project.IsWorkspace() && kindConfig.Prepare == "claude-trust" {
@@ -3121,23 +3274,12 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}); err != nil {
 		return failure(err)
 	}
-	launch := 0
 	if err := track("agent.sequence", func() error {
 		var launchErr error
 		launch, launchErr = db.NextTaskLaunchWithIdentity(ctx, task.ID, profileName, launchIdentity.ConfiguredModel, launchIdentity.ModelKnown)
 		return launchErr
 	}); err != nil {
 		return failure(err)
-	}
-	generation := int64(0)
-	if task.Type == "change" {
-		generation, err = claimTaskBranchAuthor(ctx, db, task, launch, true)
-		if err == nil && generation > 0 {
-			err = exportTaskAuthorGeneration(ctx, s, pane.PaneID, generation)
-		}
-		if err != nil {
-			return failure(err)
-		}
 	}
 	workerName := agentName(project.Name, task.Seq, launch)
 	turnToken := fmt.Sprintf("launch:%d", launch)
@@ -3173,6 +3315,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if skillErr != nil {
 			return failure(skillErr)
 		}
+	}
+	if kind == "codex" {
+		startArgs = disableCodexWorkerMemories(startArgs)
 	}
 	if plan != nil {
 		if err := track("launch.restore", func() error { return restoreAdmittedLaunchFiles(home, project, task, plan) }); err != nil {

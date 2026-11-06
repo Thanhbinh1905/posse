@@ -29,6 +29,7 @@ type Brief struct {
 	TargetByRepo   map[string]string
 	ReviewOf       string
 	Supersedes     string
+	Adopt          string
 	ReportKind     string
 	AutonomyReview string
 	AutonomyMerge  string
@@ -173,7 +174,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -193,6 +194,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 		Stage:       unquote(values["stage"]),
 		ReviewOf:    unquote(values["review_of"]),
 		Supersedes:  unquote(values["supersedes"]),
+		Adopt:       unquote(values["adopt"]),
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
@@ -339,6 +341,9 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 		if brief.Type != "change" || !taskIDPattern.MatchString(brief.Supersedes) {
 			return Brief{}, &BriefError{Field: "supersedes", Reason: "must name a Change Task such as t12"}
 		}
+	}
+	if _, found := values["adopt"]; found && (brief.Type != "change" || !taskIDPattern.MatchString(brief.Adopt)) {
+		return Brief{}, &BriefError{Field: "adopt", Reason: "must name an existing Change Task such as t12"}
 	}
 	if brief.Title == "" {
 		return Brief{}, &BriefError{Field: "title", Reason: "is required"}

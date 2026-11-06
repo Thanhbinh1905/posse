@@ -144,6 +144,7 @@ export default function (pi) {
 		generation: 0,
 		running: false,
 		blocked: false,
+		continueFresh: false,
 		child: undefined,
 		timer: undefined,
 		backoffMs: 1_000,
@@ -266,21 +267,33 @@ export default function (pi) {
 	const notifyFailure = () => {
 		if (runtime.healthNotified) return;
 		runtime.healthNotified = true;
+		ui?.setStatus?.("posse-notices", "Notices paused: /posse-notices retry");
 		try {
 			pi.sendMessage({
 				customType: "posse-notices",
-				content: '[posse | Posse -> Lead project | delivery-error]\nbody: "Notice delivery failed after bounded retries. Run `posse` to inspect open Notices."',
+				content: '[posse | Posse -> Lead project | delivery-error]\nbody: "Notice delivery paused after bounded retries. Run `posse` to inspect open Notices. Repair delivery, then use /posse-notices retry. Held receipts remain unresolved."',
 				display: true,
 				details: { origin: "posse", from: "Posse", to: "Lead", task: "project", type: "delivery-error" },
 			}, { triggerTurn: true, deliverAs: "followUp" });
 		} catch {
-			ui?.notify("Notice delivery failed after bounded retries. Run `posse` to inspect open Notices.", "warning");
+			ui?.notify("Notice delivery paused. Inspect open Notices with posse, repair delivery, then /posse-notices retry.", "warning");
 		}
 	};
 
-	const notifyUncertainty = (warning, delivery) => {
-		if (runtime.blocked) return;
-		runtime.blocked = true;
+	const notifyUncertainty = (warning, delivery, canContinue = false) => {
+		runtime.blocked = !canContinue;
+		if (canContinue) {
+			runtime.continueFresh = true;
+			runtime.pendingAcceptance.delete(delivery?.delivery_id);
+			schedule(0, runtime.generation);
+		}
+		ui?.setStatus?.("posse-notices", canContinue ? "Notices: old batch held; fresh delivery active" : "Notices paused: /posse-notices retry");
+		try {
+			if (runtime.sessionManager?.getEntries?.().some((entry) => entry.type === "custom_message" &&
+				entry.customType === "posse-notices" && entry.details?.type === "delivery-uncertain" &&
+				entry.details?.delivery_id === delivery?.delivery_id)) return;
+		} catch {}
+		warning += canContinue ? " The old batch remains held; fresh Notices continue." : " Automatic delivery is paused. After restoring session inspection, run /posse-notices retry; this does not resolve held receipts.";
 		const content = `[posse | Posse -> Lead project | delivery-uncertain]\nbody: ${JSON.stringify(warning)}`;
 		const details = { origin: "posse", from: "Posse", to: "Lead", task: "project", type: "delivery-uncertain" };
 		if (delivery?.delivery_id) details.delivery_id = delivery.delivery_id;
@@ -303,6 +316,10 @@ export default function (pi) {
 		try {
 			return runtime.sessionManager.getEntries().some((entry) =>
 				entry.type === "custom_message" && entry.customType === "posse-notices" &&
+				entry.details?.origin === "posse" && entry.details?.type === "notice" &&
+				Array.isArray(entry.details.ids) && Array.isArray(delivery.notice_ids) &&
+				entry.details.ids.length === delivery.notice_ids.length &&
+				entry.details.ids.every((id, index) => id === delivery.notice_ids[index]) &&
 				(entry.details?.delivery_id === delivery.delivery_id || entry.details?.batch_id === delivery.batch_id));
 		} catch {
 			return undefined;
@@ -400,11 +417,11 @@ export default function (pi) {
 				retry(generation);
 				return;
 			}
-			const ids = delivery.notice_ids?.join(",") ?? "unknown";
+			const count = delivery.notice_ids?.length ?? 0;
 			const warning = persisted === undefined
-				? `Pi could not inspect its session receipt for batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${ids}. Inspect the Lead session before retrying.`
-				: `Pi did not persist queued batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${ids} before its run settled. Inspect the Lead session before retrying.`;
-			notifyUncertainty(warning, delivery);
+				? `Pi could not inspect the session receipt. Notice count: ${count}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`
+				: `Pi did not persist the queued Notice batch before its run settled. Notice count: ${count}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`;
+			notifyUncertainty(warning, delivery, persisted !== undefined);
 			return;
 		}
 		schedule(0, generation);
@@ -416,6 +433,7 @@ export default function (pi) {
 		const watchRevision = choiceRevision;
 		const destination = runtime.destination;
 		const args = ["watch", "--json", "--quiet-routine", "--handoff", "--destination", destination];
+		if (runtime.continueFresh) args.push("--continue-fresh");
 		const record = startChild(args, ["ignore", "pipe", "ignore"], generation, async (code) => {
 			if (!isCurrent(generation)) return;
 			if (code !== 0) {
@@ -453,8 +471,8 @@ export default function (pi) {
 					}
 					return;
 				}
-				const warning = result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying the recorded Notice IDs.";
-				notifyUncertainty(warning, delivery);
+				const warning = result.warning ?? "A Notice delivery has an ambiguous receipt. Inspect the Lead session before retrying the receipt.";
+				notifyUncertainty(warning, delivery, sessionHasReceipt(delivery) !== undefined);
 				return;
 			}
 			const notices = result.notices ?? [];
@@ -474,7 +492,7 @@ export default function (pi) {
 				const recorded = await settleReceipt(delivery, "uncertain", generation);
 				if (!isCurrent(generation)) return;
 				if (!recorded) retry(generation);
-				notifyUncertainty(`Pi could not inspect its session receipt for Notice batch ${delivery.batch_id}. Inspect the Lead session before retrying the recorded Notice IDs.`, delivery);
+				notifyUncertainty(`Pi could not inspect the session receipt. Notice count: ${delivery.notice_ids?.length ?? 0}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`, delivery);
 				return;
 			}
 			if (previouslyAccepted) {
@@ -521,7 +539,7 @@ export default function (pi) {
 					retry(generation);
 				} else if (await settleReceipt(delivery, "uncertain", generation)) {
 					if (!isCurrent(generation)) return;
-					notifyUncertainty(`Pi could not verify whether batch ${delivery.batch_id}, delivery ${delivery.delivery_id}, Notice IDs ${delivery.notice_ids.join(",")} reached the session. Inspect the session before retrying.`, delivery);
+					notifyUncertainty(`Pi could not verify delivery. Notice count: ${delivery.notice_ids.length}. Inspect the Lead session before retrying receipt ${delivery.delivery_id}.`, delivery);
 				} else retry(generation);
 				return;
 			}
@@ -532,6 +550,19 @@ export default function (pi) {
 		if (!record) retry(generation);
 		else record.process.stdout?.on("data", (chunk) => { output += chunk; });
 	};
+
+	pi.registerCommand("posse-notices", {
+		description: "Inspect Notice receiver health or retry after repairing delivery.",
+		handler: async (args, ctx) => {
+			if (args.trim() === "retry") {
+				runtime.blocked = false;
+				resetHealth();
+				ctx.ui.setStatus?.("posse-notices", undefined);
+				if (runtime.pendingAcceptance.size) await reconcilePendingAcceptance(runtime.generation);
+				else schedule(0, runtime.generation);
+			} else ctx.ui.notify(runtime.blocked ? "Notice delivery paused. Repair the delivery or session inspection failure, then /posse-notices retry. Held receipts require confirmed outcomes." : "Notice receiver active. Uncertain batches stay held; new Notices remain eligible.", "info");
+		},
+	});
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (!isCurrent(runtime.generation)) return;
@@ -561,6 +592,7 @@ export default function (pi) {
 		runtime.sessionManager = ctx.sessionManager;
 		runtime.destination = `pi:${ctx.sessionManager.getSessionId()}`;
 		runtime.blocked = false;
+		runtime.continueFresh = false;
 		runtime.running = true;
 		runtime.failures = 0;
 		runtime.backoffMs = 1_000;

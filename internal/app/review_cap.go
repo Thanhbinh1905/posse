@@ -135,7 +135,7 @@ func reviewCapOrigin(task store.Task, head string) string {
 
 func parseReviewCapOrigin(origin string) (string, string, bool) {
 	parts := strings.Split(origin, ":")
-	if len(parts) != 3 || parts[0] != "review_cap" || !strings.HasPrefix(parts[1], "t") || len(parts[2]) != 40 && len(parts[2]) != 64 {
+	if (len(parts) != 3 && (len(parts) != 5 || parts[3] != "recovery" || parts[4] == "")) || parts[0] != "review_cap" || !strings.HasPrefix(parts[1], "t") || len(parts[2]) != 40 && len(parts[2]) != 64 {
 		return "", "", false
 	}
 	return parts[1], parts[2], true

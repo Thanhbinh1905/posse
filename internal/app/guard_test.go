@@ -305,6 +305,7 @@ func TestWorkerGuardBlocksDirectGitPush(t *testing.T) {
 }
 
 func TestRunGuardBlocksOnlyWorkers(t *testing.T) {
+	t.Setenv("POSSE_TASK_GENERATION", "")
 	root := t.TempDir()
 	home := filepath.Join(root, "posse")
 	db, err := store.Open(home)

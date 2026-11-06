@@ -14,6 +14,18 @@ import (
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 )
 
+func TestDisableCodexWorkerMemoriesPreservesLaunchArguments(t *testing.T) {
+	args := []string{"resume", "session-id", "-m", "gpt-5"}
+	got := disableCodexWorkerMemories(args)
+	want := []string{"--disable", "memories", "resume", "session-id", "-m", "gpt-5"}
+	if !equalStrings(got, want) {
+		t.Fatalf("Worker arguments = %v, want %v", got, want)
+	}
+	if !equalStrings(args, want[2:]) {
+		t.Fatalf("input arguments changed: %v", args)
+	}
+}
+
 func TestFreezePosseLaunchSkillsBuildsExactHarnessInputs(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "posse-home")

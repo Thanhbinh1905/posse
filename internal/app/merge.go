@@ -88,6 +88,13 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if usesRemovedNoMistakes(task) {
 		return noMistakesRemoved(task)
 	}
+	if parsed.Bool("execute") && task.State == store.StateMerged {
+		fields := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "result", Value: "Task is already merged"}}
+		if task.MergedRef != "" {
+			fields = append(fields, axi.Field{Key: "merged_ref", Value: task.MergedRef})
+		}
+		return ctx.Print(fields)
+	}
 	if task.State == store.StateDone && !project.IsWorkspace() {
 		work, err := s.unmergedWork(ctx.Context, db, project, task)
 		if err != nil {
@@ -599,6 +606,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 }
 
 type teardownOptions struct {
+	capDecision      int64
 	keepBranch       bool
 	keepPullRequests bool
 }
@@ -610,7 +618,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	keepBranch := option.keepBranch
 	if discardable {
-		if strings.TrimSpace(quote) == "" {
+		if strings.TrimSpace(quote) == "" && option.capDecision == 0 {
 			return result, axi.Failure("teardown_refused", "discard requires a recorded User approval quote", false, "Pass `--discard --user-approved \"<User's words>\"`")
 		}
 		if !store.IsApprovedDiscardSourceState(task.State) {
@@ -622,7 +630,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, err
 	}
 	defer release()
-	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests}))
+	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests, "review_cap_decision": option.capDecision}))
 	if err != nil {
 		settled, settleErr := s.finishSettledTeardownIntent(ctx, db, project.ID, task.ID)
 		if settleErr != nil {
@@ -1201,7 +1209,11 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	err = s.runIntentStep(ctx, db, intent, "task.torn_down", func() error {
 		if discardable {
-			return db.TransitionAfterApproval(ctx, task.ID, task.State, store.StateTornDown, "user", "Task Sandbox discarded with User approval", "discard")
+			actor, reason := "user", "Task Sandbox discarded with User approval"
+			if option.capDecision != 0 {
+				actor, reason = "lead", fmt.Sprintf("Task Sandbox discarded under delegated review-cap Decision #%d", option.capDecision)
+			}
+			return db.TransitionAfterApproval(ctx, task.ID, task.State, store.StateTornDown, actor, reason, "discard", option.capDecision)
 		}
 		if inPlace && strings.TrimSpace(quote) != "" && (task.State == store.StateFailed || task.State == store.StateLost) {
 			return db.TransitionInPlacePreserved(ctx, task, task.State, "in-place source preserved after User chose to stop recovery", quote)

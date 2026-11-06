@@ -710,8 +710,8 @@ func (db *DB) TransitionNeverStarted(ctx context.Context, taskID int64, note str
 	return db.PersistTask(ctx, taskID)
 }
 
-func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string) error {
-	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || source != "user" || action != "discard" {
+func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expected, next State, source, note, action string, delegatedDecision ...int64) error {
+	if next != StateTornDown || !IsApprovedDiscardSourceState(expected) || (source != "user" && (source != "lead" || len(delegatedDecision) != 1 || delegatedDecision[0] == 0)) || action != "discard" {
 		return ErrInvalidApprovedDiscardTransition
 	}
 	tx, err := db.beginTxWithRetry(ctx)
@@ -719,6 +719,15 @@ func (db *DB) TransitionAfterApproval(ctx context.Context, taskID int64, expecte
 		return err
 	}
 	defer tx.Rollback()
+	if source == "lead" {
+		var authorized bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE id=? AND task_id=? AND kind='review_cap' AND answer='discard' AND answer_actor='lead' AND answer_reason<>'' AND user_quote='')`, delegatedDecision[0], taskID).Scan(&authorized); err != nil {
+			return err
+		}
+		if !authorized {
+			return ErrInvalidApprovedDiscardTransition
+		}
+	}
 	count, err := db.queries.WithTx(tx.Tx).CountApproval(ctx, dbgen.CountApprovalParams{TaskID: taskID, Action: action})
 	if err != nil {
 		return err
@@ -896,6 +905,8 @@ type TaskLaunchIdentity struct {
 }
 
 type Task struct {
+	Adoption *TaskAdoptionRequest `toml:"-"`
+
 	ID             int64  `toml:"id"`
 	ProjectID      int64  `toml:"project_id"`
 	Seq            int    `toml:"seq"`
@@ -1049,6 +1060,15 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
 			return 0, 0, err
 		}
+		if task.Adoption != nil {
+			var counted bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=? AND project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging')))`, task.Adoption.SourceTaskID, projectID).Scan(&counted); err != nil {
+				return 0, 0, err
+			}
+			if counted {
+				active--
+			}
+		}
 		if active >= maxWorkers {
 			return 0, 0, ErrWorkerLimit
 		}
@@ -1069,7 +1089,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if task.Branch == "" && !inPlace && task.State != StateQueued {
 		task.Branch = TaskBranchName(seq)
 	}
-	if task.Branch != "" {
+	if task.Branch != "" && task.Adoption == nil {
 		if branchSequence, ok := taskBranchSequence(task.Branch); ok && branchSequence != seq {
 			return 0, 0, ErrTaskBranchSequenceMismatch
 		}
@@ -1123,6 +1143,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' ||
 			return 0, 0, err
 		}
 	}
+	if task.Adoption != nil {
+		if err := adoptTaskTx(ctx, tx, projectID, id, task); err != nil {
+			return 0, 0, err
+		}
+	}
 	if len(task.ReviewTargets) != 0 {
 		if task.Type != "review" {
 			return 0, 0, ErrReviewVerdictType
@@ -1149,6 +1174,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' ||
 	}
 	if err := db.PersistTask(ctx, id); err != nil {
 		return 0, 0, err
+	}
+	if task.Adoption != nil {
+		if err := db.PersistTask(ctx, task.Adoption.SourceTaskID); err != nil {
+			return 0, 0, err
+		}
 	}
 	if roundAdmission != nil {
 		if err := db.PersistTask(ctx, roundAdmission.ChangeTaskID); err != nil {
