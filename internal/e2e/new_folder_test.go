@@ -15,6 +15,10 @@ import (
 
 func TestResearchNoticeAcknowledgementTearsDownUnbornRepository(t *testing.T) {
 	f := newWorkerTabsFixtureWithOptions(t, workerTabsOptions{emptyFolder: true})
+	gitTest(t, f.env, f.repo, "init", "-b", "main")
+	if scan := runPosse(t, f.binary, f.repo, f.leadEnv, "project", "scan"); !strings.Contains(scan, "converted: true") {
+		t.Fatalf("conversion failed: %s", scan)
+	}
 	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[defaults]\nauto_teardown = \"finished\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -78,12 +82,18 @@ func TestResearchNoticeAcknowledgementTearsDownUnbornRepository(t *testing.T) {
 	}
 }
 
-// Reproduce #699: Posse starts in a new folder without manual git setup, runs
-// Tasks before the first commit and lands the first commit by fast-forward.
+// Git initialization is explicit; conversion preserves the first-commit flow (#699).
 func TestNewFolderLandsFirstCommitWithoutGitSetup(t *testing.T) {
 	f := newWorkerTabsFixtureWithOptions(t, workerTabsOptions{emptyFolder: true})
-	if branch := strings.TrimSpace(gitTest(t, f.env, f.repo, "symbolic-ref", "--short", "HEAD")); branch != "main" {
-		t.Fatalf("posse up initialized branch %q, want main", branch)
+	if _, err := os.Lstat(filepath.Join(f.repo, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("posse up created Git metadata: %v", err)
+	}
+	if show := runPosse(t, f.binary, f.repo, f.leadEnv, "project", "show"); !strings.Contains(show, "kind: directory") || !strings.Contains(show, "execution: none") {
+		t.Fatalf("not an exploration-only Project: %s", show)
+	}
+	gitTest(t, f.env, f.repo, "init", "-b", "main")
+	if scan := runPosse(t, f.binary, f.repo, f.leadEnv, "project", "scan"); !strings.Contains(scan, "converted: true") {
+		t.Fatalf("conversion failed: %s", scan)
 	}
 	if out, err := gitCommand(f.env, f.repo, "rev-parse", "--verify", "--quiet", "HEAD"); err == nil {
 		t.Fatalf("posse up created a commit: %s", out)

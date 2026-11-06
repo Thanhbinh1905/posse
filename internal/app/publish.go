@@ -119,6 +119,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if project.IsDirectory() {
+		return executionUnavailable(project)
+	}
 	if task.Type == "change" && !project.IsWorkspace() && task.WorktreePath != "" && task.Branch != "" {
 		lock, lockErr := acquireTaskBranchAuthorLock(out.Context, task.WorktreePath, task.Branch)
 		if lockErr != nil {

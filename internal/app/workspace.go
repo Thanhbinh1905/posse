@@ -27,8 +27,6 @@ type detectedProject struct {
 	DefaultBranch string // repo Projects only
 	Repos         []detectedRepo
 	Hint          string
-	// Initialize means dir holds no repository yet; registration runs `git init` first.
-	Initialize bool
 }
 
 type detectedRepo struct {
@@ -67,8 +65,8 @@ func pathWithin(root, path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// detectProject finds the Project shape of dir: the enclosing Git repository, or
-// a workspace of direct child repositories when dir is not inside one.
+// detectProject finds the Project shape of dir: the enclosing Git repository, a
+// workspace of direct child repositories, or a Directory Project without Git.
 func detectProject(ctx context.Context, dir string) (detectedProject, error) {
 	if top, err := gitTop(ctx, dir); err == nil {
 		branch, err := defaultBranch(ctx, top)
@@ -90,22 +88,24 @@ func detectProject(ctx context.Context, dir string) (detectedProject, error) {
 	if err != nil {
 		return detectedProject{}, err
 	}
+	kind := store.ProjectKindWorkspace
 	if len(repos) == 0 {
-		return detectedProject{}, axi.Failure("not_in_git_repository", "this folder is not a Git repository and has no Git repositories directly inside it", false, "Run `posse up` inside a repository, or in a folder whose direct subfolders are repositories. Edit non-Git directories directly outside Posse")
+		kind = store.ProjectKindDirectory
 	}
-	return detectedProject{Kind: store.ProjectKindWorkspace, Root: dir, Name: projectName(filepath.Base(dir)), Repos: repos}, nil
+	return detectedProject{Kind: kind, Root: dir, Name: projectName(filepath.Base(dir)), Repos: repos}, nil
 }
 
-// newRepositoryDetection describes a folder with no repository as a repo
-// Project that `posse up` initializes on the User's confirmation.
-func newRepositoryDetection(ctx context.Context, dir string) detectedProject {
-	branch, err := gitOutput(ctx, dir, "config", "--get", "init.defaultBranch")
-	if err != nil || branch == "" {
-		branch = "main"
+func projectCapabilities(kind string) axi.Object {
+	execution := "git-sandbox"
+	if kind == store.ProjectKindDirectory {
+		execution = "none"
 	}
-	name := projectName(filepath.Base(dir))
-	return detectedProject{Kind: store.ProjectKindRepo, Root: dir, Name: name, DefaultBranch: branch, Initialize: true,
-		Repos: []detectedRepo{{Name: name, Path: ".", DefaultBranch: branch}}}
+	return axi.Object{{Key: "interaction", Value: "ready"}, {Key: "execution", Value: execution}}
+}
+
+func executionUnavailable(project store.Project) error {
+	return axi.Failure("execution_unavailable", "Project "+project.Name+" is a Directory Project without Git: its Lead can explore and plan, but Posse runs no Tasks or Git operations here", false,
+		"To run Tasks, initialize Git in "+project.Root+" or add repositories inside it, then run `posse project scan`")
 }
 
 // scanWorkspace lists the direct child folders of root that are the top level of
@@ -333,9 +333,7 @@ func detectionObject(detected detectedProject, cfg config.Config) axi.Object {
 		{Key: "detected", Value: axi.Object{{Key: "project", Value: detected.Name}, {Key: "kind", Value: detected.Kind}, {Key: "root", Value: detected.Root}}},
 		{Key: "repos", Value: repos},
 	}
-	if detected.Initialize {
-		object = append(object, axi.Field{Key: "initialize", Value: "git init -b " + detected.DefaultBranch})
-	}
+	object = append(object, axi.Field{Key: "capabilities", Value: projectCapabilities(detected.Kind)})
 	if detected.Hint != "" {
 		object = append(object, axi.Field{Key: "hint", Value: detected.Hint})
 	}
@@ -355,18 +353,16 @@ func registerDetected(ctx context.Context, db *store.DB, detected detectedProjec
 		project store.Project
 		err     error
 	)
-	if detected.Kind == store.ProjectKindWorkspace {
+	switch detected.Kind {
+	case store.ProjectKindDirectory:
+		project, err = db.CreateDirectoryProject(ctx, detected.Name, detected.Root)
+	case store.ProjectKindWorkspace:
 		repos := make([]store.ProjectRepo, 0, len(detected.Repos))
 		for _, repo := range detected.Repos {
 			repos = append(repos, store.ProjectRepo{Name: repo.Name, Path: repo.Path, DefaultBranch: repo.DefaultBranch, OriginHost: savedOriginHost(repo.Remote)})
 		}
 		project, err = db.CreateWorkspaceProject(ctx, detected.Name, detected.Root, repos)
-	} else {
-		if detected.Initialize {
-			if _, err := gitOutput(ctx, detected.Root, "init", "-b", detected.DefaultBranch); err != nil {
-				return store.Project{}, err
-			}
-		}
+	default:
 		project, err = db.CreateProject(ctx, detected.Name, detected.Root, detected.DefaultBranch)
 	}
 	if err != nil {
@@ -408,9 +404,6 @@ func (s *Service) confirmRegistration(ctx *axi.Context, detected detectedProject
 		confirm = terminalConfirm
 	}
 	question := fmt.Sprintf("Register %s as a %s Project?", detected.Root, detected.Kind)
-	if detected.Initialize {
-		question = fmt.Sprintf("Initialize a Git repository in %s and register it as a %s Project?", detected.Root, detected.Kind)
-	}
 	yes, interactive, err := confirm(ctx.ErrOut, question)
 	if err != nil {
 		return err

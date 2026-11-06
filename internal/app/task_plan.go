@@ -54,7 +54,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		return taskplan.Plan{}, err
 	}
 	if project.IsDirectory() {
-		return taskplan.Plan{}, axi.Failure("project_directory_removed", "Directory Projects no longer admit Tasks", false)
+		return taskplan.Plan{}, executionUnavailable(project)
 	}
 	launch, err := frozenLaunch(resolution, cfg.Kinds)
 	if err != nil {

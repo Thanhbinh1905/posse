@@ -87,10 +87,10 @@ func TestDetectProjectInsideMemberSuggestsWorkspace(t *testing.T) {
 	}
 }
 
-func TestDetectProjectRefusesUnregisteredPlainDirectory(t *testing.T) {
-	_, err := detectProject(context.Background(), t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "no Git repositories directly inside it") {
-		t.Fatalf("err = %v", err)
+func TestDetectProjectFindsDirectoryProjectInPlainFolder(t *testing.T) {
+	detected, err := detectProject(context.Background(), t.TempDir())
+	if err != nil || detected.Kind != store.ProjectKindDirectory || len(detected.Repos) != 0 {
+		t.Fatalf("detected = %#v, %v", detected, err)
 	}
 }
 
@@ -206,7 +206,7 @@ func TestProjectAddRejectsDirectoryFlagWithoutRegistering(t *testing.T) {
 		t.Fatal(err)
 	}
 	harness := newUpHarness(t, parent, directory)
-	if code := harness.run("project", "add", "--directory", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "Directory Projects are no longer supported") {
+	if code := harness.run("project", "add", "--directory", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "registers a folder without Git as a Directory Project") {
 		t.Fatalf("project add --directory was not refused clearly: %d\n%s", code, harness.out.String())
 	}
 	if _, err := harness.db(t).ProjectByRoot(context.Background(), directory); !store.IsNotFound(err) {
@@ -227,26 +227,11 @@ func TestProjectAddDirectoryFlagIsRejectedInsideRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(directory)
-	if code := harness.run("project", "add", "--directory", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "Directory Projects are no longer supported") {
+	if code := harness.run("project", "add", "--directory", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "registers a folder without Git as a Directory Project") {
 		t.Fatalf("nested Directory Project registration was not refused: %d\n%s", code, harness.out.String())
 	}
 	if _, err := harness.db(t).ProjectByRoot(context.Background(), directory); !store.IsNotFound(err) {
 		t.Fatalf("nested Directory Project was registered: %v", err)
-	}
-}
-
-func TestProjectAddRequiresDirectoryFlagForPlainFolder(t *testing.T) {
-	parent := t.TempDir()
-	directory := filepath.Join(parent, "local-project")
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	harness := newUpHarness(t, parent, directory)
-	if code := harness.run("project", "add", "--name", "local"); code == 0 || !strings.Contains(harness.out.String(), "not_in_git_repository") {
-		t.Fatalf("project add without --directory = %d\n%s", code, harness.out.String())
-	}
-	if _, err := harness.db(t).ProjectByRoot(context.Background(), directory); !store.IsNotFound(err) {
-		t.Fatalf("plain directory was registered without --directory: %v", err)
 	}
 }
 

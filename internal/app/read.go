@@ -367,7 +367,7 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 			help = append(help, "Run `posse show "+show+"` to inspect this Task")
 		}
 	} else if project.IsDirectory() {
-		help = append(help, "Directory Projects no longer admit Tasks; register a Git repository instead")
+		help = append(help, "This Directory Project admits no Tasks; initialize Git or add repositories, then run `posse project scan`")
 	} else {
 		help = append(help, "Run `posse start --brief <file> [--name <short>]` to delegate a Task")
 	}
@@ -383,7 +383,7 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 		}
 		help = append(help, "Run `posse ack "+strings.Join(ids, ",")+"` after handling these Notices")
 	} else if project.IsDirectory() {
-		help = append(help, "Legacy Directory Projects do not admit new Tasks")
+		help = append(help, "Directory Projects support exploration and planning only")
 	} else {
 		help = append(help, "Run `posse pool` to inspect released Sandboxes")
 	}

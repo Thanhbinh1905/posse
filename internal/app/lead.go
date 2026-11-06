@@ -115,14 +115,19 @@ func (s *Service) lead(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	help := "Continue the Lead conversation with the User. For code changes, follow the runtime obligations in these instructions and use `posse start`."
+	if project.IsDirectory() {
+		help = "Continue the Lead conversation with the User. This Directory Project supports exploration and planning only; follow the runtime obligations in these instructions."
+	}
 	result := axi.Object{
+		{Key: "capabilities", Value: projectCapabilities(project.Kind)},
 		{Key: "instructions", Value: composed.Text},
 		{Key: "lowkey", Value: composed.Lowkey},
 		{Key: "reporting_rule", Value: composed.ReportingRule},
 		{Key: "identity", Value: composed.Identity},
 		{Key: "language_rule", Value: composed.LanguageRule},
 		{Key: "pending", Value: pending},
-		{Key: "help", Value: []any{"Continue the Lead conversation with the User. For code changes, follow the runtime obligations in these instructions and use `posse start`."}},
+		{Key: "help", Value: []any{help}},
 	}
 	if err := ctx.Print(withReadiness(result, gaps)); err != nil {
 		return err
@@ -316,10 +321,6 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		name = project.Name
 	} else {
 		detected, err = detectProject(ctx.Context, dir)
-		var failure *axi.Error
-		if errors.As(err, &failure) && failure.Code == "not_in_git_repository" {
-			detected, err = newRepositoryDetection(ctx.Context, dir), nil
-		}
 		if err != nil {
 			return err
 		}
@@ -612,6 +613,7 @@ func (s *Service) upCore(ctx *axi.Context, args []string) (returnErr error) {
 		{Key: "kind", Value: kind},
 		{Key: "kind_source", Value: kindSource},
 		{Key: "pane", Value: leadPane.PaneID},
+		{Key: "capabilities", Value: projectCapabilities(project.Kind)},
 		{Key: "help", Value: []any{"The Lead is starting in this pane."}},
 	}
 	return ctx.Print(withReadiness(result, gaps))
