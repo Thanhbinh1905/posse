@@ -24,6 +24,7 @@ import (
 type Service struct {
 	Home                 string
 	Version              string
+	storeBusyTimeout     time.Duration
 	updateURL            string
 	updateClient         *http.Client
 	Herdr                herdr.Adapter
@@ -326,7 +327,12 @@ func (s *Service) openDB() (*store.DB, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	db, err := store.Open(home)
+	var db *store.DB
+	if s.storeBusyTimeout > 0 {
+		db, err = store.OpenWithBusyTimeout(home, s.storeBusyTimeout)
+	} else {
+		db, err = store.Open(home)
+	}
 	return db, home, schemaFailure(err)
 }
 
