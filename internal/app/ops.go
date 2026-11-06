@@ -522,17 +522,22 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 						// Contention is transient. Keep this Watch armed, and retry
 						// rather than requiring the Lead to restart it after release.
 						fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
+						observeWatchContention("reconcile")
 					} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
 						fmt.Fprintf(ctx.ErrOut, "Watch maintenance failure could not be recorded: %v\n", noticeErr)
 					}
 				} else {
 					lastHerdrReconcile = time.Now()
+					if watchReconcileRecovered != nil {
+						watchReconcileRecovered()
+					}
 				}
 			}
 			if !parsed.Bool("handoff") {
 				if err := s.maintainProjectWatch(ctx.Context, db, project); err != nil {
 					if store.IsBusy(err) {
 						fmt.Fprintf(ctx.ErrOut, "Watch maintenance deferred: %v\n", normalizeCommandError(err))
+						observeWatchContention("maintenance")
 					} else if noticeErr := s.recordWatchMaintenanceFailure(ctx.Context, db, project, err); noticeErr != nil {
 						return noticeErr
 					}

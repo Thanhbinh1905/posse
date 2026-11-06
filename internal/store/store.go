@@ -162,14 +162,21 @@ func (db *DB) withBusyTimeout(ctx context.Context, timeoutMillis int, operation 
 }
 
 func Open(home string) (*DB, error) {
+	return OpenWithBusyTimeout(home, sqliteBusyTimeoutMillis*time.Millisecond)
+}
+
+func OpenWithBusyTimeout(home string, busyTimeout time.Duration) (*DB, error) {
 	if home == "" {
 		return nil, fmt.Errorf("POSSE_HOME is empty")
+	}
+	if busyTimeout <= 0 {
+		return nil, fmt.Errorf("SQLite busy timeout must be positive")
 	}
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, fmt.Errorf("create POSSE_HOME: %w", err)
 	}
 	path := filepath.Join(home, "posse.db")
-	db, err := OpenAt(path)
+	db, err := openAtWithBusyTimeout(path, storeOpenMigrationBudget, busyTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +189,10 @@ func OpenAt(path string) (*DB, error) {
 }
 
 func openAt(path string, timeout time.Duration) (*DB, error) {
+	return openAtWithBusyTimeout(path, timeout, sqliteBusyTimeoutMillis*time.Millisecond)
+}
+
+func openAtWithBusyTimeout(path string, timeout, busyTimeout time.Duration) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
@@ -189,7 +200,7 @@ func openAt(path string, timeout time.Duration) (*DB, error) {
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
 	// WAL with synchronous=NORMAL stays consistent after a crash and syncs only
 	// at checkpoints, so commits do not wait on fsync behind other writers.
-	dsn := fileURL + "?_pragma=busy_timeout(" + strconv.Itoa(sqliteBusyTimeoutMillis) + ")&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+	dsn := fileURL + "?_pragma=busy_timeout(" + strconv.FormatInt(busyTimeout.Milliseconds(), 10) + ")&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

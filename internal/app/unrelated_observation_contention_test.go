@@ -112,17 +112,54 @@ func TestWatchLogsAndRetriesMaintenanceContention(t *testing.T) {
 	if _, err := writer.ExecContext(context.Background(), `UPDATE projects SET lead_absent_since=COALESCE(lead_absent_since,0)+1 WHERE id=?`, fixture.project.ID); err != nil {
 		t.Fatal(err)
 	}
-	released := make(chan error, 1)
-	go func() {
-		time.Sleep(6 * time.Second)
-		released <- writer.Commit()
+	fixture.service.storeBusyTimeout = 10 * time.Millisecond
+	observed := make(chan string, 1)
+	recovered := make(chan error, 1)
+	var notify, recoverOnce sync.Once
+	watchContentionObserved = func(phase string) { notify.Do(func() { observed <- phase }) }
+	watchReconcileRecovered = func() {
+		recoverOnce.Do(func() {
+			_, err := fixture.db.ExecContext(context.Background(), `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'task_done','Writer released','{}',?)`, fixture.project.ID, time.Now().UnixMilli())
+			recovered <- err
+		})
+	}
+	defer func() {
+		watchContentionObserved = nil
+		watchReconcileRecovered = nil
 	}()
-
-	started := time.Now()
-	code, out, errOut := fixture.run("watch", "--timeout", "8000")
-	if err := <-released; err != nil {
+	type watchResult struct {
+		code   int
+		out    string
+		errOut string
+	}
+	finished := make(chan watchResult, 1)
+	go func() {
+		code, out, errOut := fixture.run("watch", "--timeout", "30000")
+		finished <- watchResult{code: code, out: out, errOut: errOut}
+	}()
+	var phase string
+	select {
+	case phase = <-observed:
+	case <-time.After(10 * time.Second):
+		_ = writer.Commit()
+		<-finished
+		t.Fatal("Watch did not report SQLite contention before the synchronization deadline")
+	}
+	if err := writer.Commit(); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case err := <-recovered:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		_, _ = fixture.db.ExecContext(context.Background(), `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'task_done','Test guard','{}',?)`, fixture.project.ID, time.Now().UnixMilli())
+		<-finished
+		t.Fatal("Watch did not complete a reconciliation retry after writer release")
+	}
+	result := <-finished
+	code, out, errOut := result.code, result.out, result.errOut
 	if code != 0 {
 		t.Fatalf("Watch did not finish after writer release: exit=%d output=%s stderr=%s", code, out, errOut)
 	}
@@ -134,12 +171,12 @@ func TestWatchLogsAndRetriesMaintenanceContention(t *testing.T) {
 	if fake.CallCount("session.snapshot") < 2 {
 		t.Fatalf("Watch did not retry reconciliation after contention: snapshots=%d", fake.CallCount("session.snapshot"))
 	}
+	if got := strings.Count(errOut, "Watch maintenance deferred: database contention; retry the operation: database is locked"); got != 1 {
+		t.Fatalf("Watch logged %s contention %d times, want once: stderr=%s", phase, got, errOut)
+	}
 	updated, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
 	if err != nil || updated.UpdatedAt <= 1 {
 		t.Fatalf("Watch did not persist maintenance after writer release: updated_at=%d error=%v", updated.UpdatedAt, err)
-	}
-	if time.Since(started) < 1500*time.Millisecond {
-		t.Fatal("Watch returned before the contending writer released its lock")
 	}
 }
 
