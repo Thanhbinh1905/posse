@@ -320,7 +320,7 @@ func TestStartFocusedDuringLaunchCompletesWithTypedPrompt(t *testing.T) {
 	}
 	code, output := fixture.start(t)
 	task, notices := fixture.onlyTask(t)
-	if code != 0 || task.State != store.StateWorking || len(notices) != 1 || notices[0].Kind != "quota_advice" || fixture.fake.CallCount("agent.prompt") != 1 {
+	if code != 0 || task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("focused start code=%d output=%s task=%#v notices=%#v prompts=%d", code, output, task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 }
@@ -357,7 +357,7 @@ func TestFocusedLaunchNeedsNoFocusRetryOrNotice(t *testing.T) {
 		}
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateWorking || len(notices) != 1 || notices[0].Kind != "quota_advice" || fixture.fake.CallCount("agent.prompt") != 1 {
+	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("focused launch task=%#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 	fixture.fake.SnapshotValue.FocusedPaneID = "w1:p1"
@@ -384,7 +384,7 @@ func TestFocusedStartSubmitsLaunchPromptWithoutRetryNotice(t *testing.T) {
 		t.Fatalf("focused launch code=%d output=%s", code, output)
 	}
 	task, notices := fixture.onlyTask(t)
-	if task.State != store.StateWorking || len(notices) != 1 || notices[0].Kind != "quota_advice" || fixture.fake.CallCount("agent.prompt") != 1 {
+	if task.State != store.StateWorking || len(notices) != 0 || fixture.fake.CallCount("agent.prompt") != 1 {
 		t.Fatalf("Task after focused typed launch = %#v notices=%#v prompts=%d", task, notices, fixture.fake.CallCount("agent.prompt"))
 	}
 }
@@ -460,7 +460,7 @@ func TestStartFailsTaskWhenNewSandboxShellNeverBecomesAvailable(t *testing.T) {
 	if task.State != store.StateFailed || task.SandboxID == 0 {
 		t.Fatalf("Task after a persistently busy pane lost its relaunchable Sandbox = %#v", task)
 	}
-	if len(notices) != 2 || notices[0].Kind != "quota_advice" || notices[1].Kind != "task_failed" {
+	if len(notices) != 1 || notices[0].Kind != "task_failed" {
 		t.Fatalf("Lead was not told about the busy pane: %#v", notices)
 	}
 }

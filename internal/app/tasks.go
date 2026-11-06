@@ -84,12 +84,6 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 			failure.Help = append([]string{"Task Name: " + name, "Run `" + command + " --profile <name>` after choosing a Profile"}, failure.Help...)
 			var profileErr *dispatch.ProfileError
 			if errors.As(err, &profileErr) && len(profileErr.Candidates) > 0 {
-				var names []string
-				for _, candidate := range profileErr.Candidates {
-					names = append(names, candidate.Profile)
-				}
-				advice, _ := json.Marshal(quotaSelection(ctx.Context, names))
-				failure.Help = append(failure.Help, "quota_advice: "+string(advice))
 				if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
 					seen := map[string]bool{}
 					for _, candidate := range profileErr.Candidates {
@@ -116,7 +110,6 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "name", Value: name},
 		{Key: "profile", Value: resolution.Profile},
 		{Key: "dispatch_rule", Value: resolution.Rule},
-		{Key: "quota_advice", Value: quotaSelection(ctx.Context, []string{resolution.Profile})},
 		{Key: "help", Value: []any{"Run `" + startCommand + "` to start this Worker"}},
 	}
 	if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
@@ -740,7 +733,6 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return axi.Failure("prepare_failed", prepareErr.Error(), false, "Inspect the Worker worktree and config before retrying")
 		}
 	}
-	s.launchQuotaAdvice(ctx.Context, db, home, project, task)
 	argsForAgent := plan.Launch.Arguments("")
 	launchIdentity := configuredLaunchIdentity(resolution.Profile, resolution.Resolved, cfg.Kinds[resolution.Resolved.Kind], argsForAgent)
 	launch := 0
