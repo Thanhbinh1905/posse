@@ -24,6 +24,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/quotaadvice"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -423,6 +424,13 @@ func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
 }
 
 func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
+	reads := 0
+	previousReader := readQuotaEvidence
+	readQuotaEvidence = func(context.Context) quotaadvice.Evidence {
+		reads++
+		return quotaadvice.Unknown("fresh_at_launch")
+	}
+	t.Cleanup(func() { readQuotaEvidence = previousReader })
 	fixture := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -456,6 +464,12 @@ func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if reads != 0 {
+		t.Fatalf("queued admission collected quota: reads=%d", reads)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers=1\nmerge_mode='local'\n[profiles.claude]\nkind='codex'\nmodel='changed-after-admission'\nfallback='other'\n[profiles.other]\nkind='pi'\n[dispatch.default]\nuse='other'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	// Reopen the store as a cold recovery would, then release the old Worker.
 	db, err = store.Open(fixture.home)
 	if err != nil {
@@ -483,6 +497,22 @@ func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
 	}
 	if got, err := db.ActiveWorkerCount(ctx, fixture.project.ID); err != nil || got != 1 {
 		t.Fatalf("refill exceeded max_workers: active=%d err=%v", got, err)
+	}
+	if reads != 1 || started.Profile != "claude" || !strings.Contains(started.PlanJSON, `"kind":"claude"`) || strings.Contains(started.PlanJSON, "changed-after-admission") {
+		t.Fatalf("launch advice changed frozen identity or was not refreshed: reads=%d task=%+v", reads, started)
+	}
+	notices, err := db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, notice := range notices {
+		if notice.Kind == "quota_advice" {
+			found = strings.Contains(notice.DataJSON, "fresh_at_launch") && strings.Contains(notice.DataJSON, "other") && strings.Contains(notice.DataJSON, `"phase":"launch"`)
+		}
+	}
+	if !found {
+		t.Fatalf("missing fresh advice and live fallback chain: %+v", notices)
 	}
 	if tasks, err := db.Tasks(ctx, fixture.project.ID, true); err != nil || len(tasks) != 2 || tasks[1].ID != queued.ID {
 		t.Fatalf("refill recreated rather than resumed queued Task: tasks=%#v err=%v", tasks, err)

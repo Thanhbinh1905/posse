@@ -73,26 +73,21 @@ func Resolve(cfg config.Config, taskType, requested string) (Resolution, error) 
 	}
 	matches := genericMatches
 	if len(typedMatches) > 0 {
-		// Exact-type rules exclude generic fallbacks. A unique typed default
-		// wins over conditional alternatives, which the Lead selects via --profile.
 		matches = typedMatches
-		var defaults []config.Rule
-		for _, rule := range typedMatches {
-			if rule.When == "" {
-				defaults = append(defaults, rule)
-			}
-		}
-		if len(defaults) == 1 {
-			return resolve(defaults[0].Use, ruleDescription(defaults[0]))
-		}
 	}
-	if len(matches) == 1 && matches[0].When == "" {
-		return resolve(matches[0].Use, ruleDescription(matches[0]))
+	if len(matches) == 1 && matches[0].When == "" && len(matches[0].ProfileNames()) == 1 {
+		return resolve(matches[0].ProfileNames()[0], ruleDescription(matches[0]))
 	}
 	if len(matches) > 0 {
-		candidates := make([]Candidate, len(matches))
-		for i, rule := range matches {
-			candidates[i] = Candidate{When: rule.When, Profile: rule.Use}
+		var candidates []Candidate
+		for _, conditional := range []bool{true, false} {
+			for _, rule := range matches {
+				if (rule.When != "") == conditional {
+					for _, name := range rule.ProfileNames() {
+						candidates = append(candidates, Candidate{When: rule.When, Profile: name})
+					}
+				}
+			}
 		}
 		return Resolution{}, &ProfileError{Code: "profile_required", Message: "multiple Dispatch Rules could apply; choose a Profile", Candidates: candidates}
 	}

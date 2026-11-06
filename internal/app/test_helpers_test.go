@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/quotaadvice"
 	"github.com/thanhbinh1905/posse/internal/research"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -34,6 +35,7 @@ func setTaskBranchAuthorEnv(t *testing.T, db *store.DB, task store.Task) {
 }
 
 func TestMain(m *testing.M) {
+	readQuotaEvidence = func(context.Context) quotaadvice.Evidence { return quotaadvice.Unknown("test_collection_disabled") }
 	if code, sharded := runAppTestShards(); sharded {
 		os.Exit(code)
 	}

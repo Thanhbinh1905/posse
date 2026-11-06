@@ -182,7 +182,7 @@ type Profile struct {
 type Rule struct {
 	Type string `toml:"type" json:"type"`
 	When string `toml:"when" json:"when"`
-	Use  string `toml:"use" json:"use"`
+	Use  any    `toml:"use" json:"use"`
 }
 
 type Autonomy struct {
@@ -920,10 +920,14 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		if rule.Type != "" && !oneOf(rule.Type, "change", "research", "review") {
 			add(fmt.Sprintf("dispatch[%d].type", i), "must be change, research or review")
 		}
-		if rule.Use == "" {
-			add(fmt.Sprintf("dispatch[%d].use", i), "must name a Profile")
-		} else if _, ok := c.Profiles[rule.Use]; !ok {
-			add(fmt.Sprintf("dispatch[%d].use", i), "references unknown Profile "+rule.Use)
+		names := rule.ProfileNames()
+		if len(names) == 0 {
+			add(fmt.Sprintf("dispatch[%d].use", i), "must name a Profile or a nonempty list of Profiles")
+		}
+		for _, name := range names {
+			if _, ok := c.Profiles[name]; !ok {
+				add(fmt.Sprintf("dispatch[%d].use", i), "references unknown Profile "+name)
+			}
 		}
 	}
 	for _, name := range sortedMapKeys(c.Profiles) {

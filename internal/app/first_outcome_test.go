@@ -294,7 +294,7 @@ use='pi-luna'
 	for _, tc := range []struct {
 		name, taskType, profile, expected string
 	}{
-		{name: "type default", taskType: "research", expected: "pi-luna"},
+		{name: "explicit typed fallback", taskType: "research", profile: "pi-luna", expected: "pi-luna"},
 		{name: "conditional selection", taskType: "research", profile: "pi-sol", expected: "pi-sol"},
 		{name: "alternate explicit selection", taskType: "research", profile: "claude-opus", expected: "claude-opus"},
 		{name: "change conditional selection", taskType: "change", profile: "pi-sol", expected: "pi-sol"},
@@ -329,7 +329,7 @@ use='pi-luna'
 	}
 }
 
-func TestFirstOutcomeDispatchUsesTypedDefaultFromMergedProjectAndGlobalRules(t *testing.T) {
+func TestFirstOutcomeDispatchOffersConditionsBeforeTypedFallback(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	globalConfig := `[profiles.pi-luna]
 kind='pi'
@@ -376,17 +376,14 @@ use='claude-opus'
 	t.Setenv("HERDR_PANE_ID", "w1:p1")
 	t.Setenv("HERDR_WORKSPACE_ID", "w1")
 
-	output := outcomeCLI(t, f.service, 0, "dispatch", "--brief", f.brief, "--json")
-	var result struct {
-		TaskType     string `json:"task_type"`
-		Profile      string `json:"profile"`
-		DispatchRule string `json:"dispatch_rule"`
+	output := outcomeCLI(t, f.service, 1, "dispatch", "--brief", f.brief, "--json")
+	for _, text := range []string{"profile_required", "science-heavy research", "exceptionally technical research", "pi-luna"} {
+		if !strings.Contains(output, text) {
+			t.Fatalf("missing conditional choice or fallback %q: %s", text, output)
+		}
 	}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("dispatch output is not JSON: %v\n%s", err, output)
-	}
-	if result.TaskType != "research" || result.Profile != "pi-luna" || result.DispatchRule != "type=research" {
-		t.Fatalf("merged dispatch resolution = %#v, want research phase default pi-luna: %s", result, output)
+	if strings.Contains(output, "image work") {
+		t.Fatalf("generic rule competed with typed rules: %s", output)
 	}
 }
 
