@@ -113,7 +113,7 @@ var keySpecs = []KeySpec{
 	{Key: "profiles.<profile>.attribution", Type: TypeBoolean, Default: false, Meaning: "Keep the agent's commit co-author trailer and PR attribution. When false, Claude launches get attribution disabled and publish refuses commits with agent attribution trailers.", UserOnly: true},
 	{Key: "profiles.<profile>.fallback", Type: TypeString, Default: "", Meaning: "Profile that relaunches a Worker in the same Sandbox when this Profile's quota or usage limit runs out; chains may not loop."},
 	{Key: "workflows.<workflow>.stages", Type: TypeTableArray, Meaning: "Ordered User-owned workflow stages; a Project replaces a named workflow as a whole.", UserOnly: true},
-	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Ordered dispatch rules that select a Profile."},
+	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Dispatch rules with type, when prose, and use naming one Profile or a nonempty list of alternatives for one Worker."},
 	{Key: "dispatch.default.use", Type: TypeString, Default: "", Meaning: "Fallback Profile used when no dispatch rule matches."},
 	{Key: "autonomy.yolo", Type: TypeBoolean, Default: false, Meaning: "Shorthand granting the Lead review and merging autonomy.", UserOnly: true},
 	{Key: "autonomy.review", Type: TypeString, Allowed: []string{"ask", "lead"}, Default: "ask", Meaning: "Disposition of review findings: whether the Lead may decide without asking the User; never substitutes for review evidence.", UserOnly: true},
@@ -424,8 +424,10 @@ func validateDispatchValue(file, key string, value any, index int) error {
 		}
 		text, ok := value.(string)
 		valid = ok && oneOf(text, "change", "research", "review")
-	case "dispatch.when", "dispatch.use":
+	case "dispatch.when":
 		_, valid = value.(string)
+	case "dispatch.use":
+		valid = len((Rule{Use: value}).ProfileNames()) > 0
 	}
 	if !valid {
 		return &InvalidError{File: file, Key: fmt.Sprintf("dispatch[%d].%s", index, strings.TrimPrefix(key, "dispatch.")), Reason: "has an invalid type or value"}
@@ -500,8 +502,6 @@ func stringArray(value any) bool {
 	}
 }
 
-// dispatchRules accepts only rules made of the string fields type, when and
-// use, so nothing a rule states is dropped when the rule is written.
 func dispatchRules(value any) bool {
 	entries, ok := tableEntries(value)
 	if !ok {
@@ -509,7 +509,11 @@ func dispatchRules(value any) bool {
 	}
 	for _, entry := range entries {
 		for key, field := range entry {
-			if _, isString := field.(string); !isString || key != "type" && key != "when" && key != "use" {
+			if key == "use" {
+				if len((Rule{Use: field}).ProfileNames()) == 0 {
+					return false
+				}
+			} else if _, isString := field.(string); !isString || key != "type" && key != "when" {
 				return false
 			}
 		}

@@ -589,6 +589,13 @@ func replaceDispatch(contents, literal string) (string, error) {
 		for _, key := range []string{"type", "when", "use"} {
 			if value, ok := entry[key].(string); ok {
 				fmt.Fprintf(&output, "%s = %s\n", key, strconv.Quote(value))
+			} else if key == "use" {
+				names := (Rule{Use: entry[key]}).ProfileNames()
+				quoted := make([]string, len(names))
+				for i, name := range names {
+					quoted[i] = strconv.Quote(name)
+				}
+				fmt.Fprintf(&output, "use = [%s]\n", strings.Join(quoted, ", "))
 			}
 		}
 		output.WriteByte('\n')

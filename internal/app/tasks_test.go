@@ -423,6 +423,7 @@ func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
 }
 
 func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
+	marker := forbidQuotaCollection(t)
 	fixture := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -456,6 +457,10 @@ func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	assertNoQuotaCollection(t, marker)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers=1\nmerge_mode='local'\n[profiles.claude]\nkind='codex'\nmodel='changed-after-admission'\nfallback='other'\n[profiles.other]\nkind='pi'\n[dispatch.default]\nuse='other'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	// Reopen the store as a cold recovery would, then release the old Worker.
 	db, err = store.Open(fixture.home)
 	if err != nil {
@@ -483,6 +488,19 @@ func TestQueuedTaskRefillsAfterRestartWithFrozenAdmission(t *testing.T) {
 	}
 	if got, err := db.ActiveWorkerCount(ctx, fixture.project.ID); err != nil || got != 1 {
 		t.Fatalf("refill exceeded max_workers: active=%d err=%v", got, err)
+	}
+	if started.Profile != "claude" || !strings.Contains(started.PlanJSON, `"kind":"claude"`) || strings.Contains(started.PlanJSON, "changed-after-admission") {
+		t.Fatalf("queued launch changed frozen identity: task=%+v", started)
+	}
+	assertNoQuotaCollection(t, marker)
+	notices, err := db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "quota_advice" {
+			t.Fatalf("queued launch emitted quota advice: %+v", notice)
+		}
 	}
 	if tasks, err := db.Tasks(ctx, fixture.project.ID, true); err != nil || len(tasks) != 2 || tasks[1].ID != queued.ID {
 		t.Fatalf("refill recreated rather than resumed queued Task: tasks=%#v err=%v", tasks, err)
