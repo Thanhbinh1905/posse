@@ -920,6 +920,10 @@ Once per machine, `install.sh` installs the `posse` binary and runs `posse setup
 8. Offers the Herdr Agents row layout (`[ui.sidebar.agents] rows`, Herdr 0.9.1 or newer) so Workers show as `├─`/`└─` rows. It writes after a `y` answer or `--sidebar-layout`, never with `--no-sidebar-layout`, `--check` or without a TTY. It inserts the block without reserializing, keeping comments, and upgrades the earlier Posse layout lacking `dim = false`. A symlinked config is never written: setup prints the block. Custom `rows` are never replaced. `posse setup --check` and `posse doctor` report the layout state.
 9. Offers the recommended workflow skills when config has no `[skills]` block. It writes the full set after a `y` answer or `--recommended-skills`, never with `--no-recommended-skills`, `--check` or without a TTY. `posse skills add` picks individual skills; `posse setup --check` and `posse doctor` report recommended skills missing from config.
 
+### Create a Herdr workspace
+
+Herdr's default shortcut to create a workspace is `Ctrl+B`, then `Shift+N`. If you customized Herdr's key bindings, use the shortcut assigned to `new_workspace`.
+
 ### Herdr Agents sidebar layout
 
 Run `posse setup` and accept the offer, or run `posse setup --sidebar-layout`, to add the optional Agents layout. It requires Herdr 0.9.1 or newer. The layout groups Worker rows beneath the Lead. Posse preserves comments in Herdr's config and does not replace existing custom `rows`. If Herdr's config is a symlink, setup prints the layout instead of writing the file. Add the printed block to the symlink's source config, or merge it with custom rows there.

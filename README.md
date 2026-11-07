@@ -20,9 +20,9 @@ The installer downloads the `posse` binary to `~/.local/bin` by default and offe
 
 ## Delegate your first task
 
-1. Create a new Herdr workspace. With the default key bindings, press `Ctrl+B`, then `Shift+N`. Press the keys in sequence. If you changed the binding, use the key for `new_workspace`.
-2. In the new workspace, open a shell, change to your Git repository, and run `posse up`. If Posse has not registered the Project, it shows what it found and asks before registering it. You should then see the Lead in this workspace.
-3. Tell the Lead what outcome you want. For example: "Fix the CSV export bug; open a PR, don't merge." When the Lead starts a Worker, you should see it in a tab. The Worker uses a separate Git worktree.
+1. Create a new Herdr workspace: press `Ctrl+B`, then `Shift+N`.
+2. In the new workspace's shell, change to your Git repository and run `posse up`. If Posse has not registered the Project, it shows what it found and asks before registering it. You should then see the Lead in this workspace.
+3. Tell the Lead what outcome you want, for example: "Fix the CSV export bug; open a PR, don't merge." When the Lead starts a Worker, you should see it in a tab. The Worker uses a separate Git worktree.
 
 To create the workspace from a Herdr shell instead, run `herdr workspace create --cwd /path/to/your/repository --focus`. Then run `posse up` in a shell in the new workspace.
 
