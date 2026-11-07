@@ -190,7 +190,7 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 			return "", &Error{Code: "unsafe_test_environment", Message: "could not inspect isolated Herdr socket path", Cause: err}
 		}
 	}
-	if !inside(root, env["HOME"]) || !inside(root, env["XDG_CONFIG_HOME"]) || !inside(root, env["POSSE_HOME"]) || !inside(root, env["CLAUDE_CONFIG_DIR"]) || !inside(root, env["CODEX_HOME"]) || !inside(root, env["PI_CODING_AGENT_DIR"]) {
+	if !inside(root, env["HOME"]) || !inside(root, env["XDG_CONFIG_HOME"]) || !inside(root, isolatedPosseHome(env)) || !inside(root, env["CLAUDE_CONFIG_DIR"]) || !inside(root, env["CODEX_HOME"]) || !inside(root, env["PI_CODING_AGENT_DIR"]) {
 		return "", &Error{Code: "unsafe_test_environment", Message: "isolated state paths must stay inside the test root"}
 	}
 	if env["GIT_CONFIG_GLOBAL"] != "/dev/null" || env["GIT_CONFIG_NOSYSTEM"] != "1" {
@@ -318,4 +318,16 @@ func TestRootName() string {
 		prefix = "posse-e2e-"
 	}
 	return prefix + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+// isolatedPosseHome is the posse home a test environment resolves: POSSE_HOME,
+// or else the folder its home pointer names, or else HOME/.posse.
+func isolatedPosseHome(env map[string]string) string {
+	if env["POSSE_HOME"] != "" {
+		return env["POSSE_HOME"]
+	}
+	if data, err := os.ReadFile(filepath.Join(env["XDG_CONFIG_HOME"], "posse", "home")); err == nil {
+		return strings.TrimSuffix(string(data), "\n")
+	}
+	return filepath.Join(env["HOME"], ".posse")
 }

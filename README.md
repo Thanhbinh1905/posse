@@ -4,7 +4,7 @@
 
 **One Lead. A whole crew. Running on Herdr.**
 
-Posse coordinates coding agents in Git repositories. You describe an outcome to a Lead in Herdr. The Lead delegates work to Workers in separate Git worktrees, tracks their progress, and brings their changes back for review and delivery.
+The name stands for Personal Orchestrated Supervised Separated Executors. Posse coordinates coding agents in Git repositories. You describe an outcome to a Lead in Herdr. The Lead delegates work to Workers in separate Git worktrees, tracks their progress, and brings their changes back for review and delivery.
 
 ## Install
 
@@ -16,7 +16,7 @@ Review the [installer](install.sh), then run:
 curl -fsSL https://raw.githubusercontent.com/Thanhbinh1905/posse/main/install.sh | sh
 ```
 
-The installer downloads the `posse` binary to `~/.local/bin` by default and offers to configure Posse's Herdr integrations. To install without setup, add `--no-setup` after `sh -s --`; run `posse setup` later.
+The installer downloads the `posse` binary to `~/.local/bin` by default. It asks where posse keeps its data (press Enter for `~/.posse`), then prepares your agents: hooks, the Herdr plugin and the recommended workflow skills. To install only the binary, add `--no-setup` after `sh -s --`; run `posse setup` later.
 
 ## Delegate your first task
 

@@ -69,7 +69,13 @@ Status: the direct path and workflow-profile configuration, preview, validation,
 
 ## 3. Home layout
 
-`POSSE_HOME` defaults to `~/.posse`. Nothing is written into Project repositories.
+Posse keeps its data in one folder, the posse home. Every process resolves it the same way:
+
+1. `POSSE_HOME`, when set.
+2. Otherwise the folder named in the home pointer file, `$XDG_CONFIG_HOME/posse/home` (`~/.config/posse/home` when `XDG_CONFIG_HOME` is unset or relative). The installer writes it when the User picks a folder other than `~/.posse`.
+3. Otherwise `~/.posse`.
+
+The pointer holds one absolute path to an existing folder. Posse refuses a pointer it cannot read or validate rather than fall back to another home. Hooks, the Herdr plugin and launched sessions resolve the pointer themselves, so a custom folder needs no shell export and no Herdr restart. The examples below use `~/.posse`. Nothing is written into Project repositories.
 
 ```text
 ~/.posse/
@@ -908,17 +914,17 @@ Work is never lost to a crash: commits live on the recorded Task branch, uncommi
 
 ## 18. Setup, skills and hooks
 
-Once per machine, `install.sh` installs the `posse` binary and runs `posse setup` with the User's go-ahead (`--yes` applies it without asking, no TTY keeps the safe default of not applying, `--no-setup` skips it). `posse setup` needs neither a Herdr pane nor a running Herdr server: it talks to Herdr only through the `herdr` CLI. It is idempotent, prints its plan and what it changed, and records its managed installations in `~/.posse/setup.json`. Posse changes the User's Herdr sidebar configuration only on consent (step 8):
+Once per machine, `install.sh` runs six steps: check the system, choose a version, download and verify, install, choose where posse keeps its data, and prepare the agents with `posse setup`. On a terminal it asks one question, the data folder; Enter keeps `~/.posse` or the folder saved earlier. `--home <directory>` picks the folder without the prompt. `POSSE_HOME` overrides the folder for that run and is never saved. The installer accepts a new folder, an empty one or an existing posse home. It never moves data: to leave a home that holds data, stop posse, move the folder, then choose the new path. Without a TTY the installer keeps the saved folder and prepares the agents only with `--yes`. `--no-setup` installs the binary and changes nothing else. `install.sh --uninstall` removes the binary and the setup integration, and deletes the data folder and its pointer only after a `y` answer. The final step is `posse up` in a new Herdr workspace, where the Lead can walk the User through configuration. `posse setup` needs neither a Herdr pane nor a running Herdr server: it talks to Herdr only through the `herdr` CLI. It is idempotent, prints its plan and what it changed, and records its managed installations in `~/.posse/setup.json`. Posse changes the User's Herdr sidebar configuration only on consent (step 8):
 
 1. Checks prerequisites: `git`, `herdr`; optional `gh`; lists available agent kinds (the kinds `herdr integration status` knows).
 2. Installs the Herdr integrations for the kinds it finds (`herdr integration install <kind>`), which Herdr needs to resume their sessions.
 3. Links the `posse-herdr` plugin into the User's Herdr (`herdr plugin link`; a running server picks it up immediately).
-4. Creates an empty `~/.posse/config.toml` when missing; schema defaults apply without persisting detected kinds, Profiles or Identity preferences. Existing config is preserved.
+4. Creates `~/.posse/config.toml` when missing, holding the recommended workflow skills unless `--no-recommended-skills` is given; schema defaults apply without persisting detected kinds, Profiles or Identity preferences. Existing config is preserved.
 5. Installs no global skills by default. `posse setup --global-skills` opts into installing them under `~/.agents/skills` and linking them into `~/.claude/skills/`. Existing unchanged Posse-owned copies are detected by their recorded hashes; `posse setup` and `posse doctor` offer `posse setup --remove-global-skills`, which removes only unchanged owned files after the explicit command. Modified and foreign files are preserved.
 6. Merges a SessionStart hook running `posse _context` and a PreToolUse hook running `posse _guard` into `~/.claude/settings.json` and `~/.codex/hooks.json`, keeping every existing hook and the file's formatting, written atomically.
 7. When pi's agent directory (`${PI_CODING_AGENT_DIR:-~/.pi/agent}`) exists, installs `extensions/posse-worker-guard.ts`, which runs `posse _guard` before every bash tool call.
 8. Offers the Herdr Agents row layout (`[ui.sidebar.agents] rows`, Herdr 0.9.1 or newer) so Workers show as `├─`/`└─` rows. It writes after a `y` answer or `--sidebar-layout`, never with `--no-sidebar-layout`, `--check` or without a TTY. It inserts the block without reserializing, keeping comments, and upgrades the earlier Posse layout lacking `dim = false`. A symlinked config is never written: setup prints the block. Custom `rows` are never replaced. `posse setup --check` and `posse doctor` report the layout state.
-9. Offers the recommended workflow skills when config has no `[skills]` block. It writes the full set after a `y` answer or `--recommended-skills`, never with `--no-recommended-skills`, `--check` or without a TTY. `posse skills add` picks individual skills; `posse setup --check` and `posse doctor` report recommended skills missing from config.
+9. Offers the recommended workflow skills when an existing config has no `[skills]` block. It writes the full set after a `y` answer or `--recommended-skills`, never with `--no-recommended-skills`, `--check` or without a TTY. `posse skills add` picks individual skills; `posse setup --check` and `posse doctor` report recommended skills missing from config.
 
 ### Create a Herdr workspace
 
@@ -938,7 +944,7 @@ rows = [
 
 The Claude Lead plugin is bundled in the binary and written under the Project's Posse home on Lead launch, not installed in the User's Claude settings or loaded for Workers. Its zero-height drawing, restored-row classification, redraw and animation packing are adapted from [firstmate-calm](https://github.com/kunchenguid/firstmate) (MIT, copyright 2026 Kun Chen); the plugin bundles `FIRSTMATE-LICENSE`. Posse's record-backed Notice recognition and Project preference handling are independent. Unit coverage runs through `claude plugin test internal/app/claude_lowkey`; the credentialed live TUI regression is `POSSE_CLAUDE_LOWKEY_LIVE_E2E=1 scripts/claude-lowkey-live-e2e.sh`. It uses an API key or a copied OAuth login in an isolated Claude config, and tests the collapsed `Ran 1 shell command` row on Claude Code 2.1.283.
 
-`posse setup --check --exit-code` exits 3 when required setup would change the machine and 0 when nothing is pending, which is how `install.sh` decides whether to ask. Optional global skills are not pending setup. `--human` only changes the display: a checklist for people instead of TOON (`+` pending, `✓` done, `-` unchanged, `!` manual, `✗` blocked), which `install.sh` shows. `posse setup --uninstall` removes exactly what `setup.json` lists and never touches `~/.posse` data. `posse doctor` reports Posse-owned global skill copies that can be removed, any global `posse-*` skill that shadows the role snapshots, review Dispatch Rules that resolve no usable Profile, stale optional skills or hooks, a failing plugin hook (from Herdr's plugin log), missing integrations, group-close risks from other repository primaries and unverified Claude Code function-hook versions.
+`posse setup --check --exit-code` exits 3 when required setup would change the machine and 0 when nothing is pending, which is how `install.sh` decides whether to apply it. Optional global skills are not pending setup. `--human` only changes the display: a checklist for people instead of TOON, one line per area (`+` will be added, `✓` done, `-` already set, `!` needs the User, `✗` blocked), which `install.sh` shows. `posse setup --uninstall` removes exactly what `setup.json` lists and never touches `~/.posse` data. `posse doctor` reports Posse-owned global skill copies that can be removed, any global `posse-*` skill that shadows the role snapshots, review Dispatch Rules that resolve no usable Profile, stale optional skills or hooks, a failing plugin hook (from Herdr's plugin log), missing integrations, group-close risks from other repository primaries and unverified Claude Code function-hook versions.
 
 **`posse _context`** prints role context only when the pane is a posse Lead or Worker (which command to run next: `posse lead` or `posse brief`, and the Task id); anywhere else it prints nothing. It runs in under 20 ms. The hook fires on session start, resume and compaction, so an agent never loses its role.
 

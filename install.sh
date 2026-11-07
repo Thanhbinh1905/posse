@@ -319,7 +319,7 @@ ui_compose() {
           continue
         fi
         text_color=$c_text
-        case $sub_state in pending|kept) text_color=$c_faint ;; esac
+        case $sub_state in pending|kept|skip) text_color=$c_faint ;; esac
         mark_state=$sub_state
         [ "$sub_state" = kept ] && mark_state=done
         mark_for "$mark_state"
@@ -1056,6 +1056,12 @@ save_home() {
 # Step 6: machine setup. posse setup --human prints one line per area; this
 # step shows them as rows and keeps their notes for the final summary.
 
+# trim_sub drops suffix $1 from the last setup row; its mark already says it.
+trim_sub() {
+  eval "trim_text=\$sub_text_$sub_count"
+  eval "sub_text_$sub_count=\${trim_text%\"\$1\"}"
+}
+
 # add_note adds an indented note under the last setup row, folded to fit.
 add_note() {
   note=$(printf '%s\n' "$1" | sed 's/^ *//')
@@ -1082,8 +1088,13 @@ show_setup_lines() {
     case $line in
       '') ;;
       '✓  '*) add_sub done "${line#✓  }"; setup_changes=$((setup_changes + 1)) ;;
-      '+  '*) add_sub pending "${line#+  }" ;;
-      '-  '*) add_sub kept "${line#-  }" ;;
+      '+  '*) add_sub pending "${line#+  }"; trim_sub ': will be added' ;;
+      '-  '*)
+        case $line in
+          *': already set') add_sub kept "${line#-  }" ;;
+          *) add_sub skip "${line#-  }" ;;
+        esac
+        ;;
       '!  '*) add_sub warn "${line#!  }"; setup_attention=1 ;;
       '✗  '*) add_sub fail "${line#✗  }"; setup_attention=1 ;;
       *)

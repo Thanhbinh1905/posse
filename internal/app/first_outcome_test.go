@@ -801,6 +801,15 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 	f.fake.RunOut["plugin link "+filepath.Join(f.home, "plugin", "herdr-plugin.toml")] = []byte(`{}`)
 	outcomeCLI(t, f.service, 0, "setup", "--binary", "/usr/bin/true")
 	f.fake.RunOut["plugin list --json"] = []byte(`{"plugins":[{"id":"posse.herdr","path":"` + filepath.Join(f.home, "plugin", "herdr-plugin.toml") + `"}]}`)
+	// Setup created the config with the recommended skills; the forge probe
+	// cache is keyed by config, so resolve auth again for the new config.
+	cfg, err = config.Load(f.home, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedForgeProbe(context.Background(), f.repo, "gitlab.example.com", cfg, "gitlab"); err != nil {
+		t.Fatal(err)
+	}
 	output = outcomeCLI(t, f.service, 0, "--json")
 	if strings.Contains(output, `"readiness"`) {
 		t.Fatalf("fully ready status retained readiness: %s", output)
