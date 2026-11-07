@@ -509,7 +509,7 @@ on_signal() {
 
 # say prints $1 folded to the content width, after mark $2 when given.
 say() {
-  printf '%s\n' "$1" | fold -s -w $((ui_w - 5)) | {
+  printf '%s\n' "$1" | fold -s -w $((ui_w - 5)) | sed "s/ *$//" | {
     first=1
     while IFS= read -r say_line; do
       if [ "$first" -eq 1 ] && [ -n "${2:-}" ]; then
@@ -1019,7 +1019,7 @@ choose_home() {
         break
       fi
       if [ "$ui_live" -eq 1 ]; then
-        ui_err=$(printf '%s\n' "$home_error" | fold -s -w $((ui_w - 8)))
+        ui_err=$(printf '%s\n' "$home_error" | fold -s -w $((ui_w - 8)) | sed "s/ *$//")
       else
         status_line fail "$home_error"
       fi
@@ -1060,7 +1060,7 @@ trim_sub() {
 # add_note adds an indented note under the last setup row, folded to fit.
 add_note() {
   note=$(printf '%s\n' "$1" | sed 's/^ *//')
-  printf '%s\n' "$note" | fold -s -w $((ui_w - 8)) > "$temp_dir/note"
+  printf '%s\n' "$note" | fold -s -w $((ui_w - 8)) | sed "s/ *$//" > "$temp_dir/note"
   while IFS= read -r note_line; do
     add_sub note "$note_line"
   done < "$temp_dir/note"
@@ -1225,7 +1225,7 @@ finish() {
   hint=$(path_hint)
   if [ -n "$hint" ]; then
     printf '\n'
-    printf '%s\n' "$hint" | fold -s -w $((ui_w - 4)) | {
+    printf '%s\n' "$hint" | fold -s -w $((ui_w - 4)) | sed "s/ *$//" | {
       IFS= read -r first
       printf '  %s!%s %s\n' "$c_warn" "$c_reset" "$first"
       while IFS= read -r rest; do
