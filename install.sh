@@ -29,8 +29,6 @@ USAGE
 # Terminal UI. Live mode redraws a stage list in place while work runs; plain
 # mode prints one line per event. Only live mode moves the cursor.
 
-stage_titles='Check your system|Choose a version|Download and verify|Install|Choose where posse keeps its data|Prepare your agents for posse'
-
 stage_title() {
   case $1 in
     1) title='Check your system' ;;
@@ -103,7 +101,6 @@ ui_init() {
   crew_required=
   crew_agents=
   crew_addons=
-  install_detail=
   version_label=
   i=1
   while [ "$i" -le 6 ]; do
@@ -139,20 +136,20 @@ ui_init() {
   [ "$ui_w" -le 74 ] || ui_w=74
 
   esc=$(printf '\033')
-  c_reset= c_bold= c_dim= c_faint= c_text= c_ok= c_warn= c_err= c_lead= c_crew= c_arc=
-  c_claude= c_codex= c_pi= c_opencode=
+  c_reset='' c_bold='' c_faint='' c_text='' c_ok='' c_warn='' c_err='' c_lead=''
+  c_claude='' c_codex='' c_pi='' c_opencode=''
   if [ "$ui_color" -eq 1 ]; then
-    c_reset="$esc[0m" c_bold="$esc[1m" c_dim="$esc[2m"
+    c_reset="${esc}[0m" c_bold="${esc}[1m"
     if [ "$ui_truecolor" -eq 1 ]; then
-      c_text="$esc[39m" c_faint="$esc[38;2;110;119;140m" c_ok="$esc[38;2;120;228;211m"
-      c_warn="$esc[38;2;255;200;87m" c_err="$esc[38;2;255;93;115m"
-      c_lead="$esc[38;2;120;228;211m" c_crew="$esc[38;2;148;170;251m" c_arc="$esc[38;2;89;105;160m"
-      c_claude="$esc[38;2;255;158;100m" c_codex="$esc[38;2;158;206;106m"
-      c_pi="$esc[38;2;177;138;255m" c_opencode="$esc[38;2;120;228;211m"
+      c_text="${esc}[39m" c_faint="${esc}[38;2;110;119;140m" c_ok="${esc}[38;2;120;228;211m"
+      c_warn="${esc}[38;2;255;200;87m" c_err="${esc}[38;2;255;93;115m"
+      c_lead="${esc}[38;2;120;228;211m"
+      c_claude="${esc}[38;2;255;158;100m" c_codex="${esc}[38;2;158;206;106m"
+      c_pi="${esc}[38;2;177;138;255m" c_opencode="${esc}[38;2;120;228;211m"
     else
-      c_text="$esc[39m" c_faint="$esc[90m" c_ok="$esc[36m" c_warn="$esc[33m" c_err="$esc[31m"
-      c_lead="$esc[96m" c_crew="$esc[94m" c_arc="$esc[34m"
-      c_claude="$esc[33m" c_codex="$esc[32m" c_pi="$esc[35m" c_opencode="$esc[36m"
+      c_text="${esc}[39m" c_faint="${esc}[90m" c_ok="${esc}[36m" c_warn="${esc}[33m" c_err="${esc}[31m"
+      c_lead="${esc}[96m"
+      c_claude="${esc}[33m" c_codex="${esc}[32m" c_pi="${esc}[35m" c_opencode="${esc}[36m"
     fi
   fi
   tick=1
@@ -200,7 +197,7 @@ logo_rows() {
 wordmark() {
   if [ "$ui_truecolor" -eq 1 ]; then
     printf '%s' "$c_bold"
-    printf '%s' "$esc[38;2;120;228;211mp$esc[38;2;125;214;223mo$esc[38;2;134;199;233ms$esc[38;2;141;185;242ms$esc[38;2;148;170;251me"
+    printf '%s' "${esc}[38;2;120;228;211mp${esc}[38;2;125;214;223mo${esc}[38;2;134;199;233ms${esc}[38;2;141;185;242ms${esc}[38;2;148;170;251me"
     printf '%s' "$c_reset"
   else
     printf '%s%sposse%s' "$c_bold" "$c_lead" "$c_reset"
@@ -251,7 +248,7 @@ mark_for() {
 
 # fl appends one line to the frame being composed.
 fl() {
-  ui_frame="$ui_frame$1$esc[K
+  ui_frame="$ui_frame$1${esc}[K
 "
   ui_lines=$((ui_lines + 1))
 }
@@ -280,6 +277,7 @@ ui_compose() {
   ui_frame=
   ui_lines=0
   done_count=0
+  state=pending detail='' detail_len=0 sub_state='' sub_text=''
   i=1
   while [ "$i" -le 6 ]; do
     eval "state=\$st_$i"
@@ -321,7 +319,7 @@ ui_compose() {
         text_color=$c_text
         case $sub_state in pending|kept|skip) text_color=$c_faint ;; esac
         mark_state=$sub_state
-        [ "$sub_state" = kept ] && mark_state=done
+        [ "$sub_state" = kept ] && mark_state="done"
         mark_for "$mark_state"
         fl "      $mark $text_color$sub_text$c_reset"
         j=$((j + 1))
@@ -373,7 +371,7 @@ ui_paint() {
   ui_compose
   out=
   if [ "$ui_cursor_up" -gt 0 ]; then
-    out="$esc[${ui_cursor_up}A"
+    out="${esc}[${ui_cursor_up}A"
   fi
   printf '%s\r%s%s[J' "$out" "$ui_frame" "$esc"
   ui_frame_lines=$ui_lines
@@ -499,7 +497,7 @@ on_signal() {
   ui_show_cursor
   if [ "$current_stage" -ge 5 ]; then
     message="posse is installed, but its setup was interrupted. Run the installer again to finish."
-  elif [ "$current_stage" -eq 4 ] && [ "$st_4" = done ]; then
+  elif [ "$current_stage" -eq 4 ] && [ "${st_4:-}" = "done" ]; then
     message="posse is installed, but its setup was not run. Run the installer again to finish."
   else
     message="Nothing was installed."
@@ -981,7 +979,7 @@ check_tools() {
       status_line skip "Optional add-ons not found: $addons_missing"
     fi
   fi
-  stage_end done "$target_os/$target_arch"
+  stage_end "done" "$target_os/$target_arch"
 }
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1009,7 @@ choose_home() {
       fail "--home cannot be combined with POSSE_HOME. Unset POSSE_HOME to save a data folder."
     fi
     status_line ok "Using POSSE_HOME=$home_path for this run; it is not saved."
-    stage_end done "$(display_path "$home_path") (POSSE_HOME)"
+    stage_end "done" "$(display_path "$home_path") (POSSE_HOME)"
     return
   fi
   if [ -n "$home_choice" ]; then
@@ -1034,7 +1032,7 @@ choose_home() {
   fi
   ui_err=
   status_line ok "posse keeps its data in $home_path"
-  stage_end done "$(display_path "$home_path")"
+  stage_end "done" "$(display_path "$home_path")"
 }
 
 read_home_info() {
@@ -1083,11 +1081,10 @@ show_setup_lines() {
   sub_count=0
   setup_notes=
   setup_changes=0
-  setup_attention=0
   while IFS= read -r line; do
     case $line in
       '') ;;
-      '✓  '*) add_sub done "${line#✓  }"; setup_changes=$((setup_changes + 1)) ;;
+      '✓  '*) add_sub "done" "${line#✓  }"; setup_changes=$((setup_changes + 1)) ;;
       '+  '*) add_sub pending "${line#+  }"; trim_sub ': will be added' ;;
       '-  '*)
         case $line in
@@ -1095,8 +1092,8 @@ show_setup_lines() {
           *) add_sub skip "${line#-  }" ;;
         esac
         ;;
-      '!  '*) add_sub warn "${line#!  }"; setup_attention=1 ;;
-      '✗  '*) add_sub fail "${line#✗  }"; setup_attention=1 ;;
+      '!  '*) add_sub warn "${line#!  }" ;;
+      '✗  '*) add_sub fail "${line#✗  }" ;;
       *)
         setup_notes="$setup_notes$line
 "
@@ -1159,7 +1156,7 @@ error{"*)
     0)
       setup_state=ready
       status_line ok "Your agents are already prepared."
-      stage_end done "already set"
+      stage_end "done" "already set"
       ;;
     3)
       if [ "$tty_available" -eq 0 ] && [ "$auto_yes" -eq 0 ]; then
@@ -1176,9 +1173,9 @@ error{"*)
         print_setup_lines "$setup_result"
         setup_state=ready
         if [ "$setup_changes" -eq 1 ]; then
-          stage_end done "1 change"
+          stage_end "done" "1 change"
         else
-          stage_end done "$setup_changes changes"
+          stage_end "done" "$setup_changes changes"
         fi
       else
         busy_stop
@@ -1325,7 +1322,7 @@ main() {
   ui_ticker=
   ui_err=
   ui_hidden_cursor=0
-  c_ok= c_err= c_faint= c_reset=
+  c_ok='' c_err='' c_faint='' c_reset=''
   current_stage=0
 
   while [ "$#" -gt 0 ]; do
@@ -1440,7 +1437,7 @@ main() {
   status_line ok "Selected $version"
   version_label=$version
   set_head
-  stage_end done "$version${version_note:+ $version_note}"
+  stage_end "done" "$version${version_note:+ $version_note}"
 
   stage_begin 3
   if [ "$auth_enabled" -eq 1 ] && [ "$custom_release_base" -eq 0 ]; then
@@ -1490,14 +1487,14 @@ main() {
     chmod 755 "$extract_dir/posse" || fail "Could not prepare the posse binary."
     install_binary=$extract_dir/posse
   fi
-  stage_end done "$verify_detail"
+  stage_end "done" "$verify_detail"
 
   stage_begin 4
   mkdir -p "$prefix" || fail "Could not create install prefix $prefix."
   prefix=$(cd "$prefix" && pwd) || fail "Could not resolve install prefix."
   atomic_install "$install_binary"
   status_line ok "Installed $prefix/posse"
-  stage_end done "$(display_path "$prefix/posse")"
+  stage_end "done" "$(display_path "$prefix/posse")"
 
   stage_begin 5
   choose_home

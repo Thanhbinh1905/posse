@@ -251,6 +251,7 @@ pass "$TEST_SHELL accepts the default data folder on Enter and asks nothing else
 # A terminal and a custom folder with spaces and Unicode.
 mkdir -p "$TEST_ROOT/home-custom"
 custom_tty=$TEST_ROOT/answers-custom
+# shellcheck disable=SC2088 # the User types a literal ~
 printf '%s\n' '~/Dữ liệu posse' > "$custom_tty"
 custom_log=$TEST_ROOT/custom.log
 run_ok "interactive custom installation" env POSSE_TTY="$custom_tty" HOME="$TEST_ROOT/home-custom" POSSE_PREFIX="$TEST_ROOT/prefix-custom" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$custom_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER"
