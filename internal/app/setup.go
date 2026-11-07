@@ -80,17 +80,18 @@ type setupHookRecord struct {
 
 type setupInspection struct {
 	GlobalSkillsMode string
+	Kinds            []string
+	ReferencedKinds  []string
+	AvailableKinds   []string
+	Integrations     map[string]string
+	PluginPath       string
+	PluginPresent    bool
+	PluginListJSON   []byte
+	SidebarSupported bool
+
 	// NoRecommendedSkills keeps a config setup creates free of the
 	// recommended [skills] block.
 	NoRecommendedSkills bool
-	Kinds               []string
-	ReferencedKinds     []string
-	AvailableKinds      []string
-	Integrations        map[string]string
-	PluginPath          string
-	PluginPresent       bool
-	PluginListJSON      []byte
-	SidebarSupported    bool
 }
 
 type setupRun struct {
@@ -471,7 +472,6 @@ func recommendedSkillsOfferRow(home string, plan []map[string]any, noRecommended
 	}
 	configPath := filepath.Join(home, "config.toml")
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) && !noRecommendedSkills {
-		// Setup creates this config with the recommended set.
 		return map[string]any{"step": "recommended_skills_offer", "target": configPath, "action": "fresh"}, true
 	}
 	configured, err := config.ConfiguredSkills(configPath)

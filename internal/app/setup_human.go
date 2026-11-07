@@ -59,7 +59,6 @@ const (
 )
 
 type humanGroup struct {
-	key     string
 	label   string
 	agents  []string
 	state   int
@@ -86,7 +85,7 @@ func humanSetupGroups(plan []map[string]any, applied bool) []string {
 		}
 		group := groups[key]
 		if group == nil {
-			group = &humanGroup{key: key, label: labels[key]}
+			group = &humanGroup{label: labels[key]}
 			groups[key] = group
 		}
 		if agent, _ := row["agent"].(string); agent != "" && !slices.Contains(group.agents, agent) {
@@ -204,16 +203,10 @@ func humanRowState(row map[string]any, applied bool) (key string, state int, not
 		case "preserve":
 			return key, humanStateKept, "modified or foreign files are preserved", true
 		case "remove_preserving":
-			lines := humanSetupRow(row, applied)
-			return key, humanStateChanged, "", len(lines) > 0
+			return key, humanStateChanged, "", true
 		}
-	default:
-		key = step
 	}
 	lines := humanSetupRow(row, applied)
-	if len(lines) == 0 {
-		return "", 0, "", false
-	}
 	switch {
 	case strings.HasPrefix(lines[0], humanFailed):
 		state = humanStateFailed

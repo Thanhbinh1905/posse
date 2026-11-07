@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/config"
 )
 
 // IsolatedTestEnvironment strips every inherited HERDR_*, Worker and agent
@@ -320,14 +322,12 @@ func TestRootName() string {
 	return prefix + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
-// isolatedPosseHome is the posse home a test environment resolves: POSSE_HOME,
-// or else the folder its home pointer names, or else HOME/.posse.
+// isolatedPosseHome is the posse home a test environment resolves, or "" when
+// its home pointer is invalid.
 func isolatedPosseHome(env map[string]string) string {
-	if env["POSSE_HOME"] != "" {
-		return env["POSSE_HOME"]
+	home, err := config.ResolveHome(func(key string) string { return env[key] })
+	if err != nil {
+		return ""
 	}
-	if data, err := os.ReadFile(filepath.Join(env["XDG_CONFIG_HOME"], "posse", "home")); err == nil {
-		return strings.TrimSuffix(string(data), "\n")
-	}
-	return filepath.Join(env["HOME"], ".posse")
+	return home.Path
 }

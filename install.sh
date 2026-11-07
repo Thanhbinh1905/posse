@@ -663,9 +663,6 @@ detect_crew() {
   done
 }
 
-# ---------------------------------------------------------------------------
-# Release download and verification.
-
 choose_auth() {
   auth_token=
   if [ -n "${GH_TOKEN:-}" ]; then
@@ -1193,9 +1190,6 @@ error{"*)
   esac
 }
 
-# ---------------------------------------------------------------------------
-# Summary.
-
 print_box() {
   # print_box <title> <line>...
   box_title=$1
@@ -1251,9 +1245,6 @@ finish() {
       '      (Ctrl+B, then Shift+N) and run posse up there.'
   fi
 }
-
-# ---------------------------------------------------------------------------
-# Uninstall.
 
 uninstall_posse() {
   binary=$prefix/posse

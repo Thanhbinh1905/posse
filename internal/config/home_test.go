@@ -115,7 +115,6 @@ func TestSetHomePointerWritesPrivatePointerAndCreatesFolder(t *testing.T) {
 	if resolved, err := ResolveHome(lookup); err != nil || resolved.Path != target {
 		t.Fatalf("resolve after set: %#v %v", resolved, err)
 	}
-	// Choosing the same folder again is a no-op.
 	if again, err := SetHomePointer(lookup, target); err != nil || again.Path != target {
 		t.Fatalf("set again: %#v %v", again, err)
 	}

@@ -201,7 +201,6 @@ pointer_of() {
   printf '%s/.config/posse/home' "$1"
 }
 
-# --yes without a terminal: prepares the agents, keeps the default data folder.
 mkdir -p "$TEST_ROOT/home-yes"
 yes_log=$TEST_ROOT/yes.log
 run_ok "--yes installation" run_install "$TEST_ROOT/home-yes" "$TEST_ROOT/prefix-yes" "$yes_log" --yes
@@ -222,7 +221,6 @@ assert_readable "$output" "--yes"
 assert_ready "$output" "--yes"
 pass "$TEST_SHELL prepares the agents with --yes and keeps the default data folder"
 
-# No terminal and no --yes: the binary is installed, nothing else changes.
 mkdir -p "$TEST_ROOT/home-no-tty"
 no_tty_log=$TEST_ROOT/no-tty.log
 run_ok "no-TTY installation" run_install "$TEST_ROOT/home-no-tty" "$TEST_ROOT/prefix-no-tty" "$no_tty_log"
@@ -235,7 +233,6 @@ assert_readable "$output" "no-TTY install"
 assert_installed_only "$output" "no-TTY install"
 pass "$TEST_SHELL changes nothing beyond the binary without a TTY or --yes"
 
-# A terminal and Enter: the default folder stays, setup runs without a question.
 mkdir -p "$TEST_ROOT/home-enter"
 enter_tty=$TEST_ROOT/answers-enter
 printf '\n' > "$enter_tty"
@@ -248,7 +245,6 @@ contains "$(cat "$enter_log")" "setup-run" || fail "interactive install did not 
 assert_ready "$output" "interactive Enter"
 pass "$TEST_SHELL accepts the default data folder on Enter and asks nothing else"
 
-# A terminal and a custom folder with spaces and Unicode.
 mkdir -p "$TEST_ROOT/home-custom"
 custom_tty=$TEST_ROOT/answers-custom
 # shellcheck disable=SC2088 # the User types a literal ~
@@ -261,7 +257,6 @@ contains "$output" "posse keeps its data in $TEST_ROOT/home-custom/Dữ liệu p
 assert_ready "$output" "interactive custom"
 pass "$TEST_SHELL saves a custom data folder with spaces and Unicode"
 
-# A rejected folder is explained and asked again.
 mkdir -p "$TEST_ROOT/home-retry"
 retry_tty=$TEST_ROOT/answers-retry
 printf 'relative\n\n' > "$retry_tty"
@@ -272,7 +267,6 @@ contains "$output" "it is not an absolute path" || fail "the rejected folder was
 [ ! -e "$(pointer_of "$TEST_ROOT/home-retry")" ] || fail "a rejected folder wrote a pointer"
 pass "$TEST_SHELL explains a rejected data folder and asks again"
 
-# --home works without a terminal; a reinstall offers the saved folder.
 mkdir -p "$TEST_ROOT/home-flag"
 flag_log=$TEST_ROOT/flag.log
 run_ok "--home installation" run_install "$TEST_ROOT/home-flag" "$TEST_ROOT/prefix-flag" "$flag_log" --yes --home "$TEST_ROOT/data flag"
@@ -284,7 +278,6 @@ contains "$output" "Data folder [$TEST_ROOT/data flag]: " || fail "reinstall did
 contains "$(cat "$flag_log.2")" "home-set" && fail "reinstall rewrote the saved folder on Enter"
 pass "$TEST_SHELL saves --home and offers the saved folder on reinstall"
 
-# POSSE_HOME wins for the run and is never saved.
 mkdir -p "$TEST_ROOT/home-env"
 env_log=$TEST_ROOT/env.log
 run_ok "POSSE_HOME installation" env POSSE_HOME="$TEST_ROOT/env home" HOME="$TEST_ROOT/home-env" POSSE_PREFIX="$TEST_ROOT/prefix-env" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$env_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
@@ -298,7 +291,6 @@ fi
 contains "$output" "--home cannot be combined with POSSE_HOME" || fail "--home with POSSE_HOME was not explained"
 pass "$TEST_SHELL uses POSSE_HOME for the run without saving it"
 
-# --no-setup installs only the binary.
 mkdir -p "$TEST_ROOT/home-no-setup"
 no_setup_log=$TEST_ROOT/no-setup.log
 : > "$no_setup_log"
@@ -314,7 +306,6 @@ fi
 contains "$output" "--home cannot be combined with --no-setup" || fail "--no-setup --home was not explained"
 pass "$TEST_SHELL changes only the binary with --no-setup"
 
-# A build without posse _home keeps its legacy data folder.
 mkdir -p "$TEST_ROOT/home-old-home"
 run_ok "old home build" env STUB_OLD_HOME=1 HOME="$TEST_ROOT/home-old-home" POSSE_PREFIX="$TEST_ROOT/prefix-old-home" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$TEST_ROOT/old-home.log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
 contains "$output" "This posse version keeps its data in POSSE_HOME or ~/.posse." || fail "old home build was not explained"
@@ -426,7 +417,6 @@ contains "$(cat "$uninstall_log")" "setup-uninstall" || fail "uninstall did not 
 contains "$output" "using safe default [N]" || fail "uninstall did not state the safe default"
 pass "$TEST_SHELL removes only posse and preserves ~/.posse by default"
 
-# Uninstall finds a saved data folder and, when asked, removes it and its pointer.
 uhome=$TEST_ROOT/home-uninstall-saved
 mkdir -p "$TEST_ROOT/prefix-uninstall-saved" "$uhome/.config/posse" "$uhome/.posse" "$TEST_ROOT/saved data"
 cp "$STUB_DIR/posse" "$TEST_ROOT/prefix-uninstall-saved/posse"
