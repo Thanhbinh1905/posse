@@ -277,3 +277,57 @@ func unsetEnv(env []string, key string) []string {
 	}
 	return kept
 }
+
+// TestInstallerWithoutAgentIsNotReady installs a real release with no
+// supported agent on PATH. Preparing the machine succeeds, first while setup
+// applies and then while it is already complete, but neither run may tell the
+// User that posse up is ready.
+func TestInstallerWithoutAgentIsNotReady(t *testing.T) {
+	root := newFixtureRoot(t, herdr.TestRootName())
+	bin := filepath.Join(root, "bin")
+	for _, dir := range []string{bin, filepath.Join(root, "home"), filepath.Join(root, "posse"), filepath.Join(root, "claude"), filepath.Join(root, "codex")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	releases := writeReleaseFixture(t, root, "v9.9.9")
+	herdrBinary, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(herdrBinary, filepath.Join(bin, "herdr")); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"claude", "codex", "pi", "opencode"} {
+		if path, err := exec.LookPath(filepath.Join("/usr/bin", agent)); err == nil {
+			t.Skipf("%s is installed system-wide at %s", agent, path)
+		}
+	}
+	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
+		t.Fatal(err)
+	}
+	env := isolatedE2EEnv(t, root)
+	env = setEnv(env, "PATH", bin+":/usr/bin:/bin")
+	env = append(env, "POSSE_PREFIX="+filepath.Join(root, "prefix"), "POSSE_VERSION=v9.9.9", "POSSE_RELEASE_BASE=file://"+releases, "NO_COLOR=1")
+	for _, run := range []string{"setup applies", "setup already complete"} {
+		command := exec.Command("sh", filepath.Join(moduleRoot(t), "install.sh"), "--yes")
+		command.Dir = root
+		command.Env = env
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: install.sh: %v\n%s", run, err, output)
+		}
+		text := string(output)
+		if run == "setup already complete" && !strings.Contains(text, "Your agents are already prepared.") {
+			t.Fatalf("second run did not find setup complete:\n%s", text)
+		}
+		for _, want := range []string{"No supported agent found", "| posse is installed", "Next: install Claude Code, Codex, Pi or OpenCode."} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s: output omitted %q:\n%s", run, want, text)
+			}
+		}
+		if strings.Contains(text, "posse is ready") {
+			t.Fatalf("%s: installer reported ready without an agent:\n%s", run, text)
+		}
+	}
+}

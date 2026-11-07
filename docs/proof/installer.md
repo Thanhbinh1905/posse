@@ -8,7 +8,7 @@ Screens of `install.sh` recorded through a real pseudo-terminal with `script(1)`
 
 ## Live view
 
-The data-folder prompt, then the spinner while `posse setup` runs. Rows marked `○` are pending, `–` is optional and left alone.
+The data-folder prompt, then the spinner while `posse setup` runs. Rows marked `○` are pending, `–` is optional and left alone. The Crew panel lists the agents found on `PATH` and says that agent sign-in was not checked.
 
 ![Prompt and preparing the agents](installer-live.png)
 
@@ -16,9 +16,13 @@ Typing `~/Posse data` saved that folder in the home pointer and finished with th
 
 ![Finished with a custom data folder](installer-finished.png)
 
-At 64 columns without `COLORTERM`, the same view uses ANSI-16 colors.
+At 64 columns without `COLORTERM`, the same view uses ANSI-16 colors. This fixture has no agent, so the summary asks for one before `posse up`.
 
 ![64 columns, ANSI-16](installer-narrow.png)
+
+With no supported agent on `PATH`, the real build still prepares the machine, then reports `posse is installed` and names the missing agent. The summary box wraps to the 60-column terminal.
+
+![No supported agent at 60 columns](installer-no-agent.png)
 
 ## Errors and cancellation
 
@@ -32,7 +36,7 @@ Ctrl+C at the prompt marks the step, restores the cursor and says what state the
 
 ## Plain output
 
-Without a TTY, with `NO_COLOR` or with `TERM=dumb`, the installer prints one line per event and no escape bytes. `--yes` prepares the agents:
+Without a TTY, with `NO_COLOR` or with `TERM=dumb`, the installer prints one line per event and no escape bytes. With Claude Code on `PATH`, `--yes` prepares the agents:
 
 ```text
    .--o--.
@@ -47,7 +51,7 @@ Without a TTY, with `NO_COLOR` or with `TERM=dumb`, the installer prints one lin
   ✓  Checksum tool: sha256sum
   ✓  Git 2.53.0
   ✓  Herdr 0.9.1
-  -  No supported agent found: install Claude Code, Codex, Pi or OpenCode.
+  ✓  Agents found: Claude Code (sign-in not checked)
   ✓  Optional add-ons found: gh, glab
   -  Optional add-ons not found: lavish-axi, quota-axi
 
@@ -72,6 +76,8 @@ Without a TTY, with `NO_COLOR` or with `TERM=dumb`, the installer prints one lin
   ✓  SessionStart hook for Claude Code, Codex
        Codex asks once to trust its new hook.
   ✓  Recommended workflow skills
+
+  ! Add /home/user/.local/bin to your PATH.
 
   +------------------------------------------------------------+
   | posse is ready                                             |

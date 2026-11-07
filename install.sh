@@ -348,7 +348,7 @@ ERRORS
     fl "  ${c_faint}Required$c_reset  $crew_required"
     fl "  ${c_faint}Agents$c_reset    $crew_agents"
     fl "  ${c_faint}Add-ons$c_reset   $crew_addons"
-    fl "            $c_faint○ not found · posse doctor checks sign-in$c_reset"
+    fl "            $c_faint○ not found · agent sign-in not checked$c_reset"
   fi
   if [ "$ui_final" -eq 0 ]; then
     fl ''
@@ -965,7 +965,7 @@ check_tools() {
   crew_required="$c_ok✓$c_reset git${git_version:+ $git_version}  $c_ok✓$c_reset Herdr $herdr_version"
   if [ "$ui_live" -eq 0 ]; then
     if [ -n "$agents_found" ]; then
-      status_line ok "Agents found: $agents_found (sign-in is checked by posse doctor)"
+      status_line ok "Agents found: $agents_found (sign-in not checked)"
     else
       status_line skip "No supported agent found: install Claude Code, Codex, Pi or OpenCode."
     fi
@@ -1191,28 +1191,45 @@ error{"*)
 }
 
 print_box() {
-  # print_box <title> <line>...
+  # print_box <title> <label> <text> [<label> <text>]...
+  # Each text is wrapped to the box and indented past its label.
   box_title=$1
   shift
+  inner=58
   if [ "$ui_color" -eq 1 ]; then
     width=$((ui_w - 2))
     [ "$width" -le 64 ] || width=64
-    printf '\n  %s╭─ %s%s%s %s╮%s\n' "$c_faint" "$c_reset$c_bold" "$box_title" "$c_reset$c_faint" "$(rule $((width - 5 - ${#box_title})) ─)" "$c_reset"
-    for box_line in "$@"; do
-      box_len=$(vlen "$box_line")
-      pad $((width - 4 - box_len))
-      box_line=$(printf '%s' "$box_line" | sed "s/posse up/$c_lead${c_bold}posse up$c_reset/; s/posse setup/$c_lead${c_bold}posse setup$c_reset/")
-      printf '  %s│%s %s%s %s│%s\n' "$c_faint" "$c_reset" "$box_line" "$pad" "$c_faint" "$c_reset"
+    inner=$((width - 4))
+  fi
+  box_body=
+  while [ "$#" -ge 2 ]; do
+    label=$(printf '%-6s' "$1")
+    folded=$(printf '%s\n' "$2" | fold -s -w $((inner - 6)) | sed 's/ *$//')
+    shift 2
+    while IFS= read -r part; do
+      box_body="$box_body$label$part
+"
+      label='      '
+    done <<BODY
+$folded
+BODY
+  done
+  if [ "$ui_color" -eq 0 ]; then
+    printf '\n  +%s+\n' '------------------------------------------------------------'
+    printf '  | %-58s |\n' "$box_title"
+    printf '%s' "$box_body" | while IFS= read -r box_line; do
+      printf '  | %-58s |\n' "$box_line"
     done
-    printf '  %s╰%s╯%s\n' "$c_faint" "$(rule $((width - 2)) ─)" "$c_reset"
+    printf '  +%s+\n' '------------------------------------------------------------'
     return
   fi
-  printf '\n  +%s+\n' '------------------------------------------------------------'
-  printf '  | %-58s |\n' "$box_title"
-  for box_line in "$@"; do
-    printf '  | %-58s |\n' "$box_line"
+  printf '\n  %s╭─ %s%s%s %s╮%s\n' "$c_faint" "$c_reset$c_bold" "$box_title" "$c_reset$c_faint" "$(rule $((width - 5 - ${#box_title})) ─)" "$c_reset"
+  printf '%s' "$box_body" | while IFS= read -r box_line; do
+    pad $((inner - $(vlen "$box_line")))
+    box_line=$(printf '%s' "$box_line" | sed "s/posse up/$c_lead${c_bold}posse up$c_reset/; s/posse setup/$c_lead${c_bold}posse setup$c_reset/")
+    printf '  %s│%s %s%s %s│%s\n' "$c_faint" "$c_reset" "$box_line" "$pad" "$c_faint" "$c_reset"
   done
-  printf '  +%s+\n' '------------------------------------------------------------'
+  printf '  %s╰%s╯%s\n' "$c_faint" "$(rule $((width - 2)) ─)" "$c_reset"
 }
 
 finish() {
@@ -1233,17 +1250,21 @@ finish() {
       done
     }
   fi
-  if [ "$setup_state" = ready ]; then
-    print_box 'posse is ready' \
-      'Next: open a new Herdr workspace in your repository' \
-      '      (Ctrl+B, then Shift+N) and run posse up there.' \
-      '      The Lead can walk you through configuration.'
-  else
-    print_box 'posse is installed' \
-      'Next: run posse setup to prepare your agents.' \
-      'Then: open a new Herdr workspace in your repository' \
-      '      (Ctrl+B, then Shift+N) and run posse up there.'
+  open_workspace='open a new Herdr workspace in your repository (Ctrl+B, then Shift+N) and run posse up there.'
+  if [ "$setup_state" = ready ] && [ -n "$agents_found" ]; then
+    print_box 'posse is ready' 'Next:' "$open_workspace" '' 'The Lead can walk you through configuration.'
+    return
   fi
+  set --
+  if [ "$setup_state" != ready ]; then
+    set -- "$@" 'Next:' 'run posse setup to prepare your agents.'
+  fi
+  if [ -z "$agents_found" ]; then
+    label=Next:
+    [ "$#" -eq 0 ] || label=Then:
+    set -- "$@" "$label" 'install Claude Code, Codex, Pi or OpenCode.'
+  fi
+  print_box 'posse is installed' "$@" 'Then:' "$open_workspace"
 }
 
 uninstall_posse() {
@@ -1291,7 +1312,7 @@ uninstall_posse() {
   else
     status_line skip "Kept $data_dir (Task history and config)."
   fi
-  print_box 'posse has been uninstalled' 'Next: install again with install.sh'
+  print_box 'posse has been uninstalled' 'Next:' 'install again with install.sh'
 }
 
 main() {

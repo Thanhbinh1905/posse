@@ -126,6 +126,11 @@ cat > "$FAKE_BIN/herdr" <<'HERDR'
 printf 'herdr 0.9.1\n'
 HERDR
 chmod 755 "$FAKE_BIN/herdr"
+NO_AGENT_BIN=$TEST_ROOT/no-agent-bin
+mkdir -p "$NO_AGENT_BIN"
+cp "$FAKE_BIN/herdr" "$NO_AGENT_BIN/herdr"
+printf '#!/bin/sh\nexit 0\n' > "$FAKE_BIN/claude"
+chmod 755 "$FAKE_BIN/claude"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -215,6 +220,7 @@ contains "$(cat "$yes_log")" "home-set" && fail "--yes saved a data folder nobod
 contains "$output" "  ✓  SessionStart hook for Claude Code, Codex" || fail "--yes did not show the setup result"
 contains "$output" "posse keeps its data in $TEST_ROOT/home-yes/.posse" || fail "--yes did not name the data folder"
 contains "$output" "global-skills" && fail "--yes still mentions global skills"
+contains "$output" "(sign-in not checked)" || fail "--yes did not say agent sign-in was not checked"
 contains "$output" "Apply these changes" && fail "--yes asked a setup question"
 [ ! -e "$(pointer_of "$TEST_ROOT/home-yes")" ] || fail "--yes wrote a home pointer for the default folder"
 assert_readable "$output" "--yes"
@@ -431,5 +437,50 @@ contains "$output" "Delete $TEST_ROOT/saved data (Task history and config)?" || 
 [ ! -e "$uhome/.config/posse/home" ] || fail "uninstall kept the pointer to a removed folder"
 [ -f "$uhome/.posse/state" ] || fail "uninstall removed a folder it did not name"
 pass "$TEST_SHELL uninstalls the saved data folder only when confirmed"
+
+for agentless in fresh complete; do
+  mkdir -p "$TEST_ROOT/home-no-agent-$agentless"
+  setup_done=
+  [ "$agentless" = fresh ] || setup_done=1
+  if ! output=$(env STUB_SETUP_DONE="$setup_done" HOME="$TEST_ROOT/home-no-agent-$agentless" POSSE_PREFIX="$TEST_ROOT/prefix-no-agent-$agentless" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$TEST_ROOT/no-agent.log" NO_COLOR=1 PATH="$NO_AGENT_BIN:/usr/bin:/bin" "$TEST_SHELL" "$INSTALLER" --yes 2>&1); then
+    printf '%s\n' "$output" >&2
+    fail "installation without an agent failed"
+  fi
+  contains "$output" "No supported agent found" || fail "no-agent install ($agentless) did not report the missing agent"
+  contains "$output" "posse is ready" && fail "no-agent install ($agentless) reported ready"
+  contains "$output" "| Next: install Claude Code, Codex, Pi or OpenCode." || fail "no-agent install ($agentless) omitted installing an agent"
+  assert_box "$output" "no-agent install"
+done
+pass "$TEST_SHELL does not report ready without a supported agent"
+
+if script --version 2>/dev/null | grep -q util-linux; then
+  for cols in 50 60 64; do
+    pty_home=$TEST_ROOT/home-pty-$cols
+    mkdir -p "$pty_home"
+    long_home="$pty_home/a data folder with a rather long name for narrow terminals"
+    if ! env HOME="$pty_home" POSSE_PREFIX="$pty_home/.local/bin" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$TEST_ROOT/pty-$cols.log" PATH="$FAKE_BIN:$PATH" TERM=xterm-256color COLORTERM=truecolor LC_ALL=C.UTF-8 \
+      script -qec "stty cols $cols rows 50; $TEST_SHELL '$INSTALLER' --yes --home '$long_home'" "$TEST_ROOT/pty-$cols.raw" < /dev/null > /dev/null 2>&1; then
+      cat "$TEST_ROOT/pty-$cols.raw" >&2
+      fail "PTY installation at $cols columns failed"
+    fi
+    screen=$TEST_ROOT/pty-$cols.txt
+    sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\r//g' "$TEST_ROOT/pty-$cols.raw" | grep -v '^Script ' > "$screen"
+    contains "$(cat "$screen")" "posse is ready" || fail "PTY install at $cols columns did not finish"
+    # Below 60 columns the installer prints plain lines, which may wrap.
+    if [ "$cols" -ge 60 ]; then
+      while IFS= read -r line; do
+        width=$(printf '%s' "$line" | LC_ALL=C.UTF-8 wc -m | tr -d ' ')
+        [ "$width" -lt "$cols" ] || fail "a line is $width columns wide at $cols columns: $line"
+      done < "$screen"
+    fi
+    box_lines=$(grep -E '^  (╭|│|╰)' "$screen")
+    [ -n "$box_lines" ] || fail "no summary box at $cols columns"
+    box_wide=$(printf '%s\n' "$box_lines" | while IFS= read -r line; do printf '%s' "$line" | LC_ALL=C.UTF-8 wc -m; done | sort -n | tail -1 | tr -d ' ')
+    [ "$box_wide" -lt "$cols" ] || fail "the summary box is $box_wide columns wide at $cols columns"
+    box_widths=$(grep -E '^  (╭|│|╰)' "$screen" | while IFS= read -r line; do printf '%s' "$line" | LC_ALL=C.UTF-8 wc -m; done | sort -u | wc -l)
+    [ "$box_widths" -eq 1 ] || fail "summary box borders are uneven at $cols columns: $(grep -E '^  (╭|│|╰)' "$screen")"
+  done
+  pass "$TEST_SHELL fits the summary box at 50, 60 and 64 columns and every live line at 60 and 64"
+fi
 
 printf 'Installer scenarios passed under %s.\n' "$TEST_SHELL"
