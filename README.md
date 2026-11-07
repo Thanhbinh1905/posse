@@ -20,11 +20,13 @@ The installer downloads the `posse` binary to `~/.local/bin` by default and offe
 
 ## Delegate your first task
 
-1. Open a Herdr workspace at your Git repository and run `posse up` in a pane. If Posse has not registered the Project, it shows what it found and asks before registering it.
-2. Tell the Lead what outcome you want. For example: "Fix the CSV export bug; open a PR, don't merge."
-3. You should see the Lead in the workspace. When you assign work, the Lead starts a Worker in its own tab and separate worktree. The Lead reports the result and follows the Project's delivery policy.
+1. Create a new Herdr workspace. With the default key bindings, press `Ctrl+B`, then `Shift+N`. Press the keys in sequence. If you changed the binding, use the key for `new_workspace`.
+2. In the new workspace, open a shell, change to your Git repository, and run `posse up`. If Posse has not registered the Project, it shows what it found and asks before registering it. You should then see the Lead in this workspace.
+3. Tell the Lead what outcome you want. For example: "Fix the CSV export bug; open a PR, don't merge." When the Lead starts a Worker, you should see it in a tab. The Worker uses a separate Git worktree.
 
-Use one Project per Herdr workspace. Each Project has one Lead. Posse isolates Worker changes in Git worktrees, but local delivery does not run automated verification. Pull-request delivery relies on forge CI at the exact commit being merged. Merge approval follows the Project's configured policy.
+To create the workspace from a Herdr shell instead, run `herdr workspace create --cwd /path/to/your/repository --focus`. Then run `posse up` in a shell in the new workspace.
+
+Each Herdr workspace holds one Project and its Lead. Workers use tabs inside that workspace. To work on another Project, create another workspace, not another tab or pane. Local delivery does not run automated verification. Pull-request delivery relies on forge CI at the exact commit being merged. Merge approval follows the Project's configured policy.
 
 ## Documentation
 
