@@ -920,6 +920,18 @@ Once per machine, `install.sh` installs the `posse` binary and runs `posse setup
 8. Offers the Herdr Agents row layout (`[ui.sidebar.agents] rows`, Herdr 0.9.1 or newer) so Workers show as `├─`/`└─` rows. It writes after a `y` answer or `--sidebar-layout`, never with `--no-sidebar-layout`, `--check` or without a TTY. It inserts the block without reserializing, keeping comments, and upgrades the earlier Posse layout lacking `dim = false`. A symlinked config is never written: setup prints the block. Custom `rows` are never replaced. `posse setup --check` and `posse doctor` report the layout state.
 9. Offers the recommended workflow skills when config has no `[skills]` block. It writes the full set after a `y` answer or `--recommended-skills`, never with `--no-recommended-skills`, `--check` or without a TTY. `posse skills add` picks individual skills; `posse setup --check` and `posse doctor` report recommended skills missing from config.
 
+### Herdr Agents sidebar layout
+
+Run `posse setup` and accept the offer, or run `posse setup --sidebar-layout`, to add the optional Agents layout. It requires Herdr 0.9.1 or newer. The layout groups Worker rows beneath the Lead. Posse preserves comments in Herdr's config and does not replace existing custom `rows`. If Herdr's config is a symlink, setup prints the layout instead of writing the file. Add the printed block to the symlink's source config, or merge it with custom rows there.
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true, dim = false }],
+  ["agent"],
+]
+```
+
 The Claude Lead plugin is bundled in the binary and written under the Project's Posse home on Lead launch, not installed in the User's Claude settings or loaded for Workers. Its zero-height drawing, restored-row classification, redraw and animation packing are adapted from [firstmate-calm](https://github.com/kunchenguid/firstmate) (MIT, copyright 2026 Kun Chen); the plugin bundles `FIRSTMATE-LICENSE`. Posse's record-backed Notice recognition and Project preference handling are independent. Unit coverage runs through `claude plugin test internal/app/claude_lowkey`; the credentialed live TUI regression is `POSSE_CLAUDE_LOWKEY_LIVE_E2E=1 scripts/claude-lowkey-live-e2e.sh`. It uses an API key or a copied OAuth login in an isolated Claude config, and tests the collapsed `Ran 1 shell command` row on Claude Code 2.1.283.
 
 `posse setup --check --exit-code` exits 3 when required setup would change the machine and 0 when nothing is pending, which is how `install.sh` decides whether to ask. Optional global skills are not pending setup. `--human` only changes the display: a checklist for people instead of TOON (`+` pending, `✓` done, `-` unchanged, `!` manual, `✗` blocked), which `install.sh` shows. `posse setup --uninstall` removes exactly what `setup.json` lists and never touches `~/.posse` data. `posse doctor` reports Posse-owned global skill copies that can be removed, any global `posse-*` skill that shadows the role snapshots, review Dispatch Rules that resolve no usable Profile, stale optional skills or hooks, a failing plugin hook (from Herdr's plugin log), missing integrations, group-close risks from other repository primaries and unverified Claude Code function-hook versions.

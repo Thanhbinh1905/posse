@@ -31,7 +31,8 @@ Use one Project per Herdr workspace. Each Project has one Lead. Posse isolates W
 - [Full specification](docs/spec.md)
 - [Recommended skills](docs/skills.md)
 - [Upgrading and vocabulary changes](docs/adr/0026-functional-vocabulary.md)
-- [Worker layout in Herdr](docs/adr/0013-all-workers-open-as-lead-tabs.md)
+- [Herdr sidebar layout setup](docs/spec.md#herdr-agents-sidebar-layout)
+- [GitHub Releases](https://github.com/Thanhbinh1905/posse/releases)
 
 ## Acknowledgements
 
