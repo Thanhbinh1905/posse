@@ -83,14 +83,14 @@ type setupInspection struct {
 	// NoRecommendedSkills keeps a config setup creates free of the
 	// recommended [skills] block.
 	NoRecommendedSkills bool
-	Kinds            []string
-	ReferencedKinds  []string
-	AvailableKinds   []string
-	Integrations     map[string]string
-	PluginPath       string
-	PluginPresent    bool
-	PluginListJSON   []byte
-	SidebarSupported bool
+	Kinds               []string
+	ReferencedKinds     []string
+	AvailableKinds      []string
+	Integrations        map[string]string
+	PluginPath          string
+	PluginPresent       bool
+	PluginListJSON      []byte
+	SidebarSupported    bool
 }
 
 type setupRun struct {
