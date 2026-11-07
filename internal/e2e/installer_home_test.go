@@ -30,7 +30,8 @@ import (
 func TestInstallerSavedDataFolderReachesFirstTask(t *testing.T) {
 	root := newFixtureRoot(t, herdr.TestRootName())
 	bin := filepath.Join(root, "bin")
-	prefix := filepath.Join(root, "prefix")
+	// posse setup refuses a binary under /tmp, so install where users would.
+	prefix := newFixtureRootAt(t, "/var/tmp", fixturePrefix("installed-"))
 	data := filepath.Join(root, "data folder")
 	for _, dir := range []string{bin, filepath.Join(root, "home"), filepath.Join(root, "claude"), filepath.Join(root, "codex"), filepath.Join(root, "pi")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -308,7 +309,7 @@ func TestInstallerWithoutAgentIsNotReady(t *testing.T) {
 	}
 	env := isolatedE2EEnv(t, root)
 	env = setEnv(env, "PATH", bin+":/usr/bin:/bin")
-	env = append(env, "POSSE_PREFIX="+filepath.Join(root, "prefix"), "POSSE_VERSION=v9.9.9", "POSSE_RELEASE_BASE=file://"+releases, "NO_COLOR=1")
+	env = append(env, "POSSE_PREFIX="+newFixtureRootAt(t, "/var/tmp", fixturePrefix("installed-")), "POSSE_VERSION=v9.9.9", "POSSE_RELEASE_BASE=file://"+releases, "NO_COLOR=1")
 	for _, run := range []string{"setup applies", "setup already complete"} {
 		command := exec.Command("sh", filepath.Join(moduleRoot(t), "install.sh"), "--yes")
 		command.Dir = root
