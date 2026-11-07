@@ -4,89 +4,34 @@
 
 **One Lead. A whole crew. Running on Herdr.**
 
-Posse is a local-first CLI for coordinating coding agents in Git repositories and workspaces. In a folder without Git, `posse up` starts a Lead for exploration and planning only. After you initialize Git or add repositories, run `posse project scan` to enable Tasks. You talk to one Lead in a Herdr pane; the Lead writes task briefs and dispatches Workers (worker agents) into isolated worktrees. Posse tracks tasks, relays progress and decisions, and integrates changes through pull requests or local fast-forwards. Pull-request Merges rely on green forge CI at the exact `gated_sha`. Local Merges have no automated verification; verification is the User's responsibility. Edit non-Git directories directly outside Posse.
+Posse coordinates coding agents in Git repositories. You describe an outcome to a Lead in Herdr. The Lead delegates work to Workers in separate Git worktrees, tracks their progress, and brings their changes back for review and delivery.
 
-## How it works
+## Install
 
-1. Start a Lead with `posse up` from a Herdr pane in your project.
-2. Describe the outcome you want. The Lead splits work into tasks and starts repository Workers as worktree children under its Herdr workspace. Workspace Project Workers use tabs.
-3. Workers commit changes in their own branches and report back. The Lead reviews results and asks for decisions when needed.
-4. Changes merge locally or through pull requests, according to your project's merge mode and approval settings.
+You need [Herdr](https://github.com/herdrdev/herdr) with protocol 22 or newer, Git, and an agent supported by your Herdr installation. To open pull requests, authenticate the forge CLI for your repository (`gh` for GitHub or `glab` for GitLab).
 
-Posse keeps task state in a local SQLite database and uses Herdr to run the agents. See the [domain glossary](CONTEXT.md), [specification](docs/spec.md), and [architecture decisions](docs/adr/) for details.
-
-## Install Posse
-
-You need [Herdr](https://github.com/herdrdev/herdr) (protocol 22 or newer), Git, and a coding agent supported by your Herdr installation. PR-based merging also requires authentication with your repository's forge CLI (`gh` for GitHub or `glab` for GitLab).
-
-Review the [installer](install.sh) before running it:
+Review the [installer](install.sh), then run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Thanhbinh1905/posse/main/install.sh | sh
 ```
 
-The installer downloads a release to `~/.local/bin` by default and offers to set up Herdr integrations and configuration. Posse skills are injected only into sessions it launches; `posse setup --global-skills` optionally installs them for ordinary agent sessions. To install without setup, pass `--no-setup` after `sh -s --`. Run `posse setup` later to complete setup. Pass `--help` after `sh -s --` to see all options.
+The installer downloads the `posse` binary to `~/.local/bin` by default and offers to configure Posse's Herdr integrations. To install without setup, add `--no-setup` after `sh -s --`; run `posse setup` later.
 
-### Upgrading from 0.14
+## Delegate your first task
 
-1. Back up the full Posse home and Project Git metadata as described in [ADR 0026](docs/adr/0026-functional-vocabulary.md).
-2. From a User shell, run the installed 0.14 binary with `posse update --stop-lookouts`. That binary does not know `--stop-watches`; use the new flag only after upgrading.
-3. `posse update` runs the new `posse setup` for integrations; run it manually after another installation method. If you installed optional global skills, also run `posse setup --global-skills` so agents do not learn removed commands from stale copies.
-4. Restart every running Lead: from a User shell in each Project, run `posse up --replace`. Running Pi/OpenCode Leads retain their old adapters in memory. Their exact machine handoff/receipt calls remain supported during the transition, but restarting loads the new adapter and instructions.
+1. Open a Herdr workspace at your Git repository and run `posse up` in a pane. If Posse has not registered the Project, it shows what it found and asks before registering it.
+2. Tell the Lead what outcome you want. For example: "Fix the CSV export bug; open a PR, don't merge."
+3. You should see the Lead in the workspace. When you assign work, the Lead starts a Worker in its own tab and separate worktree. The Lead reports the result and follows the Project's delivery policy.
 
-Stored Tasks, config and paths upgrade automatically; existing worktrees are not moved. Removed User commands and flags fail with their replacement names. If config contains `review = "on_risk"`, the new binary remains installed but setup cannot finish until you repair the policy. Run `posse config set defaults.review none` or `posse config unset defaults.review`, then `posse setup`; add `--project <name>` for Project config.
+Use one Project per Herdr workspace. Each Project has one Lead. Posse isolates Worker changes in Git worktrees, but local delivery does not run automated verification. Pull-request delivery relies on forge CI at the exact commit being merged. Merge approval follows the Project's configured policy.
 
-### 0.15 release notes
+## Documentation
 
-Custom scripts and Herdr layouts that consume Posse output must use the renamed fields and tokens:
-
-- `ack.auto_unsaddled` is now `ack.auto_torn_down`.
-- Update fields `lookouts`, `stopped_lookouts` and `reexec_lookouts` are now `watches`, `stopped_watches` and `reexec_watches`.
-- Pool `mount` and `mounts` are now `sandbox` and `sandboxes`.
-- The Herdr token `posse_mount` is now `posse_sandbox`.
-
-## Get started
-
-Use one Project per Herdr workspace. Each Project has one Lead, and each Lead owns a separate Herdr workspace. Do not start or adopt another Project's Lead from an existing Lead pane. To use several Projects, open a separate Herdr workspace at each Project root, then run `posse up` in each workspace.
-
-1. Open a Herdr pane in your repository or workspace folder and run `posse up`. It asks once before registering an unregistered Project.
-2. State the outcome you want, for example: "Fix the CSV export bug; open a PR, don't merge." The Lead raises only missing settings that affect this request, such as forge authentication, then starts work.
-
-With one available agent kind, `posse up` selects it without saving a preference. With several, choose with `posse up --<kind>` or `lead.kind`. Without Dispatch Rules or `dispatch.default.use`, Workers use the Lead's kind with its default model and effort. Inspect consequential gaps with `posse`.
-
-Posse never restarts agents on its own. After closing or restarting Herdr, run `posse up --all` to restore the Lead, Workers and Watch of every Project that is not down; each Lead returns as the agent and session that were running.
-
-For a clear implementation request, the Lead can dispatch one Change directly. Research Tasks, specifications, tickets and separate review Tasks are optional. Customize workflow guidance with `posse preferences show|path|set`; User and Project preferences can change advice but not Posse's runtime obligations or authority checks. Use `posse handoff write --file <file.md>` when the User asks to preserve conversation-only context for the next Lead. Posse loads and archives that note at the next Lead startup. Legacy preference files remain readable; move them explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement. See [ADR 0026](docs/adr/0026-functional-vocabulary.md) for the vocabulary mapping and automatic 0.14 upgrade.
-
-The `posse-setup` skill (Claude Code: `/posse-setup`, Codex: `$posse-setup`) remains available as an optional full configuration tour. The User-invoked `posse-down` and `posse-update` skills (Claude Code: `/posse-down`, `/posse-update`; Codex: `$posse-down`, `$posse-update`) guide safe shutdown and update/restart. `posse-better-each-day` ("what should improve?") consolidates friction into upstream issues and proposed skill edits. These platform skills always load. Use `posse config` to personalize later and `posse --help` to explore the CLI.
-
-## Adopt the recommended skill set
-
-Installing Posse does not load the workflow skills. Add them with `posse skills add`: a picker on a terminal, or `--all` for the whole set. `posse setup` offers it once, and an upgraded install gets it written once. See [docs/skills.md](docs/skills.md) for the `[skills]` block, the role table and every skill.
-
-To uninstall, run the installer with `--uninstall` after `sh -s --`. Posse keeps local task history and configuration unless you confirm their removal.
-
-## Better look
-
-Herdr's default Agents panel shows every Worker as `Lead:<project> · <tab>`. With Herdr 0.9.1 or newer, `posse setup` offers a row layout that shows the Lead row, then its Workers as `├─` and `└─` rows. Answer `y` and it adds the block to `~/.config/herdr/config.toml`, keeping your comments. `posse setup --check` and `posse doctor` report when it is missing or outdated; a layout from an earlier Posse without `dim = false` is upgraded in place.
-
-The panel shows the Lead followed by its Workers:
-
-```text
-Lead: shop
-├─ t1
-└─ t2
-```
-
-If your Herdr config is a symlink (for example Nix home-manager) or already sets custom Agents `rows`, Posse never writes it. Paste this block into the config's source instead:
-
-```toml
-[ui.sidebar.agents]
-rows = [
-  ["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true, dim = false }],
-  ["agent"],
-]
-```
+- [Full specification](docs/spec.md)
+- [Recommended skills](docs/skills.md)
+- [Upgrading and vocabulary changes](docs/adr/0026-functional-vocabulary.md)
+- [Worker layout in Herdr](docs/adr/0013-all-workers-open-as-lead-tabs.md)
 
 ## Acknowledgements
 
