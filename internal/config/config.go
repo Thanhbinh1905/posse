@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -282,17 +281,6 @@ func (e *InvalidError) Error() string {
 }
 
 func (e *InvalidError) Unwrap() error { return e.Cause }
-
-func DefaultHome() (string, error) {
-	if home := os.Getenv("POSSE_HOME"); home != "" {
-		return filepath.Clean(home), nil
-	}
-	current, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(current.HomeDir, ".posse"), nil
-}
 
 func Load(home, projectName string) (Config, error) {
 	return loadConfig(home, projectName, true)

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -288,14 +289,20 @@ func parseProcessInt64(value string) int64 {
 	return parsed
 }
 
+// processHome is the posse home a process resolves from its environment, or
+// "" when that cannot be told.
 func processHome(environment map[string]string) string {
 	if home := environment["POSSE_HOME"]; home != "" {
 		return home
 	}
-	if home := environment["HOME"]; home != "" {
-		return filepath.Join(home, ".posse")
+	if environment["HOME"] == "" {
+		return ""
 	}
-	return ""
+	home, err := config.ResolveHome(func(key string) string { return environment[key] })
+	if err != nil {
+		return ""
+	}
+	return home.Path
 }
 
 func sameWatchHome(processHome, home string) bool {

@@ -13,7 +13,7 @@ else
   TEST_SHELL=dash
 fi
 
-unset HERDR_ENV POSSE_TTY GH_TOKEN GITHUB_TOKEN
+unset HERDR_ENV POSSE_TTY GH_TOKEN GITHUB_TOKEN POSSE_HOME XDG_CONFIG_HOME CI
 
 case $(uname -s) in
   Linux) TEST_OS=linux ;;
@@ -36,9 +36,34 @@ mkdir -p "$VERSION_ROOT" "$STUB_DIR" "$FAKE_BIN"
 
 cat > "$STUB_DIR/posse" <<'STUB'
 #!/bin/sh
+log=${STUB_LOG:-/dev/null}
 case $1 in
   --version) printf 'posse 1.2.3\n' ;;
   --help) printf 'commands:\n  setup\n' ;;
+  _home)
+    if [ "${STUB_OLD_HOME:-}" = 1 ]; then
+      printf 'error{code,message}: "usage","unknown command \\"_home\\""\n'
+      exit 2
+    fi
+    if [ -n "${XDG_CONFIG_HOME:-}" ]; then pointer=$XDG_CONFIG_HOME/posse/home; else pointer=$HOME/.config/posse/home; fi
+    if [ -n "${POSSE_HOME:-}" ]; then path=$POSSE_HOME source=env
+    elif [ -f "$pointer" ]; then path=$(cat "$pointer") source=pointer
+    else path=$HOME/.posse source=default
+    fi
+    if [ "$#" -ge 3 ] && [ "$2" = --set ]; then
+      printf 'home-set %s\n' "$3" >> "$log"
+      if [ "${STUB_HOME_SET_FAIL:-}" = 1 ] && [ ! -e "$log.failed" ]; then
+        : > "$log.failed"
+        printf 'cannot use "%s" as the posse data folder: it is not an absolute path\n' "$3" >&2
+        exit 1
+      fi
+      case $3 in "~/"*) target=$HOME/${3#"~/"} ;; *) target=$3 ;; esac
+      mkdir -p "$target" "${pointer%/*}"
+      printf '%s\n' "$target" > "$pointer"
+      path=$target source=pointer
+    fi
+    printf '%s\n%s\n%s\n' "$path" "$source" "$pointer"
+    ;;
   setup)
     shift
     mode=apply
@@ -60,16 +85,15 @@ case $1 in
     fi
     case $mode in
       check)
-        printf 'setup-check\n' >> "$STUB_LOG"
-        if [ "${STUB_SIDEBAR_OFFER:-}" = 1 ]; then printf '%s\n' '!  Add Posse Agents sidebar layout to ~/.config/herdr/config.toml? Run `posse setup` to confirm.'; fi
+        printf 'setup-check home=%s\n' "${POSSE_HOME:-}" >> "$log"
         if [ "${STUB_SETUP_DONE:-}" = 1 ]; then
-          printf '%s\n' '-  posse skill already installed'
+          printf '%s\n' '-  Herdr plugin and agent integrations: already set' '-  SessionStart hook for Claude Code, Codex: already set'
           exit 0
         fi
         if [ "${STUB_UNLISTED_PENDING:-}" = 1 ]; then
-          printf '%s\n' '-  posse skill already installed'
+          printf '%s\n' '-  Herdr plugin and agent integrations: already set'
         else
-          printf '%s\n' '+  Link the posse plugin into Herdr' '+  Install the posse skill' '-  Codex SessionStart hook already present'
+          printf '%s\n' '+  Herdr plugin and agent integrations: will be added' '-  Agents sidebar in Herdr: optional (posse setup --sidebar-layout)' '+  SessionStart hook for Claude Code, Codex: will be added' '     Codex asks once to trust its new hook.' '+  Recommended workflow skills: will be added'
         fi
         if [ "$exit_code" -eq 1 ]; then
           exit 3
@@ -77,16 +101,16 @@ case $1 in
         ;;
       uninstall)
         printf 'setup integration removed\n'
-        printf 'setup-uninstall\n' >> "$STUB_LOG"
+        printf 'setup-uninstall\n' >> "$log"
         ;;
       *)
-        printf 'setup-run\n' >> "$STUB_LOG"
-        if [ "$layout" -eq 1 ]; then printf 'setup-sidebar\n' >> "$STUB_LOG"; fi
+        printf 'setup-run\n' >> "$log"
+        if [ "$layout" -eq 1 ]; then printf 'setup-sidebar\n' >> "$log"; fi
         if [ "${STUB_SETUP_FAIL:-}" = 1 ]; then
-          printf '%s\n' '✗  setup would overwrite an unmanaged path' '   /home/user/.agents/skills/posse'
+          printf '%s\n' '✗  setup would overwrite an unmanaged path' '   /home/user/.claude/settings.json'
           exit 1
         fi
-        printf '%s\n' '✓  Linked the posse plugin into Herdr' '✓  Installed the posse skill' '-  Codex SessionStart hook already present'
+        printf '%s\n' '✓  Herdr plugin and agent integrations' '-  Agents sidebar in Herdr: optional (posse setup --sidebar-layout)' '✓  SessionStart hook for Claude Code, Codex' '     Codex asks once to trust its new hook.' '✓  Recommended workflow skills'
         ;;
     esac
     ;;
@@ -135,167 +159,189 @@ run_install() {
     "$TEST_SHELL" "$INSTALLER" "$@"
 }
 
+
 assert_readable() {
   case $1 in
     *'error{'*|*'plan['*|*'{step,'*) fail "$2 printed TOON" ;;
   esac
 }
 
-assert_next_step() {
-  contains "$1" "Next: open your agent and run the posse-setup skill" || fail "$2 omitted the posse-setup next step"
-  contains "$1" "Claude Code: /posse-setup, Codex: \$posse-setup" || fail "$2 omitted how to run the skill"
-  contains "$1" "Then: run posse up from a Herdr pane in your repository." || fail "$2 omitted posse up"
+assert_box() {
   box_widths=$(printf '%s\n' "$1" | awk '/^  [|] |^  [+]-/ { print length($0) }' | sort -u | wc -l)
   [ "$box_widths" -eq 1 ] || fail "$2 closing box lines have uneven widths"
 }
 
+assert_ready() {
+  contains "$1" "| posse is ready" || fail "$2 did not report posse as ready"
+  contains "$1" "Next: open a new Herdr workspace in your repository" || fail "$2 omitted the new workspace step"
+  contains "$1" "run posse up there." || fail "$2 omitted posse up"
+  contains "$1" "posse-setup" && fail "$2 still sends the User to the posse-setup skill"
+  assert_box "$1" "$2"
+}
+
+assert_installed_only() {
+  contains "$1" "| posse is installed" || fail "$2 did not report posse as installed"
+  contains "$1" "Next: run posse setup to prepare your agents." || fail "$2 omitted posse setup"
+  contains "$1" "run posse up there." || fail "$2 omitted posse up"
+  assert_box "$1" "$2"
+}
+
+run_ok() {
+  label=$1
+  shift
+  if output=$("$@" 2>&1); then
+    :
+  else
+    printf '%s\n' "$output" >&2
+    fail "$label failed"
+  fi
+}
+
+pointer_of() {
+  printf '%s/.config/posse/home' "$1"
+}
+
+# --yes without a terminal: prepares the agents, keeps the default data folder.
 mkdir -p "$TEST_ROOT/home-yes"
 yes_log=$TEST_ROOT/yes.log
-if output=$(run_install "$TEST_ROOT/home-yes" "$TEST_ROOT/prefix-yes" "$yes_log" --yes 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "--yes installation failed"
-fi
+run_ok "--yes installation" run_install "$TEST_ROOT/home-yes" "$TEST_ROOT/prefix-yes" "$yes_log" --yes
 [ -x "$TEST_ROOT/prefix-yes/posse" ] || fail "--yes did not install the binary"
-contains "$output" "[1/5]" || fail "numbered steps were not shown"
-contains "$output" "  +  Link the posse plugin into Herdr" || fail "--yes did not show the setup plan"
-contains "$output" "Apply these changes now" && fail "--yes should not prompt"
-contains "$(cat "$yes_log")" "setup-run" || fail "--yes did not apply setup outside Herdr"
-contains "$output" "  ✓  Installed the posse skill" || fail "--yes did not show the setup result"
-contains "$output" "  -  Codex SessionStart hook already present" || fail "--yes did not show kept items"
+for step in "[1/6] Check your system" "[2/6] Choose a version" "[3/6] Download and verify" "[4/6] Install" "[5/6] Choose where posse keeps its data" "[6/6] Prepare your agents for posse"; do
+  contains "$output" "$step" || fail "--yes omitted $step"
+done
+contains "$output" "will be added" && fail "--yes printed the plan before the result"
+contains "$(cat "$yes_log")" "setup-run" || fail "--yes did not apply setup"
+contains "$(cat "$yes_log")" "setup-sidebar" && fail "--yes applied the retired sidebar layout"
+contains "$(cat "$yes_log")" "home-set" && fail "--yes saved a data folder nobody chose"
+contains "$output" "  ✓  SessionStart hook for Claude Code, Codex" || fail "--yes did not show the setup result"
+contains "$output" "posse keeps its data in $TEST_ROOT/home-yes/.posse" || fail "--yes did not name the data folder"
+contains "$output" "global-skills" && fail "--yes still mentions global skills"
+contains "$output" "Apply these changes" && fail "--yes asked a setup question"
+[ ! -e "$(pointer_of "$TEST_ROOT/home-yes")" ] || fail "--yes wrote a home pointer for the default folder"
 assert_readable "$output" "--yes"
-assert_next_step "$output" "--yes"
-pass "$TEST_SHELL applies setup outside Herdr with --yes and a readable checklist"
+assert_ready "$output" "--yes"
+pass "$TEST_SHELL prepares the agents with --yes and keeps the default data folder"
 
-mkdir -p "$TEST_ROOT/home-sidebar-yes"
-sidebar_no_log=$TEST_ROOT/sidebar-no.log
-if output=$(STUB_SIDEBAR_OFFER=1 run_install "$TEST_ROOT/home-sidebar-yes" "$TEST_ROOT/prefix-sidebar-yes" "$sidebar_no_log" --yes 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "installer with optional sidebar offer failed"
-fi
-case $(cat "$sidebar_no_log") in
-  *setup-sidebar*) fail "--yes silently applied the retired sidebar layout" ;;
-esac
-sidebar_tty=$TEST_ROOT/sidebar-answer-yes
-printf 'y\n' > "$sidebar_tty"
-sidebar_yes_log=$TEST_ROOT/sidebar-yes.log
-if output=$(STUB_SIDEBAR_OFFER=1 POSSE_TTY=$sidebar_tty run_install "$TEST_ROOT/home-sidebar-prompt" "$TEST_ROOT/prefix-sidebar-prompt" "$sidebar_yes_log" --yes 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "installer with a stale sidebar offer and TTY failed"
-fi
-case $(cat "$sidebar_yes_log") in
-  *setup-sidebar*) fail "installer applied the retired sidebar layout with a TTY" ;;
-esac
-pass "$TEST_SHELL ignores an older build's optional sidebar offer"
-
-mkdir -p "$TEST_ROOT/home-interactive-yes"
-yes_tty=$TEST_ROOT/answers-yes
-printf 'y\n' > "$yes_tty"
-interactive_yes_log=$TEST_ROOT/interactive-yes.log
-if output=$(POSSE_TTY=$yes_tty run_install "$TEST_ROOT/home-interactive-yes" "$TEST_ROOT/prefix-interactive-yes" "$interactive_yes_log" 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "interactive yes installation failed"
-fi
-contains "$output" "Apply these changes now? [Y/n]" || fail "interactive setup prompt is missing"
-contains "$(cat "$interactive_yes_log")" "setup-run" || fail "interactive yes did not apply setup"
-pass "$TEST_SHELL reads a yes answer from POSSE_TTY"
-
-mkdir -p "$TEST_ROOT/home-interactive-no"
-no_tty=$TEST_ROOT/answers-no
-printf 'n\n' > "$no_tty"
-interactive_no_log=$TEST_ROOT/interactive-no.log
-if output=$(POSSE_TTY=$no_tty run_install "$TEST_ROOT/home-interactive-no" "$TEST_ROOT/prefix-interactive-no" "$interactive_no_log" 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "interactive no installation failed"
-fi
-contains "$output" "Machine setup was not applied." || fail "interactive no did not skip setup"
-case $(cat "$interactive_no_log") in
-  *setup-run*) fail "interactive no applied setup" ;;
-esac
-assert_next_step "$output" "interactive no"
-pass "$TEST_SHELL reads a no answer from POSSE_TTY"
-
+# No terminal and no --yes: the binary is installed, nothing else changes.
 mkdir -p "$TEST_ROOT/home-no-tty"
 no_tty_log=$TEST_ROOT/no-tty.log
-if output=$(run_install "$TEST_ROOT/home-no-tty" "$TEST_ROOT/prefix-no-tty" "$no_tty_log" 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "no-TTY installation failed"
-fi
-contains "$output" "No TTY available; using safe default [N]." || fail "no-TTY install did not state the safe default"
-contains "$output" "Machine setup was not applied." || fail "no-TTY install did not skip setup"
-case $(cat "$no_tty_log") in
-  *setup-run*) fail "no-TTY install applied setup without --yes" ;;
-esac
+run_ok "no-TTY installation" run_install "$TEST_ROOT/home-no-tty" "$TEST_ROOT/prefix-no-tty" "$no_tty_log"
+contains "$output" "No TTY available; keeping the current data folder." || fail "no-TTY install did not explain the data folder"
+contains "$output" "No TTY available; nothing was changed." || fail "no-TTY install did not explain the skipped setup"
+contains "$output" "  +  SessionStart hook for Claude Code, Codex: will be added" || fail "no-TTY install did not preview the setup"
+contains "$(cat "$no_tty_log")" "setup-run" && fail "no-TTY install applied setup without --yes"
+contains "$(cat "$no_tty_log")" "home-set" && fail "no-TTY install saved a data folder"
 assert_readable "$output" "no-TTY install"
-assert_next_step "$output" "no-TTY install"
-pass "$TEST_SHELL previews setup without a TTY and keeps the safe default"
+assert_installed_only "$output" "no-TTY install"
+pass "$TEST_SHELL changes nothing beyond the binary without a TTY or --yes"
 
+# A terminal and Enter: the default folder stays, setup runs without a question.
+mkdir -p "$TEST_ROOT/home-enter"
+enter_tty=$TEST_ROOT/answers-enter
+printf '\n' > "$enter_tty"
+enter_log=$TEST_ROOT/enter.log
+run_ok "interactive Enter installation" env POSSE_TTY="$enter_tty" HOME="$TEST_ROOT/home-enter" POSSE_PREFIX="$TEST_ROOT/prefix-enter" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$enter_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER"
+contains "$output" "Data folder [~/.posse]: " || fail "the data folder prompt is missing"
+contains "$(cat "$enter_log")" "home-set" && fail "Enter saved a data folder"
+contains "$(cat "$enter_log")" "setup-run" || fail "interactive install did not prepare the agents"
+[ ! -e "$(pointer_of "$TEST_ROOT/home-enter")" ] || fail "Enter wrote a home pointer"
+assert_ready "$output" "interactive Enter"
+pass "$TEST_SHELL accepts the default data folder on Enter and asks nothing else"
+
+# A terminal and a custom folder with spaces and Unicode.
+mkdir -p "$TEST_ROOT/home-custom"
+custom_tty=$TEST_ROOT/answers-custom
+printf '%s\n' '~/Dữ liệu posse' > "$custom_tty"
+custom_log=$TEST_ROOT/custom.log
+run_ok "interactive custom installation" env POSSE_TTY="$custom_tty" HOME="$TEST_ROOT/home-custom" POSSE_PREFIX="$TEST_ROOT/prefix-custom" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$custom_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER"
+contains "$(cat "$custom_log")" "home-set ~/Dữ liệu posse" || fail "the custom folder was not passed to posse _home --set"
+[ "$(cat "$(pointer_of "$TEST_ROOT/home-custom")")" = "$TEST_ROOT/home-custom/Dữ liệu posse" ] || fail "the home pointer does not name the custom folder"
+contains "$output" "posse keeps its data in $TEST_ROOT/home-custom/Dữ liệu posse" || fail "custom install did not report the folder"
+assert_ready "$output" "interactive custom"
+pass "$TEST_SHELL saves a custom data folder with spaces and Unicode"
+
+# A rejected folder is explained and asked again.
+mkdir -p "$TEST_ROOT/home-retry"
+retry_tty=$TEST_ROOT/answers-retry
+printf 'relative\n\n' > "$retry_tty"
+retry_log=$TEST_ROOT/retry.log
+run_ok "retry installation" env STUB_HOME_SET_FAIL=1 POSSE_TTY="$retry_tty" HOME="$TEST_ROOT/home-retry" POSSE_PREFIX="$TEST_ROOT/prefix-retry" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$retry_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER"
+contains "$output" "it is not an absolute path" || fail "the rejected folder was not explained"
+[ "$(printf '%s\n' "$output" | grep -c 'Data folder \[')" -eq 2 ] || fail "the installer did not ask again"
+[ ! -e "$(pointer_of "$TEST_ROOT/home-retry")" ] || fail "a rejected folder wrote a pointer"
+pass "$TEST_SHELL explains a rejected data folder and asks again"
+
+# --home works without a terminal; a reinstall offers the saved folder.
+mkdir -p "$TEST_ROOT/home-flag"
+flag_log=$TEST_ROOT/flag.log
+run_ok "--home installation" run_install "$TEST_ROOT/home-flag" "$TEST_ROOT/prefix-flag" "$flag_log" --yes --home "$TEST_ROOT/data flag"
+[ "$(cat "$(pointer_of "$TEST_ROOT/home-flag")")" = "$TEST_ROOT/data flag" ] || fail "--home did not save the folder"
+reinstall_tty=$TEST_ROOT/answers-reinstall
+printf '\n' > "$reinstall_tty"
+run_ok "reinstall" env POSSE_TTY="$reinstall_tty" HOME="$TEST_ROOT/home-flag" POSSE_PREFIX="$TEST_ROOT/prefix-flag" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$flag_log.2" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER"
+contains "$output" "Data folder [$TEST_ROOT/data flag]: " || fail "reinstall did not offer the saved folder"
+contains "$(cat "$flag_log.2")" "home-set" && fail "reinstall rewrote the saved folder on Enter"
+pass "$TEST_SHELL saves --home and offers the saved folder on reinstall"
+
+# POSSE_HOME wins for the run and is never saved.
+mkdir -p "$TEST_ROOT/home-env"
+env_log=$TEST_ROOT/env.log
+run_ok "POSSE_HOME installation" env POSSE_HOME="$TEST_ROOT/env home" HOME="$TEST_ROOT/home-env" POSSE_PREFIX="$TEST_ROOT/prefix-env" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$env_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
+contains "$output" "Using POSSE_HOME=$TEST_ROOT/env home for this run; it is not saved." || fail "POSSE_HOME was not reported"
+contains "$(cat "$env_log")" "home-set" && fail "POSSE_HOME was saved"
+contains "$(cat "$env_log")" "setup-check home=$TEST_ROOT/env home" || fail "setup did not run against POSSE_HOME"
+[ ! -e "$(pointer_of "$TEST_ROOT/home-env")" ] || fail "POSSE_HOME wrote the home pointer"
+if output=$(env POSSE_HOME="$TEST_ROOT/env home" HOME="$TEST_ROOT/home-env" POSSE_PREFIX="$TEST_ROOT/prefix-env" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$env_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes --home "$TEST_ROOT/other" 2>&1); then
+  fail "--home with POSSE_HOME unexpectedly succeeded"
+fi
+contains "$output" "--home cannot be combined with POSSE_HOME" || fail "--home with POSSE_HOME was not explained"
+pass "$TEST_SHELL uses POSSE_HOME for the run without saving it"
+
+# --no-setup installs only the binary.
 mkdir -p "$TEST_ROOT/home-no-setup"
 no_setup_log=$TEST_ROOT/no-setup.log
 : > "$no_setup_log"
-if output=$(run_install "$TEST_ROOT/home-no-setup" "$TEST_ROOT/prefix-no-setup" "$no_setup_log" --yes --no-setup 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "--no-setup installation failed"
-fi
+run_ok "--no-setup installation" run_install "$TEST_ROOT/home-no-setup" "$TEST_ROOT/prefix-no-setup" "$no_setup_log" --yes --no-setup
 contains "$output" "Machine setup skipped by --no-setup." || fail "--no-setup did not report the skip"
-[ -s "$no_setup_log" ] && fail "--no-setup ran posse setup"
-assert_next_step "$output" "--no-setup"
-pass "$TEST_SHELL skips setup with --no-setup"
+[ -s "$no_setup_log" ] && fail "--no-setup ran posse setup or _home: $(cat "$no_setup_log")"
+[ ! -e "$TEST_ROOT/home-no-setup/.config" ] || fail "--no-setup wrote config"
+[ ! -e "$TEST_ROOT/home-no-setup/.posse" ] || fail "--no-setup created the data folder"
+assert_installed_only "$output" "--no-setup"
+if output=$(run_install "$TEST_ROOT/home-no-setup" "$TEST_ROOT/prefix-no-setup" "$no_setup_log" --no-setup --home "$TEST_ROOT/x" 2>&1); then
+  fail "--no-setup --home unexpectedly succeeded"
+fi
+contains "$output" "--home cannot be combined with --no-setup" || fail "--no-setup --home was not explained"
+pass "$TEST_SHELL changes only the binary with --no-setup"
+
+# A build without posse _home keeps its legacy data folder.
+mkdir -p "$TEST_ROOT/home-old-home"
+run_ok "old home build" env STUB_OLD_HOME=1 HOME="$TEST_ROOT/home-old-home" POSSE_PREFIX="$TEST_ROOT/prefix-old-home" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$TEST_ROOT/old-home.log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
+contains "$output" "This posse version keeps its data in POSSE_HOME or ~/.posse." || fail "old home build was not explained"
+assert_readable "$output" "old home build"
+pass "$TEST_SHELL keeps the legacy data folder for builds without posse _home"
 
 mkdir -p "$TEST_ROOT/home-done"
 done_log=$TEST_ROOT/done.log
-if output=$(STUB_SETUP_DONE=1 run_install "$TEST_ROOT/home-done" "$TEST_ROOT/prefix-done" "$done_log" 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "installation with complete setup failed"
-fi
-contains "$output" "Machine setup is already complete." || fail "complete setup was not reported"
-contains "$output" "No TTY available" && fail "complete setup still asked to apply"
-case $(cat "$done_log") in
-  *setup-run*) fail "complete setup was applied again" ;;
-esac
-pass "$TEST_SHELL skips the prompt when setup is already complete"
+run_ok "complete setup" env STUB_SETUP_DONE=1 HOME="$TEST_ROOT/home-done" POSSE_PREFIX="$TEST_ROOT/prefix-done" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$done_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER"
+contains "$output" "Your agents are already prepared." || fail "complete setup was not reported"
+contains "$(cat "$done_log")" "setup-run" && fail "complete setup was applied again"
+assert_ready "$output" "complete setup"
+pass "$TEST_SHELL reports ready when setup is already complete"
 
 mkdir -p "$TEST_ROOT/home-unlisted"
 unlisted_log=$TEST_ROOT/unlisted.log
-if output=$(STUB_UNLISTED_PENDING=1 run_install "$TEST_ROOT/home-unlisted" "$TEST_ROOT/prefix-unlisted" "$unlisted_log" --yes 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "installation with pending setup failed"
-fi
-contains "$output" "Machine setup is already complete." && fail "pending setup was read from the checklist text"
+run_ok "pending setup" env STUB_UNLISTED_PENDING=1 HOME="$TEST_ROOT/home-unlisted" POSSE_PREFIX="$TEST_ROOT/prefix-unlisted" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$unlisted_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
+contains "$output" "already prepared" && fail "pending setup was read from the checklist text"
 contains "$(cat "$unlisted_log")" "setup-run" || fail "pending exit status did not lead to applying setup"
 pass "$TEST_SHELL decides from the --exit-code status, not the checklist text"
 
 mkdir -p "$TEST_ROOT/home-old-setup"
 old_setup_log=$TEST_ROOT/old-setup.log
 : > "$old_setup_log"
-if output=$(STUB_OLD_SETUP=1 run_install "$TEST_ROOT/home-old-setup" "$TEST_ROOT/prefix-old-setup" "$old_setup_log" --yes 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "installation of a build without human setup output failed"
-fi
+run_ok "old setup build" env STUB_OLD_SETUP=1 HOME="$TEST_ROOT/home-old-setup" POSSE_PREFIX="$TEST_ROOT/prefix-old-setup" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$old_setup_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
 contains "$output" "This posse version has no readable setup output." || fail "old setup output was not replaced"
 assert_readable "$output" "old setup build"
-case $(cat "$old_setup_log") in
-  *setup-run*) fail "old setup build was applied without a preview" ;;
-esac
+contains "$(cat "$old_setup_log")" "setup-run" && fail "old setup build was applied without a preview"
 pass "$TEST_SHELL hides TOON from builds without human setup output"
 
 mkdir -p "$TEST_ROOT/home-setup-fail"
@@ -329,12 +375,7 @@ FAKE_GO_SCRIPT
 chmod 755 "$FAKE_GO"
 EMPTY_RELEASES=$TEST_ROOT/empty-releases
 mkdir -p "$EMPTY_RELEASES" "$TEST_ROOT/home-source"
-if output=$(HOME=$TEST_ROOT/home-source POSSE_PREFIX=$TEST_ROOT/prefix-source POSSE_VERSION=$VERSION POSSE_RELEASE_BASE=file://$EMPTY_RELEASES STUB_LOG=$TEST_ROOT/source.log STUB_SOURCE=$STUB_DIR/posse NO_COLOR=1 PATH=$FAKE_BIN:$PATH "$TEST_SHELL" "$INSTALLER" --yes --no-setup 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "source fallback installation failed"
-fi
+run_ok "source fallback installation" env HOME="$TEST_ROOT/home-source" POSSE_PREFIX="$TEST_ROOT/prefix-source" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$EMPTY_RELEASES" STUB_LOG="$TEST_ROOT/source.log" STUB_SOURCE="$STUB_DIR/posse" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes --no-setup
 [ -x "$TEST_ROOT/prefix-source/posse" ] || fail "source fallback did not install the binary"
 contains "$output" "Build from source with: go install" || fail "source fallback did not offer the Go command"
 pass "$TEST_SHELL offers and installs from source when the release asset is absent"
@@ -360,16 +401,14 @@ fi
 contains "$output" "Herdr 0.9.0 or newer is required" || fail "old Herdr version was not rejected"
 pass "$TEST_SHELL rejects Herdr older than 0.9.0"
 
-mkdir -p "$TEST_ROOT/home-no-color"
 ESC=$(printf '\033')
-if output=$(HOME=$TEST_ROOT/home-no-color POSSE_PREFIX=$TEST_ROOT/prefix-no-color POSSE_VERSION=$VERSION POSSE_RELEASE_BASE=file://$RELEASE_ROOT NO_COLOR=1 PATH=$FAKE_BIN:$PATH "$TEST_SHELL" "$INSTALLER" --no-setup 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "NO_COLOR installation failed"
-fi
-case $output in *"$ESC"*) fail "NO_COLOR output contains an escape byte" ;; esac
-pass "$TEST_SHELL keeps NO_COLOR output free of escape bytes"
+for mode in NO_COLOR=1 TERM=dumb; do
+  mkdir -p "$TEST_ROOT/home-plain"
+  run_ok "$mode installation" env "$mode" HOME="$TEST_ROOT/home-plain" POSSE_PREFIX="$TEST_ROOT/prefix-plain" POSSE_VERSION=$VERSION POSSE_RELEASE_BASE="file://$RELEASE_ROOT" STUB_LOG="$TEST_ROOT/plain.log" PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --yes
+  case $output in *"$ESC"*) fail "$mode output contains an escape byte" ;; esac
+  contains "$output" "One Lead. A whole crew. Running on Herdr." || fail "$mode output lost the tagline"
+done
+pass "$TEST_SHELL keeps NO_COLOR and TERM=dumb output free of escape bytes"
 
 mkdir -p "$TEST_ROOT/home-uninstall" "$TEST_ROOT/prefix-uninstall" "$TEST_ROOT/home-uninstall/.posse"
 cp "$STUB_DIR/posse" "$TEST_ROOT/prefix-uninstall/posse"
@@ -377,12 +416,7 @@ printf 'keep\n' > "$TEST_ROOT/prefix-uninstall/keep.txt"
 printf 'task data\n' > "$TEST_ROOT/home-uninstall/.posse/state"
 printf 'home data\n' > "$TEST_ROOT/home-uninstall/keep.txt"
 uninstall_log=$TEST_ROOT/uninstall.log
-if output=$(HOME=$TEST_ROOT/home-uninstall POSSE_PREFIX=$TEST_ROOT/prefix-uninstall STUB_LOG=$uninstall_log NO_COLOR=1 PATH=$FAKE_BIN:$PATH "$TEST_SHELL" "$INSTALLER" --uninstall 2>&1); then
-  :
-else
-  printf '%s\n' "$output" >&2
-  fail "uninstall failed"
-fi
+run_ok "uninstall" env HOME="$TEST_ROOT/home-uninstall" POSSE_PREFIX="$TEST_ROOT/prefix-uninstall" STUB_LOG="$uninstall_log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --uninstall
 [ ! -e "$TEST_ROOT/prefix-uninstall/posse" ] || fail "uninstall kept the binary"
 [ -f "$TEST_ROOT/prefix-uninstall/keep.txt" ] || fail "uninstall removed an unrelated prefix file"
 [ -f "$TEST_ROOT/home-uninstall/.posse/state" ] || fail "default uninstall removed ~/.posse"
@@ -390,5 +424,21 @@ fi
 contains "$(cat "$uninstall_log")" "setup-uninstall" || fail "uninstall did not call setup --uninstall"
 contains "$output" "using safe default [N]" || fail "uninstall did not state the safe default"
 pass "$TEST_SHELL removes only posse and preserves ~/.posse by default"
+
+# Uninstall finds a saved data folder and, when asked, removes it and its pointer.
+uhome=$TEST_ROOT/home-uninstall-saved
+mkdir -p "$TEST_ROOT/prefix-uninstall-saved" "$uhome/.config/posse" "$uhome/.posse" "$TEST_ROOT/saved data"
+cp "$STUB_DIR/posse" "$TEST_ROOT/prefix-uninstall-saved/posse"
+printf '%s\n' "$TEST_ROOT/saved data" > "$uhome/.config/posse/home"
+printf 'task data\n' > "$TEST_ROOT/saved data/state"
+printf 'other home\n' > "$uhome/.posse/state"
+yes_answer=$TEST_ROOT/answers-uninstall
+printf 'y\n' > "$yes_answer"
+run_ok "uninstall with a saved folder" env POSSE_TTY="$yes_answer" HOME="$uhome" POSSE_PREFIX="$TEST_ROOT/prefix-uninstall-saved" STUB_LOG="$TEST_ROOT/uninstall-saved.log" NO_COLOR=1 PATH="$FAKE_BIN:$PATH" "$TEST_SHELL" "$INSTALLER" --uninstall
+contains "$output" "Delete $TEST_ROOT/saved data (Task history and config)?" || fail "uninstall did not offer the saved folder"
+[ ! -e "$TEST_ROOT/saved data" ] || fail "uninstall kept the confirmed saved folder"
+[ ! -e "$uhome/.config/posse/home" ] || fail "uninstall kept the pointer to a removed folder"
+[ -f "$uhome/.posse/state" ] || fail "uninstall removed a folder it did not name"
+pass "$TEST_SHELL uninstalls the saved data folder only when confirmed"
 
 printf 'Installer scenarios passed under %s.\n' "$TEST_SHELL"
