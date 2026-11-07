@@ -274,11 +274,11 @@ func TestSetupPreviewLeavesExistingAgentsRowsForManualReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	preview, code := runHumanSetup(t, service, "--check")
-	if code != 0 || !strings.Contains(preview, "rows already configured") || !strings.Contains(preview, "$posse_row") {
+	if code != 0 || !strings.Contains(preview, "-  Agents sidebar in Herdr: your own rows are kept\n") {
 		t.Fatalf("manual preview = %d %s", code, preview)
 	}
 	applied, code := runHumanSetup(t, service, "--sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "rows already configured") {
+	if code != 0 || !strings.Contains(applied, "-  Agents sidebar in Herdr: your own rows are kept\n") {
 		t.Fatalf("setup with custom rows = %d %s", code, applied)
 	}
 	data, err := os.ReadFile(path)
@@ -293,11 +293,12 @@ func TestSetupReportsSidebarLayoutAndAppliesOnlyWhenConfirmed(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	path := filepath.Join(configHome, "herdr", "config.toml")
 	preview, code := runHumanSetup(t, service, "--check")
-	if code != 0 || !strings.Contains(preview, "Add Posse Agents sidebar layout") || !strings.Contains(strings.ReplaceAll(preview, "\n     ", "\n"), strings.TrimSuffix(sidebarLayoutSnippet, "\n")) {
+	const optional = "-  Agents sidebar in Herdr: optional (posse setup --sidebar-layout)\n"
+	if code != 0 || !strings.Contains(preview, optional) {
 		t.Fatalf("preview = %d %s", code, preview)
 	}
 	applied, code := runHumanSetup(t, service, "--no-sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "Add Posse Agents sidebar layout") {
+	if code != 0 || !strings.Contains(applied, optional) {
 		t.Fatalf("ordinary setup = %d %s", code, applied)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -306,18 +307,18 @@ func TestSetupReportsSidebarLayoutAndAppliesOnlyWhenConfirmed(t *testing.T) {
 	adapter.RunOut["integration status"] = []byte("claude: current (v9)\ncodex: not installed\n")
 	adapter.RunOut["plugin list --json"] = []byte(`{"result":{"plugins":[{"plugin_id":"posse.herdr","manifest_path":"` + filepath.Join(service.Home, "plugin", "herdr-plugin.toml") + `"}]}}`)
 	preview, code = runHumanSetup(t, service, "--check", "--exit-code")
-	if code != 0 || !strings.Contains(preview, "Add Posse Agents sidebar layout") {
+	if code != 0 || !strings.Contains(preview, optional) {
 		t.Fatalf("optional offer made required: %d %s", code, preview)
 	}
 	applied, code = runHumanSetup(t, service, "--sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "Added Posse Agents sidebar layout") {
+	if code != 0 || !strings.Contains(applied, "✓  Agents sidebar in Herdr\n") {
 		t.Fatalf("confirmed setup = %d %s", code, applied)
 	}
 	if state, err := sidebarLayoutState(path); state != "keep" || err != nil {
 		t.Fatalf("confirmed state = %q, %v", state, err)
 	}
 	preview, code = runHumanSetup(t, service, "--check", "--exit-code")
-	if code != 0 || !strings.Contains(preview, "sidebar layout already present") {
+	if code != 0 || !strings.Contains(preview, "-  Agents sidebar in Herdr: already set\n") {
 		t.Fatalf("complete = %d %s", code, preview)
 	}
 }
@@ -338,7 +339,7 @@ func TestSetupUpgradesLegacyPosseRowsAndKeepsComments(t *testing.T) {
 		t.Fatalf("state = %q, %v", state, err)
 	}
 	applied, code := runHumanSetup(t, service, "--sidebar-layout")
-	if code != 0 || !strings.Contains(applied, "Added Posse Agents sidebar layout") {
+	if code != 0 || !strings.Contains(applied, "✓  Agents sidebar in Herdr\n") {
 		t.Fatalf("upgrade = %d %s", code, applied)
 	}
 	data, _ := os.ReadFile(path)

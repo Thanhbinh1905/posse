@@ -76,6 +76,7 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 		{"project", "remove", "shop", "--yes"},
 		{"up", "--claude"},
 		{"setup", "--check"},
+		{"_home", "--set", filepath.Join(fixture.root, "elsewhere")},
 		{"config", "set", "defaults.max_workers", "6"},
 		{"teardown", "t1"},
 		{"accept", "t1"},

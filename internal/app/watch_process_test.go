@@ -376,3 +376,24 @@ func TestWatchLogLinesCarryTimestamps(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessHomeFollowsTheHomePointer(t *testing.T) {
+	userHome := t.TempDir()
+	data := filepath.Join(userHome, "data")
+	xdg := filepath.Join(userHome, "xdg")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(xdg, "posse"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "posse", "home"), []byte(data+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := processHome(map[string]string{"HOME": userHome, "XDG_CONFIG_HOME": xdg}); got != data {
+		t.Fatalf("pointer process home = %q, want %q", got, data)
+	}
+	if got := processHome(map[string]string{"HOME": userHome, "XDG_CONFIG_HOME": xdg, "POSSE_HOME": "/explicit"}); got != "/explicit" {
+		t.Fatalf("explicit process home = %q", got)
+	}
+}

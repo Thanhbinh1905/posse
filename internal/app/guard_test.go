@@ -658,3 +658,38 @@ func TestGuardAllowsTheIsolatedSetupItsRefusalPrescribes(t *testing.T) {
 		}
 	}
 }
+
+func TestGuardFollowsTheHomePointerToTheWorkerHome(t *testing.T) {
+	scope, dir := guardFixture(t)
+	userHome := t.TempDir()
+	data := filepath.Join(userHome, "posse data")
+	pointer := filepath.Join(userHome, ".config", "posse", "home")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(pointer), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pointer, []byte(data+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scope.env = []string{"HOME=" + userHome, "PATH=" + dir + ":/usr/bin"}
+	scope.workerHome = data
+	for _, command := range []string{
+		"./posse-copy list",
+		"env -u POSSE_HOME ./posse-copy list",
+		"POSSE_HOME=\"" + data + "\" ./posse-copy list",
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || reason.rule != rulePosseBuild {
+			t.Errorf("guard did not refuse %q by %s: %v %#v", command, rulePosseBuild, refused, reason)
+		}
+	}
+	for _, command := range []string{
+		"env -i HOME=$(mktemp -d) ./posse-copy list",
+		"R=$(mktemp -d); XDG_CONFIG_HOME=$R/xdg HOME=$R/home ./posse-copy list",
+	} {
+		if refused, reason := guardCommand(command, scope); refused {
+			t.Errorf("guard refused %q: %#v", command, reason)
+		}
+	}
+}

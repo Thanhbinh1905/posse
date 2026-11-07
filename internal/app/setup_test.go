@@ -183,6 +183,7 @@ func TestSetupManifestOwnsOnlyHooksItInserted(t *testing.T) {
 	adapter := herdr.NewFake()
 	adapter.RunOut["plugin link "+filepath.Join(home, "plugin", "herdr-plugin.toml")] = []byte("{}")
 	adapter.RunOut["plugin uninstall "+possePluginID] = []byte("{}")
+	adapter.RunOut["integration uninstall claude"] = []byte("{}")
 	service := &Service{Herdr: adapter}
 	if _, err := service.applySetup(context.Background(), home, manifestPath, setupManifest{}, "/opt/posse/bin/posse", "test", setupDirs{claude: claudeDir, codex: codexDir, agents: filepath.Join(home, "agents", "skills")}, setupInspection{}); err != nil {
 		t.Fatal(err)
@@ -658,6 +659,7 @@ func TestSetupRepairsPreexistingIntegrationWithoutOwningIt(t *testing.T) {
 	adapter.RunOut["integration status"] = []byte("claude: needs repair\n")
 	adapter.RunOut["plugin link "+filepath.Join(home, "plugin", "herdr-plugin.toml")] = []byte("{}")
 	adapter.RunOut["plugin uninstall "+possePluginID] = []byte("{}")
+	adapter.RunOut["integration uninstall claude"] = []byte("{}")
 	status, err := integrationStatus(adapter, context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -694,6 +696,7 @@ func TestSetupUninstallPersistsCompletedItemsBeforeFailure(t *testing.T) {
 	adapter.RunErrors["integration uninstall claude"] = errors.New("simulated integration uninstall failure")
 	adapter.RunOut["integration uninstall claude"] = []byte("removed")
 	adapter.RunOut["plugin uninstall "+possePluginID] = []byte("{}")
+	adapter.RunOut["integration uninstall claude"] = []byte("{}")
 	service := &Service{Herdr: adapter}
 	ctx := &axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}
 	if err := service.uninstallSetup(ctx, home, manifestPath, manifest, true); err == nil {
@@ -727,6 +730,7 @@ func TestSetupInstallsAndRemovesThePiWorkerGuard(t *testing.T) {
 	adapter := herdr.NewFake()
 	adapter.RunOut["plugin link "+filepath.Join(home, "plugin", "herdr-plugin.toml")] = []byte("{}")
 	adapter.RunOut["plugin uninstall "+possePluginID] = []byte("{}")
+	adapter.RunOut["integration uninstall claude"] = []byte("{}")
 	service := &Service{Herdr: adapter}
 	manifestPath := filepath.Join(home, setupManifestName)
 	if _, err := service.applySetup(context.Background(), home, manifestPath, setupManifest{}, "/opt/posse/bin/posse", "1", dirs, setupInspection{}); err != nil {
@@ -843,28 +847,84 @@ func TestSetupUpgradeWritesTheRecommendedSkillsOnce(t *testing.T) {
 	}
 }
 
-func TestSetupOffersTheRecommendedSkillsAndWritesThemOnlyWhenConfirmed(t *testing.T) {
-	service, _, _ := humanSetupFixture(t)
+func TestFreshSetupWritesTheRecommendedSkillsWithoutAsking(t *testing.T) {
+	service, adapter, _ := humanSetupFixture(t)
+	adapter.RunOut["plugin uninstall "+possePluginID] = []byte("{}")
+	adapter.RunOut["integration uninstall claude"] = []byte("{}")
 	configPath := filepath.Join(service.Home, "config.toml")
 	preview, code := runHumanSetup(t, service, "--check")
-	if code != 0 || !strings.Contains(preview, "No workflow skills in") || !strings.Contains(preview, "posse skills add") {
-		t.Fatalf("preview = %d %s", code, preview)
+	if code != 0 || !strings.Contains(preview, "+  Recommended workflow skills: will be added\n") {
+		t.Fatalf("fresh preview = %d %s", code, preview)
 	}
-	if out, code := runHumanSetup(t, service, "--no-recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "No workflow skills in") {
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote config: %v", err)
+	}
+	if out, code := runHumanSetup(t, service, "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "✓  Recommended workflow skills\n") {
+		t.Fatalf("fresh setup = %d %s", code, out)
+	}
+	configured, err := config.ConfiguredSkills(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing := config.MissingRecommendedSkills(configured); len(missing) != 0 {
+		t.Fatalf("fresh setup left recommended skills out: %v", missing)
+	}
+	if out, _ := runHumanSetup(t, service, "--check"); !strings.Contains(out, "-  Recommended workflow skills: already set\n") {
+		t.Fatalf("complete config: %s", out)
+	}
+	// Uninstall removes the config setup created, skills block included.
+	output := &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"setup", "--uninstall"}); code != 0 {
+		t.Fatalf("uninstall = %d %s", code, output)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("uninstall kept the config setup created: %v", err)
+	}
+}
+
+func TestFreshSetupHonorsNoRecommendedSkills(t *testing.T) {
+	service, _, _ := humanSetupFixture(t)
+	configPath := filepath.Join(service.Home, "config.toml")
+	if out, code := runHumanSetup(t, service, "--no-recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "posse skills add") {
 		t.Fatalf("declined setup = %d %s", code, out)
 	}
 	if configured, _ := config.ConfiguredSkills(configPath); len(configured["lead"]) != 0 {
-		t.Fatalf("skills written without confirmation: %v", configured)
+		t.Fatalf("skills written despite --no-recommended-skills: %v", configured)
 	}
-	if out, code := runHumanSetup(t, service, "--recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "Added the recommended workflow skills") {
+	// A later setup keeps that choice instead of adding the block.
+	if out, code := runHumanSetup(t, service, "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "-  Recommended workflow skills: not in config; add them with `posse skills add`\n") {
+		t.Fatalf("later setup = %d %s", code, out)
+	}
+	if configured, _ := config.ConfiguredSkills(configPath); len(configured["lead"]) != 0 {
+		t.Fatalf("later setup added skills to an existing config: %v", configured)
+	}
+	if out, code := runHumanSetup(t, service, "--recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "✓  Recommended workflow skills\n") {
 		t.Fatalf("confirmed setup = %d %s", code, out)
 	}
 	configured, err := config.ConfiguredSkills(configPath)
 	if err != nil || len(configured["lead"]) == 0 || len(configured["change"]) == 0 {
 		t.Fatalf("configured = %v, %v", configured, err)
 	}
-	if out, _ := runHumanSetup(t, service, "--check"); strings.Contains(out, "workflow skills") {
-		t.Fatalf("complete config still reports skills: %s", out)
+}
+
+func TestSetupKeepsACustomSkillSelection(t *testing.T) {
+	service, _, _ := humanSetupFixture(t)
+	configPath := filepath.Join(service.Home, "config.toml")
+	if err := os.MkdirAll(service.Home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	custom := "# mine\n[skills]\nchange = [\"posse-tdd\"]\n"
+	if err := os.WriteFile(configPath, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runHumanSetup(t, service, "--no-sidebar-layout")
+	if code != 0 || !strings.Contains(out, "-  Recommended workflow skills: ") || !strings.Contains(out, "recommended skills are not in config") {
+		t.Fatalf("setup with a custom list = %d %s", code, out)
+	}
+	if contents, _ := os.ReadFile(configPath); string(contents) != custom {
+		t.Fatalf("setup changed a custom skill list:\n%s", contents)
 	}
 }
 

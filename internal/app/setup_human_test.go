@@ -60,15 +60,19 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	}
 	assertNoTOON(t, preview)
 	for _, want := range []string{
-		"+  Install the Herdr integration for claude\n",
-		"+  Link the posse plugin into Herdr\n",
-		"!  The posse skill is available only to Posse-launched sessions; optionally install it globally with `posse setup --global-skills`\n",
-		"+  Add the Claude Code SessionStart hook to ~/.claude/settings.json\n",
-		"+  Add the Codex SessionStart hook to ~/.codex/hooks.json; Codex asks once to trust it\n",
-		"✓  claude is on PATH\n",
+		"+  Herdr plugin and agent integrations: will be added\n",
+		"+  SessionStart hook for Claude Code, Codex: will be added\n",
+		"     Codex asks once to trust its new hook.\n",
+		"+  Worker guard hook for Claude Code, Codex",
+		"+  Recommended workflow skills: will be added\n",
 	} {
 		if !strings.Contains(preview, want) {
 			t.Errorf("human preview omitted %q:\n%s", want, preview)
+		}
+	}
+	for _, unwanted := range []string{"--global-skills", "available only to Posse-launched sessions", "is on PATH"} {
+		if strings.Contains(preview, unwanted) {
+			t.Errorf("human preview still mentions %q:\n%s", unwanted, preview)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(userHome, ".claude", "settings.json")); !os.IsNotExist(err) {
@@ -81,10 +85,10 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	}
 	assertNoTOON(t, applied)
 	for _, want := range []string{
-		"✓  Installed the Herdr integration for claude\n",
-		"✓  Linked the posse plugin into Herdr\n",
-		"!  The posse skill is available only to Posse-launched sessions; optionally install it globally with `posse setup --global-skills`\n",
-		"✓  Added the Claude Code SessionStart hook to ~/.claude/settings.json\n",
+		"✓  Herdr plugin and agent integrations\n",
+		"✓  SessionStart hook for Claude Code, Codex\n",
+		"✓  Worker guard hook for Claude Code, Codex",
+		"✓  Recommended workflow skills\n",
 	} {
 		if !strings.Contains(applied, want) {
 			t.Errorf("human setup omitted %q:\n%s", want, applied)
@@ -99,7 +103,7 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 		}
 	}
 	installed, code := runHumanSetup(t, service, "--global-skills")
-	if code != 0 || !strings.Contains(installed, "✓  Installed the posse skill globally") {
+	if code != 0 || !strings.Contains(installed, "✓  Global copies of the posse skills\n") {
 		t.Fatalf("opt-in global install exit=%d output=%s", code, installed)
 	}
 	modifiedSkill := filepath.Join(userHome, ".agents", "skills", "posse", "SKILL.md")
@@ -129,7 +133,7 @@ func TestHumanSetupAppliesWithoutHerdrServer(t *testing.T) {
 	if strings.Contains(again, "+  ") {
 		t.Fatalf("completed setup still lists pending changes:\n%s", again)
 	}
-	if !strings.Contains(again, "-  posse plugin already linked into Herdr\n") || !strings.Contains(again, "-  Codex SessionStart hook already present\n") {
+	if !strings.Contains(again, "-  Herdr plugin and agent integrations: already set\n") || !strings.Contains(again, "-  SessionStart hook for Claude Code, Codex: already set\n") {
 		t.Fatalf("completed setup did not report kept items:\n%s", again)
 	}
 }

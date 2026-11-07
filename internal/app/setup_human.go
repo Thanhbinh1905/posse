@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -20,9 +21,9 @@ const (
 	humanFailed  = "✗"
 )
 
-// printHumanSetup writes the setup result as a checklist for people. A preview
-// lists pending changes with "+" and the agent CLIs it found; an applied run
-// lists the changes with "✓".
+// printHumanSetup writes the setup result as a short checklist for people,
+// one line per area: "+" will be added, "✓" done, "-" already set, "!" needs
+// the User, "✗" failed. Detail lines under an area are indented.
 func printHumanSetup(out io.Writer, run setupRun, err error) {
 	if err != nil {
 		var structured *axi.Error
@@ -35,10 +36,8 @@ func printHumanSetup(out io.Writer, run setupRun, err error) {
 		}
 		return
 	}
-	for _, row := range run.plan {
-		for _, line := range humanSetupRow(row, run.applied) {
-			fmt.Fprintln(out, line)
-		}
+	for _, line := range humanSetupGroups(run.plan, run.applied) {
+		fmt.Fprintln(out, line)
 	}
 	if run.applied {
 		return
@@ -46,11 +45,179 @@ func printHumanSetup(out io.Writer, run setupRun, err error) {
 	for _, kind := range run.inspection.ReferencedKinds {
 		tool := agentCLIName(kind)
 		if setupPrerequisiteMissing(run.prerequisites, tool) {
-			fmt.Fprintf(out, "%s  %s is not on PATH\n", humanKept, tool)
-		} else {
-			fmt.Fprintf(out, "%s  %s is on PATH\n", humanDone, tool)
+			fmt.Fprintf(out, "%s  %s is in your config but not on PATH\n", humanManual, tool)
 		}
 	}
+}
+
+// Severity of a checklist area; the worst row decides the area's mark.
+const (
+	humanStateKept = iota
+	humanStateChanged
+	humanStateManual
+	humanStateFailed
+)
+
+type humanGroup struct {
+	label   string
+	agents  []string
+	state   int
+	note    string
+	details []string
+	codex   bool
+}
+
+func humanSetupGroups(plan []map[string]any, applied bool) []string {
+	order := []string{"herdr", "sidebar", "session", "guard", "skills", "global"}
+	labels := map[string]string{
+		"herdr":   "Herdr plugin and agent integrations",
+		"sidebar": "Agents sidebar in Herdr",
+		"session": "SessionStart hook",
+		"guard":   "Worker guard hook",
+		"skills":  "Recommended workflow skills",
+		"global":  "Global copies of the posse skills",
+	}
+	groups := map[string]*humanGroup{}
+	for _, row := range plan {
+		key, state, note, include := humanRowState(row, applied)
+		if !include {
+			continue
+		}
+		group := groups[key]
+		if group == nil {
+			group = &humanGroup{label: labels[key]}
+			groups[key] = group
+		}
+		if agent, _ := row["agent"].(string); agent != "" && !slices.Contains(group.agents, agent) {
+			group.agents = append(group.agents, agent)
+		}
+		if row["step"] == "pi_guard" && !slices.Contains(group.agents, "pi") {
+			group.agents = append(group.agents, "pi")
+		}
+		if agent, _ := row["agent"].(string); agent == "Codex" && state == humanStateChanged {
+			group.codex = true
+		}
+		if state > group.state {
+			group.state = state
+		}
+		if note != "" && group.note == "" {
+			group.note = note
+		}
+		if state >= humanStateManual || row["action"] == "remove_preserving" {
+			for index, line := range humanSetupRow(row, applied) {
+				if index == 0 {
+					line = "     " + line[strings.Index(line, "  ")+2:]
+				}
+				group.details = append(group.details, line)
+			}
+		}
+	}
+	codexNoted := false
+	var lines []string
+	for _, key := range order {
+		group := groups[key]
+		if group == nil {
+			continue
+		}
+		label := group.label
+		if len(group.agents) > 0 {
+			label += " for " + strings.Join(group.agents, ", ")
+		}
+		switch group.state {
+		case humanStateFailed:
+			lines = append(lines, humanFailed+"  "+label+": failed")
+		case humanStateManual:
+			lines = append(lines, humanManual+"  "+label+": see below")
+		case humanStateChanged:
+			if applied {
+				lines = append(lines, humanDone+"  "+label)
+			} else {
+				lines = append(lines, humanPending+"  "+label+": will be added")
+			}
+		default:
+			note := group.note
+			if note == "" {
+				note = "already set"
+			}
+			lines = append(lines, humanKept+"  "+label+": "+note)
+		}
+		lines = append(lines, group.details...)
+		if group.codex && !codexNoted {
+			lines = append(lines, "     Codex asks once to trust its new hook.")
+			codexNoted = true
+		}
+	}
+	return lines
+}
+
+// humanRowState places one plan row in its checklist area. Rows that only
+// offer optional global skill copies are left out.
+func humanRowState(row map[string]any, applied bool) (key string, state int, note string, include bool) {
+	step, _ := row["step"].(string)
+	action, _ := row["action"].(string)
+	switch step {
+	case "integration", "plugin":
+		key = "herdr"
+	case "sidebar_layout":
+		key = "sidebar"
+		switch {
+		case action == "offer":
+			return key, humanStateKept, "optional (posse setup --sidebar-layout)", true
+		case action == "upgrade":
+			return key, humanStateKept, "update available (posse setup --sidebar-layout)", true
+		case action == "manual" && row["error"] == nil:
+			return key, humanStateKept, "your own rows are kept", true
+		}
+	case "session_start_hook":
+		key = "session"
+	case "guard_hook", "pi_guard":
+		key = "guard"
+	case "recommended_skills":
+		key = "skills"
+	case "recommended_skills_offer":
+		key = "skills"
+		switch action {
+		case "keep":
+			status, _ := row["status"].(string)
+			return key, humanStateKept, status, true
+		case "complete":
+			return key, humanStateKept, "", true
+		case "offer":
+			return key, humanStateKept, "not in config; add them with `posse skills add`", true
+		case "fresh":
+			return key, humanStateChanged, "", true
+		}
+	case "default_config":
+		return "", 0, "", false
+	case "skill":
+		key = "global"
+		switch action {
+		case "offer_global":
+			return "", 0, "", false
+		case "keep":
+			if note, _ := row["note"].(string); strings.Contains(note, "no Posse-owned global files") {
+				return "", 0, "", false
+			}
+		case "offer_removal":
+			return key, humanStateKept, "found; remove unchanged copies with `posse setup --remove-global-skills`", true
+		case "preserve":
+			return key, humanStateKept, "modified or foreign files are preserved", true
+		case "remove_preserving":
+			return key, humanStateChanged, "", true
+		}
+	}
+	lines := humanSetupRow(row, applied)
+	switch {
+	case strings.HasPrefix(lines[0], humanFailed):
+		state = humanStateFailed
+	case strings.HasPrefix(lines[0], humanManual):
+		state = humanStateManual
+	case strings.HasPrefix(lines[0], humanKept):
+		state = humanStateKept
+	default:
+		state = humanStateChanged
+	}
+	return key, state, "", true
 }
 
 func humanSetupRow(row map[string]any, applied bool) []string {

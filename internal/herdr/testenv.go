@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/config"
 )
 
 // IsolatedTestEnvironment strips every inherited HERDR_*, Worker and agent
@@ -190,7 +192,7 @@ func ValidateIsolatedEnvironment(values []string) (string, error) {
 			return "", &Error{Code: "unsafe_test_environment", Message: "could not inspect isolated Herdr socket path", Cause: err}
 		}
 	}
-	if !inside(root, env["HOME"]) || !inside(root, env["XDG_CONFIG_HOME"]) || !inside(root, env["POSSE_HOME"]) || !inside(root, env["CLAUDE_CONFIG_DIR"]) || !inside(root, env["CODEX_HOME"]) || !inside(root, env["PI_CODING_AGENT_DIR"]) {
+	if !inside(root, env["HOME"]) || !inside(root, env["XDG_CONFIG_HOME"]) || !inside(root, isolatedPosseHome(env)) || !inside(root, env["CLAUDE_CONFIG_DIR"]) || !inside(root, env["CODEX_HOME"]) || !inside(root, env["PI_CODING_AGENT_DIR"]) {
 		return "", &Error{Code: "unsafe_test_environment", Message: "isolated state paths must stay inside the test root"}
 	}
 	if env["GIT_CONFIG_GLOBAL"] != "/dev/null" || env["GIT_CONFIG_NOSYSTEM"] != "1" {
@@ -318,4 +320,14 @@ func TestRootName() string {
 		prefix = "posse-e2e-"
 	}
 	return prefix + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+// isolatedPosseHome is the posse home a test environment resolves, or "" when
+// its home pointer is invalid.
+func isolatedPosseHome(env map[string]string) string {
+	home, err := config.ResolveHome(func(key string) string { return env[key] })
+	if err != nil {
+		return ""
+	}
+	return home.Path
 }

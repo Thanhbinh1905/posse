@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"mvdan.cc/sh/v3/syntax"
@@ -1660,10 +1661,29 @@ func (e *shellEnv) posseHome() (string, bool) {
 	}
 	home := e.values["POSSE_HOME"]
 	if home == "" || !e.exported["POSSE_HOME"] {
-		if e.values["HOME"] == "" {
+		if e.values["HOME"] == "" || e.unknown["XDG_CONFIG_HOME"] {
 			return "", false
 		}
-		home = filepath.Join(e.values["HOME"], ".posse")
+		lookup := func(name string) string {
+			if name == "POSSE_HOME" || e.values[name] == "" || !e.exported[name] && name != "HOME" {
+				return ""
+			}
+			return e.path(e.values[name])
+		}
+		pointer, err := config.HomePointerPath(lookup)
+		if err != nil {
+			return "", false
+		}
+		if strings.HasPrefix(pointer, mktempPath) {
+			// A fresh temp directory holds no pointer.
+			home = filepath.Join(lookup("HOME"), ".posse")
+		} else {
+			resolved, err := config.ResolveHome(lookup)
+			if err != nil {
+				return "", false
+			}
+			home = resolved.Path
+		}
 	}
 	// posse resolves a relative home against the directory it runs in.
 	home = e.path(home)

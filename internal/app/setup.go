@@ -88,6 +88,10 @@ type setupInspection struct {
 	PluginPresent    bool
 	PluginListJSON   []byte
 	SidebarSupported bool
+
+	// NoRecommendedSkills keeps a config setup creates free of the
+	// recommended [skills] block.
+	NoRecommendedSkills bool
 }
 
 type setupRun struct {
@@ -141,7 +145,14 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	} else if parsed.Bool("remove-global-skills") {
 		skillMode = "remove"
 	}
-	run, err := s.runSetup(ctx.Context, home, manifestPath, manifest, found, parsed.Flags["binary"], !parsed.Bool("check"), human, skillMode)
+	run, err := s.runSetup(ctx.Context, home, manifestPath, manifest, found, parsed.Flags["binary"], !parsed.Bool("check"), human, skillMode, parsed.Bool("no-recommended-skills"))
+	if err == nil && run.applied {
+		for _, change := range run.changed {
+			if change == "recommended_skills" {
+				markRecommendedSkillsInstalled(run.plan)
+			}
+		}
+	}
 	if err == nil && run.applied && sidebarOffer(run.plan) && !parsed.Bool("no-sidebar-layout") {
 		confirmed := parsed.Bool("sidebar-layout")
 		if !confirmed && !parsed.Bool("human") && setupInputIsTerminal() {
@@ -178,11 +189,7 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 			written, err = config.WriteRecommendedSkills(filepath.Join(home, "config.toml"))
 			if written && err == nil {
 				run.changed = append(run.changed, "recommended_skills")
-				for _, row := range run.plan {
-					if row["step"] == "recommended_skills_offer" {
-						row["action"] = "installed"
-					}
-				}
+				markRecommendedSkillsInstalled(run.plan)
 			}
 		}
 	}
@@ -214,7 +221,7 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 
 // runSetup inspects the machine and, when apply is set, applies the plan. A
 // human preview also validates the plan so conflicts surface before the prompt.
-func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manifest setupManifest, found bool, binaryFlag string, apply, human bool, skillMode string) (setupRun, error) {
+func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manifest setupManifest, found bool, binaryFlag string, apply, human bool, skillMode string, noRecommendedSkills bool) (setupRun, error) {
 	run := setupRun{manifestPath: manifestPath}
 	binary, err := resolveSetupBinary(binaryFlag)
 	if err != nil {
@@ -228,6 +235,7 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 		return run, err
 	}
 	run.inspection.GlobalSkillsMode = skillMode
+	run.inspection.NoRecommendedSkills = noRecommendedSkills
 	version := s.binaryVersion()
 	dirs, err := setupDirectories()
 	if err != nil {
@@ -252,7 +260,7 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 		row["error"] = "Herdr 0.9.1 or newer is required for styled sidebar rules"
 	}
 	run.plan = append(run.plan, row)
-	if skillsRow, ok := recommendedSkillsOfferRow(home, run.plan); ok {
+	if skillsRow, ok := recommendedSkillsOfferRow(home, run.plan, noRecommendedSkills); ok {
 		run.plan = append(run.plan, skillsRow)
 	}
 	run.prerequisites = setupPrerequisites(run.inspection)
@@ -456,13 +464,16 @@ func recommendedSkillsPending(configPath string, manifest setupManifest) bool {
 // recommendedSkillsOfferRow reports the recommended workflow skills the config
 // lacks. It offers the whole set when the config has no [skills] block, and
 // only notes the gap once the User has chosen a list.
-func recommendedSkillsOfferRow(home string, plan []map[string]any) (map[string]any, bool) {
+func recommendedSkillsOfferRow(home string, plan []map[string]any, noRecommendedSkills bool) (map[string]any, bool) {
 	for _, row := range plan {
 		if row["step"] == "recommended_skills" {
 			return nil, false
 		}
 	}
 	configPath := filepath.Join(home, "config.toml")
+	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) && !noRecommendedSkills {
+		return map[string]any{"step": "recommended_skills_offer", "target": configPath, "action": "fresh"}, true
+	}
 	configured, err := config.ConfiguredSkills(configPath)
 	if err != nil {
 		return nil, false
@@ -478,12 +489,21 @@ func recommendedSkillsOfferRow(home string, plan []map[string]any) (map[string]a
 			missing += len(names)
 		}
 		if missing == 0 {
-			return nil, false
+			row["action"] = "complete"
+			return row, true
 		}
 		row["action"] = "keep"
 		row["status"] = fmt.Sprintf("%d recommended skills are not in config; run `posse skills add` to pick them", missing)
 	}
 	return row, true
+}
+
+func markRecommendedSkillsInstalled(plan []map[string]any) {
+	for _, row := range plan {
+		if row["step"] == "recommended_skills_offer" {
+			row["action"] = "installed"
+		}
+	}
 }
 
 func recommendedSkillsOffered(plan []map[string]any) bool {
@@ -685,7 +705,7 @@ const setupPendingExitCode = 3
 // read-only hook link stays a manual step, so it is never pending.
 func setupPending(plan []map[string]any) bool {
 	for _, row := range plan {
-		if action, _ := row["action"].(string); action != "keep" && action != "setup_hook_symlink" && action != "offer" && action != "upgrade" && action != "offer_global" && action != "offer_removal" && action != "preserve" && action != "manual" {
+		if action, _ := row["action"].(string); action != "keep" && action != "complete" && action != "setup_hook_symlink" && action != "offer" && action != "upgrade" && action != "offer_global" && action != "offer_removal" && action != "preserve" && action != "manual" {
 			return true
 		}
 	}
@@ -983,9 +1003,22 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 		if err := atomicfile.Write(configPath, defaultConfig, 0o600); err != nil {
 			return changed, err
 		}
-		manifest.ConfigCreated = true
-		manifest.ConfigHash = fileHash(defaultConfig)
 		changed = append(changed, "default_config")
+		if !state.NoRecommendedSkills {
+			written, err := config.WriteRecommendedSkills(configPath)
+			if err != nil {
+				return changed, err
+			}
+			if written {
+				changed = append(changed, "recommended_skills")
+			}
+		}
+		created, err := os.ReadFile(configPath)
+		if err != nil {
+			return changed, err
+		}
+		manifest.ConfigCreated = true
+		manifest.ConfigHash = fileHash(created)
 	}
 	if err := writeSetupManifest(manifestPath, manifest); err != nil {
 		return changed, err

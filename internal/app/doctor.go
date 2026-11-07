@@ -524,8 +524,8 @@ func stringListContains(values []string, wanted string) bool {
 
 func recommendedSkillsCheck(home string) (name, status, detail, action string) {
 	name = "workflow skills"
-	row, offered := recommendedSkillsOfferRow(home, nil)
-	if !offered {
+	row, offered := recommendedSkillsOfferRow(home, nil, true)
+	if !offered || row["action"] == "complete" {
 		return name, "ok", "every recommended skill is in config", ""
 	}
 	if row["action"] == "offer" {

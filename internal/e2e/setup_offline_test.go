@@ -58,11 +58,11 @@ func TestSetupWithoutHerdrServer(t *testing.T) {
 	}
 
 	preview := runPosse(t, binary, root, env, "setup", "--check", "--human", "--binary", binary)
-	if !strings.Contains(preview, "+  Link the posse plugin into Herdr") || strings.Contains(preview, "plan[") {
+	if !strings.Contains(preview, "+  Herdr plugin and agent integrations: will be added") || strings.Contains(preview, "plan[") {
 		t.Fatalf("offline setup preview is not a readable plan:\n%s", preview)
 	}
 	applied := runPosse(t, binary, root, env, "setup", "--human", "--binary", binary)
-	for _, want := range []string{"✓  Installed the Herdr integration for claude", "✓  Linked the posse plugin into Herdr", "!  The posse skill is available only to Posse-launched sessions"} {
+	for _, want := range []string{"✓  Herdr plugin and agent integrations", "✓  SessionStart hook for Claude Code", "✓  Recommended workflow skills"} {
 		if !strings.Contains(applied, want) {
 			t.Fatalf("offline setup omitted %q:\n%s", want, applied)
 		}

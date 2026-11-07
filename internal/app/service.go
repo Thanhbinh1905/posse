@@ -237,6 +237,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-watches]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},
+		{Name: "_home", Summary: "Print or save the posse data folder for install.sh.", Hidden: true, Handler: s.homeCommand},
 		{Name: "recover", Usage: "$ recover --rebuild", Summary: "Rebuild Projects, Tasks, Sandboxes, Decisions and Notices from snapshots.", Handler: s.recover},
 		{Name: "_herdr_started", Summary: "Record a Herdr restart and tell the User how to restore.", Hidden: true, Handler: s.herdrStarted},
 		{Name: "_watch-pass", Summary: "Run one Project Watch pass now and wait for it to finish.", Hidden: true, Handler: s.watchPass},
