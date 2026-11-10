@@ -61,14 +61,20 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 // confirmed agent in it. A recovery that failed after bringing every pane
 // back, or a restore the User did by hand, then ends the hold instead of
 // extending it.
-// A missing Lead or Worker keeps the hold for `posse up` (ADR 0035).
-func adoptCurrentGeneration(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) (bool, error) {
+// A missing Lead or Worker keeps the hold for `posse up` (ADR 0035). So does a
+// Lead whose extension owns its Notices but runs no receiver: `posse up`
+// restarts it with the extension.
+func (s *Service) adoptCurrentGeneration(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) (bool, error) {
 	recorded, err := db.ProjectServerStartedAt(ctx, project.ID)
 	if err != nil || recorded == "" || snapshot.ServerStartedAt == "" || recorded == snapshot.ServerStartedAt {
 		return false, err
 	}
 	if project.IsDown() || !leadPaneLive(project, snapshot) {
 		return false, nil
+	}
+	lead, _ := herdr.FindPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
+	if missing, err := s.leadReceiverMissing(project, lead); err != nil || missing {
+		return false, err
 	}
 	tasks, err := db.Tasks(ctx, project.ID, false)
 	if err != nil {

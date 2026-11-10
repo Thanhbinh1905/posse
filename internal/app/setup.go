@@ -45,6 +45,9 @@ type setupManifest struct {
 	PiGuardPath        string             `json:"pi_guard_path,omitempty"`
 	PiGuardHash        string             `json:"pi_guard_hash,omitempty"`
 	PiGuardDirs        []string           `json:"pi_guard_dirs,omitempty"`
+	PiLeadPath         string             `json:"pi_lead_path,omitempty"`
+	PiLeadHash         string             `json:"pi_lead_hash,omitempty"`
+	PiLeadDirs         []string           `json:"pi_lead_dirs,omitempty"`
 	// RecommendedSkills records that setup made its one-time choice to write
 	// the recommended [skills] block, which only an upgraded install gets.
 	RecommendedSkills bool `json:"recommended_skills,omitempty"`
@@ -438,6 +441,21 @@ func (s *Service) setupPlan(home, binary, version string, dirs setupDirs, manife
 			}
 		}
 		rows = append(rows, map[string]any{"step": "pi_guard", "target": path, "action": action})
+	}
+	if path := dirs.piLeadPath(); path != "" {
+		action := "install"
+		contents, _ := renderLeadPiExtension(binary, true)
+		if current, err := os.ReadFile(path); err == nil {
+			switch {
+			case fileHash(current) == fileHash(contents):
+				action = "keep"
+			case manifest.PiLeadHash != "" && fileHash(current) == manifest.PiLeadHash:
+				action = "update"
+			default:
+				action = "conflict"
+			}
+		}
+		rows = append(rows, map[string]any{"step": "pi_lead", "target": path, "action": action})
 	}
 	return rows
 }
@@ -1122,6 +1140,28 @@ func (s *Service) applySetup(ctx context.Context, home, manifestPath string, man
 			return changed, err
 		}
 	}
+	if path := dirs.piLeadPath(); path != "" {
+		contents, err := renderLeadPiExtension(binary, true)
+		if err != nil {
+			return changed, err
+		}
+		createdDirs, err := makeSetupDirs(filepath.Dir(path))
+		if err != nil {
+			return changed, err
+		}
+		manifest.PiLeadDirs = appendUniqueStrings(manifest.PiLeadDirs, createdDirs...)
+		made, err := installManagedFile(path, contents, manifest.PiLeadHash, 0o600)
+		if err != nil {
+			return changed, axi.Failure("setup_path_conflict", "cannot install the pi Lead extension", false, err.Error())
+		}
+		manifest.PiLeadPath, manifest.PiLeadHash = path, fileHash(contents)
+		if made {
+			changed = append(changed, "pi_lead")
+		}
+		if err := writeSetupManifest(manifestPath, manifest); err != nil {
+			return changed, err
+		}
+	}
 	if err := writeSetupManifest(manifestPath, manifest); err != nil {
 		return changed, err
 	}
@@ -1198,6 +1238,23 @@ func (s *Service) uninstallSetup(ctx *axi.Context, home, manifestPath string, ma
 			return err
 		}
 		removeCreatedSkillDirs(record, dirs)
+	}
+	if manifest.PiLeadPath != "" && manifest.PiLeadHash != "" {
+		data, err := os.ReadFile(manifest.PiLeadPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil && fileHash(data) == manifest.PiLeadHash {
+			if err := os.Remove(manifest.PiLeadPath); err != nil {
+				return err
+			}
+			removed = append(removed, "pi_lead")
+		}
+		removeCreatedDirs(manifest.PiLeadDirs)
+		manifest.PiLeadPath, manifest.PiLeadHash, manifest.PiLeadDirs = "", "", nil
+		if err := writeSetupManifest(manifestPath, manifest); err != nil {
+			return err
+		}
 	}
 	if manifest.PiGuardPath != "" && manifest.PiGuardHash != "" {
 		data, err := os.ReadFile(manifest.PiGuardPath)
@@ -1366,6 +1423,14 @@ func (d setupDirs) piGuardPath() string {
 		return ""
 	}
 	return filepath.Join(d.pi, "extensions", "posse-worker-guard.ts")
+}
+
+// piLeadPath is where the pi Lead extension goes, or "" when pi is not set up.
+func (d setupDirs) piLeadPath() string {
+	if path := d.piGuardPath(); path != "" {
+		return filepath.Join(filepath.Dir(path), "posse-lead.ts")
+	}
+	return ""
 }
 
 func readSetupManifest(path string) (setupManifest, bool, error) {

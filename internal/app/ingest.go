@@ -14,6 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/runtime"
+	"github.com/thanhbinh1905/posse/internal/sessionref"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -336,6 +337,23 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 			delivery = config.NoticeDeliveryPrompt
 		}
 	}
+	// An extension or plugin can be lost while its Lead keeps running, for
+	// example when Herdr resumes the Lead without Posse's launch arguments.
+	if extensionOwnsNotices(delivery) && (lead.AgentStatus == "idle" || lead.AgentStatus == "done") && oldestNoticeAge(notices) >= leadReceiverGrace {
+		missing, err := s.leadReceiverMissing(project, lead)
+		if err != nil {
+			return err
+		}
+		if missing {
+			if err := raiseLeadReceiverMissing(ctx, db, project, lead.Agent); err != nil {
+				return err
+			}
+			if notices, err = db.UndeliveredNotices(ctx, project.ID); err != nil {
+				return err
+			}
+			delivery = config.NoticeDeliveryPrompt
+		}
+	}
 	// Lead watch plugins acknowledge these without involving the Lead. Do
 	// not display a Herdr notification for a batch that needs no turn.
 	if found && lead.Agent != "" && extensionOwnsNotices(delivery) {
@@ -430,6 +448,56 @@ func recordClaudeNotice(home, project string, notices []store.Notice, prompt str
 
 func extensionOwnsNotices(delivery string) bool {
 	return delivery == config.NoticeDeliveryPiExtension || delivery == config.NoticeDeliveryOpenCodePlugin
+}
+
+// leadReceiverGrace is how long a Notice may wait for an idle Lead's extension
+// before Posse treats the extension's receiver as missing.
+var leadReceiverGrace = 30 * time.Second
+
+var leadReceiverLive = func(home string, project store.Project) (bool, error) {
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		return false, err
+	}
+	return liveLeadWatch(project, processes), nil
+}
+
+func (s *Service) leadReceiverMissing(project store.Project, lead herdr.Pane) (bool, error) {
+	if lead.Tokens["posse_attached"] == "true" || !extensionOwnsNotices(s.leadNoticeDelivery(project, lead.Agent)) {
+		return false, nil
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return false, err
+	}
+	live, err := leadReceiverLive(home, project)
+	return !live, err
+}
+
+func oldestNoticeAge(notices []store.Notice) time.Duration {
+	oldest := int64(0)
+	for _, notice := range notices {
+		if oldest == 0 || notice.CreatedAt < oldest {
+			oldest = notice.CreatedAt
+		}
+	}
+	if oldest == 0 {
+		return 0
+	}
+	return time.Duration(currentTime()-oldest) * time.Millisecond
+}
+
+func raiseLeadReceiverMissing(ctx context.Context, db *store.DB, project store.Project, agent string) error {
+	var existing int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE project_id=? AND kind='lead_receiver_missing' AND acked_at IS NULL`, project.ID).Scan(&existing); err != nil || existing > 0 {
+		return err
+	}
+	summary := "Run `posse setup`, then `/reload` in the " + project.Name + " Lead pane: its Notice receiver is missing, so Notices are typed while it is idle."
+	if sessionref.NormalizeKind(agent) == "opencode" {
+		summary = "Quit OpenCode in the " + project.Name + " Lead pane and run `posse up` there: its Notice receiver is missing, so Notices are typed while it is idle."
+	}
+	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "lead_receiver_missing", Summary: summary})
+	return err
 }
 
 func onlyQuietPiNotices(notices []store.Notice) bool {

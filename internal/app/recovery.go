@@ -325,7 +325,7 @@ func (s *Service) recoverProject(ctx context.Context, db *store.DB, home string,
 		return 0, err
 	}
 	if serverRestarted && pendingGroupGeneration == "" {
-		adopted, err := adoptCurrentGeneration(ctx, db, current, fresh)
+		adopted, err := s.adoptCurrentGeneration(ctx, db, current, fresh)
 		if err != nil {
 			return 0, err
 		}

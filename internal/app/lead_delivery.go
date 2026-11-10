@@ -42,7 +42,7 @@ const codexOpeningPrompt = "Run `posse` and give the User a short status of the 
 // Lead's whole context.
 const noPollRule = "Never poll with sleep, `posse peek`, `posse list` or repeated `posse` calls to wait for Workers, CI or PRs; use `posse peek` only to inspect a specific concern."
 
-const lowkeyReportingRule = "Lowkey mode on: message the User only about needs-decision, message_delivery_uncertain, notice_delivery_uncertain, merge_ready when autonomy.merge=ask, failed/lost, quota_exhausted, budget_exceeded, pr_closed, pr_merged_ungated, review_policy_violation, head_discontinuity, persistent pr_watch_failing/root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, quota_fallback, working notes, pr_watch_recovered, root_fetch_recovered, first pr_watch_failing, restarts) silently; group only if useful. Never answer a needs-decision Notice for the User. The wake includes the Notice text; don't run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
+const lowkeyReportingRule = "Lowkey mode on: message the User only about needs-decision, message/notice_delivery_uncertain, lead_receiver_missing, merge_ready when autonomy.merge=ask, failed/lost, quota_exhausted, budget_exceeded, pr_closed, pr_merged_ungated, review_policy_violation, head_discontinuity, persistent pr_watch_failing/root_fetch_failing, and completed outcomes (done after review, pr_merged). Acknowledge routine Notices (pr_opened, quota_fallback, working notes, pr_watch_recovered, root_fetch_recovered, first pr_watch_failing, restarts) silently; group only if useful. Never answer a needs-decision Notice for the User. The wake includes the Notice text; don't run `posse` just to learn what arrived. Inspect with `posse show <task>` when needed."
 
 const normalReportingRule = "Lowkey mode off: handle every Notice, tell the User the outcome in your own words without waiting to be asked, then run `posse ack <id|all>`. Posse runs configured `notify.command` with JSON User-actionable Notices on stdin."
 
@@ -296,13 +296,50 @@ func (s *Service) writeLeadPiExtension(home string, project store.Project) (stri
 	if err != nil {
 		return "", fmt.Errorf("locate posse executable for the pi extension: %w", err)
 	}
-	quoted, err := json.Marshal(executable)
+	contents, err := renderLeadPiExtension(executable, false)
 	if err != nil {
 		return "", err
 	}
 	path := filepath.Join(home, "projects", project.Name, "lead-pi-extension.ts")
+	return path, writeFile(path, contents)
+}
+
+// The global copy is the one `posse setup` installs for every Pi start.
+func renderLeadPiExtension(executable string, global bool) ([]byte, error) {
+	quoted, err := json.Marshal(executable)
+	if err != nil {
+		return nil, err
+	}
 	contents := strings.Replace(leadPiExtension, `"posse"; // POSSE_EXECUTABLE`, string(quoted)+";", 1)
-	return path, writeFile(path, []byte(contents))
+	if global {
+		contents = strings.Replace(contents, `false; // POSSE_GLOBAL_COPY`, "true;", 1)
+	}
+	return []byte(contents), nil
+}
+
+// piLead succeeds only in the recorded Lead pane of a Project whose Pi Lead
+// receives Notices through the Pi extension. The global extension copy runs
+// only where it does.
+func (s *Service) piLead(ctx *axi.Context, args []string) error {
+	notLead := axi.Failure("not_pi_lead", "this pane is not a Pi Lead that uses the Pi extension", false)
+	paneID := os.Getenv("HERDR_PANE_ID")
+	if len(args) != 0 || paneID == "" {
+		return notLead
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return notLead
+	}
+	db, err := store.OpenReadOnly(home)
+	if err != nil {
+		return notLead
+	}
+	defer db.Close()
+	project, err := db.ProjectByLeadPane(ctx.Context, paneID)
+	if err != nil || project.IsDown() || s.leadNoticeDelivery(project, "pi") != config.NoticeDeliveryPiExtension {
+		return notLead
+	}
+	return nil
 }
 
 func (s *Service) writeLeadOpenCodePlugin(home string, project store.Project) (string, error) {

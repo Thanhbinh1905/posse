@@ -718,7 +718,7 @@ func TestSetupUninstallPersistsCompletedItemsBeforeFailure(t *testing.T) {
 	}
 }
 
-func TestSetupInstallsAndRemovesThePiWorkerGuard(t *testing.T) {
+func TestSetupInstallsAndRemovesThePiWorkerGuardAndLeadExtension(t *testing.T) {
 	home := t.TempDir()
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -737,6 +737,7 @@ func TestSetupInstallsAndRemovesThePiWorkerGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	guard := filepath.Join(piDir, "extensions", "posse-worker-guard.ts")
+	leadExtension := filepath.Join(piDir, "extensions", "posse-lead.ts")
 	if _, err := os.Stat(guard); !os.IsNotExist(err) {
 		t.Fatalf("pi guard was installed without a pi agent directory: %v", err)
 	}
@@ -760,6 +761,10 @@ func TestSetupInstallsAndRemovesThePiWorkerGuard(t *testing.T) {
 	if err != nil || !bytes.Contains(contents, []byte(`"/opt/posse/bin/posse"`)) || !bytes.Contains(contents, []byte(`"_guard"`)) || !containsValue(changed, "pi_guard") {
 		t.Fatalf("pi guard not installed: changed=%v contents=%s err=%v", changed, contents, err)
 	}
+	contents, err = os.ReadFile(leadExtension)
+	if err != nil || !bytes.Contains(contents, []byte(`const posse = "/opt/posse/bin/posse";`)) || !bytes.Contains(contents, []byte("const globalCopy = true;")) || !containsValue(changed, "pi_lead") {
+		t.Fatalf("pi Lead extension not installed as the global copy: changed=%v err=%v", changed, err)
+	}
 	manifest, _, err = readSetupManifest(manifestPath)
 	if err != nil {
 		t.Fatal(err)
@@ -768,12 +773,18 @@ func TestSetupInstallsAndRemovesThePiWorkerGuard(t *testing.T) {
 		if row["step"] == "pi_guard" && row["action"] != "keep" {
 			t.Fatalf("pi guard plan after install = %#v, want keep", row)
 		}
+		if row["step"] == "pi_lead" && row["action"] != "keep" {
+			t.Fatalf("pi Lead extension plan after install = %#v, want keep", row)
+		}
 	}
 	if err := service.uninstallSetup(&axi.Context{Context: context.Background(), Out: &bytes.Buffer{}}, home, manifestPath, manifest, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(guard); !os.IsNotExist(err) {
 		t.Fatalf("uninstall kept the pi guard: %v", err)
+	}
+	if _, err := os.Stat(leadExtension); !os.IsNotExist(err) {
+		t.Fatalf("uninstall kept the pi Lead extension: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(piDir, "extensions")); !os.IsNotExist(err) {
 		t.Fatalf("uninstall kept the extensions directory it created: %v", err)
