@@ -197,6 +197,36 @@ func TestPublishRefusesStaleBranchAuthorGeneration(t *testing.T) {
 	if code := fixture.service.RunGuard(strings.NewReader(guardInput), &guardErr); code != guardExitBlocked || !strings.Contains(guardErr.String(), "branch author claim") {
 		t.Fatalf("stale author write guard = %d, %s", code, guardErr.String())
 	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleNotices := 0
+	for _, notice := range notices {
+		if notice.Kind == "worker_branch_author_stale" {
+			staleNotices++
+		}
+	}
+	if staleNotices != 1 {
+		t.Fatalf("stale guard produced %d stale author Notices, want 1: %#v", staleNotices, notices)
+	}
+	guardErr.Reset()
+	if code := fixture.service.RunGuard(strings.NewReader(guardInput), &guardErr); code != guardExitBlocked {
+		t.Fatalf("repeated stale author write guard = %d, %s", code, guardErr.String())
+	}
+	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleNotices = 0
+	for _, notice := range notices {
+		if notice.Kind == "worker_branch_author_stale" {
+			staleNotices++
+		}
+	}
+	if staleNotices != 1 {
+		t.Fatalf("repeated stale guard produced %d Notices, want one", staleNotices)
+	}
 	t.Setenv("POSSE_TASK_GENERATION", "")
 	guardErr.Reset()
 	if code := fixture.service.RunGuard(strings.NewReader(guardInput), &guardErr); code != guardExitBlocked || !strings.Contains(guardErr.String(), "branch author claim") {

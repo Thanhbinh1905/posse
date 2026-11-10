@@ -80,6 +80,21 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	}
 	_ = db.Close()
 	if taskErr != nil && (os.Getenv("POSSE_TASK_GENERATION") != "" || taskErr == store.ErrBranchAuthorStale) {
+		if taskErr == store.ErrBranchAuthorStale {
+			if noticeDB, noticeErr := store.Open(home); noticeErr != nil {
+				fmt.Fprintf(stderr, "posse: could not open the store to notify the Lead about the stale branch author claim: %v\n", noticeErr)
+			} else {
+				project, projectErr := noticeDB.ProjectByID(context.Background(), task.ProjectID)
+				if projectErr == nil {
+					summary := fmt.Sprintf("%s: Worker attempt %d no longer holds the branch author claim; repository-changing actions remain blocked", task.Title, task.Launches)
+					projectErr = createNoticeOnce(context.Background(), noticeDB, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "worker_branch_author_stale", Summary: summary, DataJSON: marshalJSON(map[string]any{"attempt": task.Launches})})
+				}
+				_ = noticeDB.Close()
+				if projectErr != nil {
+					fmt.Fprintf(stderr, "posse: could not create a stale branch author Notice for the Lead: %v\n", projectErr)
+				}
+			}
+		}
 		fmt.Fprintf(stderr, "posse: refused Worker action because this attempt no longer holds the branch author claim: %v\n", taskErr)
 		return guardExitBlocked
 	}
