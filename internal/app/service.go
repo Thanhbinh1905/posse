@@ -242,6 +242,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "_herdr_started", Summary: "Record a Herdr restart and tell the User how to restore.", Hidden: true, Handler: s.herdrStarted},
 		{Name: "_watch-pass", Summary: "Run one Project Watch pass now and wait for it to finish.", Hidden: true, Handler: s.watchPass},
 		{Name: "_context", Summary: "Print Lead or Worker context inside a posse pane.", Hidden: true, Handler: s.context},
+		{Name: "_pi-lead", Summary: "Succeed only in a Pi Lead pane whose Notices use the Pi extension.", Hidden: true, Handler: s.piLead},
 		{Name: "doctor", Usage: "$ doctor [--full] [--verbose] [--json]", Summary: "Check Herdr, plugin, config, database and merging tools; --verbose expands successful checks.", Handler: s.doctor},
 	}
 	return root
@@ -493,7 +494,7 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	}
 	deferredRecovery := false
 	if current.ServerStartedAt != "" && recorded != "" && current.ServerStartedAt != recorded {
-		adopted, err := adoptCurrentGeneration(ctx, db, project, current)
+		adopted, err := s.adoptCurrentGeneration(ctx, db, project, current)
 		if err != nil {
 			return result, err
 		}
@@ -739,7 +740,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				} else {
 					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
 					if runErr == nil && result.GenerationMismatch {
-						adopted, err := adoptCurrentGeneration(ctx, db, project, result.Snapshot)
+						adopted, err := s.adoptCurrentGeneration(ctx, db, project, result.Snapshot)
 						if err != nil {
 							return cfg, err
 						}
@@ -767,6 +768,15 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				// diagnostics, while foreground commands warn about stale output.
 				if errors.Is(runErr, errRecoveryHeld) {
 					s.relabelProjectTabs(ctx, db, project)
+					// A held Project whose Lead still runs, such as a Lead
+					// Herdr resumed without its Notice receiver, still gets
+					// its Notices. Only the label identifies that Lead while
+					// the recorded pane may be stale.
+					if lead, found := herdr.FindPane(result.Snapshot.Panes, "", project.LeadLabel); found && project.LeadLabel != "" && paneAgentRunning(lead) {
+						if err := s.deliverNoticesWithSnapshot(ctx, db, project, result.Snapshot); err != nil && !isHerdrUnavailable(err) {
+							return cfg, herdrError(err)
+						}
+					}
 				}
 				if store.IsOnlyBusy(runErr) {
 					if options.watchObservation {

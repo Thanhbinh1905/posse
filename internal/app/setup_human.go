@@ -156,7 +156,7 @@ func humanRowState(row map[string]any, applied bool) (key string, state int, not
 	step, _ := row["step"].(string)
 	action, _ := row["action"].(string)
 	switch step {
-	case "integration", "plugin":
+	case "integration", "plugin", "pi_lead":
 		key = "herdr"
 	case "sidebar_layout":
 		key = "sidebar"
@@ -282,6 +282,17 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 			return []string{humanFailed + "  " + displayPath(target) + " was not written by posse"}
 		default:
 			return change("Link the posse plugin into Herdr", "Linked the posse plugin into Herdr")
+		}
+	case "pi_lead":
+		switch action {
+		case "keep":
+			return kept("pi Lead extension already installed")
+		case "update":
+			return change("Update the pi Lead extension at "+displayPath(target), "Updated the pi Lead extension at "+displayPath(target))
+		case "conflict":
+			return []string{humanFailed + "  " + displayPath(target) + " was not written by posse"}
+		default:
+			return change("Install the pi Lead extension at "+displayPath(target), "Installed the pi Lead extension at "+displayPath(target))
 		}
 	case "pi_guard":
 		switch action {

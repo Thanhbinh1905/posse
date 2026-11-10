@@ -4,13 +4,23 @@
 // without appearing in the User's conversation.
 // @ts-nocheck
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { Text } from "@earendil-works/pi-tui";
 import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 
 const posse = "posse"; // POSSE_EXECUTABLE
 const maxBackoffMs = 60_000;
+
+// `posse setup` also installs this file where Pi loads it on every start, so a
+// Lead that Herdr resumes as a bare `pi` keeps its Notice receiver. That copy
+// runs only in a Posse Lead pane, and defers to the copy a Posse launch passes.
+const globalCopy = false; // POSSE_GLOBAL_COPY
+function globalCopyEnabled() {
+	if (process.argv.some((arg) => arg.endsWith("lead-pi-extension.ts"))) return false;
+	if (!process.env.HERDR_PANE_ID) return false;
+	return spawnSync(posse, ["_pi-lead"], { stdio: "ignore", timeout: 5_000 }).status === 0;
+}
 
 // Pi has no per-session API for hiding transcript rows. Patch only the TUI
 // presentation, not messages, tool execution, context, settings or session data.
@@ -129,6 +139,7 @@ function registerResearch(pi) {
 }
 
 export default function (pi) {
+	if (globalCopy && !globalCopyEnabled()) return;
 	const shutdownResearch = registerResearch(pi);
 	let layout;
 	try { layout = installLowkeyLayout(); }
