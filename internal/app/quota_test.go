@@ -137,6 +137,24 @@ func TestClassifyQuotaExhaustionRecognizesEachHarness(t *testing.T) {
 
 const quotaPiHelp = piErrorHelpLine
 
+const piWrappedCooldownPane = ` Error: OpenAI API error (429): {"code":"model_cooldown","last_upstream_error":"usage_limit_reached:
+ The usage limit has been reached","message":"All credentials for model gpt-6-luna are cooling down via
+ provider codex ...
+ Error: Retry failed after 3 attempts: OpenAI API error (429):
+ {"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been
+ reached", ...
+` + quotaPiHelp + "\n\n~/work/posse\n"
+
+func TestClassifyQuotaExhaustionPiWrappedErrorWithPrefix(t *testing.T) {
+	found, ok := classifyQuotaExhaustion("pi", piWrappedCooldownPane)
+	if !ok {
+		t.Fatalf("wrapped Pi usage limit not recognized in %q", piWrappedCooldownPane)
+	}
+	if !strings.HasPrefix(found.Line, "Retry failed after 3 attempts: OpenAI API error (429): {") {
+		t.Fatalf("quota line = %q", found.Line)
+	}
+}
+
 const piModelCooldownBody = `{"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been reached","message":"All credentials for model gpt-5.6-luna are cooling down via provider codex (last error: usage_limit_reached: The usage limit has been reached)","model":"gpt-5.6-luna","provider":"codex","reset_seconds":1620130,"reset_time":"450h2m10s"}`
 
 func TestClassifyQuotaExhaustionIgnoresQuotaTextTheWorkerMovedPast(t *testing.T) {
