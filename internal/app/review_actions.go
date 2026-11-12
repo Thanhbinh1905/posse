@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -155,7 +156,14 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 			body.WriteString("\nFix the other Members on their Task branch and commit the changes there.\n")
 		}
 	}
-	body.WriteString("\nFix every instance of each selected pattern, including any unlisted instances you find. For every pattern, write one answer with status `fixed` or `disputed` in a `posse.review-resolutions.v1` JSON file, then signal done with `--resolutions <file>`. A missing or extra answer is refused.\n")
+	body.WriteString("\nFix every instance of each selected pattern, including any unlisted instances you find. For every pattern, write one answer with status `fixed` or `disputed` in a `posse.review-resolutions.v1` JSON file, then signal done with `--resolutions <file>`. A missing or extra answer is refused. Set each `status` and replace each `note`, which is optional:\n\n```json\n")
+	answers := make([]reviewPatternResolution, len(selected))
+	for i, seq := range selected {
+		answers[i] = reviewPatternResolution{Pattern: "P-" + strconv.Itoa(seq), Status: "fixed", Note: "what changed, or why the pattern is disputed"}
+	}
+	example, _ := json.Marshal(reviewResolutionsFile{Schema: "posse.review-resolutions.v1", Patterns: answers})
+	body.Write(example)
+	body.WriteString("\n```\n")
 	for _, seq := range selected {
 		fmt.Fprintf(&body, "\n## P-%d\n", seq)
 		for _, finding := range findings {
