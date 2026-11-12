@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -59,11 +58,7 @@ func TestResearchChildrenRunThroughTheDetachedRunner(t *testing.T) {
 	if recorded.RunnerPID == 0 || recorded.RunnerPID == os.Getpid() || recorded.ChildID == "" {
 		t.Fatalf("runner identity not recorded: %+v", recorded)
 	}
-	if err := syscall.Kill(recorded.RunnerPID, 0); err == nil {
-		if identity, identityErr := processIdentity(recorded.RunnerPID); identityErr == nil && identity == recorded.RunnerIdentity {
-			t.Fatalf("runner %d outlived its finished child", recorded.RunnerPID)
-		}
-	}
+	waitForProcessExit(t, recorded.RunnerPID, recorded.RunnerIdentity)
 	if _, err := os.Stat(filepath.Join(f.home, "research-runs", "r1.log")); err != nil {
 		t.Fatalf("runner log: %v", err)
 	}
@@ -192,4 +187,19 @@ func processIdentity(pid int) (string, error) {
 		return "", err
 	}
 	return boot + "/" + start, nil
+}
+
+func waitForProcessExit(t *testing.T, pid int, identity string) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for alive(pid, identity) {
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("process %d with identity %s did not exit", pid, identity)
+		}
+	}
 }
