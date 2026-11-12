@@ -83,15 +83,18 @@ func TestBuiltInReviewWritesImmutableProviderVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	var provider, head, target, outcome, mode string
-	if err := f.db.QueryRowContext(f.ctx, `SELECT provider,head_sha,target_sha,verdict,mode FROM verdicts WHERE task_id=?`, f.review).Scan(&provider, &head, &target, &outcome, &mode); err != nil {
+	if err := f.db.QueryRowContext(f.ctx, `SELECT provider,head_sha,target_sha,verdict,mode FROM verdicts WHERE task_id=?`, f.change).Scan(&provider, &head, &target, &outcome, &mode); err != nil {
 		t.Fatal(err)
 	}
 	if provider != BuiltinReviewProvider || head != reviewShaB || target != reviewShaA || outcome != "inconclusive" || mode != "gate" {
 		t.Fatalf("verdict binding = %q %q %q %q %q", provider, head, target, outcome, mode)
 	}
-	stored, err := f.db.VerdictsFor(f.ctx, f.review)
-	if err != nil || len(stored) != 1 || stored[0].Head != reviewShaB || stored[0].Target != reviewShaA {
-		t.Fatalf("stored Verdicts = %#v, %v", stored, err)
+	stored, err := f.db.VerdictsFor(f.ctx, f.change)
+	if err != nil || len(stored) != 1 || stored[0].Head != reviewShaB || stored[0].Target != reviewShaA || stored[0].TaskID != f.change {
+		t.Fatalf("stored Change Verdicts = %#v, %v", stored, err)
+	}
+	if reviewVerdicts, err := f.db.VerdictsFor(f.ctx, f.review); err != nil || len(reviewVerdicts) != 0 {
+		t.Fatalf("Review Task owns new Verdict rows: %#v, %v", reviewVerdicts, err)
 	}
 	verdict := Verdict{Mode: mode, Head: head, Outcome: outcome}
 	if verdict.Qualifies(head) {
@@ -115,10 +118,10 @@ func TestBuiltInReviewWritesImmutableProviderVerdict(t *testing.T) {
 			}
 		})
 	}
-	if _, err := f.db.ExecContext(f.ctx, `UPDATE verdicts SET head_sha=? WHERE task_id=?`, reviewShaB, f.review); err == nil {
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE verdicts SET head_sha=? WHERE task_id=?`, reviewShaB, f.change); err == nil {
 		t.Fatal("Verdict update succeeded")
 	}
-	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM verdicts WHERE task_id=?`, f.review); err == nil {
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM verdicts WHERE task_id=?`, f.change); err == nil {
 		t.Fatal("Verdict delete succeeded")
 	}
 }
@@ -139,6 +142,14 @@ func TestReviewVerdictPersistsWithSignalAndReviewerIdentity(t *testing.T) {
 	}
 	if verdict.Reviewer.Profile != "reviewer" || verdict.Reviewer.ConfiguredModel != "model-b" || !verdict.Reviewer.ModelKnown || verdict.Reviewer.LaunchNumber != 1 {
 		t.Fatalf("reviewer identity = %#v", verdict.Reviewer)
+	}
+	providerVerdicts, err := f.db.VerdictsFor(f.ctx, f.change)
+	if err != nil || len(providerVerdicts) != 1 || providerVerdicts[0].TaskID != f.change {
+		t.Fatalf("Change Task Verdicts = %#v, %v", providerVerdicts, err)
+	}
+	reviewTaskVerdicts, err := f.db.VerdictsFor(f.ctx, f.review)
+	if err != nil || len(reviewTaskVerdicts) != 0 {
+		t.Fatalf("Review Task Verdicts = %#v, %v", reviewTaskVerdicts, err)
 	}
 }
 
