@@ -224,9 +224,13 @@ func TestFullPipelineWholePatternFixRequiresPrivateCandidateResolutions(t *testi
 	}
 	gitTest(t, f.env, candidatePath, "add", "review-issue.txt")
 	gitTest(t, f.env, candidatePath, "commit", "-m", "fix unsafe operation")
+	_, example, _ := strings.Cut(body, "```json\n")
+	example, _, found := strings.Cut(example, "```")
+	if !found {
+		t.Fatalf("whole-pattern instruction does not show the resolutions file format: %s", body)
+	}
 	resolutions := filepath.Join(f.home, "scratch", "shop", "t1", "review-resolutions.json")
-	payload, _ := json.Marshal(map[string]any{"schema": "posse.review-resolutions.v1", "patterns": []any{map[string]any{"pattern": "P-1", "status": "fixed", "note": "Fixed the complete pattern"}}})
-	if err := os.WriteFile(resolutions, payload, 0o600); err != nil {
+	if err := os.WriteFile(resolutions, []byte(example), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
