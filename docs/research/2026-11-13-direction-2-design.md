@@ -111,12 +111,12 @@ One insert-only table, in the shape ADR 0020 gave review targets:
 | `grant` (unique) | Posse issues it; Greenhouse refuses a reused grant |
 | `head`, `target`, `review_base` | `host_result` |
 | `verdict` (`clean`, `findings`, `inconclusive`) | `host_result` |
-| `blocking` (count of findings at or above the frozen `block_at`) | Posse computes |
+| `blocking` (count of findings at or above the frozen `block_at`; meaningful only when `verdict = findings`) | Posse computes |
 | `rules_digest`, `config_digest`, `input_digest`, `backend`, `model` | `host_result` |
 | `findings_digest`, findings file path | Posse |
 | `mode` (`parallel` or `gate`), `recorded_at` | Posse |
 
-Qualification is computed when read, as today: a Verdict passes only if `mode = gate`, `verdict = clean` or `blocking = 0`, and `head` equals the head being published or merged now. No operation rebinds a Verdict to another head. A moved head has no passing Verdict.
+Qualification is computed when read, as today: a Verdict passes only if all three hold: `mode = gate`; `verdict` is `clean`, or `verdict` is `findings` and `blocking = 0`; and `head` equals the head being published or merged now. An `inconclusive` Verdict never passes, whatever its `blocking` count, and neither does a missing one. No operation rebinds a Verdict to another head. A moved head has no passing Verdict.
 
 Exact-head safety therefore has two independent checks: Greenhouse sets `current: false` "once the worktree branch or head moved" (`GH:docs/embedding.md`), and Posse compares the recorded `head` with the head being merged inside the merge transaction. Posse's check does not trust Greenhouse's.
 
@@ -167,7 +167,7 @@ Fault table for G0 (each is an automated test; the pass condition is "no passing
 | Reviewer quota pause | no Verdict; the same grant resumes; the Fix Round budget is not spent |
 | Task Teardown while another Task's review runs | the other review completes (process placement rule, 2.4) |
 | Daemon protocol range excludes version 2 | Posse refuses to request a Verdict and names both ranges; Merge stays blocked, never downgraded |
-| `inconclusive` verdict | never satisfies the gate |
+| `inconclusive` verdict, with zero findings listed | never satisfies the gate; `blocking = 0` alone is not a pass (2.3) |
 
 Parallel-run thresholds (G1), measured per reviewed head from stored rows by one command (`posse stats` gains a review comparison):
 
@@ -223,12 +223,13 @@ Every step ships alone, leaves `main` releasable and names how to undo it. Admit
 | G-4 | Opt-in gate: `review_provider = "greenhouse"` per Project, frozen per Task. Such a Task follows 2.7: no Review Task, no Private Candidate, no `posse validate` stage | stage G2 | unset the key; admitted Tasks finish under their frozen provider |
 | G-5 | Greenhouse default for new Projects; built-in frozen | stage G3 | set `review_provider = "builtin"` |
 
-Removal, only after G-5 passes:
+Removal, only after G-5 passes. It removes behaviour, never data:
 
 | Step | Change | Undo |
 |---|---|---|
 | R-1 | Stop admitting Review Tasks; remove `posse review ...`, `posse validate ...`, candidate commands and the built-in provider's write paths. Readers and tables stay. Removed commands fail with an error naming the replacement, as removed commands do today | release revert; no data was dropped |
-| R-2 | Drop the 16 review and validation tables after exporting each historical Task's review record into its Task artifacts | none. This is the only irreversible step and needs the User's explicit decision (D7 in section 11) |
+
+The 16 review and validation tables stay as read-only history. This migration contains no step that drops them, so every step above can be undone. Dropping them later is a separate proposal outside this design; it would need a lossless export and a tested restore before it could be considered (D7 in section 11).
 
 Acceptance for this phase: AC-D2 to AC-D5 and AC-G2 in section 10, and the fault table and thresholds of 2.6. Historical Review Tasks stay readable under the rules of section 9.
 
@@ -583,7 +584,7 @@ T-5 is the riskiest step: it touches the `done` and merge transactions. It start
 ### Order across both phases
 
 ```
-Phase 1:  G-1 -> G-2 -> G-3 -> G-4 -> G-5 ------------------> R-1 -> R-2
+Phase 1:  G-1 -> G-2 -> G-3 -> G-4 -> G-5 ------------------> R-1
 Phase 2:          T-1 -> T-2 -> T-3 -> T-4
                            \-> T-5 -> T-6 -> T-7
 ```
@@ -601,7 +602,7 @@ T-1 starts after G-1 has merged, so that the provider interface exists before th
 1. **Rows are never rewritten.** No migration updates `tasks.type`, a stored state, a plan or a snapshot of a finished Task.
 2. **Readers map, writers move on.** One compatibility package holds every mapping below. The test from T-1 keeps legacy branches from spreading.
 3. **A Task finishes under the plan it was admitted with.** A Task that is live at upgrade keeps its type, its state path and its review provider.
-4. **Removal keeps reading.** A removed feature keeps its reader until R-2, and R-2 exports before it drops.
+4. **Removal keeps reading.** R-1 removes commands and write paths. The review and validation tables and their readers stay, so a historical Review Task renders the same after R-1 as before.
 
 ### 9.2 Mappings
 
@@ -634,7 +635,7 @@ T-1 starts after G-1 has merged, so that the provider interface exists before th
 ### 9.4 Proof
 
 - **Fixture home.** A synthetic `POSSE_HOME` holding Tasks of every plan version, every terminal state and every review mode, built from the existing migration fixtures and containing no real Project data. For every step in sections 2.8 and 8, `posse list --json`, `posse show <task> --json` and `posse stats --json` over that home are compared before and after; legacy fields must be identical.
-- **Real history check.** A read-only command run by the User on a backup copy of the real database renders every Task and reports failures. It is a release gate for T-2, T-5, R-1 and R-2.
+- **Real history check.** A read-only command run by the User on a backup copy of the real database renders every Task and reports failures. It is a release gate for T-2, T-5 and R-1.
 - **Live Task check.** An E2E upgrades the binary while one Change Task waits in `merging` and one Review Round runs, and both finish on their frozen path.
 
 ---
@@ -696,7 +697,7 @@ Each criterion is a test or a measurement with a threshold. None counts lines, t
 | AC-H3 | Binary upgrade with a live legacy Change Task and Review Round | both finish on their frozen path |
 | AC-A1 | Type branches outside the compatibility package | 0 after T-2 (174 today [O]) |
 | AC-A2 | Imports from core packages to Delivery or Verdict packages | 0 |
-| AC-R1 | Each step of sections 2.8 and 8 has a rehearsed undo on the fixture home | passes |
+| AC-R1 | Each step of sections 2.8 and 8 has a rehearsed undo on the fixture home, including R-1 by a release revert that finds every review and validation row intact | passes |
 
 AC-A1 and AC-A2 measure the structure, not its size: they hold whether the code grows or shrinks.
 
@@ -714,7 +715,7 @@ Decided already: Greenhouse first, parallel run before removal, and D2. The rest
 | D4 | The thresholds of section 2.6 | As written; they can be tightened after G1 produces a baseline |
 | D5 | Review of publication-bound Reports (spec, tickets). Greenhouse reviews committed diffs only | A spec or ticket set that needs independent review is committed as a document and reviewed as a Delivery. Report Acceptance by exact digest stays |
 | D6 | Workspace Projects | One host run per changed Member. Cross-Member context is lost; measure in G1 before choosing G-4 for a Workspace |
-| D7 | Dropping review tables (R-2) | Decide after R-1 has run for one release. Not needed for any other step |
+| D7 | Whether to ever drop the review and validation tables | Not part of this design. They stay as read-only history. A later, separate proposal must bring a lossless export and a tested restore path |
 | D8 | Rename the config key `kinds` to `harnesses` | No. The key is User-only and rarely edited; a rename costs a config migration and buys nothing once the word leaves output |
 
 ---
