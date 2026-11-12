@@ -217,3 +217,51 @@ func (d *Daemon) verifyPlacement(pid int) error {
 	}
 	return nil
 }
+
+// Idle reports whether no run of the daemon serving home is reviewing,
+// cancelling or writing, from its versioned store file.
+func Idle(home string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(home, "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var store struct {
+		Runs map[string]struct {
+			Status string `json:"status"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(data, &store); err != nil {
+		return false, fmt.Errorf("read Greenhouse store: %w", err)
+	}
+	for _, run := range store.Runs {
+		if run.Status == "running" || run.Status == "cancelling" || run.Status == "writing" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// Stop ends the daemon Posse placed in home with SIGTERM, the only stop
+// Greenhouse documents, and waits for it to exit. It leaves a daemon Posse has
+// no record of alone.
+func Stop(home string, wait time.Duration) error {
+	pid, live := LivePID(home)
+	if !live {
+		return nil
+	}
+	if state, err := ReadState(home); err != nil || state.PID != pid {
+		return fmt.Errorf("the Greenhouse daemon %d serving %s was not placed by Posse", pid, home)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if syscall.Kill(pid, 0) != nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("the Greenhouse daemon %d did not exit within %s", pid, wait)
+}

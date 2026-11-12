@@ -616,3 +616,66 @@ func buildGreenhouseProtocolOne(t *testing.T, f *workerTabsFixture) string {
 	}
 	return binary
 }
+
+// TestGreenhouseDaemonStopsAfterDownOnceReviewsSettle covers section 2.4:
+// `posse down` of the last up Project stops the Posse-owned daemon only after
+// the review it is running settles.
+func TestGreenhouseDaemonStopsAfterDownOnceReviewsSettle(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse shutdown change", "greenhouse-shutdown")
+	head := c.authorCommit(t)
+	c.hold(t)
+	done := c.reviewAsync(c.env)
+	c.waitInvocations(t, 1)
+	daemon := c.daemonPID(t)
+
+	markTaskReported(t, f, f.task(t, "t1"))
+	f.exitWorker(t, "t1")
+	output := runPosse(t, f.binary, f.repo, f.userPaneEnv(f.userBefore), "down")
+	if !strings.Contains(output, "greenhouse_daemon: stops after its reviews settle") {
+		t.Fatalf("down did not hand the busy daemon to the stop waiter:\n%s", output)
+	}
+	if waitForCondition(2*time.Second, func() bool { return syscall.Kill(daemon, 0) != nil }) {
+		t.Fatal("down stopped the Greenhouse daemon while its review ran")
+	}
+	c.release(t)
+	c.requireRecorded(t, c.finish(t, done), head, "clean", 0)
+	if !waitForCondition(20*time.Second, func() bool { return syscall.Kill(daemon, 0) != nil }) {
+		t.Fatalf("the Greenhouse daemon %d outlived its settled review after down", daemon)
+	}
+}
+
+// TestGreenhouseDaemonDownKeepsDaemonWhileAnotherProjectIsUp covers the
+// daemon shared by the Projects of one POSSE_HOME.
+func TestGreenhouseDaemonDownKeepsDaemonWhileAnotherProjectIsUp(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse shared daemon change", "greenhouse-shared")
+	c.authorCommit(t)
+	if result := c.review(t); result["outcome"] != "settled" {
+		t.Fatalf("review = %v", result)
+	}
+	daemon := c.daemonPID(t)
+	other := filepath.Join(f.root, "other")
+	initRepository(t, other, filepath.Join(f.root, "other-origin.git"), f.env)
+	runPosse(t, f.binary, other, f.env, "project", "add", "--name", "other")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE projects SET lead_pane_id='other-lead', down_at=0 WHERE name='other'`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	markTaskReported(t, f, f.task(t, "t1"))
+	f.exitWorker(t, "t1")
+	output := runPosse(t, f.binary, f.repo, f.userPaneEnv(f.userBefore), "down")
+	if !strings.Contains(output, "greenhouse_daemon: \"kept: Project other is up\"") && !strings.Contains(output, "greenhouse_daemon: kept: Project other is up") {
+		t.Fatalf("down did not keep the daemon shared with an up Project:\n%s", output)
+	}
+	if syscall.Kill(daemon, 0) != nil {
+		t.Fatalf("down stopped the Greenhouse daemon %d that Project other still uses", daemon)
+	}
+}

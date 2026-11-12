@@ -196,6 +196,10 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	if err := s.regenerateProjects(ctx.Context, db); err != nil {
 		return err
 	}
+	greenhouseDaemon, err := greenhouseAfterDown(ctx.Context, db, home)
+	if err != nil {
+		return err
+	}
 	if callerLead != nil {
 		if err := s.closeOwnPane(ctx.Context, snapshot, *callerLead); err != nil {
 			return err
@@ -212,6 +216,9 @@ func (s *Service) down(ctx *axi.Context, args []string) error {
 	}
 	if len(kept) > 0 {
 		result = append(result, axi.Field{Key: "kept_panes", Value: stringsToAny(kept)})
+	}
+	if greenhouseDaemon != "" {
+		result = append(result, axi.Field{Key: "greenhouse_daemon", Value: greenhouseDaemon})
 	}
 	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse up` here to start the Lead again"}}))
 }

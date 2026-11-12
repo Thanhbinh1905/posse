@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
@@ -318,4 +319,114 @@ func greenhouseDaemonCheck(home string) (name, status, detail, action string) {
 		return name, "fail", fmt.Sprintf("PID %d speaks protocol %s; Posse needs protocol %s", pid, state.Range, greenhouse.PosseRange), "Let its work settle, stop it with SIGTERM to PID " + strconv.Itoa(pid) + " and install a Greenhouse that speaks protocol " + strconv.Itoa(greenhouse.Protocol)
 	}
 	return name, "ok", fmt.Sprintf("PID %d speaks protocol %s; Posse uses %d", pid, state.Range, greenhouse.Protocol), ""
+}
+
+const greenhouseStopWait = 10 * time.Second
+
+// greenhouseAfterDown stops the shared Greenhouse daemon once no Project of
+// this Posse home is up. A daemon with a review in progress is handed to a
+// detached `posse _greenhouse stop`, which stops it after the review settles.
+func greenhouseAfterDown(ctx context.Context, db *store.DB, home string) (string, error) {
+	greenhouseHome := greenhouse.HomeFor(home)
+	if _, live := greenhouse.LivePID(greenhouseHome); !live {
+		return "", nil
+	}
+	up, err := upProject(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	if up != "" {
+		return "kept: Project " + up + " is up", nil
+	}
+	idle, err := greenhouse.Idle(greenhouseHome)
+	if err != nil {
+		return "", err
+	}
+	if idle {
+		if err := greenhouse.Stop(greenhouseHome, greenhouseStopWait); err != nil {
+			return "", err
+		}
+		return "stopped", nil
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	log, err := os.OpenFile(filepath.Join(greenhouseHome, "posse-daemon.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer log.Close()
+	waiter := exec.Command(binary, "_greenhouse", "stop")
+	waiter.Dir = greenhouseHome
+	for _, entry := range os.Environ() {
+		if key, _, _ := strings.Cut(entry, "="); !watchRuntimeDropsEnvironmentVariable(key) {
+			waiter.Env = append(waiter.Env, entry)
+		}
+	}
+	waiter.Env = append(waiter.Env, "POSSE_HOME="+home)
+	waiter.Stdout, waiter.Stderr = log, log
+	waiter.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := waiter.Start(); err != nil {
+		return "", fmt.Errorf("start the Greenhouse stop waiter: %w", err)
+	}
+	return "stops after its reviews settle", waiter.Process.Release()
+}
+
+// greenhouseStop waits until the Greenhouse daemon is idle, then stops it,
+// unless a Project comes up first.
+func (s *Service) greenhouseStop(ctx *axi.Context, args []string) error {
+	if len(args) != 0 {
+		return axi.Usage("_greenhouse stop takes no arguments")
+	}
+	db, home, err := s.openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if s.workerCaller(ctx.Context, home) {
+		return axi.Failure("lead_only", "a Worker never calls Greenhouse", false)
+	}
+	greenhouseHome := greenhouse.HomeFor(home)
+	for {
+		if _, live := greenhouse.LivePID(greenhouseHome); !live {
+			return ctx.Print(axi.Object{{Key: "greenhouse", Value: "not running"}})
+		}
+		up, err := upProject(ctx.Context, db)
+		if err != nil {
+			return err
+		}
+		if up != "" {
+			return ctx.Print(axi.Object{{Key: "greenhouse", Value: "kept: Project " + up + " is up"}})
+		}
+		idle, err := greenhouse.Idle(greenhouseHome)
+		if err != nil {
+			return err
+		}
+		if idle {
+			if err := greenhouse.Stop(greenhouseHome, greenhouseStopWait); err != nil {
+				return err
+			}
+			return ctx.Print(axi.Object{{Key: "greenhouse", Value: "stopped"}})
+		}
+		select {
+		case <-ctx.Context.Done():
+			return ctx.Context.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// upProject names a Project of this Posse home whose Lead is up.
+func upProject(ctx context.Context, db *store.DB) (string, error) {
+	projects, err := db.Projects(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, project := range projects {
+		if !project.IsDown() && project.LeadPaneID != "" {
+			return project.Name, nil
+		}
+	}
+	return "", nil
 }

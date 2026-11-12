@@ -238,6 +238,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "_greenhouse", Summary: "Request Greenhouse host-mode review (contract stage; no gate reads it).", Hidden: true, Subcommands: []*axi.Command{
 			{Name: "review", Usage: "$ _greenhouse review <task> [--repo <member>] [--rule <name>]... [--reviewer-backend <b>] [--reviewer-model <m>] [--timeout ms]", Summary: "Request or continue one Greenhouse review of a Change Task Member's exact head and record its Verdict.", Hidden: true, Handler: s.greenhouseReview},
+			{Name: "stop", Usage: "$ _greenhouse stop", Summary: "Stop the Posse-owned Greenhouse daemon once its reviews settle, unless a Project comes up.", Hidden: true, Handler: s.greenhouseStop},
 		}},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},
 		{Name: "_home", Summary: "Print or save the posse data folder for install.sh.", Hidden: true, Handler: s.homeCommand},
