@@ -202,12 +202,13 @@ func recordBuiltinVerdictsTx(ctx context.Context, tx *writeTx, taskID int64, inp
 	for rows.Next() {
 		var verdict Verdict
 		var changeTaskID int64
-		verdict.TaskID, verdict.Provider, verdict.Protocol, verdict.Mode = taskID, BuiltinReviewProvider, "builtin-v1", "gate"
+		verdict.Provider, verdict.Protocol, verdict.Mode = BuiltinReviewProvider, "builtin-v1", "gate"
 		verdict.Outcome, verdict.Blocking = outcome, blocking
 		if err := rows.Scan(&changeTaskID, &verdict.Repository, &verdict.Head, &verdict.Target, &verdict.ReviewBase); err != nil {
 			rows.Close()
 			return err
 		}
+		verdict.TaskID = changeTaskID
 		if outcome == "findings" {
 			verdict.Blocking, err = countBlockingReviewFindingsTx(ctx, tx, changeTaskID, verdict.Repository, input.Findings.BlockAt)
 			if err != nil {
@@ -223,12 +224,19 @@ func recordBuiltinVerdictsTx(ctx context.Context, tx *writeTx, taskID int64, inp
 	}
 	rows.Close()
 	if len(verdicts) == 0 {
+		var changeTaskID sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT reviews_task_id FROM tasks WHERE id=?`, taskID).Scan(&changeTaskID); err != nil {
+			return err
+		}
+		if !changeTaskID.Valid || changeTaskID.Int64 < 1 {
+			return fmt.Errorf("review task %d has no bound Change Task", taskID)
+		}
 		targets, err := queryReviewTargets(ctx, tx, taskID)
 		if err != nil {
 			return err
 		}
 		for _, target := range targets {
-			verdicts = append(verdicts, Verdict{TaskID: taskID, Repository: target.Repository, Provider: BuiltinReviewProvider, Protocol: "builtin-v1", Head: target.Commit, Target: target.Commit, ReviewBase: target.Commit, Outcome: outcome, Blocking: blocking, Mode: "gate"})
+			verdicts = append(verdicts, Verdict{TaskID: changeTaskID.Int64, Repository: target.Repository, Provider: BuiltinReviewProvider, Protocol: "builtin-v1", Head: target.Commit, Target: target.Commit, ReviewBase: target.Commit, Outcome: outcome, Blocking: blocking, Mode: "gate"})
 		}
 	}
 	for _, verdict := range verdicts {
