@@ -57,7 +57,7 @@ Yes, in three specific places, and no in most others.
 
 **What the request assumed that the evidence does not support** [I]:
 
-5. **The `codex-sol` misrouting is mostly not a Lead judgment failure.** Posse's own Review auto-start code picks "the first candidate in config order", and the User's first rule is the image rule. That deterministic path explains most of the 88 non-image `codex-sol` Tasks. A second deterministic cause hides the image rule from the Lead in any Project with typed rules. Section E has the reproduction.
+5. **The `codex-sol` misrouting has deterministic causes inside Posse, so it cannot be assumed to be a Lead judgment failure.** Posse's own Review auto-start code picks "the first candidate in config order", and the User's first rule is the image rule [O]. `codex-sol` ran 88 Tasks since 2026-11-02, of which 85 were not image work and 73 were Review Tasks [O]. Who started those Tasks is not recorded, so how many came from auto-start is a hypothesis [H]. A second deterministic cause hides the image rule from the Lead in any Project with typed rules [O]. Section E has the reproductions.
 6. **SQLite is not the problem.** The guarantees that need a transactional store sit in about 20 tables. The other 50 persist the delivery and review model. A second persistence layer (TOML snapshot files) costs more than SQLite itself.
 7. **Firstmate is not simpler.** It is about 145,000 lines of bash with a 52,000-word configuration document, and its spawn script refuses to launch on more conditions than `posse start` does. Its dispatch feels natural for two reasons that Posse can adopt without copying it: intake judgment is written as prose with an explicit "do not over-plan" rule, and the captain never sees the mechanics.
 
@@ -478,16 +478,20 @@ and the Profile is:
   model = "gpt-6.1-sol"
 ```
 
-**Observed usage.** The Lead's notes for the Posse Project record that the image rule was restored on 2026-11-02. Since that date, `codex-sol` ran 88 Tasks in five Projects: 73 Review Tasks, 11 Change Tasks and 4 Research Tasks. Three of the 88 have an image-related title [O: aggregate over real `task.toml` files].
+**Observed usage.** The Lead's notes for the Posse Project record that the image rule was restored on 2026-11-02. Since that date, `codex-sol` ran 88 Tasks in five Projects: 73 Review Tasks, 11 Change Tasks and 4 Research Tasks. Three of the 88 have an image-related title, so 85 are not image work [O: aggregate over real `task.toml` files].
 
-**Cause 1, deterministic: Review auto-start takes the first candidate in config order.**
+**Who started them is not recorded.** [O] Every one of the 88 stores the rule `--profile codex-sol`. [O] A read-only query of a database backup copy shows the same start transition for all `codex-sol` Review Tasks (`source = cli`, note `Task created`), with no field for Lead start or auto-start. The causes below are therefore mechanisms that the code and the reproductions establish. Their share of the 88 historical Tasks is not established.
+
+**Cause 1, a deterministic mechanism: Review auto-start takes the first candidate in config order.**
 
 - [O] `autoStartReviewProfile` documents itself: "otherwise the first candidate in config order whose launch starts a fresh session" (`internal/app/review_rounds.go:768-812`).
 - [O] Candidates come from `Resolve`, which lists `when` rules first in config order (`internal/dispatch/resolve.go:82-92`).
 - [O] Reproduction with the User's rule shape: `Resolve(cfg, "review", "")` returns `profile_required` with `first_candidate=codex-sol` (test `TestReassessReviewCandidateOrder`, Appendix A).
 - [O] Auto-start then passes `--profile codex-sol` to the normal start path (`internal/app/review_rounds.go:147-151`), so the Task records `--profile codex-sol`, exactly like a Lead choice.
-- [I] In every Project that has no typed `review` rule and no `review_loop.profile`, each auto-started Review Round therefore runs on the image Profile. This matches the 73 reviews. Tasks in Projects that set `review_loop.profile` carry the rule `review_loop.profile` instead (115 Tasks).
-- [H] Some of the 73 may be Lead-started reviews. The stored rule text cannot separate the two paths. A Notice or event log query per Task would.
+- [I] In a Project that has no typed `review` rule and no `review_loop.profile`, an auto-started Review Round therefore asks for the image Profile, provided that Profile passes the fresh-session check in the same function.
+- [O] The first-candidate behaviour was added in commit `2c162386` on 2026-10-28, before all 88 Tasks.
+- [O] Tasks in Projects that set `review_loop.profile` carry the rule `review_loop.profile` instead (115 Tasks).
+- [H] Auto-start produced most of the 73 `codex-sol` Review Tasks. The pattern fits: they are Review Rounds in Projects without a reviewer setting. The records cannot confirm it, because a Lead-started review with `--profile codex-sol` looks identical. Lead transcripts for those starts, or a start-source field added to the Task record, would settle it.
 
 **Cause 2, structural: the Profile's name carries the wrong meaning.**
 
@@ -877,7 +881,7 @@ Alternatively the Lead explores by itself or through read-only research children
 
 **Shared across Projects** [O]: one database file and one writer lock, one global `posse.db.mount-lock` for all Sandbox operations, one `config.toml`, one Herdr server (a restart holds every Project), one plugin and binary path, one Worker Go cache, global hooks. Migrations are refused while any Project has a live Task.
 
-**Unneeded complication.** None for the Lead. For the User, global Dispatch Rules apply to every Project unless typed Project rules replace them, which is how the image rule disappears in one Project and governs reviews in another (section E).
+**Unneeded complication.** None for the Lead. For the User, global Dispatch Rules apply to every Project unless typed Project rules replace them, which is how the image rule disappears in one Project and can be picked for reviews in another (section E).
 
 **Guarantees.** One Lead per Project; no cross-Project command; leases checked across Projects.
 
@@ -1066,7 +1070,7 @@ Priority: **P1** fix now under any direction; **P2** next, needs a short design;
 
 | # | Improvement | Why it matters | Validate first | P |
 |---|---|---|---|---|
-| J1 | Review auto-start must not take the first candidate from conditional rules. Use `review_loop.profile`, an unconditional `review` rule, or stop with a Notice | Sends reviews to the image Profile (section E, cause 1) | Reproduce with `TestReassessReviewCandidateOrder`; confirm against event logs that auto-start produced the 73 reviews | P1 |
+| J1 | Review auto-start must not take the first candidate from conditional rules. Use `review_loop.profile`, an unconditional `review` rule, or stop with a Notice | Can send reviews to the image Profile (section E, cause 1) | Reproduce with `TestReassessReviewCandidateOrder`; the historical share is unknown, so add a start-source field to confirm the effect after the fix | P1 |
 | J2 | Show generic rules beside typed rules in `profile_required`, or state the precedence in `posse config show --effective` and `posse doctor` | Hides the image rule (cause 3, X1) | Confirm no Project relies on typed rules to suppress generic ones | P1 |
 | J3 | An unconditional rule or `dispatch.default` is the default when the Lead passes no `--profile`; conditional rules are listed as alternatives in the output | Adding a rule should not remove a default (E2.6, E2.7) | Decide whether silent defaults are acceptable when conditional rules exist; the Lead still reads the list | P1 |
 | J4 | Record why a Profile was chosen (`--because`), separately for Lead choice, auto-start and default; show it in `posse show` and `posse stats` | No audit trail (1,208 of 1,335 Tasks say only `--profile`) | Check that Leads supply a reason reliably in an E2E with a real harness | P2 |
@@ -1184,7 +1188,7 @@ Each runs against an isolated Herdr server and `POSSE_HOME`. Tests marked (real)
 
 The request asks to be challenged. Five of its premises did not hold as stated.
 
-1. **"The Lead selects `codex-sol` for unrelated tasks."** Mostly Posse does, through first-candidate Review auto-start. The Lead-side share is at most the 15 non-review Tasks, and 3 of those were image work [O].
+1. **"The Lead selects `codex-sol` for unrelated tasks."** Posse itself can do this without the Lead, through first-candidate Review auto-start [O: code and reproduction R1]. Of the 88 `codex-sol` Tasks, 85 were not image work and 73 were Review Tasks [O]. Auto-start cannot have started the 15 non-review Tasks, 3 of which were image work, so at least 12 non-image starts were Lead choices [I]. How the 73 reviews divide between auto-start and Lead choice is not recorded [H: mostly auto-start].
 2. **"SQLite has accumulated a significant amount of state."** It has, but the store is not the cause. The review and delivery model is, and a parallel TOML layer costs more than SQLite tuning [O].
 3. **"Posse has become too system-oriented" as a general statement.** The dispatch path on a fresh home is two commands and a three-key file (E1.7, E1.8). The weight is in what happens after `done` for code changes, and in configuration.
 4. **"Firstmate's dispatch is flexible."** Its intake judgment is flexible. Its launch is more locked down than Posse's and recently became stricter (`18b20eaf`, 2026-11-08) [O].
@@ -1212,13 +1216,14 @@ go test ./internal/dispatch -run TestReassessReviewCandidateOrder -v -count=1   
 ```
 
 - The tests assert nothing about product behaviour. They log what the CLI prints. "PASS" means the harness ran to the end.
-- Real-home figures come from read-only aggregation over `~/.posse/projects/*/tasks/*/task.toml` and `ls -l`. The real database was not opened.
+- Real-home figures come from read-only aggregation over `~/.posse/projects/*/tasks/*/task.toml` and `ls -l`.
 - Firstmate and Greenhouse were read, not run.
 
 ### Limits
 
 - Fake agents do not make decisions. The experiments show what Posse permits and prints, not what a real Lead chooses. Claims about Lead behaviour rest on the real Task records and are labelled.
-- The 73 `codex-sol` reviews are attributed to auto-start by code reading plus reproduction of the candidate order, not by per-Task event logs.
+- The origin of the 73 `codex-sol` reviews is a hypothesis. Code reading and the candidate-order reproduction establish that auto-start can select the image Profile. Neither the Task records nor the start transitions in a database backup copy record who started a Task.
+- One read-only query ran against a backup copy of the database (`~/.posse/backup/`), opened immutable. The live database was not opened.
 - Line counts by area use file-name patterns and are lower bounds for logic that lives in shared files.
 - Research children did the wide reading for the Firstmate, Greenhouse, state, Herdr and skills sections. Claims used in this report were spot-checked against the cited lines; counts that were not rechecked are reported as given.
 
