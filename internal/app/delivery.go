@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -174,6 +175,80 @@ func inputDialogVisible(screen string) bool {
 	return false
 }
 
+var (
+	claudeAgentViewMain     = regexp.MustCompile(`(?m)^\s*(?:❯\s+)?◯\s+main\s*$`)
+	claudeAgentSelectedMain = regexp.MustCompile(`(?m)^\s*❯\s+[●◯]\s+main\s*$`)
+	claudeAgentSelectorOpen = regexp.MustCompile(`(?m)^\s*↑/↓ to select`)
+)
+
+const (
+	claudeAgentSelectorRows = 16
+	claudeAgentViewWait     = 3 * time.Second
+)
+
+// showClaudeMainAgent switches a Claude pane back to its main agent. Claude
+// Code sends typed text to the agent whose transcript it shows, so a research
+// child's view left open would receive the message, even after the child ends.
+// The agent list marks the shown agent with ● and the others with ◯; Enter on
+// the main row of its selector shows the main agent again.
+func (s *Service) showClaudeMainAgent(ctx context.Context, paneID string) error {
+	screen := s.visibleScreen(ctx, paneID)
+	if !claudeAgentViewMain.MatchString(screen) {
+		return nil
+	}
+	notReady := axi.Failure("agent_ui_unknown", "Worker pane shows a subagent and Posse could not switch it back to the Worker", true)
+	key := func(name string) bool {
+		before := claudeAgentRows(screen)
+		if _, err := s.herdrCall(ctx, "agent.send_keys", map[string]any{"target": paneID, "keys": []string{name}}); err != nil {
+			return false
+		}
+		deadline := time.Now().Add(claudeAgentViewWait)
+		for {
+			screen = s.visibleScreen(ctx, paneID)
+			if claudeAgentRows(screen) != before {
+				return true
+			}
+			if time.Now().After(deadline) {
+				return false
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if !claudeAgentSelectorOpen.MatchString(screen) && (!key("down") || !claudeAgentSelectorOpen.MatchString(screen)) {
+		return notReady
+	}
+	for row := 0; !claudeAgentSelectedMain.MatchString(screen); row++ {
+		if row == claudeAgentSelectorRows || !key("up") {
+			return notReady
+		}
+	}
+	if !key("enter") || claudeAgentViewMain.MatchString(screen) {
+		return notReady
+	}
+	return nil
+}
+
+// claudeAgentRows returns the agent list and selector hint at the bottom of a
+// Claude screen, without the elapsed times that change every second.
+func claudeAgentRows(screen string) string {
+	lines := strings.Split(strings.TrimRight(screen, "\n "), "\n")
+	var rows []string
+	for _, line := range lines[max(0, len(lines)-claudeAgentSelectorRows-2):] {
+		fields := strings.Fields(line)
+		marker := 0
+		if len(fields) > 0 && fields[0] == "❯" {
+			marker = 1
+		}
+		switch {
+		case len(fields) > marker+1 && (fields[marker] == "●" || fields[marker] == "◯"):
+			rows = append(rows, strings.Join(fields[:marker+2], " "))
+		case strings.Contains(line, "to select"):
+			rows = append(rows, strings.TrimSpace(line))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
 func newDeliveryClaimToken() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -260,6 +335,9 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			if screen.Read.Text == "" || inputDialogVisible(screen.Read.Text) {
 				return axi.Failure("agent_ui_unknown", "Worker input is in a dialog or an unrecognized UI", true)
 			}
+		}
+		if pane.Agent == "claude" {
+			return s.showClaudeMainAgent(ctx, paneID)
 		}
 		return nil
 	}
