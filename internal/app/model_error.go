@@ -69,11 +69,15 @@ type piRenderedError struct {
 func piRenderedErrors(output string) []piRenderedError {
 	var rendered []piRenderedError
 	lines := strings.Split(normalizeModelTerminalOutput(output), "\n")
-	for i := 0; i+1 < len(lines); i++ {
-		errorLine := strings.TrimSpace(lines[i])
-		if strings.TrimSpace(lines[i+1]) != piErrorHelpLine || piErrorInsideToolOutput(lines, i) {
+	for helpAt := 1; helpAt < len(lines); helpAt++ {
+		if strings.TrimSpace(lines[helpAt]) != piErrorHelpLine {
 			continue
 		}
+		i := piErrorStart(lines, helpAt)
+		if i < 0 || piErrorInsideToolOutput(lines, i) {
+			continue
+		}
+		errorLine := strings.TrimSpace(strings.Join(strings.Fields(strings.Join(lines[i:helpAt], " ")), " "))
 		lowerErrorLine := strings.ToLower(errorLine)
 		var message string
 		streamErrorPrefix := false
@@ -88,12 +92,34 @@ func piRenderedErrors(output string) []piRenderedError {
 		}
 		text := strings.TrimSpace(message)
 		message = strings.ToLower(text)
-		if len(message) > 2048 || !piFooterOnly(lines[i+2:]) {
+		if len(message) > 2048 || !piFooterOnly(lines[helpAt+1:]) {
 			continue
 		}
 		rendered = append(rendered, piRenderedError{message: message, text: text, streamErrorPrefix: streamErrorPrefix})
 	}
 	return rendered
+}
+
+const piErrorMaxLines = 12
+
+func piErrorHead(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	return strings.HasPrefix(lower, "error:") || strings.HasPrefix(lower, "stream error:")
+}
+
+// piErrorStart returns the line where the error rendered above the help line
+// begins, or -1. Pi wraps a long message across consecutive non-blank lines.
+func piErrorStart(lines []string, helpAt int) int {
+	for i := helpAt - 1; i >= 0 && helpAt-i <= piErrorMaxLines; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || piTerminalBorder(line) {
+			return -1
+		}
+		if piErrorHead(line) {
+			return i
+		}
+	}
+	return -1
 }
 
 // Pi brackets tool-result panels with horizontal rules. A pane tail may start
