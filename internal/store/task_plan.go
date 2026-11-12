@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/taskplan"
@@ -103,9 +104,10 @@ func (db *DB) reviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan,
 			return err
 		}
 	}
-	note := fmt.Sprintf("Execution plan revised from %d to %d; prior revision evidence invalidated", previous.Revision, plan.Revision)
+	changedFields := plan.ChangedFields(*previous)
+	note := fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; prior revision evidence invalidated", previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
 	if task.State == StateMerging {
-		note = fmt.Sprintf("Execution plan revised from %d to %d; merge gate retained", previous.Revision, plan.Revision)
+		note = fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; merge gate retained", previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, task.State, task.State, "lead", note, time.Now().UnixMilli()); err != nil {
 		return err

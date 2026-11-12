@@ -2957,6 +2957,10 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	return result, err
 }
 
+func relaunchNeedsPlanRevision(plan *taskplan.Plan, requestedProfile string) bool {
+	return requestedProfile != "" && (plan == nil || requestedProfile != plan.Launch.ProfileName)
+}
+
 func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
 	// A completed Change Task keeps its state, so only an explicit relaunch
@@ -2979,7 +2983,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		profileName, profile, kindConfig, ok = plan.Launch.ProfileName, plan.Launch.Profile, plan.Launch.Kind, true
 	}
 	var revision *taskplan.Plan
-	if requestedProfile != "" {
+	if relaunchNeedsPlanRevision(plan, requestedProfile) {
 		resolution, err := dispatch.Resolve(cfg, task.Type, requestedProfile)
 		if err != nil {
 			return failure(profileError(err))
@@ -3164,7 +3168,13 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			return failure(errors.Join(err, releaseErr))
 		}
 	}
+	var changedPlanFields []string
 	if revision != nil {
+		previousPlan, err := task.AdmittedPlan()
+		if err != nil {
+			return failure(admittedPlanFailure(err))
+		}
+		changedPlanFields = revision.ChangedFields(*previousPlan)
 		if err := track("plan.revise", func() error { return db.ReviseTaskPlan(ctx, task, *revision) }); err != nil {
 			return failure(err)
 		}
@@ -3338,6 +3348,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	if err := track("relaunch.write", func() error {
 		instructions := relaunchInstructionsFor(task, gitStateReport, messages, currentTurn)
+		if len(changedPlanFields) > 0 {
+			instructions = append(instructions, []byte("\nThis relaunch revised the admitted plan fields: "+strings.Join(changedPlanFields, ", ")+". Earlier evidence tied to the previous revision is invalid.\n")...)
+		}
 		if generation > 0 {
 			bundle, err := buildBranchAuthorHandoffBundle(ctx, db, home, project.Name, task, launch, generation)
 			if err != nil {

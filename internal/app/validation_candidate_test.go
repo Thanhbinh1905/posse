@@ -202,6 +202,46 @@ func TestFullPipelinePublishSubmitsPrivateCandidateWithoutPushing(t *testing.T) 
 	}
 }
 
+func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("admitted plan = %#v, %v", plan, err)
+	}
+	before := plan.SHA256()
+	if relaunchNeedsPlanRevision(plan, plan.Launch.ProfileName) {
+		t.Fatal("same-Profile relaunch requested a plan revision")
+	}
+	current, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPlan, err := current.AdmittedPlan()
+	if err != nil || currentPlan == nil || currentPlan.SHA256() != before {
+		t.Fatalf("same-Profile relaunch changed admitted plan: %#v, %v", currentPlan, err)
+	}
+	currentCandidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || currentCandidate.ID != candidate.ID || currentCandidate.CandidateSHA != candidate.CandidateSHA {
+		t.Fatalf("same-Profile relaunch changed candidate: before=%+v after=%+v err=%v", candidate, currentCandidate, err)
+	}
+	verdicts, err := fixture.db.ReviewVerdictsFor(context.Background(), fixture.task.ID)
+	if err != nil || len(verdicts) != 1 || verdicts[0].Verdict != store.ReviewPass || verdicts[0].Targets[0].Commit != candidate.CandidateSHA {
+		t.Fatalf("same-Profile relaunch lost Review pass: %#v, %v", verdicts, err)
+	}
+	changedReview := *currentPlan
+	changedReview.Review = "quick"
+	if changedReview.SHA256() == before {
+		t.Fatal("review-relevant plan change kept the prior evidence digest")
+	}
+}
+
 func TestFullPipelineStaleCandidateDoneNamesStaleStateAndNextStep(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)

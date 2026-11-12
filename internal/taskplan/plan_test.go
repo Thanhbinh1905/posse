@@ -3,6 +3,7 @@ package taskplan_test
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -433,8 +434,11 @@ func TestReconfigurationExtendsPlanWithoutReconstructingUnknownIdentity(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next.Revision != 2 || next.PreviousSHA256 != plan.SHA256() || plan.Launch.ModelKnown || plan.Launch.ConfiguredModel != "" || !bytes.Equal(next.Inputs[0].Bytes, plan.Inputs[0].Bytes) {
+	if next.Revision != 2 || next.PreviousSHA256 != plan.SHA256() || next.SHA256() == plan.SHA256() || plan.Launch.ModelKnown || plan.Launch.ConfiguredModel != "" || !bytes.Equal(next.Inputs[0].Bytes, plan.Inputs[0].Bytes) {
 		t.Fatalf("revision or unknown history changed: before=%#v after=%#v", plan, next)
+	}
+	if fields := next.ChangedFields(plan); !reflect.DeepEqual(fields, []string{"launch"}) {
+		t.Fatalf("changed plan fields = %v, want [launch]", fields)
 	}
 }
 
