@@ -65,6 +65,10 @@ func (builtinReviewProvider) RecordVerdict(ctx context.Context, tx VerdictTx, ve
 	if verdict.Provider != BuiltinReviewProvider {
 		return sql.ErrNoRows
 	}
+	return insertVerdict(ctx, tx, verdict)
+}
+
+func insertVerdict(ctx context.Context, tx VerdictTx, verdict Verdict) error {
 	if verdict.RecordedAt == 0 {
 		verdict.RecordedAt = time.Now().UnixMilli()
 	}
