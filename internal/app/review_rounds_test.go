@@ -789,6 +789,107 @@ profile = "opus"
 	}
 }
 
+func TestAutoStartNeverGuessesAmongConditionalRules(t *testing.T) {
+	const base = `[defaults]
+merge_mode = "local"
+review = "quick"
+
+[profiles.author]
+kind = "claude"
+model = "model-author"
+
+[profiles.img]
+kind = "claude"
+model = "model-img"
+
+[profiles.reviewer]
+kind = "claude"
+model = "model-reviewer"
+
+[review_loop]
+enabled = true
+auto_start = true
+`
+	for _, test := range []struct {
+		name    string
+		global  string
+		project string
+		want    string
+	}{
+		{
+			name:    "global conditional image rule first and a default",
+			global:  "[[dispatch]]\nwhen = \"Task requires generating images\"\nuse = \"img\"\n\n[[dispatch]]\nwhen = \"Heavy work\"\nuse = \"reviewer\"\n\n[dispatch.default]\nuse = \"reviewer\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n",
+		},
+		{
+			name:    "only conditional review rules",
+			global:  "[[dispatch]]\ntype = \"review\"\nwhen = \"security changes\"\nuse = \"img\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n",
+		},
+		{
+			name:    "an unconditional review rule beside a conditional image rule",
+			global:  "[[dispatch]]\nwhen = \"Task requires generating images\"\nuse = \"img\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n\n[[dispatch]]\ntype = \"review\"\nuse = \"reviewer\"\n",
+			want:    "reviewer",
+		},
+		{
+			name:    "an unconditional review rule after a conditional review rule",
+			global:  "[[dispatch]]\ntype = \"review\"\nwhen = \"security changes\"\nuse = \"img\"\n\n[[dispatch]]\ntype = \"review\"\nuse = \"reviewer\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n",
+			want:    "reviewer",
+		},
+		{
+			name:    "dispatch.default with no conditional rule",
+			global:  "[dispatch.default]\nuse = \"reviewer\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n",
+			want:    "reviewer",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, db, change := newAutoStartReviewFixture(t, base+test.project)
+			if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(base+test.global), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			projectConfig := config.ConfigPath(f.home, f.project.Name)
+			if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(projectConfig, []byte(test.project), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			started, err := f.service.maybeAutoStartReviewRound(&axi.Context{Context: ctx, Out: &bytes.Buffer{}}, db, f.home, f.project, change)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.want == "" {
+				if started || len(rounds) != 0 {
+					review, _ := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
+					t.Fatalf("auto-start guessed Profile %q (%s)", review.Profile, review.DispatchRule)
+				}
+				notices := assertReviewAutoStartReadinessNotices(t, db, change, 1)
+				for _, want := range []string{"review_loop.profile", "img"} {
+					if !strings.Contains(notices[0].Summary, want) {
+						t.Fatalf("Notice lacks %q: %s", want, notices[0].Summary)
+					}
+				}
+				return
+			}
+			if !started || len(rounds) != 1 {
+				t.Fatalf("auto-start started=%v rounds=%d notices=%#v", started, len(rounds), reviewAutoStartSkippedNotices(t, db, change))
+			}
+			review, err := db.TaskByID(ctx, change.ProjectID, rounds[0].ReviewTaskID)
+			if err != nil || review.Profile != test.want {
+				t.Fatalf("auto-start Review Task profile=%q rule=%q, want %q (%v)", review.Profile, review.DispatchRule, test.want, err)
+			}
+		})
+	}
+}
+
 func TestAutoStartNamesIneligibleReviewRuleCandidatesPerHead(t *testing.T) {
 	f, db, change := newAutoStartReviewFixture(t, `[defaults]
 merge_mode = "local"

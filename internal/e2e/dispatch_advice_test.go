@@ -39,7 +39,7 @@ func TestDispatchAlternativesWithoutQuotaCollectionCLI(t *testing.T) {
 			choices = append(choices, line)
 		}
 	}
-	if len(choices) != 3 || !strings.Contains(choices[0], "complex work") || !strings.Contains(choices[1], "complex work") || choices[2] != `when="" profile=author` {
+	if len(choices) != 3 || !strings.Contains(choices[0], "complex work") || !strings.Contains(choices[1], "complex work") || choices[2] != `when="" profile=author rule=type=change source=global default` {
 		t.Fatalf("conditional ordering: %+v", choices)
 	}
 	output = runPosse(t, f.binary, f.repo, f.leadEnv, "dispatch", "--brief", brief, "--profile", "reviewer", "--json")

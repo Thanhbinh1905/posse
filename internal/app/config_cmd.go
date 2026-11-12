@@ -10,6 +10,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -58,7 +59,7 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return configError(err)
 		}
-		result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "sources", Value: sources}}
+		result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "sources", Value: sources}, {Key: "dispatch_rules", Value: effectiveDispatchRules(cfg)}, {Key: "dispatch_precedence", Value: stringsToAny(dispatch.Precedence)}}
 		if len(cfg.Warnings) > 0 {
 			result = append(result, axi.Field{Key: "warnings", Value: stringsToAny(cfg.Warnings)})
 		}
@@ -301,4 +302,27 @@ func configScope(project string) string {
 		return "global"
 	}
 	return "project:" + strings.TrimSpace(project)
+}
+
+func effectiveDispatchRules(cfg config.Config) []any {
+	rows := []any{}
+	for _, rule := range cfg.Dispatch {
+		rows = append(rows, axi.Object{
+			{Key: "use", Value: strings.Join(rule.ProfileNames(), ", ")},
+			{Key: "type", Value: defaultValue(rule.Type, "any")},
+			{Key: "when", Value: rule.When},
+			{Key: "source", Value: rule.Source},
+			{Key: "precedence", Value: dispatch.RulePrecedence(rule)},
+		})
+	}
+	if cfg.DispatchDefault.Use != "" {
+		rows = append(rows, axi.Object{
+			{Key: "use", Value: cfg.DispatchDefault.Use},
+			{Key: "type", Value: "dispatch.default"},
+			{Key: "when", Value: ""},
+			{Key: "source", Value: cfg.DispatchDefault.Source},
+			{Key: "precedence", Value: "default when no unconditional rule applies"},
+		})
+	}
+	return rows
 }

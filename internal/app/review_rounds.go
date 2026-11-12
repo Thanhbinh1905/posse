@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -766,9 +767,10 @@ func autoStartReviewerUnavailable(err error) (*axi.Error, bool) {
 }
 
 // autoStartReviewProfile returns the Profile auto-start passes to `posse
-// review start`: empty when review_loop.profile or one Dispatch Rule resolves a
-// reviewer, otherwise the first candidate in config order whose launch starts
-// a fresh session. The Review spawn rechecks the launch.
+// review start`: empty when dispatch resolves one Profile, otherwise the first
+// unconditional type="review" rule candidate whose launch starts a fresh
+// session. It never chooses a conditional candidate or a default meant for
+// other work; with no such candidate it fails with profile_required.
 func (s *Service) autoStartReviewProfile(ctx context.Context, project store.Project, home string) (string, error) {
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
@@ -792,7 +794,16 @@ func (s *Service) autoStartReviewProfile(ctx context.Context, project store.Proj
 			rejected = append(rejected, fmt.Sprintf("%s (%s)", resolution.Profile, reason))
 		}
 	} else {
+		var reviewDefaults []dispatch.Candidate
 		for _, candidate := range profileErr.Candidates {
+			if candidate.Default && candidate.Scope == "type=review" {
+				reviewDefaults = append(reviewDefaults, candidate)
+			}
+		}
+		if len(reviewDefaults) == 0 {
+			return "", reviewProfileUndecided(profileErr.Candidates)
+		}
+		for _, candidate := range reviewDefaults {
 			reason := ""
 			if candidateResolution, err := s.resolveDispatch(ctx, project, cfg, "review", candidate.Profile); err != nil {
 				reason = err.Error()
@@ -809,6 +820,19 @@ func (s *Service) autoStartReviewProfile(ctx context.Context, project store.Proj
 		return "", axi.Failure("review_identity_ineligible", "no reviewer candidate starts a fresh Review session: "+strings.Join(rejected, ", "), false)
 	}
 	return "", nil
+}
+
+func reviewProfileUndecided(candidates []dispatch.Candidate) error {
+	var names []string
+	help := []string{}
+	for _, candidate := range candidates {
+		if !slices.Contains(names, candidate.Profile) {
+			names = append(names, candidate.Profile)
+		}
+		help = append(help, candidateHelp(candidate))
+	}
+	help = append(help, "Set `review_loop.profile` or add a `type = \"review\"` Dispatch Rule without `when` to let auto-start choose a reviewer")
+	return axi.Failure("profile_required", "no review_loop.profile or unconditional type=\"review\" Dispatch Rule chooses a reviewer, and Posse does not choose among "+strings.Join(names, ", ")+"; set review_loop.profile", false, help...)
 }
 
 // recordAutoStartReviewerReadiness raises one Notice per reviewed head, so a

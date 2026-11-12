@@ -383,7 +383,9 @@ func TestDoctorWarnsOnUnresolvableReviewDispatchRules(t *testing.T) {
 		{name: "no rule matches review", config: "[profiles.deep]\nkind = \"claude\"\n[[dispatch]]\ntype = \"change\"\nuse = \"deep\"\n", status: "warn", detail: "no Dispatch Rule matches"},
 		{name: "disabled kind", config: "[kinds.pi]\ndisabled = true\n[profiles.deep]\nkind = \"pi\"\n[[dispatch]]\ntype = \"review\"\nuse = \"deep\"\n", status: "warn", detail: "disabled"},
 		{name: "one candidate unusable", config: "[kinds.pi]\ndisabled = true\n[profiles.deep]\nkind = \"pi\"\n[profiles.quick]\nkind = \"claude\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"small\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"large\"\nuse = \"quick\"\n", status: "warn", detail: "deep"},
-		{name: "candidates all usable", config: "[profiles.deep]\nkind = \"claude\"\n[profiles.quick]\nkind = \"codex\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"small\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"large\"\nuse = \"quick\"\n", status: "ok", detail: "deep, quick"},
+		{name: "candidates all usable without auto-start", config: "[review_loop]\nauto_start = false\n[profiles.deep]\nkind = \"claude\"\n[profiles.quick]\nkind = \"codex\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"small\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"large\"\nuse = \"quick\"\n", status: "ok", detail: "deep, quick"},
+		{name: "conditional candidates leave auto-start without a reviewer", config: "[profiles.deep]\nkind = \"claude\"\n[profiles.quick]\nkind = \"codex\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"small\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nwhen = \"large\"\nuse = \"quick\"\n", status: "warn", detail: "auto-start raises a Notice"},
+		{name: "unconditional review rules feed auto-start", config: "[profiles.deep]\nkind = \"claude\"\n[profiles.quick]\nkind = \"codex\"\n[[dispatch]]\ntype = \"review\"\nuse = \"deep\"\n[[dispatch]]\ntype = \"review\"\nuse = \"quick\"\n", status: "ok", detail: "deep, quick"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()

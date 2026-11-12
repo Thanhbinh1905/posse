@@ -548,14 +548,19 @@ func (s *Service) reviewDispatchCheck(ctx context.Context, project store.Project
 		return "warn", "review Tasks cannot resolve a Profile: " + err.Error(), fix
 	}
 	var candidates, unusable []string
+	autoStart := false
 	for _, candidate := range profileErr.Candidates {
 		candidates = append(candidates, candidate.Profile)
+		autoStart = autoStart || (candidate.Default && candidate.Scope == "type=review")
 		if _, err := s.resolveDispatch(ctx, project, cfg, "review", candidate.Profile); err != nil {
 			unusable = append(unusable, err.Error())
 		}
 	}
 	if len(unusable) > 0 {
 		return "warn", "review Dispatch Rule candidates cannot start: " + strings.Join(unusable, "; "), fix
+	}
+	if !autoStart && cfg.ReviewLoop.Enabled && cfg.ReviewLoop.AutoStart {
+		return "warn", "review start needs --profile among " + strings.Join(candidates, ", ") + "; Review auto-start raises a Notice instead of choosing a conditional or non-review candidate", "Set review_loop.profile or add a type=\"review\" Dispatch Rule without `when`, then rerun `posse doctor`"
 	}
 	return "ok", "review start chooses among " + strings.Join(candidates, ", "), ""
 }
