@@ -303,9 +303,13 @@ func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
 	if err := fixture.db.ReviseTaskPlan(ctx, current, changedReview); err != nil {
 		t.Fatalf("revise Review policy: %v", err)
 	}
-	current, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	revisedTask, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	revisedPlan, err := revisedTask.AdmittedPlan()
+	if err != nil || revisedPlan == nil || revisedPlan.Review != "quick" {
+		t.Fatalf("admitted Review policy after revision = %#v, %v", revisedPlan, err)
 	}
 	currentCandidate, err = fixture.db.LatestValidationCandidate(ctx, fixture.task.ID, "")
 	if err != nil || currentCandidate.State != store.ValidationCandidateStale {
