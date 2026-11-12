@@ -511,6 +511,11 @@ func processEnvironmentEmpty(pid int) bool {
 	return err == nil && len(contents) == 0
 }
 
+func processInTaskContainment(pid int, task store.Task) bool {
+	return task.ContainmentMode == "cgroup" && task.ContainmentPath != "" && processInCgroup(pid, task.ContainmentPath) ||
+		task.ContainmentMarker != "" && processHasTaskMarker(pid, task.ContainmentMarker)
+}
+
 func processHasTaskMarker(pid int, marker string) bool {
 	contents, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
 	if err != nil {

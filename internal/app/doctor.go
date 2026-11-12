@@ -280,6 +280,7 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 			addCheck("Claude Code lowkey", "warn", versionErr.Error(), "Check the Claude Code installation")
 		}
 	}
+	addCheck(greenhouseDaemonCheck(home))
 	checks = append(checks, preferenceSizeWarnings(home, registeredProjects)...)
 	checks = append(checks, knowledgeWarnings(home, registeredProjects)...)
 	// A removed config value is already reported by the config checks above.

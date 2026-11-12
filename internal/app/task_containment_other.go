@@ -45,6 +45,8 @@ func retainTaskContainmentProcesses(*sandboxProcessAuthorization, store.Task, []
 
 func processHasTaskMarker(int, string) bool { return false }
 
+func processInTaskContainment(int, store.Task) bool { return false }
+
 func taskSharedProcessExclusions(store.Task) ([]taskProcessDetail, map[int]bool, error) {
 	return nil, map[int]bool{}, nil
 }
