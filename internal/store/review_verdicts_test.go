@@ -74,6 +74,55 @@ func (f reviewVerdictFixture) signalCount(t *testing.T, id int64) int {
 	return count
 }
 
+func TestBuiltInReviewWritesImmutableProviderVerdict(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','admitted',NULL,1)`, f.change, f.review, reviewShaA, reviewShaB, reviewShaA, reviewShaA, reportHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.RecordWorkerSignalWithVerdict(f.ctx, f.task(t, f.review), "done", "reviewed", map[string]string{}, "task_done", &ReviewVerdictInput{Verdict: ReviewInconclusive, ReportSHA256: reportHash, Findings: findingsInput("binding", "P1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	var provider, head, target, outcome, mode string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT provider,head_sha,target_sha,verdict,mode FROM verdicts WHERE task_id=?`, f.review).Scan(&provider, &head, &target, &outcome, &mode); err != nil {
+		t.Fatal(err)
+	}
+	if provider != BuiltinReviewProvider || head != reviewShaB || target != reviewShaA || outcome != "inconclusive" || mode != "gate" {
+		t.Fatalf("verdict binding = %q %q %q %q %q", provider, head, target, outcome, mode)
+	}
+	stored, err := f.db.VerdictsFor(f.ctx, f.review)
+	if err != nil || len(stored) != 1 || stored[0].Head != reviewShaB || stored[0].Target != reviewShaA {
+		t.Fatalf("stored Verdicts = %#v, %v", stored, err)
+	}
+	verdict := Verdict{Mode: mode, Head: head, Outcome: outcome}
+	if verdict.Qualifies(head) {
+		t.Fatal("inconclusive verdict qualified without findings")
+	}
+	for _, tc := range []struct {
+		name    string
+		verdict Verdict
+		want    bool
+	}{
+		{"clean gate", Verdict{Mode: "gate", Head: reviewShaA, Outcome: "clean"}, true},
+		{"nonblocking findings", Verdict{Mode: "gate", Head: reviewShaA, Outcome: "findings"}, true},
+		{"blocking findings", Verdict{Mode: "gate", Head: reviewShaA, Outcome: "findings", Blocking: 1}, false},
+		{"parallel", Verdict{Mode: "parallel", Head: reviewShaA, Outcome: "clean"}, false},
+		{"wrong head", Verdict{Mode: "gate", Head: reviewShaB, Outcome: "clean"}, false},
+		{"inconclusive zero findings", Verdict{Mode: "gate", Head: reviewShaA, Outcome: "inconclusive"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.verdict.Qualifies(reviewShaA); got != tc.want {
+				t.Fatalf("Qualifies() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE verdicts SET head_sha=? WHERE task_id=?`, reviewShaB, f.review); err == nil {
+		t.Fatal("Verdict update succeeded")
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM verdicts WHERE task_id=?`, f.review); err == nil {
+		t.Fatal("Verdict delete succeeded")
+	}
+}
+
 func TestReviewVerdictPersistsWithSignalAndReviewerIdentity(t *testing.T) {
 	targets := []ReviewTarget{{Repository: "shop", Commit: reviewShaA}}
 	f := newReviewVerdictFixture(t, targets)

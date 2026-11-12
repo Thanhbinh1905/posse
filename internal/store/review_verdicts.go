@@ -184,6 +184,61 @@ func (db *DB) CurrentReviewPass(ctx context.Context, changeTaskID int64, candida
 	return ReviewVerdict{}, false, nil
 }
 
+func recordBuiltinVerdictsTx(ctx context.Context, tx *writeTx, taskID int64, input ReviewVerdictInput) error {
+	provider := ReviewProvider(builtinReviewProvider{})
+	outcome := "clean"
+	blocking := 0
+	switch input.Verdict {
+	case ReviewChangesRequested:
+		outcome = "findings"
+	case ReviewInconclusive:
+		outcome = "inconclusive"
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT ship_task_id,repository,head_sha,target_commit_sha,scope_base_sha FROM review_rounds WHERE review_task_id=? ORDER BY repository`, taskID)
+	if err != nil {
+		return err
+	}
+	var verdicts []Verdict
+	for rows.Next() {
+		var verdict Verdict
+		var changeTaskID int64
+		verdict.TaskID, verdict.Provider, verdict.Protocol, verdict.Mode = taskID, BuiltinReviewProvider, "builtin-v1", "gate"
+		verdict.Outcome, verdict.Blocking = outcome, blocking
+		if err := rows.Scan(&changeTaskID, &verdict.Repository, &verdict.Head, &verdict.Target, &verdict.ReviewBase); err != nil {
+			rows.Close()
+			return err
+		}
+		if outcome == "findings" {
+			verdict.Blocking, err = countBlockingReviewFindingsTx(ctx, tx, changeTaskID, verdict.Repository, input.Findings.BlockAt)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		verdicts = append(verdicts, verdict)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(verdicts) == 0 {
+		targets, err := queryReviewTargets(ctx, tx, taskID)
+		if err != nil {
+			return err
+		}
+		for _, target := range targets {
+			verdicts = append(verdicts, Verdict{TaskID: taskID, Repository: target.Repository, Provider: BuiltinReviewProvider, Protocol: "builtin-v1", Head: target.Commit, Target: target.Commit, ReviewBase: target.Commit, Outcome: outcome, Blocking: blocking, Mode: "gate"})
+		}
+	}
+	for _, verdict := range verdicts {
+		if err := provider.RecordVerdict(ctx, tx, verdict); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // recordReviewVerdictTx writes the verdict inside the Signal transaction. The
 // bound target, Reviewer launch identity and Review Task identity come from
 // the store, never from the Worker.
@@ -274,8 +329,14 @@ func recordReviewVerdictTx(ctx context.Context, tx *writeTx, taskID, signalID in
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO review_verdicts(task_id,signal_id,verdict,report_sha256,targets_json,launch_number,profile_name,configured_model,model_known,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		taskID, signalID, input.Verdict, input.ReportSHA256, string(encoded), reviewer.LaunchNumber, reviewer.Profile, reviewer.ConfiguredModel, modelKnown, time.Now().UnixMilli())
-	if err != nil || input.Verdict != ReviewPass || input.NextStep == nil || !changeTaskID.Valid {
+	if err != nil {
 		return err
+	}
+	if err := recordBuiltinVerdictsTx(ctx, tx, taskID, input); err != nil {
+		return err
+	}
+	if input.Verdict != ReviewPass || input.NextStep == nil || !changeTaskID.Valid {
+		return nil
 	}
 	return queueReviewPassNextStepTx(ctx, tx, projectID, changeTaskID.Int64, *input.NextStep)
 }
