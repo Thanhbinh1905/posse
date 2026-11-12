@@ -57,7 +57,7 @@ func (db *DB) TaskPlanRevisions(ctx context.Context, taskID int64) ([]string, er
 }
 
 // ReviseTaskPlan compares the admitted revision before recording an explicit
-// launch reconfiguration. It invalidates merge-head evidence unless the Task is merging.
+// plan change. It invalidates review evidence when review-relevant fields change.
 func (db *DB) ReviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan) error {
 	return db.reviseTaskPlan(ctx, task, plan, nil)
 }
@@ -105,7 +105,32 @@ func (db *DB) reviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan,
 		}
 	}
 	changedFields := plan.ChangedFields(*previous)
+	reviewRelevant := false
+	for _, field := range changedFields {
+		switch field {
+		case "review", "validation_loops", "inputs", "execution", "preferences", "grants", "user_choice", "member_admissions":
+			reviewRelevant = true
+		}
+	}
+	invalidateReview := reviewRelevant && task.State != StateMerging
+	if invalidateReview {
+		if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='stale',observed_author_sha=submitted_sha,updated_at=? WHERE task_id=? AND state IN ('preparing','active')`, time.Now().UnixMilli(), task.ID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET invalidated_from_status=status,status='invalidated',invalidated_by_sha=(SELECT candidate_sha FROM validation_candidates WHERE id=validation_stage_results.candidate_id) WHERE task_id=? AND status IN ('passed','failed')`, task.ID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO branch_author_invalidated_verdicts(task_id,change_task_id,invalidated_at) SELECT v.task_id,t.reviews_task_id,? FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=?`, time.Now().UnixMilli(), task.ID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE review_rounds SET status='void',verdict=NULL WHERE ship_task_id=? AND status IN ('admitted','verdict')`, task.ID); err != nil {
+			return err
+		}
+	}
 	note := fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; prior revision evidence invalidated", previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
+	if invalidateReview {
+		note += "; Review evidence invalidated because review-relevant fields changed"
+	}
 	if task.State == StateMerging {
 		note = fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; merge gate retained", previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
 	}
