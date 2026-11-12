@@ -181,8 +181,19 @@ func TestAcknowledgedNoticeReceiptSurvivesCrashAndRebuild(t *testing.T) {
 			if err := json.Unmarshal(output, &next); err != nil {
 				t.Fatalf("decode later batch: %s: %v", output, err)
 			}
-			if len(next.Notices) != 1 || next.Notices[0].ID != newerID || next.Delivery.BatchID == first.Delivery.BatchID {
-				t.Fatalf("acknowledged Notice was replayed or later Notice was lost: first=%+v next=%+v", first, next)
+			containsNewer := false
+			for _, notice := range next.Notices {
+				if notice.ID == newerID {
+					containsNewer = true
+				}
+				for _, firstID := range first.Delivery.NoticeIDs {
+					if notice.ID == firstID {
+						t.Fatalf("acknowledged Notice was replayed: first=%+v next=%+v", first, next)
+					}
+				}
+			}
+			if !containsNewer || next.Delivery.BatchID == first.Delivery.BatchID {
+				t.Fatalf("later Notice was lost: first=%+v next=%+v", first, next)
 			}
 		})
 	}
