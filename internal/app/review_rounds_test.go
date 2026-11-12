@@ -687,6 +687,13 @@ auto_start = true
 	var output bytes.Buffer
 	cli := f.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), "profile_required") || !strings.Contains(output.String(), "sonnet, opus") {
+		t.Fatalf("review start among two unconditional review Profiles exit=%d output=%s", code, output.String())
+	}
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(strings.Replace(configText, "[[dispatch]]\ntype = \"review\"\nuse = \"opus\"\n\n", "", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
 	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code != 0 {
 		t.Fatalf("review start without --profile exit=%d output=%s", code, output.String())
 	}
@@ -700,7 +707,7 @@ auto_start = true
 	}
 }
 
-func TestAutoStartPicksFirstReviewRuleCandidateEvenWithAuthorModel(t *testing.T) {
+func TestAutoStartUsesTheReviewRuleProfileEvenWithAuthorModel(t *testing.T) {
 	f, db, change := newAutoStartReviewFixture(t, `[defaults]
 merge_mode = "local"
 review = "quick"
@@ -720,10 +727,6 @@ use = "sonnet"
 [[dispatch]]
 type = "review"
 use = "sonnet"
-
-[[dispatch]]
-type = "review"
-use = "opus"
 
 [review_loop]
 enabled = true
@@ -806,6 +809,11 @@ model = "model-img"
 kind = "claude"
 model = "model-reviewer"
 
+[profiles.resumer]
+kind = "claude"
+model = "model-reviewer"
+args = ["--continue"]
+
 [review_loop]
 enabled = true
 auto_start = true
@@ -815,16 +823,41 @@ auto_start = true
 		global  string
 		project string
 		want    string
+		notice  []string
 	}{
 		{
 			name:    "global conditional image rule first and a default",
 			global:  "[[dispatch]]\nwhen = \"Task requires generating images\"\nuse = \"img\"\n\n[[dispatch]]\nwhen = \"Heavy work\"\nuse = \"reviewer\"\n\n[dispatch.default]\nuse = \"reviewer\"\n",
 			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n",
+			notice:  []string{"review_loop.profile", "img"},
 		},
 		{
 			name:    "only conditional review rules",
 			global:  "[[dispatch]]\ntype = \"review\"\nwhen = \"security changes\"\nuse = \"img\"\n",
 			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n",
+			notice:  []string{"review_loop.profile", "img"},
+		},
+		{
+			name:    "unconditional review rules in global and Project config name different Profiles",
+			global:  "[[dispatch]]\ntype = \"review\"\nuse = \"reviewer\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n\n[[dispatch]]\ntype = \"review\"\nuse = \"img\"\n",
+			notice:  []string{"review_loop.profile", "img, reviewer"},
+		},
+		{
+			name:    "an unconditional review rule with a use array",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n\n[[dispatch]]\ntype = \"review\"\nuse = [\"reviewer\", \"img\"]\n",
+			notice:  []string{"review_loop.profile", "reviewer, img"},
+		},
+		{
+			name:    "unconditional review rules in global and Project config name the same Profile",
+			global:  "[[dispatch]]\ntype = \"review\"\nuse = \"reviewer\"\n",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n\n[[dispatch]]\ntype = \"review\"\nuse = \"reviewer\"\n",
+			want:    "reviewer",
+		},
+		{
+			name:    "one unconditional review Profile starts a fresh session",
+			project: "[[dispatch]]\ntype = \"change\"\nuse = \"author\"\n\n[[dispatch]]\ntype = \"review\"\nuse = \"resumer\"\n\n[[dispatch]]\ntype = \"review\"\nuse = \"reviewer\"\n",
+			want:    "reviewer",
 		},
 		{
 			name:    "an unconditional review rule beside a conditional image rule",
@@ -872,7 +905,7 @@ auto_start = true
 					t.Fatalf("auto-start guessed Profile %q (%s)", review.Profile, review.DispatchRule)
 				}
 				notices := assertReviewAutoStartReadinessNotices(t, db, change, 1)
-				for _, want := range []string{"review_loop.profile", "img"} {
+				for _, want := range test.notice {
 					if !strings.Contains(notices[0].Summary, want) {
 						t.Fatalf("Notice lacks %q: %s", want, notices[0].Summary)
 					}
