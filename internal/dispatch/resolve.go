@@ -17,6 +17,10 @@ type Resolution struct {
 type Candidate struct {
 	When    string
 	Profile string
+	Scope   string
+	Source  string
+	// Default marks a Profile that applies when no `when` condition does.
+	Default bool
 }
 
 type ProfileError struct {
@@ -46,6 +50,31 @@ func StoredProfile(cfg config.Config, name, rule string) (config.Profile, bool) 
 	return profile, ok
 }
 
+// Precedence is the order Resolve applies. It is the only definition of
+// dispatch precedence; `posse config show --effective` prints it and
+// docs/spec.md section 11 documents it.
+var Precedence = []string{
+	"1. --profile <name> wins.",
+	"2. For a Review Task, review_loop.profile.",
+	"3. Rules apply when their type equals the Task type or they have no type, from the Project and the global config alike.",
+	"4. The default tier is the first non-empty one of: unconditional rules of the Task type, unconditional rules with no type, dispatch.default (the Project value replaces the global one).",
+	"5. Posse never evaluates `when`. With no applicable conditional rule, a default tier of one rule naming one Profile is used.",
+	"6. Otherwise profile_required lists the conditional candidates in config order (Project before global), then the default tier marked default. The Lead passes --profile.",
+	"7. With no Dispatch Rules and no dispatch.default, the Profile is inherited from the Lead per defaults.dispatch_inheritance.",
+}
+
+func RulePrecedence(rule config.Rule) string {
+	switch {
+	case rule.When != "":
+		return "conditional: listed for the Lead to choose"
+	case rule.Type != "":
+		return "default for type=" + rule.Type
+	default:
+		return "default for types with no unconditional typed rule"
+	}
+}
+
+// Resolve chooses the Profile for a new Task in the order of Precedence.
 func Resolve(cfg config.Config, taskType, requested string) (Resolution, error) {
 	resolve := func(name, rule string) (Resolution, error) {
 		profile, found := cfg.Profiles[name]
@@ -63,36 +92,46 @@ func Resolve(cfg config.Config, taskType, requested string) (Resolution, error) 
 	if taskType == "review" && cfg.ReviewLoop.Profile != "" {
 		return resolve(cfg.ReviewLoop.Profile, "review_loop.profile")
 	}
-	var typedMatches, genericMatches []config.Rule
+	var conditional []Candidate
+	var typedDefaults, genericDefaults []config.Rule
 	for _, rule := range cfg.Dispatch {
-		if rule.Type == taskType {
-			typedMatches = append(typedMatches, rule)
-		} else if rule.Type == "" {
-			genericMatches = append(genericMatches, rule)
+		if rule.Type != taskType && rule.Type != "" {
+			continue
 		}
-	}
-	matches := genericMatches
-	if len(typedMatches) > 0 {
-		matches = typedMatches
-	}
-	if len(matches) == 1 && matches[0].When == "" && len(matches[0].ProfileNames()) == 1 {
-		return resolve(matches[0].ProfileNames()[0], ruleDescription(matches[0]))
-	}
-	if len(matches) > 0 {
-		var candidates []Candidate
-		for _, conditional := range []bool{true, false} {
-			for _, rule := range matches {
-				if (rule.When != "") == conditional {
-					for _, name := range rule.ProfileNames() {
-						candidates = append(candidates, Candidate{When: rule.When, Profile: name})
-					}
-				}
+		switch {
+		case rule.When != "":
+			for _, name := range rule.ProfileNames() {
+				conditional = append(conditional, Candidate{When: rule.When, Profile: name, Scope: ruleScope(rule), Source: rule.Source})
 			}
+		case rule.Type != "":
+			typedDefaults = append(typedDefaults, rule)
+		default:
+			genericDefaults = append(genericDefaults, rule)
 		}
-		return Resolution{}, &ProfileError{Code: "profile_required", Message: "multiple Dispatch Rules could apply; choose a Profile", Candidates: candidates}
 	}
-	if cfg.DispatchDefault.Use != "" {
-		return resolve(cfg.DispatchDefault.Use, "dispatch.default")
+	defaultRules := typedDefaults
+	if len(defaultRules) == 0 {
+		defaultRules = genericDefaults
+	}
+	var defaults []Candidate
+	for _, rule := range defaultRules {
+		for _, name := range rule.ProfileNames() {
+			defaults = append(defaults, Candidate{Profile: name, Scope: ruleScope(rule), Source: rule.Source, Default: true})
+		}
+	}
+	if len(conditional) == 0 {
+		if len(defaultRules) == 1 && len(defaults) == 1 {
+			return resolve(defaults[0].Profile, ruleDescription(defaultRules[0]))
+		}
+		if len(defaults) == 0 && cfg.DispatchDefault.Use != "" {
+			return resolve(cfg.DispatchDefault.Use, "dispatch.default")
+		}
+	}
+	if len(defaults) == 0 && cfg.DispatchDefault.Use != "" {
+		defaults = []Candidate{{Profile: cfg.DispatchDefault.Use, Scope: "dispatch.default", Source: cfg.DispatchDefault.Source, Default: true}}
+	}
+	if candidates := append(conditional, defaults...); len(candidates) > 0 {
+		return Resolution{}, &ProfileError{Code: "profile_required", Message: "multiple Dispatch Rules could apply; choose a Profile", Candidates: candidates}
 	}
 	if len(cfg.Dispatch) == 0 && cfg.Lead.Kind != "" {
 		if _, ok := cfg.Kinds[cfg.Lead.Kind]; ok {
@@ -128,4 +167,11 @@ func ruleDescription(rule config.Rule) string {
 		return "type=" + rule.Type
 	}
 	return "when=" + rule.When
+}
+
+func ruleScope(rule config.Rule) string {
+	if rule.Type != "" {
+		return "type=" + rule.Type
+	}
+	return "type=any"
 }

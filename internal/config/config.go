@@ -179,9 +179,10 @@ type Profile struct {
 }
 
 type Rule struct {
-	Type string `toml:"type" json:"type"`
-	When string `toml:"when" json:"when"`
-	Use  any    `toml:"use" json:"use"`
+	Type   string `toml:"type" json:"type"`
+	When   string `toml:"when" json:"when"`
+	Use    any    `toml:"use" json:"use"`
+	Source string `toml:"-" json:"source"`
 }
 
 type Autonomy struct {
@@ -263,7 +264,8 @@ type Config struct {
 }
 
 type DispatchDefault struct {
-	Use string `toml:"use" json:"use"`
+	Use    string `toml:"use" json:"use"`
+	Source string `toml:"-" json:"source,omitempty"`
 }
 
 type InvalidError struct {
@@ -485,13 +487,15 @@ func removeLegacyGateSettings(path string, values map[string]any) []string {
 func configFromMaps(globalPath string, global map[string]any, projectPath string, project map[string]any, projectName string) (Config, error) {
 	globalRules, globalDefault := extractDispatch(global)
 	merged := mergeMaps(defaultMap(), global)
+	projectRuleCount, defaultSource := 0, "global"
 	if projectName != "" {
 		projectRules, projectDefault := extractDispatch(project)
 		project = applyProjectScalars(project)
 		merged = mergeMaps(merged, project)
 		merged["dispatch_rules"] = append(projectRules, globalRules...)
+		projectRuleCount = len(projectRules)
 		if projectDefault != "" {
-			globalDefault = projectDefault
+			globalDefault, defaultSource = projectDefault, "project"
 		}
 	} else {
 		merged["dispatch_rules"] = globalRules
@@ -516,6 +520,15 @@ func configFromMaps(globalPath string, global map[string]any, projectPath string
 	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
 		field := undecoded[0]
 		return Config{}, &InvalidError{File: globalPath, Key: field.String(), Reason: "unknown configuration key"}
+	}
+	for i := range cfg.Dispatch {
+		cfg.Dispatch[i].Source = "global"
+		if i < projectRuleCount {
+			cfg.Dispatch[i].Source = "project"
+		}
+	}
+	if cfg.DispatchDefault.Use != "" {
+		cfg.DispatchDefault.Source = defaultSource
 	}
 	cfg.LeadLanguageDefault = !hasLeadLanguage(global) && !hasLeadLanguage(project)
 	cfg.Files = []string{globalPath}

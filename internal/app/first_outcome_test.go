@@ -382,12 +382,15 @@ use='claude-opus'
 			t.Fatalf("missing conditional choice or fallback %q: %s", text, output)
 		}
 	}
-	if strings.Contains(output, "image work") {
-		t.Fatalf("generic rule competed with typed rules: %s", output)
+	typed := strings.Index(output, `profile=claude-opus rule=type=research source=project"`)
+	generic := strings.Index(output, `when=\"image work\" profile=codex-sol rule=type=any source=global"`)
+	fallback := strings.Index(output, `profile=pi-luna rule=type=research source=project default"`)
+	if typed < 0 || generic < typed || fallback < generic {
+		t.Fatalf("want typed choices, then the global generic rule, then the typed default: %s", output)
 	}
 }
 
-func TestFirstOutcomeTypedDispatchKeepsConditionalChoicesAndIgnoresGenericRules(t *testing.T) {
+func TestFirstOutcomeTypedDispatchListsGenericRulesAfterTypedChoices(t *testing.T) {
 	f := newFirstOutcomeFixture(t)
 	configText := `[profiles.pi-luna]
 kind='pi'
@@ -431,8 +434,10 @@ use='pi-luna'
 			t.Fatalf("typed change choices omitted %s: %s", candidate, output)
 		}
 	}
-	if strings.Contains(output, "codex-sol") || strings.Contains(output, "image work") {
-		t.Fatalf("generic rule competed with typed change choices: %s", output)
+	typed := strings.Index(output, `profile=claude-sonnet rule=type=change source=global"`)
+	generic := strings.Index(output, `when=\"image work\" profile=codex-sol rule=type=any source=global"`)
+	if typed < 0 || generic < typed {
+		t.Fatalf("want the generic image rule listed after the typed change choices: %s", output)
 	}
 }
 

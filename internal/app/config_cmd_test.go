@@ -759,3 +759,47 @@ func TestConfigSetUpProjectsIsUserOnlyAndNamesRegisteredProjects(t *testing.T) {
 		t.Fatalf("up.projects = %#v, %v", cfg.Up.Projects, err)
 	}
 }
+
+func TestConfigShowEffectiveListsDispatchRulesWithSourceAndPrecedence(t *testing.T) {
+	f := newStartFixture(t)
+	global := "[profiles.img]\nkind = \"claude\"\n[profiles.deep]\nkind = \"claude\"\n[[dispatch]]\nwhen = \"Task requires generating images\"\nuse = \"img\"\n[dispatch.default]\nuse = \"deep\"\n"
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := config.ConfigPath(f.home, f.project.Name)
+	if err := os.MkdirAll(filepath.Dir(project), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(project, []byte("[[dispatch]]\ntype = \"change\"\nuse = \"deep\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, f.service, "config", "show", "--effective", "--project", f.project.Name, "--json")
+	if code != 0 {
+		t.Fatalf("config show --effective code=%d output=%s", code, output)
+	}
+	var result struct {
+		Rules      []map[string]string `json:"dispatch_rules"`
+		Precedence []string            `json:"dispatch_precedence"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("%v: %s", err, output)
+	}
+	want := []map[string]string{
+		{"use": "deep", "type": "change", "when": "", "source": "project", "precedence": "default for type=change"},
+		{"use": "img", "type": "any", "when": "Task requires generating images", "source": "global", "precedence": "conditional: listed for the Lead to choose"},
+		{"use": "deep", "type": "dispatch.default", "when": "", "source": "global", "precedence": "default when no unconditional rule applies"},
+	}
+	if len(result.Rules) != len(want) {
+		t.Fatalf("dispatch_rules = %#v", result.Rules)
+	}
+	for i := range want {
+		for key, value := range want[i] {
+			if result.Rules[i][key] != value {
+				t.Fatalf("dispatch_rules[%d].%s = %q, want %q; rows=%#v", i, key, result.Rules[i][key], value, result.Rules)
+			}
+		}
+	}
+	if len(result.Precedence) == 0 || !strings.Contains(strings.Join(result.Precedence, "\n"), "never evaluates `when`") {
+		t.Fatalf("dispatch_precedence = %#v", result.Precedence)
+	}
+}

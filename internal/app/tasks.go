@@ -3719,7 +3719,7 @@ func profileError(err error) error {
 	}
 	help := []string{}
 	for _, candidate := range profileErr.Candidates {
-		help = append(help, fmt.Sprintf("when=%q profile=%s", candidate.When, candidate.Profile))
+		help = append(help, candidateHelp(candidate))
 	}
 	switch profileErr.Code {
 	case "profile_required":
@@ -3729,7 +3729,7 @@ func profileError(err error) error {
 				"Run `/posse-setup` to configure available Profiles",
 			)
 		} else {
-			help = append(help, "Pass `--profile <name>` after the Lead chooses based on the Brief")
+			help = append(help, "Pass `--profile <name>` after the Lead chooses based on the Brief; a `default` Profile applies when no `when` condition fits")
 		}
 	case "kind_disabled":
 		help = append(help, "Set `kinds.<kind>.disabled` to false or choose a Profile for another enabled kind")
@@ -3737,6 +3737,14 @@ func profileError(err error) error {
 		help = append(help, "Pass `--profile <name>` after the Lead chooses based on the Brief")
 	}
 	return axi.Failure(profileErr.Code, profileErr.Message, false, help...)
+}
+
+func candidateHelp(candidate dispatch.Candidate) string {
+	line := fmt.Sprintf("when=%q profile=%s rule=%s source=%s", candidate.When, candidate.Profile, candidate.Scope, candidate.Source)
+	if candidate.Default {
+		line += " default"
+	}
+	return line
 }
 
 func briefError(err error) error {

@@ -557,6 +557,12 @@ func (s *Service) reviewDispatchCheck(ctx context.Context, project store.Project
 	if len(unusable) > 0 {
 		return "warn", "review Dispatch Rule candidates cannot start: " + strings.Join(unusable, "; "), fix
 	}
+	if cfg.ReviewLoop.Enabled && cfg.ReviewLoop.AutoStart {
+		var failure *axi.Error
+		if _, err := s.autoStartReviewProfileFor(ctx, project, cfg); errors.As(err, &failure) && failure.Code == "profile_required" {
+			return "warn", "review start needs --profile among " + strings.Join(candidates, ", ") + "; Review auto-start raises a Notice: " + failure.Message, "Set review_loop.profile, or leave one Profile in type=\"review\" Dispatch Rules without `when`, then rerun `posse doctor`"
+		}
+	}
 	return "ok", "review start chooses among " + strings.Join(candidates, ", "), ""
 }
 

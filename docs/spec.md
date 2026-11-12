@@ -569,19 +569,32 @@ A Task in `working` is stalled when all hold for `stall_after`:
 
 `posse dispatch --brief <file> [--name <display-name>] [--profile <name>]` previews a Profile and a safe Task Name. When `--name` is omitted, dispatch and `start` derive a short name from the title, falling back to `task` when a localized title cannot produce a safe ASCII name. `posse start <file> [--name <display-name>] [--profile <name>]` starts the Task; `--brief <file>` is also accepted. An explicit name is independent of the title, lowercase kebab-case, at most 24 characters and cannot look like a Task ID (`t<n>`). Names may repeat; name/title lookup refuses ambiguity, while `t<n>` remains unambiguous. New Task branches use `posse/t<n>` independently of display names ([ADR 0023](adr/0023-task-branches-are-independent-of-display-names.md)); historical `short_name` and `branch` values remain unchanged. Unsafe names or an existing branch ref fail before Task creation:
 
+Profile selection follows one precedence, defined in `internal/dispatch/resolve.go` (`dispatch.Precedence`) and printed by `posse config show --effective`:
+
 1. `--profile` given: use it if it exists, else `profile_unknown`.
 2. For Review Tasks, use `review_loop.profile` when configured.
-3. Otherwise, if any rule has an exact `type` match, consider only those rules. If none match, consider rules with no `type`. The resolver does not evaluate `when` prose.
-4. Exactly one matching rule with no `when` and one Profile: use it.
-5. Otherwise refuse with `profile_required`. List conditional choices before unconditional fallbacks, retaining declaration order within each group. The Lead interprets `when` against the Brief and selects one Profile with `--profile`.
-6. No rule matches: use `dispatch.default.use` when configured.
+3. Rules apply when their `type` equals the Task type or they have no `type`, from the Project and the global config alike. A typed rule does not hide a generic one.
+4. The default tier is the first non-empty one of: unconditional rules of the Task type, unconditional rules with no `type`, `dispatch.default.use`. A Project `dispatch.default.use` replaces the global one.
+5. The resolver does not evaluate `when` prose. With no applicable conditional rule, a default tier of one rule naming one Profile is used, and `dispatch_rule` names it (`type=<type>`, `when=` or `dispatch.default`).
+6. Otherwise refuse with `profile_required`. Help lists conditional candidates in declaration order, Project rules before global ones, then the default tier. Each line reads `when="<text>" profile=<name> rule=<type=<type>|type=any|dispatch.default> source=<project|global>`, and a default ends with ` default`. The Lead interprets `when` against the Brief and passes `--profile`; when no condition fits, it passes a `default` Profile.
 7. With no Dispatch Rules at all and no default, inherit according to `defaults.dispatch_inheritance`:
    - `kind` (default): use the running Lead's kind with no model or effort arguments, preserving current behavior.
    - `lead_profile`: use the configured `lead.profiles.<kind>` Profile for the running Lead kind, including its model and effort; if none is configured, use that kind without model or effort.
 
+| Applicable config, no `--profile` | Result |
+|---|---|
+| One unconditional rule of the Task type; it outranks untyped unconditional rules and the default | That rule's Profile |
+| One untyped unconditional rule and no typed one | That rule's Profile |
+| Only `dispatch.default.use`, or rules for other types plus a default | The default |
+| Any applicable conditional rule | `profile_required`; the default tier is listed as `default` |
+| Several unconditional rules in the winning tier, or one with an array | `profile_required`; each is listed as `default` |
+| Rules for other types only, no default | `profile_required` with no candidates |
+
 A rule's `use` accepts an existing Profile name or a nonempty array of existing names, such as `use = ["opus", "codex"]`. Arrays offer alternatives for one Worker, never concurrent Workers. Their order is display order, not measured quota priority. Empty arrays, blank names, non-string entries, and unknown names are invalid. Existing scalar configurations remain valid; `dispatch.default.use` remains scalar.
 
-Conditional rules now require Lead judgment even when a same-type unconditional fallback exists. Previously, that fallback bypassed all conditional choices. To retain an automatic default, remove the conditional rules for that type, or pass the former default explicitly. Before running an older binary, replace each array with one scalar Profile; reverting the implementation restores the old precedence. No automatic migration changes configuration.
+Conditional rules require Lead judgment even when an unconditional fallback or `dispatch.default.use` exists. This includes a generic conditional rule beside an unconditional typed rule: earlier, typed rules hid every generic rule, so such a typed fallback was used without listing the generic choice. To retain an automatic default, remove the conditional rules that apply to that type, or pass the default explicitly. Before running an older binary, replace each array with one scalar Profile; reverting the implementation restores the old precedence. No automatic migration changes configuration.
+
+`posse config show --effective` adds `dispatch_rules`, one row per rule plus `dispatch.default`, each with `use`, `type`, `when`, `source` (`project` or `global`) and `precedence`, and `dispatch_precedence`, the steps above.
 
 Configured but unmatched rules still require a Profile. A selected Profile whose kind is disabled fails with `kind_disabled`; Posse never substitutes another kind or downgrades its model.
 
@@ -1234,7 +1247,7 @@ Review mode is orthogonal to delivery: `merge_mode = "local"` is still local Git
 
 #### none and quick flow
 
-After a loop-enabled Change signals done, preserve the existing path: freshness -> selected review -> pinned Merge, with PR-watch CI allowed in parallel with review on the published head. When `review_loop.profile` is unset and several Dispatch Rules match `type = "review"`, auto-start uses the first candidate in config order whose launch starts a fresh session. Missing reviewer resolution produces one readiness Notice per head naming each candidate and why it was rejected, but never satisfies required `quick` evidence; explicit start reports the session/Profile error. `none` does not acquire a fictitious review pass. Known blocking findings remain blocking under either mode.
+After a loop-enabled Change signals done, preserve the existing path: freshness -> selected review -> pinned Merge, with PR-watch CI allowed in parallel with review on the published head. When `review_loop.profile` is unset and dispatch resolves no single Profile, auto-start considers only the Profiles of unconditional `type = "review"` rules whose launch starts a fresh session. Exactly one such Profile is used; config order never breaks a tie. It never chooses a conditional candidate, an untyped rule or `dispatch.default.use` from a `profile_required` list. With no unconditional review candidate, or with several distinct eligible Profiles, it raises the readiness Notice, which names the candidates and asks for `review_loop.profile`. `posse review start` without `--profile` follows the same rule and fails with `profile_required`. `posse doctor` warns when Review auto-start is enabled and would raise that Notice. Missing reviewer resolution produces one readiness Notice per head naming each candidate and why it was rejected, but never satisfies required `quick` evidence; explicit start reports the session/Profile error. `none` does not acquire a fictitious review pass. Known blocking findings remain blocking under either mode.
 
 #### full-pipeline flow
 
