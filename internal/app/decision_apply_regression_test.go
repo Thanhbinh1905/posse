@@ -14,6 +14,32 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestTeardownObsoletesOpenDecisionsAndHidesThemFromListing(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	ctx := context.Background()
+	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{
+		ProjectID: f.project.ID, TaskID: f.task.ID, Origin: "lead:task-question",
+		Kind: "worker_question", Question: "Should this Task continue?", Options: []string{"continue", "stop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markPRFixtureWorkerExited(f.service.Herdr.(*herdr.Fake))
+	removeFixtureTaskPane(f)
+	if code, out, stderr := f.run("teardown", "t1", "--discard", "--user-approved", "Stop this Task"); code != 0 {
+		t.Fatalf("teardown: %s %s", out, stderr)
+	}
+	pending, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending Decisions after teardown = %#v, %v; want none", pending, err)
+	}
+	all, err := f.db.Decisions(ctx, f.project.ID, false)
+	if err != nil || len(all) != 1 || all[0].ID != decision.ID || all[0].ObsoleteAt == 0 || all[0].ObsoleteReason == "" {
+		t.Fatalf("historical Decision after teardown = %#v, %v; want obsolete record", all, err)
+	}
+}
+
 func TestApplyRecoveryRelaunchesAnsweredTask(t *testing.T) {
 	f := newRelaunchFixture(t, store.StateFailed)
 	ctx := context.Background()
