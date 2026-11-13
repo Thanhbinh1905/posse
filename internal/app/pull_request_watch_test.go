@@ -910,6 +910,42 @@ func TestPRWatchCIRepairsUseCIBudgetNotSpentReviewCap(t *testing.T) {
 	}
 }
 
+func TestPRWatchQueuesCIFixWhileFullPipelineRefreshInstructionIsInFlight(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	installValidationPlanForReview(t, fixture, "full-pipeline")
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='working' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", fixture.headSHA, "freshness:target-refresh", "Merge the updated target and refresh validation"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	var rounds, queued int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&rounds); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if rounds != 1 || queued != 1 {
+		t.Fatalf("CI repair during an in-flight target refresh: rounds=%d queued=%d, want one each", rounds, queued)
+	}
+}
+
 func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
