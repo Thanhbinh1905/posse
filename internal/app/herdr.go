@@ -301,12 +301,13 @@ func (s *Service) confirmPrompt(ctx context.Context, paneID, text string, send f
 		if lastErr == nil {
 			return nil
 		}
+		if !isPromptStall(lastErr) && !isAgentBlocked(lastErr) {
+			return lastErr
+		}
+		if s.codexUpdatePrompt(ctx, paneID) {
+			return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
+		}
 		if !isPromptStall(lastErr) {
-			if isAgentBlocked(lastErr) {
-				if updatePrompt := s.codexUpdatePrompt(ctx, paneID); updatePrompt {
-					return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
-				}
-			}
 			return lastErr
 		}
 		if s.agentActive(ctx, paneID) {
