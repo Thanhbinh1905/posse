@@ -1,6 +1,10 @@
 package greenhouse
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -11,6 +15,22 @@ func TestDaemonEnvironmentDropsTaskAndPaneIdentity(t *testing.T) {
 	want := []string{"PATH=/bin", "PI_CODING_AGENT_DIR=/agent", "GREENHOUSE_HOME=/posse/greenhouse"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("environment() = %v, want %v", got, want)
+	}
+}
+
+func TestAXIReportsTransientServerEOF(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "greenhouse")
+	script := `#!/bin/sh
+printf '%s\n' '{"version":1,"outcome":"error","error":"EOF"}'
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{Binary: binary, Home: filepath.Join(dir, "home")}
+	_, err := d.axi(context.Background(), dir, []byte(`{"version":2,"op":"attach"}`))
+	if !errors.Is(err, errUnavailable) {
+		t.Fatalf("axi error = %v, want transient daemon unavailability", err)
 	}
 }
 
