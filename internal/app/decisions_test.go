@@ -87,7 +87,7 @@ func TestReviewCapReconcileReusesPendingDecisionAfterFinalFixGrant(t *testing.T)
 		t.Fatalf("reconcile after final-fix grant: %v", err)
 	}
 	decisions, err = fixture.db.Decisions(ctx, fixture.project.ID, true)
-	if err != nil || len(decisions) != 1 || decisions[0].ID != decisionID || strings.Join(decisions[0].Options, ",") != "accept-head,final-fix,rethink,discard" {
+	if err != nil || len(decisions) != 1 || decisions[0].ID != decisionID || strings.Join(decisions[0].Options, ",") != "accept-head,rethink,discard" {
 		t.Fatalf("pending review_cap Decision = %#v, %v", decisions, err)
 	}
 }
