@@ -832,7 +832,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan, task) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
