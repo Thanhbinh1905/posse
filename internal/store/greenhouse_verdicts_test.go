@@ -77,6 +77,67 @@ func TestGreenhouseReviewLedgerKeepsResumeOutcomeForSameGrant(t *testing.T) {
 	}
 }
 
+func TestGreenhouseRequestMigrationConsolidatesResumedGrantHistory(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	grant := "shop/t1/shop/r1"
+	verdict := greenhouseVerdict(task.ID, grant, reviewShaA)
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record resumed Verdict = %v, %v", recorded, err)
+	}
+	var verdictID int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT id FROM verdicts WHERE grant_id=?`, grant).Scan(&verdictID); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DROP INDEX greenhouse_review_requests_grant_idx`,
+		`DROP TRIGGER greenhouse_review_requests_immutable`,
+		`CREATE TRIGGER greenhouse_review_requests_immutable BEFORE UPDATE ON greenhouse_review_requests BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END`,
+	} {
+		if _, err := f.db.ExecContext(f.ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, request := range []struct {
+		requestedAt, settledAt int64
+		outcome                string
+		verdictID              any
+	}{{100, 200, "failed", nil}, {100, 300, "verdict", verdictID}} {
+		if _, err := f.db.ExecContext(f.ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			task.ProjectID, task.ID, "shop", reviewShaA, GreenhouseReviewProvider, request.requestedAt, request.settledAt, request.outcome, request.verdictID, grant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM posse_migration_checksums WHERE version=98`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM goose_db_version WHERE version_id=98`); err != nil {
+		t.Fatal(err)
+	}
+	path := f.db.Path
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenAt(path)
+	if err != nil {
+		t.Fatalf("apply request-ledger migration to resumed history: %v", err)
+	}
+	defer reopened.Close()
+	var count int
+	if err := reopened.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM greenhouse_review_requests WHERE task_id=? AND repo=? AND grant_id=?`, task.ID, "shop", grant).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rows for resumed grant = %d, %v; want one", count, err)
+	}
+	var requestedAt, settledAt int64
+	var outcome string
+	var gotVerdictID int64
+	if err := reopened.QueryRowContext(f.ctx, `SELECT requested_at,settled_at,outcome,verdict_id FROM greenhouse_review_requests WHERE task_id=? AND repo=? AND grant_id=?`, task.ID, "shop", grant).Scan(&requestedAt, &settledAt, &outcome, &gotVerdictID); err != nil {
+		t.Fatal(err)
+	}
+	if requestedAt != 100 || settledAt != 300 || outcome != "verdict" || gotVerdictID != verdictID {
+		t.Fatalf("migrated request = requested %d, settled %d, outcome %q, Verdict %d", requestedAt, settledAt, outcome, gotVerdictID)
+	}
+}
+
 func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	task := f.task(t, f.change)
