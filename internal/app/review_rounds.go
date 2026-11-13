@@ -182,24 +182,39 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 }
 
 func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, project store.Project, change store.Task) error {
-	if project.IsWorkspace() {
-		return axi.Failure("candidate_target_moved", "a workspace candidate target changed before Review admission", false, "Refresh the stale workspace candidates before starting Review")
-	}
-	candidate, err := db.LatestValidationCandidate(ctx.Context, change.ID, "")
+	lanes, err := changedCandidateLanes(ctx.Context, db, project, change)
 	if err != nil {
 		return err
 	}
-	freshness, err := fetchPRTargetTip(ctx.Context, project.Root, taskTargetBranch(project, change))
-	if err != nil {
-		return err
+	queued := false
+	for _, lane := range lanes {
+		candidate, err := db.LatestValidationCandidate(ctx.Context, change.ID, lane.repo)
+		if err != nil {
+			return err
+		}
+		targetHead, err := lane.targetHead(ctx.Context)
+		if err != nil {
+			return err
+		}
+		if candidate.State != store.ValidationCandidateStale && candidate.TargetSHA == targetHead {
+			continue
+		}
+		if targetHead == "" {
+			return axi.Failure("candidate_target_missing", lane.memberLabel("the frozen target branch is missing"), false)
+		}
+		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Local: lane.localDelivery()}
+		if err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA); err != nil {
+			return err
+		}
+		queued = true
 	}
-	if err := queueTargetMergeInstruction(ctx.Context, db, change, "", freshness, candidate.CandidateSHA); err != nil {
-		return err
+	if !queued {
+		return axi.Failure("candidate_target_moved", "candidate target changed before Review admission but no stale candidate lane remains", true)
 	}
 	if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "state", Value: "refresh_queued"}, {Key: "help", Value: []any{"The Worker has the target-refresh instruction; wait for its next done Signal before starting Review"}}})
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "state", Value: "refresh_queued"}, {Key: "help", Value: []any{"Posse queued the target-refresh instruction; wait for the Worker's next done Signal before starting Review"}}})
 }
 
 func reviewScopeInstructions(ctx context.Context, db *store.DB, taskID int64) ([]string, error) {
