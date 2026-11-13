@@ -42,6 +42,18 @@ func parallelReviewOwnerPath(roundDir, repository string) string {
 	return filepath.Join(roundDir, repository+".parallel-owner.json")
 }
 
+func parallelReviewPending(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func shouldRecordParallelRequestFailure(hasPending bool) bool {
+	return !hasPending
+}
+
 func parallelRequestMetadata(head string, requestedAt int64, hasPending bool, owner *parallelReviewOwner) (string, int64) {
 	if hasPending && owner != nil {
 		if owner.Head != "" {

@@ -86,10 +86,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	parallelMode := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse"
 	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
 	pendingPath := filepath.Join(roundDir, member.name+".pending.json")
-	_, pendingErr := os.Stat(pendingPath)
-	hasPending := pendingErr == nil
-	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-		return pendingErr
+	hasPending, err := parallelReviewPending(pendingPath)
+	if err != nil {
+		return err
 	}
 	ownerPath := parallelReviewOwnerPath(roundDir, member.name)
 	requestOwner, ownerErr := readParallelReviewOwner(ownerPath)
@@ -113,8 +112,10 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	target, err := greenhouseTarget(ctx.Context, member)
 	if err != nil {
 		if parallelMode {
-			if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); recordErr != nil {
-				return recordErr
+			if shouldRecordParallelRequestFailure(hasPending) {
+				if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); recordErr != nil {
+					return recordErr
+				}
 			}
 			if noticeErr := notifyFailure(requestedHead, err.Error()); noticeErr != nil {
 				return noticeErr
@@ -125,6 +126,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	recordInitialFailure := func(reason string) error {
 		if !parallelMode {
 			return nil
+		}
+		if !shouldRecordParallelRequestFailure(hasPending) {
+			return notifyFailure(requestedHead, reason)
 		}
 		if err := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); err != nil {
 			return err
@@ -235,6 +239,15 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if !parallelMode {
 				return nil
 			}
+			if outcome == "failed" || outcome == "refused" {
+				hasPending, err := parallelReviewPending(pendingPath)
+				if err != nil {
+					return err
+				}
+				if !shouldRecordParallelRequestFailure(hasPending) {
+					return nil
+				}
+			}
 			if requestSettledAt > 0 {
 				settledAt = requestSettledAt
 			}
@@ -245,30 +258,19 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			})
 		}
 		var result greenhouse.RoundResult
-		retries := 0
 		for {
-			round.Wait = time.Until(deadline)
-			result, err = daemon.Review(ctx.Context, round)
-			if err != nil {
-				var protocolErr *greenhouse.ProtocolError
-				if parallelMode && !errors.As(err, &protocolErr) && retries < 3 {
-					if recordErr := recordRequest("failed", "", time.Now().UnixMilli()); recordErr != nil {
-						return recordErr
-					}
-					timer := time.NewTimer(time.Duration(1<<retries) * time.Second)
-					retries++
-					select {
-					case <-ctx.Context.Done():
-						timer.Stop()
-						return ctx.Context.Err()
-					case <-timer.C:
-					}
-					deadline = time.Now().Add(wait)
-					continue
-				}
-				break
+			var attempts int
+			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
+				round.Wait = attemptWait
+				return daemon.Review(ctx.Context, round)
+			})
+			if attempts > 0 {
+				requestSettledAt = time.Now().UnixMilli()
 			}
-			if result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused {
+			if ctx.Context.Err() != nil {
+				return ctx.Context.Err()
+			}
+			if err != nil || result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused {
 				break
 			}
 			if time.Until(deadline) <= 0 {

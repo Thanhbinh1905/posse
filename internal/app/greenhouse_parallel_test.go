@@ -1,12 +1,68 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/greenhouse"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestParallelRequestFailureIsRecordedOnlyAfterPendingRequestEnds(t *testing.T) {
+	pendingPath := filepath.Join(t.TempDir(), "request.pending.json")
+	if err := os.WriteFile(pendingPath, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := parallelReviewPending(pendingPath)
+	if err != nil || !pending || shouldRecordParallelRequestFailure(pending) {
+		t.Fatalf("pending parallel request should remain unrecorded: pending=%v record=%v err=%v", pending, shouldRecordParallelRequestFailure(pending), err)
+	}
+	if err := os.Remove(pendingPath); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = parallelReviewPending(pendingPath)
+	if err != nil || pending || !shouldRecordParallelRequestFailure(pending) {
+		t.Fatalf("ended parallel request should record its outcome: pending=%v record=%v err=%v", pending, shouldRecordParallelRequestFailure(pending), err)
+	}
+}
+
+func TestParallelReviewRetriesTransportAsOneRequestObservation(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	ctx := context.Background()
+	head, err := gitOutput(ctx, f.task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := "shop/t1/shop/r1"
+	calls := 0
+	result, attempts, err := reviewGreenhouseWithRetries(ctx, true, time.Millisecond, func(time.Duration) (greenhouse.RoundResult, error) {
+		calls++
+		if calls == 1 {
+			return greenhouse.RoundResult{}, errors.New("transport reset after request delivery")
+		}
+		return greenhouse.RoundResult{Outcome: greenhouse.Settled, Grant: grant}, nil
+	})
+	if err != nil || calls != 2 || attempts != 2 || result.Outcome != greenhouse.Settled {
+		t.Fatalf("retried review = %+v after %d calls and %d attempts, %v", result, calls, attempts, err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: grant, Head: head, Target: head, ReviewBase: head, Outcome: "clean", Mode: "parallel"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record final Verdict = %v, %v", recorded, err)
+	}
+	request := store.GreenhouseReviewRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: head, Provider: store.GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 300, Outcome: "verdict", Grant: result.Grant}
+	if err := f.db.RecordGreenhouseReviewRequest(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(ctx, f.project.ID)
+	if err != nil || len(requests) != 1 || requests[0].RequestedAt != 100 || requests[0].SettledAt != 300 {
+		t.Fatalf("one retried request observation = %+v, %v", requests, err)
+	}
+}
 
 func TestParallelReviewLockDetectsLiveAndAbandonedOwners(t *testing.T) {
 	if lockPath := os.Getenv("POSSE_REVIEW_LOCK_CHILD"); lockPath != "" {
