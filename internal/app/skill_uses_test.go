@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T) {
@@ -34,8 +36,8 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 	for _, want := range []string{
 		"## Role skills",
 		"- `posse-tdd`: before changing code",
-		"- `posse-deslop`: before the `done` Signal",
-		"- `posse-no-comments`: before the `done` Signal, after `posse-deslop`",
+		"- `posse-deslop`: when this Task changes code, before the `done` Signal",
+		"- `posse-no-comments`: when this Task changes code, before the `done` Signal and after `posse-deslop`",
 		"- `posse-unslop`: on PR text, commit messages and Reports, before `posse publish` and the `done` Signal",
 	} {
 		if !strings.Contains(string(launch), want) {
@@ -119,7 +121,7 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 		}
 	}
 	done := outcomeCLI(t, f.service, 0, "signal", "done", "Changed", "--turn", "launch:1")
-	for _, want := range []string{"skill_checklist[3]{skill,when,invoked}:", "posse-deslop,\"before the `done` Signal", "posse-no-comments,", "posse-unslop,"} {
+	for _, want := range []string{"skill_checklist[3]{skill,when,invoked}:", "posse-deslop,\"when this Task changes code", "posse-no-comments,", "posse-unslop,"} {
 		if !strings.Contains(done, want) {
 			t.Fatalf("done output lacks %q:\n%s", want, done)
 		}
@@ -199,6 +201,42 @@ func TestPiWorkerRoleSkillUsesAreRecorded(t *testing.T) {
 	done := outcomeCLI(t, f.service, 0, "signal", "done", "Changed", "--turn", "launch:1")
 	if !strings.Contains(done, "posse-deslop,") || !strings.Contains(done, ",yes") {
 		t.Fatalf("Pi done Signal does not show the recorded skill: %s", done)
+	}
+}
+
+func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T) {
+	root := t.TempDir()
+	gitTest(t, root, "init", "-b", "main")
+	gitTest(t, root, "config", "user.email", "test@example.com")
+	gitTest(t, root, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, root, "add", "README.md")
+	gitTest(t, root, "commit", "-m", "base")
+	gitTest(t, root, "switch", "-c", "posse/task")
+	skills := []string{"posse-deslop", "posse-no-comments", "posse-technical-writing"}
+	for _, taskType := range []string{"review", "research"} {
+		got := taskRoleSkills(store.Task{Type: taskType}, skills)
+		if strings.Join(got, ",") != "posse-technical-writing" {
+			t.Errorf("%s Task skills = %v, want report skill only", taskType, got)
+		}
+	}
+	change := store.Task{Type: "change", WorktreePath: root, BaseRef: "main"}
+	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != "posse-technical-writing" {
+		t.Fatalf("unchanged Change Task skills = %v, want report skill only", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "change.go"), []byte("package change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, root, "add", "change.go")
+	gitTest(t, root, "commit", "-m", "change")
+	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != strings.Join(skills, ",") {
+		t.Fatalf("changed Change Task skills = %v, want %v", got, skills)
+	}
+	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
+	if got := roleSkillProtocol(plan, store.Task{Type: "review"}); strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
+		t.Fatalf("Review launch skill instructions = %q", got)
 	}
 }
 
