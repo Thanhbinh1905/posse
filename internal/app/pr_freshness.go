@@ -139,7 +139,7 @@ func workingPRBehindFailure(ctx context.Context, db *store.DB, project store.Pro
 // queuePRTargetSyncInstruction enters a behind done or merging Task in its
 // target's merge queue and queues the merge-target instruction only for the
 // queue head, deduplicated against an earlier one (ADR 0031).
-func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) (targetSync, error) {
+func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) (targetSync, error) {
 	if task.State != store.StateDone && task.State != store.StateMerging {
 		return targetSync{}, nil
 	}
@@ -157,6 +157,9 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 	if err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA); err != nil {
 		return targetSync{}, err
 	}
+	if err := s.relaunchReleasedFullPipelineWorker(ctx, db, task, member); err != nil {
+		return targetSync{}, err
+	}
 	return targetSync{Queued: true, Place: place}, nil
 }
 
@@ -164,11 +167,50 @@ func queuePRTargetSyncInstruction(ctx context.Context, db *store.DB, task store.
 // whose PR conflicts with its target to merge the target, without the merge
 // queue. It applies when defaults.require_current_target is off, so only
 // real conflicts need a Worker update (ADR 0019).
-func queueConflictTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
+func (s *Service) queueConflictTargetSyncInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
 	if task.State != store.StateDone && task.State != store.StateMerging {
 		return nil
 	}
-	return queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA)
+	if err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA); err != nil {
+		return err
+	}
+	return s.relaunchReleasedFullPipelineWorker(ctx, db, task, member)
+}
+
+func (s *Service) relaunchReleasedFullPipelineWorker(ctx context.Context, db *store.DB, task store.Task, member string) error {
+	if !fullPipelineSelected(task, member) || s.Herdr == nil {
+		return nil
+	}
+	deliveries, err := db.TaskDeliveries(ctx, task.ID)
+	if err != nil || len(deliveries) == 0 {
+		return err
+	}
+	policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
+	if err != nil || policy != "release" {
+		return err
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	pane, found := findTaskPane(snapshot.Panes, task)
+	if found && pane.Agent != "" {
+		return nil
+	}
+	project, err := db.ProjectByID(ctx, task.ProjectID)
+	if err != nil {
+		return err
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return err
+	}
+	_, err = s.relaunchTask(ctx, db, home, project, cfg, task, "")
+	return err
 }
 
 func hasCurrentTargetWork(ctx context.Context, db *store.DB, task store.Task, member, targetSHA string) (bool, error) {
@@ -258,7 +300,7 @@ func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, projec
 	if freshness.Fresh {
 		return nil
 	}
-	sync, err := queuePRTargetSyncInstruction(ctx, db, task, member, freshness, headSHA)
+	sync, err := s.queuePRTargetSyncInstruction(ctx, db, task, member, freshness, headSHA)
 	if err != nil {
 		return err
 	}
