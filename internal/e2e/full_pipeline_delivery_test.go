@@ -426,6 +426,7 @@ func TestFullPipelineWorkspacePRMemberCanRepublishAfterPromotion(t *testing.T) {
 	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
 	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
 	runPosse(t, f.binary, root, f.env, "config", "set", "defaults.review", "full-pipeline", "--project", "stack")
+	runPosse(t, f.binary, root, f.env, "config", "set", "defaults.merge_mode", "pr", "--project", "stack")
 	brief := filepath.Join(f.root, "workspace-single-member.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace PR member\ndone_when: republish the new head\nrepos: [api]\n---\nChange the Member.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -475,14 +476,34 @@ func TestFullPipelineWorkspacePRMemberCanRepublishAfterPromotion(t *testing.T) {
 	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "First head promoted"); code != 0 {
 		t.Fatalf("done after promotion: code=%d %s", code, output)
 	}
-	if err := os.WriteFile(filepath.Join(member.WorktreePath, "later.txt"), []byte("later commit\n"), 0o600); err != nil {
+	remote := filepath.Join(f.root, "ws-api.git")
+	command := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+change.Branch)
+	command.Env = f.env
+	remoteOutput, err := command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(remoteOutput)) != candidate.CandidateSHA {
+		t.Fatalf("PR remote head=%q, want promoted candidate %s, err=%v", strings.TrimSpace(string(remoteOutput)), candidate.CandidateSHA, err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, "later.txt"), []byte("later commit\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitTest(t, f.env, member.WorktreePath, "add", "later.txt")
-	gitTest(t, f.env, member.WorktreePath, "commit", "-m", "later commit")
-	code, output = runReleaseCLI(t, f.binary, member.WorktreePath, workerEnv, "publish", "--repo", "api", "Second candidate", "--verify", "go test ./... -> passed", "--proof", "New head verified", "--risk", "Risk: low\nRollback: revert the change")
+	gitTest(t, f.env, candidate.WorktreePath, "add", "later.txt")
+	gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "later commit")
+	code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "--repo", "api", "Second candidate", "--verify", "go test ./... -> passed", "--proof", "New head verified", "--risk", "Risk: low\nRollback: revert the change")
 	if code != 0 || !strings.Contains(output, "validation required before publication") {
 		t.Fatalf("submit a post-promotion workspace head: code=%d %s", code, output)
+	}
+	pollEnv := setEnv(leadEnv, "POSSE_WATCH_TOKEN", "")
+	if code, output := runReleaseCLI(t, f.binary, root, pollEnv, "watch", "--poll-only", "--timeout", "2500"); code != 0 {
+		t.Fatalf("poll the superseded PR head: code=%d %s", code, output)
+	}
+	notices, err := f.db.Notices(context.Background(), project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "merge_ready" {
+			t.Fatalf("merge_ready emitted for a superseded PR head while a new candidate is pending: %+v", notice)
+		}
 	}
 	latest, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "api")
 	if err != nil || latest.State != store.ValidationCandidateActive || latest.CandidateSHA == candidate.CandidateSHA {
@@ -506,14 +527,31 @@ func TestFullPipelineWorkspacePRMemberCanRepublishAfterPromotion(t *testing.T) {
 	if code, output := runReleaseCLI(t, f.binary, latest.WorktreePath, workerEnv, "publish", "--repo", "api", "Promote second candidate"); code != 0 {
 		t.Fatalf("promote second candidate: code=%d %s", code, output)
 	}
-	if head := gitRef(t, f, member.WorktreePath, "refs/heads/"+change.Branch); head != latest.CandidateSHA {
-		t.Fatalf("origin Task branch=%s after promotion, want new head %s", head, latest.CandidateSHA)
+	command = exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+change.Branch)
+	command.Env = f.env
+	remoteOutput, err = command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(remoteOutput)) != latest.CandidateSHA {
+		t.Fatalf("PR remote head=%q after second promotion, want new head %s, err=%v", strings.TrimSpace(string(remoteOutput)), latest.CandidateSHA, err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1"); code != 0 {
+		t.Fatalf("prepare Merge for the new head: code=%d %s", code, output)
+	}
+	repos, err = f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || repos[0].GatedSHA != latest.CandidateSHA {
+		t.Fatalf("Member gated head=%q after Merge preparation, want new candidate %s, err=%v", repos[0].GatedSHA, latest.CandidateSHA, err)
 	}
 	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1", "--execute", "--user-approved", "Merge the newly reviewed head"); code != 0 {
 		t.Fatalf("Merge newly reviewed workspace head: code=%d %s", code, output)
 	}
-	if head := gitRef(t, f, member.WorktreePath, "refs/heads/main"); head != latest.CandidateSHA {
-		t.Fatalf("Member target=%s after Merge, want newly promoted head %s", head, latest.CandidateSHA)
+	command = exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/main")
+	command.Env = f.env
+	remoteOutput, err = command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(remoteOutput)) != latest.CandidateSHA {
+		t.Fatalf("Member target=%q after Merge, want newly promoted head %s, err=%v", strings.TrimSpace(string(remoteOutput)), latest.CandidateSHA, err)
+	}
+	repos, err = f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || repos[0].GatedSHA != latest.CandidateSHA {
+		t.Fatalf("Member gated head=%q after Merge, want new candidate %s, err=%v", repos[0].GatedSHA, latest.CandidateSHA, err)
 	}
 }
 
@@ -540,14 +578,30 @@ case "$1 $2" in
   "pr create")
     repo=$(git config --get remote.origin.url | sed -E 's#.*/acme/([^/.]+)(\.git)?$#\1#')
     : > "$state/$repo-open"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$state/$repo-title"; shift 2 ;;
+        --body) printf '%s' "$2" > "$state/$repo-body"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
     printf 'https://github.com/acme/%s/pull/%s\n' "$repo" "$(number "$repo")" ;;
   "pr view")
     repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
     case "$*" in
-      *'--json title,body'*) printf '{"title":"t","body":"b"}\n' ;;
+      *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$state/$repo-title" "$state/$repo-body" ;;
       *) pull_json "$repo"; printf '\n' ;;
     esac ;;
-  "pr edit") printf 'Edited\n' ;;
+  "pr edit")
+    repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$state/$repo-title"; shift 2 ;;
+        --body) printf '%s' "$2" > "$state/$repo-body"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'Edited\n' ;;
   "pr merge")
     repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
     sha=$(printf '%s\n' "$*" | sed -E 's#.*--match-head-commit ([0-9a-f]+).*#\1#')

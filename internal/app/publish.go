@@ -391,6 +391,18 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	} else if root, err := gitTop(ctx, ""); err != nil || !samePath(root, task.WorktreePath) {
 		return axi.Failure("publish_refused", "publish must run at the Task Sandbox or its private candidate checkout", false)
 	}
+	if candidateCWD && candidate.State == store.ValidationCandidatePromoted {
+		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
+			return err
+		}
+		candidateHead, found, err := readGitRef(ctx, lane.task.WorktreePath, candidate.RefName)
+		if err != nil {
+			return err
+		}
+		if found && gitAncestor(ctx, lane.task.WorktreePath, candidate.PromotedSHA, candidateHead) {
+			candidate.CandidateSHA = candidateHead
+		}
+	}
 	if err := s.refuseMovedCandidateAuthor(ctx, db, project, task, true, true); err != nil {
 		return err
 	}
@@ -406,6 +418,26 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 	} else if branchHead != head {
 		return axi.Failure("publish_refused", "Task branch moved while publish was inspecting the Sandbox", true, "Retry `posse publish` after the branch settles")
 	}
+	resubmittingMovedCandidate := candidateCWD && candidate.State == store.ValidationCandidatePromoted && candidate.CandidateSHA != candidate.PromotedSHA
+	if resubmittingMovedCandidate {
+		if !gitAncestor(ctx, lane.task.WorktreePath, candidate.PromotedSHA, candidate.CandidateSHA) {
+			return axi.Failure("candidate_ref_moved", "private candidate checkout no longer descends from its promoted head", false, candidate.RefName)
+		}
+		if head != candidate.PromotedSHA {
+			return candidateAuthorMovedFailure(task, candidate, head, branch)
+		}
+		status, err := gitStatusOutput(ctx, lane.task.WorktreePath, "--porcelain", "--untracked-files=all")
+		if err != nil {
+			return err
+		}
+		if status != "" {
+			return axi.Failure("candidate_author_dirty", "the Worker's Sandbox is not clean; resubmission will not overwrite it", false, "Commit or preserve Sandbox changes, then retry publish")
+		}
+		if _, err := gitOutput(ctx, lane.task.WorktreePath, "merge", "--ff-only", "--no-edit", candidate.CandidateSHA); err != nil {
+			return axi.Failure("candidate_not_fast_forward", "Task branch could not fast-forward to the moved private candidate", false, err.Error())
+		}
+		head = candidate.CandidateSHA
+	}
 	if err := refuseAgentAttribution(ctx, lane.task.WorktreePath, head, lane.task); err != nil {
 		return err
 	}
@@ -418,7 +450,7 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 			return s.refreshPromotedPullRequest(out, db, lane, cfg, candidate, summary, strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"))
 		}
 	}
-	if candidateCWD {
+	if candidateCWD && !resubmittingMovedCandidate {
 		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
 			return err
 		}
