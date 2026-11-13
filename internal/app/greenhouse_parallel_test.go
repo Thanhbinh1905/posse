@@ -13,21 +13,14 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestParallelRequestFailureIsRecordedOnlyAfterPendingRequestEnds(t *testing.T) {
+func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) {
 	pendingPath := filepath.Join(t.TempDir(), "request.pending.json")
-	if err := os.WriteFile(pendingPath, []byte("pending"), 0o600); err != nil {
+	if err := os.WriteFile(pendingPath, []byte(`{"grant":"shop/t1/shop/r1","request":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := parallelReviewPending(pendingPath)
-	if err != nil || !pending || shouldRecordParallelRequestFailure(pending) {
-		t.Fatalf("pending parallel request should remain unrecorded: pending=%v record=%v err=%v", pending, shouldRecordParallelRequestFailure(pending), err)
-	}
-	if err := os.Remove(pendingPath); err != nil {
-		t.Fatal(err)
-	}
-	pending, err = parallelReviewPending(pendingPath)
-	if err != nil || pending || !shouldRecordParallelRequestFailure(pending) {
-		t.Fatalf("ended parallel request should record its outcome: pending=%v record=%v err=%v", pending, shouldRecordParallelRequestFailure(pending), err)
+	grant, err := parallelPendingGrant(pendingPath)
+	if err != nil || grant != "shop/t1/shop/r1" {
+		t.Fatalf("pending grant = %q, %v", grant, err)
 	}
 }
 
