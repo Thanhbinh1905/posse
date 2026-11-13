@@ -89,7 +89,7 @@ auto_start = false
 		t.Fatalf("failed launch consumed the visible round cap: code=%d %s", code, status.String())
 	}
 	f.fake.Errors = map[string]error{}
-	f.fake.ErrorQueue["agent.start"] = []error{paneBusy(), paneBusy(), nil}
+	f.fake.ErrorQueue["pane.send_input"] = []error{paneBusy(), paneBusy(), nil}
 	if code, output := startReview(); code != 0 {
 		t.Fatalf("start Review after the pane became available: code=%d %s", code, output)
 	}
