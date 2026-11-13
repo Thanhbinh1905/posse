@@ -66,6 +66,37 @@ func TestUnsupportedBriefsRefuseBeforePreparationOrResourceAllocation(t *testing
 	}
 }
 
+func TestAdmittedTaskFreezesReviewProviderAcrossConfigChanges(t *testing.T) {
+	f := newStartFixture(t)
+	if _, err := config.SetFile(config.ConfigPath(f.home, f.project.Name), "review_provider", "greenhouse", true); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	task, _ := f.onlyTask(t)
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil || plan.ReviewProvider != "greenhouse" {
+		t.Fatalf("admitted provider = %#v, %v; want greenhouse", plan, err)
+	}
+	if _, err := config.SetFile(config.ConfigPath(f.home, f.project.Name), "review_provider", "builtin", true); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	updated, err := db.TaskByID(context.Background(), f.project.ID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := updated.AdmittedPlan()
+	if err != nil || frozen == nil || frozen.ReviewProvider != "greenhouse" {
+		t.Fatalf("config change moved admitted provider: %#v, %v", frozen, err)
+	}
+}
+
 func TestWorkerStatusReadsOnlyOwnAdmittedStateWithoutMaintenance(t *testing.T) {
 	f := newStartFixture(t)
 	if code, output := f.start(t); code != 0 {
