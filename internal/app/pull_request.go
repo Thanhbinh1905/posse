@@ -30,14 +30,15 @@ type pullRequestReference struct {
 }
 
 type ghPullRequest struct {
-	URL            string `json:"url"`
-	State          string `json:"state"`
-	HeadRefOID     string `json:"headRefOid"`
-	HeadRefName    string `json:"headRefName"`
-	BaseRefName    string `json:"baseRefName"`
-	Mergeable      string `json:"mergeable"`
-	ReviewDecision string `json:"reviewDecision"`
-	MergeCommit    *struct {
+	URL              string `json:"url"`
+	State            string `json:"state"`
+	HeadRefOID       string `json:"headRefOid"`
+	HeadRefName      string `json:"headRefName"`
+	BaseRefName      string `json:"baseRefName"`
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+	ReviewDecision   string `json:"reviewDecision"`
+	MergeCommit      *struct {
 		OID string `json:"oid"`
 	} `json:"mergeCommit"`
 	StatusCheckRollup *ghStatusCheckRollup `json:"statusCheckRollup"`
@@ -1491,6 +1492,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				pull.Mergeable = previous.Mergeable
 			}
 			observation, failures, err = makePRObservation(project.ID, task, pull, now, taskTargetBranch(project, task))
+			if strings.EqualFold(pull.MergeStateStatus, "BEHIND") {
+				observation.Mergeable = "BEHIND"
+			}
 		}
 		if observation.Mergeable == "UNKNOWN" && hasPrevious {
 			observation.Mergeable = previous.Mergeable
@@ -1502,7 +1506,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			continue
 		}
 		retainGreenObservation := false
-		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || fullPipelineSelected(task, "")) {
+		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || observation.Mergeable == "BEHIND" || fullPipelineSelected(task, "")) {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
 			var beforeQuery prTargetFreshness
 			if freshnessErr == nil && !freshness.Fresh && cfg.Defaults.RequireCurrentTarget {
@@ -1514,7 +1518,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				}
 				continue
 			}
-			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget && observation.Mergeable == "CONFLICTING" && !fullPipelineSelected(task, "") {
+			if !freshness.Fresh && !cfg.Defaults.RequireCurrentTarget && (observation.Mergeable == "CONFLICTING" || observation.Mergeable == "BEHIND") && !fullPipelineSelected(task, "") {
 				conflicts = append(conflicts, behindPR{task: task, freshness: freshness, headSHA: observation.HeadSHA})
 			} else if !freshness.Fresh {
 				// A target that advanced only during the query may hold this
@@ -1809,7 +1813,7 @@ func pullRequestGraphQLQuery(targets []prWatchTarget) (string, []prWatchTarget) 
   }`
 		}
 		groupFields[repository] = append(groupFields[repository], fmt.Sprintf(`%s: pullRequest(number: %d) {
-  url state headRefOid baseRefName mergeable reviewDecision mergeCommit { oid }
+  url state headRefOid baseRefName mergeable mergeStateStatus reviewDecision mergeCommit { oid }
   %s
 	}`, targets[index].Pull, ref.Number, checksField))
 	}
@@ -2001,8 +2005,12 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 		if current.Review == "CHANGES_REQUESTED" && (newHead || previous.Review != "CHANGES_REQUESTED") {
 			addNotice("pr_changes_requested", task.Title+": review requests changes", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA, "review": current.Review})
 		}
-		if current.Mergeable == "CONFLICTING" && (newHead || previous.Mergeable != "CONFLICTING") {
-			addNotice("pr_conflict", task.Title+": pull request conflicts with the Task's frozen target branch", map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
+		if (current.Mergeable == "CONFLICTING" || current.Mergeable == "BEHIND") && (newHead || previous.Mergeable != current.Mergeable) {
+			summary := task.Title + ": pull request conflicts with the Task's frozen target branch"
+			if current.Mergeable == "BEHIND" {
+				summary = task.Title + ": pull request is behind its target under strict branch protection"
+			}
+			addNotice("pr_conflict", summary, map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 		// A head pushed after the gate, outside `posse publish`, is never merge-ready.
 		if task.GatedSHA != "" && current.HeadSHA != task.GatedSHA {

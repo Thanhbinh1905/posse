@@ -215,7 +215,7 @@ func TestUnrecoverableOrphanOffersApprovedDiscard(t *testing.T) {
 	}
 }
 
-func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
+func TestAnsweredClosedPRDecisionNamesTeardownForLiveWorker(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	defer f.db.Close()
 	ctx := context.Background()
@@ -248,24 +248,19 @@ func TestAnsweredClosedPRDecisionDiscardsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
-	markPRFixtureWorkerExited(fake)
 	fake.SnapshotValue.Agents = []herdr.Agent{{Name: agentName(f.project.Name, f.task.Seq, 1), PaneID: f.task.PaneID}}
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w2:p1","shell_pid":4242,"foreground_process_group_id":4343,"foreground_processes":[]}}`)
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
-	removeFixtureTaskPane(f)
 	if err := os.WriteFile(filepath.Join(f.worktree, ".git"), []byte("gitdir: /missing/pruned/gitdir\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, out, stderr := f.run("apply", fmt.Sprint(closed.ID))
-	if code != 0 {
-		t.Fatalf("apply discard: %s %s", out, stderr)
+	if code == 0 || !strings.Contains(out+stderr, "posse teardown t1 --discard --user-approved") {
+		t.Fatalf("apply did not explain how to complete discard with a live Worker: %d %s %s", code, out, stderr)
 	}
 	task, err := f.db.Task(ctx, f.project.ID, "t1")
-	if err != nil || task.State != store.StateTornDown {
-		t.Fatalf("discard did not release Task: %#v %v", task, err)
-	}
-	transitions, err := f.db.TaskTransitions(ctx, task.ID, 10)
-	if err != nil || len(transitions) == 0 || transitions[0].From != string(store.StateMerging) || transitions[0].To != string(store.StateTornDown) || transitions[0].Source != "user" {
-		t.Fatalf("closed-PR discard did not transition directly from merging: %#v %v", transitions, err)
+	if err != nil || task.State != store.StateMerging {
+		t.Fatalf("refused apply changed Task: %#v %v", task, err)
 	}
 }
 

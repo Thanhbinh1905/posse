@@ -199,7 +199,7 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 		foreground := info.ProcessInfo.ForegroundProcessGroup
 		if foreground > 1 && foreground != info.ProcessInfo.ShellPID {
 			if pane.Agent != "" {
-				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Worker agent is still running", false, "Interrupted discard recovery will not retarget a live Worker. Inspect it, then retry approved teardown to retain its exact process instance")
+				return axi.Failure("discard_live_agent", "refusing to discard a Task while its Worker agent is still running", false, "Interrupted discard recovery will not retarget a live Worker. Inspect it, then run `posse teardown "+taskIDString(task.Seq)+" --discard --user-approved \"<User's words>\"` to retain and stop its exact process instance")
 			}
 			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task pane's non-shell foreground process has exited", true, pane.PaneID, identityHelp)
 		}
