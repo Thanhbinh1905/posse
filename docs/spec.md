@@ -289,6 +289,7 @@ use = "deep"
 ```toml
 # ~/.posse/projects/<name>/config.toml
 merge_mode = "pr"
+review_provider = "greenhouse" # builtin | greenhouse; frozen for newly admitted Tasks
 
 [defaults]
 forge = "gitlab"             # optional explicit override for this Project
@@ -298,6 +299,7 @@ merge_mode = "local"       # local | pr; default local without an origin, else t
 target_branch = "staging"    # optional per-member PR/MR target; overrides defaults.target_branch
 forge = "github"             # optional per-member override
 review = "quick"             # target: none | quick | full-pipeline; overrides defaults.review; User-only
+review_provider = "greenhouse" # builtin | greenhouse; overrides the Project provider
 delete_branch_on_merge = false # optional; overrides defaults.delete_branch_on_merge
 
 [autonomy]
@@ -317,6 +319,7 @@ Rules:
 - The Lead workspace label is `Lead:<project>`. New Workers in every Project kind open as unfocused `<name>` tabs in the Lead workspace, with pane identity and tree `posse_row` metadata. Git worktree registration and locking remain unchanged. Existing linked-child Tasks retain their workspace label and linked-child Teardown behavior until completion; recovery and relaunch open them as Lead tabs. Posse never renames a User tab or workspace ([ADR 0013](adr/0013-all-workers-open-as-lead-tabs.md)).
 - A Profile's `model` and `effort` reach the agent only through the kind's `model_args` and `effort_args` templates; a kind without a template for a set value is a `config_invalid` error naming the Profile.
 - A Profile's `fallback` names another Profile. It must exist, and following fallbacks from any Profile must end without returning to it; otherwise `config_invalid` names the Profile. See Quota fallback in section 17.
+- `review_provider` and `repositories.<member>.review_provider` are User-only settings that select the reviewer for newly admitted Tasks. The code default is `builtin`; a Member override takes precedence over the Project value. Admission freezes the selected provider in the Task plan, so later config changes do not move admitted Tasks to another reviewer. To roll back, run `posse config set review_provider builtin` globally or with `--project <name>`, and set any Member override to `builtin` or unset it.
 - `defaults.review`, `repositories.<member>.review`, `[pool] setup`, `[autonomy]`, `notify.command`, kind argument templates (`auto_approve_args`, `model_args`, `effort_args`, `resume_args`, `system_prompt_args`, `lead_args`), kind trust preparation (`prepare`), `lead_auto_approve`, and Profile `kind`, `args` and `attribution` are User-only. `posse config set|unset` requires a registered Lead to pass `--user-approved "<User's words>"` with a non-blank quote. The Lead records the quote, key, action, set value and Project ID in `config_approvals` (global changes are attributed to its Project). A Worker cannot write any key, even with the flag. Pane bindings in the current process and its ancestors recognize registered native Worker and Lead children. An unbound pane or recognized agent environment/process is not the User and cannot write protected settings or answer Decisions. A plain User shell needs no quote; an unbound Herdr pane must first be observed without an agent. Missing or unavailable pane evidence does not prove it is a shell.
 - These checks are cooperative same-user safeguards, not authentication. Environment/process hints and a consent quote can be forged by a process with the User's OS permissions; absence of a binding does not prove a human is present. The quote records provenance, not authenticated consent. Isolated test homes do not inherit parent actor hints across their home boundary.
 - `posse config show --effective` includes effective values and per-key `sources`: built-in defaults, global config or Project config. Project scalar aliases resolve to canonical keys, concatenated Dispatch Rules list both contributing files, and derived yolo grants name the yolo source. `posse doctor` shows the selected implicit-dispatch policy and disabled kinds, plus separate active Worker, tracked native-child and parked-resource counts per Project. The native-child count is the Project's registered and running research attempts (section 26); it never includes unregistered harness subprocesses. Parked resources are held Sandboxes whose Tasks are outside active execution states.

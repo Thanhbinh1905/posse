@@ -28,6 +28,31 @@ func request(taskType string) taskplan.Request {
 	return r
 }
 
+func TestReviewProvidersAreFrozenPerPlanMember(t *testing.T) {
+	r := request("change")
+	r.ReviewProvider = "greenhouse"
+	r.Execution.Scope = "workspace"
+	r.Execution.Members = []taskplan.Member{
+		{Name: "api", Path: "api", Base: "main", Target: "main", Delivery: "local", Review: "none", ReviewSource: "defaults.review", ReviewProvider: "builtin"},
+		{Name: "worker", Path: "worker", Base: "main", Target: "main", Delivery: "local", Review: "none", ReviewSource: "defaults.review"},
+	}
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ReviewProvider != "greenhouse" || plan.Execution.Members[0].ReviewProvider != "builtin" || plan.Execution.Members[1].ReviewProvider != "greenhouse" {
+		t.Fatalf("review providers were not frozen per Project and Member: %#v", plan)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := taskplan.Decode(encoded)
+	if err != nil || restored.SHA256() != plan.SHA256() {
+		t.Fatalf("review provider did not survive plan round-trip: %#v, %v", restored, err)
+	}
+}
+
 func TestFullPipelineReviewModeCanBeFrozenBeforeVPCRuntime(t *testing.T) {
 	r := request("change")
 	r.Review = "full-pipeline"

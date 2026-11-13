@@ -195,6 +195,7 @@ type Autonomy struct {
 type Repository struct {
 	CandidateFiles []string `toml:"candidate_files" json:"candidate_files"`
 	Review         string   `toml:"review" json:"review"`
+	ReviewProvider string   `toml:"review_provider" json:"review_provider"`
 	MergeMode      string   `toml:"merge_mode" json:"merge_mode"`
 	TargetBranch   string   `toml:"target_branch" json:"target_branch"`
 	Forge          string   `toml:"forge" json:"forge"`
@@ -234,6 +235,7 @@ const DefaultKnowledgeBudgetBytes = 8192
 
 type Config struct {
 	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
+	ReviewProvider      string                     `toml:"review_provider" json:"review_provider"`
 	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`
 	Notify              Notify                     `toml:"notify" json:"notify"`
 	Knowledge           Knowledge                  `toml:"knowledge" json:"knowledge"`
@@ -719,6 +721,7 @@ func defaultMap() map[string]any {
 		"lowkey":          map[string]any{"lead": false},
 		"notify":          map[string]any{"command": ""},
 		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
+		"review_provider": "builtin",
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
 			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
@@ -737,6 +740,9 @@ func defaultMap() map[string]any {
 }
 
 func (c *Config) normalizeBuiltins() {
+	if c.ReviewProvider == "" {
+		c.ReviewProvider = "builtin"
+	}
 	if c.Kinds == nil {
 		c.Kinds = map[string]Kind{}
 	}
@@ -858,6 +864,9 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	if err := ValidateMergeMode(c.Defaults.MergeMode); err != nil {
 		addErr("defaults.merge_mode", err)
 	}
+	if !oneOf(c.ReviewProvider, "builtin", "greenhouse") {
+		add("review_provider", "must be builtin or greenhouse")
+	}
 	if !oneOf(c.Defaults.Forge, "", "auto", "github", "gitlab") {
 		add("defaults.forge", "must be auto, github or gitlab")
 	}
@@ -873,6 +882,9 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 			if err := ValidateReview(repo.Review); err != nil {
 				addErr("repositories."+name+".review", err)
 			}
+		}
+		if repo.ReviewProvider != "" && !oneOf(repo.ReviewProvider, "builtin", "greenhouse") {
+			add("repositories."+name+".review_provider", "must be builtin or greenhouse")
 		}
 		if !oneOf(repo.Forge, "", "auto", "github", "gitlab") {
 			add("repositories."+name+".forge", "must be auto, github or gitlab")
