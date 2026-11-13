@@ -50,8 +50,21 @@ func parallelReviewPending(path string) (bool, error) {
 	return err == nil, err
 }
 
-func shouldRecordParallelRequestFailure(hasPending bool) bool {
-	return !hasPending
+func parallelPendingGrant(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var pending struct {
+		Grant string `json:"grant"`
+	}
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return "", err
+	}
+	return pending.Grant, nil
 }
 
 func parallelRequestMetadata(head string, requestedAt int64, hasPending bool, owner *parallelReviewOwner) (string, int64) {

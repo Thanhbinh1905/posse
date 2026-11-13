@@ -112,10 +112,12 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	target, err := greenhouseTarget(ctx.Context, member)
 	if err != nil {
 		if parallelMode {
-			if shouldRecordParallelRequestFailure(hasPending) {
-				if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); recordErr != nil {
-					return recordErr
-				}
+			grant, grantErr := parallelPendingGrant(pendingPath)
+			if grantErr != nil {
+				return grantErr
+			}
+			if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed", Grant: grant}); recordErr != nil {
+				return recordErr
 			}
 			if noticeErr := notifyFailure(requestedHead, err.Error()); noticeErr != nil {
 				return noticeErr
@@ -127,10 +129,11 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if !parallelMode {
 			return nil
 		}
-		if !shouldRecordParallelRequestFailure(hasPending) {
-			return notifyFailure(requestedHead, reason)
+		grant, err := parallelPendingGrant(pendingPath)
+		if err != nil {
+			return err
 		}
-		if err := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); err != nil {
+		if err := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed", Grant: grant}); err != nil {
 			return err
 		}
 		return notifyFailure(requestedHead, reason)
@@ -240,12 +243,10 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				return nil
 			}
 			if outcome == "failed" || outcome == "refused" {
-				hasPending, err := parallelReviewPending(pendingPath)
-				if err != nil {
+				if pendingGrant, err := parallelPendingGrant(pendingPath); err != nil {
 					return err
-				}
-				if !shouldRecordParallelRequestFailure(hasPending) {
-					return nil
+				} else if grant == "" {
+					grant = pendingGrant
 				}
 			}
 			if requestSettledAt > 0 {

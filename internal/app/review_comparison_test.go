@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,11 +36,6 @@ func TestReviewComparisonUsesAttemptRowsAndReportsG1PrecisionGap(t *testing.T) {
 	if _, err := f.db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,2,?,? ,1,?,'main.go','save','return err',1,?,'P1','introduced',1,'fixed')`, f.task.ID, patternID, strings.Repeat("b", 64), f.project.Name, failedHead); err != nil {
 		t.Fatal(err)
 	}
-	grant := "shop/t1/shop/r1"
-	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: grant, Head: head, Target: head, ReviewBase: head, Outcome: "inconclusive", FindingsPath: findingsPath, Mode: "parallel"}
-	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
-		t.Fatalf("record inconclusive parallel Verdict: recorded=%v err=%v", recorded, err)
-	}
 	base := store.GreenhouseReviewRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: head, Provider: store.GreenhouseReviewProvider}
 	for i, outcome := range []string{"verdict", "failed", "head_mismatch", "failed", "verdict"} {
 		request := base
@@ -49,8 +45,12 @@ func TestReviewComparisonUsesAttemptRowsAndReportsG1PrecisionGap(t *testing.T) {
 		request.RequestedAt = int64(100 + i*100)
 		request.SettledAt = request.RequestedAt + 50
 		request.Outcome = outcome
-		if outcome == "verdict" || i == 1 {
-			request.Grant = grant
+		if outcome == "verdict" {
+			request.Grant = fmt.Sprintf("shop/t1/shop/r%d", i+1)
+			verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: request.Grant, Head: request.RequestedHead, Target: head, ReviewBase: head, Outcome: "inconclusive", FindingsPath: findingsPath, Mode: "parallel"}
+			if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+				t.Fatalf("record inconclusive parallel Verdict: recorded=%v err=%v", recorded, err)
+			}
 		}
 		if err := f.db.RecordGreenhouseReviewRequest(ctx, request); err != nil {
 			t.Fatal(err)
