@@ -1490,6 +1490,36 @@ func renderArgs(template []string, token, value string) []string {
 	return result
 }
 
+func fullPipelineCandidateTargetStale(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
+	lanes, err := changedCandidateLanes(ctx, db, project, task)
+	if err != nil {
+		return false, err
+	}
+	for _, lane := range lanes {
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
+		if err != nil {
+			if store.IsNotFound(err) {
+				continue
+			}
+			return false, err
+		}
+		if candidate.State == store.ValidationCandidateStale {
+			return true, nil
+		}
+		if candidate.State != store.ValidationCandidateActive {
+			continue
+		}
+		targetHead, err := lane.targetHead(ctx)
+		if err != nil {
+			return false, err
+		}
+		if targetHead != candidate.TargetSHA {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Service) signal(ctx *axi.Context, args []string) error {
 	var attachments []string
 	filtered := make([]string, 0, len(args))
@@ -1946,7 +1976,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if plan, err := task.AdmittedPlan(); err != nil {
 			return admittedPlanFailure(err)
 		} else if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {
-			data["next_action"] = "posse review start " + taskIDString(task.Seq)
+			stale, err := fullPipelineCandidateTargetStale(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			if !stale {
+				data["next_action"] = "posse review start " + taskIDString(task.Seq)
+			}
 		}
 	}
 	if workerResumed {

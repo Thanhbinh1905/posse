@@ -110,10 +110,21 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	}
 	candidateReview := plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan))
 	if candidateReview {
+		pendingRefresh, err := db.OutstandingValidationFixHead(ctx.Context, change.ID, "freshness")
+		if err != nil {
+			return err
+		}
+		if pendingRefresh != "" {
+			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "state", Value: "refresh_queued"}, {Key: "help", Value: []any{"The target-refresh instruction is already in flight; wait for the Worker's next done Signal before starting Review"}}})
+		}
 		if change.State != store.StateWorking && change.State != store.StateStalled && change.State != store.StateDone && change.State != store.StateMerging {
 			return axi.Failure("review_target_incomplete", "Change Task must be active before its private candidate can be reviewed", false, "Answer the Worker with `posse send "+taskIDString(change.Seq)+"`; a full-pipeline Worker requests Review with `posse signal done` after submitting its private candidates")
 		}
 		if err := s.prepareReviewCandidateCheckouts(ctx.Context, db, home, project, change, plan); err != nil {
+			var failure *axi.Error
+			if errors.As(err, &failure) && failure.Code == "candidate_target_moved" {
+				return s.queueReviewTargetRefresh(ctx, db, project, change)
+			}
 			return err
 		}
 	} else if err := reviewableChange(change); err != nil {
@@ -168,6 +179,27 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		return axi.Failure("review_round_cap", fmt.Sprintf("frozen Review and repair cap reached at %s (%d of %d rounds used)", binding.label(), used, maxRounds), false, "Wait for the User's `review_cap` Decision")
 	}
 	return err
+}
+
+func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, project store.Project, change store.Task) error {
+	if project.IsWorkspace() {
+		return axi.Failure("candidate_target_moved", "a workspace candidate target changed before Review admission", false, "Refresh the stale workspace candidates before starting Review")
+	}
+	candidate, err := db.LatestValidationCandidate(ctx.Context, change.ID, "")
+	if err != nil {
+		return err
+	}
+	freshness, err := fetchPRTargetTip(ctx.Context, project.Root, taskTargetBranch(project, change))
+	if err != nil {
+		return err
+	}
+	if err := queueTargetMergeInstruction(ctx.Context, db, change, "", freshness, candidate.CandidateSHA); err != nil {
+		return err
+	}
+	if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
+		return err
+	}
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "state", Value: "refresh_queued"}, {Key: "help", Value: []any{"The Worker has the target-refresh instruction; wait for its next done Signal before starting Review"}}})
 }
 
 func reviewScopeInstructions(ctx context.Context, db *store.DB, taskID int64) ([]string, error) {
