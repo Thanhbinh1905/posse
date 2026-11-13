@@ -90,6 +90,21 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	if original, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND origin=?`, request.ProjectID, request.Origin)); err == nil {
 		// A dependency question names the prerequisite's current state, which
 		// may move (failed, then torn-down) under the same origin.
+		if original.Kind == "review_cap" && request.Kind == "review_cap" && original.TaskID == request.TaskID && original.Question == request.Question && original.AnsweredAt == 0 && original.ObsoleteAt == 0 {
+			if !slices.Equal(original.Options, request.Options) {
+				if _, err := tx.ExecContext(ctx, `UPDATE decisions SET options_json=? WHERE id=?`, string(options), original.ID); err != nil {
+					return Decision{}, err
+				}
+				if err := tx.Commit(); err != nil {
+					return Decision{}, err
+				}
+				if err := db.PersistProject(ctx, request.ProjectID); err != nil {
+					return Decision{}, err
+				}
+				original.Options = request.Options
+			}
+			return original, nil
+		}
 		if original.Kind == "dependency" && request.Kind == "dependency" && original.TaskID == request.TaskID && original.Question != request.Question && slices.Equal(original.Options, request.Options) {
 			if original.AnsweredAt != 0 || original.ObsoleteAt != 0 {
 				return original, nil
