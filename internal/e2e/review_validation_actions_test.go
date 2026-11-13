@@ -423,6 +423,7 @@ func TestYoloReviewCapDiscardUsesDelegatedAuthority(t *testing.T) {
 
 func TestReviewCapFinalFixWithoutOpenPatternsNeedsReview(t *testing.T) {
 	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	_, _, seq := startPrivateReviewChange(t, f, "1")
 	recordBlockingReviewFinding(t, f, seq)
 	change := f.mustTask(t, seq)
@@ -467,19 +468,31 @@ func TestReviewCapFinalFixWithoutOpenPatternsNeedsReview(t *testing.T) {
 	if code, out := runReviewIdentityCLI(t, f, "review", "start", seq, "--profile", "reviewer"); code == 0 {
 		t.Fatalf("final Review allowance was reused: %s", out)
 	}
-	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	laterHead := strings.Repeat("a", 40)
+	noticeData, err := json.Marshal(map[string]any{"head_sha": laterHead, "targets": []store.ReviewTarget{{Repository: "shop", Commit: laterHead}}, "rounds_used": 4, "max_rounds": 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := f.db.RaiseDecision(context.Background(), store.DecisionRequest{ProjectID: f.project.ID, TaskID: change.ID, Kind: "review_cap", Origin: "review_cap:" + seq + ":" + candidate.CandidateSHA + ":recovery:999", Question: "Another final repair?", Options: []string{"final-fix"}})
+	_, err = f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: change.ID, Kind: "review_cap_reached", Summary: "A later CI fix exhausted the Review cap", DataJSON: string(noticeData)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(other.ID), "final-fix", "--user-approved", "Try another repair"); code != 0 {
-		t.Fatal(out)
+	if code, out := runReviewIdentityCLI(t, f, "decisions"); code != 0 || !strings.Contains(out, "options[3]: accept-head,rethink,discard") || strings.Contains(out, "options[4]: accept-head,final-fix,rethink,discard") {
+		t.Fatalf("spent allowance Decision options=%d %s", code, out)
 	}
-	if code, out := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(other.ID)); code == 0 || !strings.Contains(out, "review_final_fix_spent") {
-		t.Fatalf("distinct Decision renewed allowance: %d %s", code, out)
+	var otherID int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE origin=?`, "review_cap:"+seq+":"+laterHead).Scan(&otherID); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(otherID), "final-fix", "--lead-reason", "Try another repair under YOLO"); code == 0 || !strings.Contains(out, "review_final_fix_spent") || !strings.Contains(out, "accept-head") || !strings.Contains(out, "rethink") {
+		t.Fatalf("spent allowance should refuse before answering and suggest another option: %d %s", code, out)
+	}
+	var unanswered string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT answer FROM decisions WHERE id=?`, otherID).Scan(&unanswered); err != nil || unanswered != "" {
+		t.Fatalf("spent final-fix Decision answer=%q err=%v; want unanswered", unanswered, err)
+	}
+	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(otherID), "accept-head", "--user-approved", "Accept this head"); code != 0 {
+		t.Fatalf("unanswered cap could not take accept-head: %d %s", code, out)
 	}
 	var dispositions int
 	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_dispositions WHERE ship_task_id=?`, change.ID).Scan(&dispositions); err != nil || dispositions != 0 {
