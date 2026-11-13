@@ -61,6 +61,37 @@ func TestWorkerExitedNoticePastCursorStillRaisesDecision(t *testing.T) {
 	}
 }
 
+func TestReviewCapReconcileReusesPendingDecisionAfterFinalFixGrant(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	ctx := context.Background()
+	if err := createReviewCapNotice(ctx, fixture.db, fixture.project, fixture.task, reviewCapBinding{Head: fixture.headSHA}, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(fixture.home, herdr.NewFake())
+	if err := service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("initial review_cap Decision = %#v, %v", decisions, err)
+	}
+	decisionID := decisions[0].ID
+	grantDecision, err := fixture.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, Origin: "review-cap:prior", Kind: "review_cap", Question: "Prior review cap?", Options: []string{"accept-head", "rethink", "discard"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.RecordReviewCapGrant(ctx, store.ReviewCapGrant{TaskID: fixture.task.ID, DecisionID: grantDecision.ID, Round: 2, ResultJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.raiseNoticeDecisions(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatalf("reconcile after final-fix grant: %v", err)
+	}
+	decisions, err = fixture.db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].ID != decisionID || strings.Join(decisions[0].Options, ",") != "accept-head,rethink,discard" {
+		t.Fatalf("pending review_cap Decision = %#v, %v", decisions, err)
+	}
+}
+
 func TestTornDownReviewCapNoticesAreExcludedFromReconciliation(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	ctx := context.Background()
