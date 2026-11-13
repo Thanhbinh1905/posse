@@ -79,6 +79,17 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			request.Origin = reviewCapOrigin(task, binding.Head)
 			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%d of %d Review/repair rounds used). Choose how to proceed.", taskIDString(task.Seq), binding.label(), used, max)
 			request.Options = []string{"accept-head", "final-fix", "rethink", "discard"}
+			if grant, err := db.ReviewCapGrant(ctx, task.ID); err == nil {
+				var sameDecision bool
+				if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE id=? AND origin=?)`, grant.DecisionID, request.Origin).Scan(&sameDecision); err != nil {
+					return err
+				}
+				if !sameDecision {
+					request.Options = []string{"accept-head", "rethink", "discard"}
+				}
+			} else if !store.IsNotFound(err) {
+				return err
+			}
 		case notice.Kind == "merge_ready" && task.AutonomyMerge != "auto" && (task.State == store.StateDone || task.State == store.StateMerging):
 			request.Kind = "merge_ready"
 			request.Question = "Merge " + task.Title + "? " + notice.Summary
@@ -359,6 +370,15 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 			return err
 		}
 		id, decisionBefore = recovered.ID, recovered
+	}
+	if decisionBefore.Kind == "review_cap" && parsed.Positionals[1] == "final-fix" {
+		grant, err := db.ReviewCapGrant(ctx.Context, decisionBefore.TaskID)
+		if err == nil && grant.DecisionID != id {
+			return axi.Failure("review_final_fix_spent", "the one final repair and Review allowance belongs to another Decision", false, "Choose `accept-head` or `rethink` instead")
+		}
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
 	}
 	if reason := strings.TrimSpace(parsed.Flags["lead-reason"]); reason != "" {
 		cfg, cfgErr := config.Load(home, project.Name)
