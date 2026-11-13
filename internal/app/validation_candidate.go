@@ -400,7 +400,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 		return err
 	}
 	if err == nil {
-		if refresh {
+		if refresh || candidate.SubmittedSHA == submittedSHA {
 			if summary == "" {
 				summary = candidate.Summary
 			}

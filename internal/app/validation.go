@@ -155,7 +155,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 			if lane.repo != "" {
 				repoFlag = " --repo " + lane.repo
 			}
-			return axi.Failure("validation_pr_description_incomplete", "the candidate PR description is incomplete: "+strings.Join(missing, "; "), false, "Resubmit the unchanged head from the Sandbox with `posse publish"+repoFlag+" \"<summary>\"` and the corrected flags, then rerun docs and lint; the flags update the stored description without a new candidate")
+			return axi.Failure("validation_pr_description_incomplete", "the candidate PR description is incomplete: "+strings.Join(missing, "; "), false, "From this private candidate checkout, run `posse publish --refresh"+repoFlag+" \"<summary>\"` with the corrected --verify, --proof and --risk flags, then rerun docs and lint; this updates the stored description without changing the reviewed candidate head")
 		}
 	} else if stage == "lint" {
 		if _, err := db.ValidationStage(out.Context, candidate.ID, "docs", candidate.CandidateSHA, candidate.TargetSHA, plan.SHA256()); err != nil {

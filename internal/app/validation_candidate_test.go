@@ -1487,6 +1487,77 @@ func TestDocsStageNamesEachIncompleteDescriptionField(t *testing.T) {
 	}
 }
 
+func TestPublishResubmissionWithoutFlagsKeepsReviewedCandidateDescription(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	if err := fixture.db.MarkValidationCandidateStale(context.Background(), candidate.ID, candidate.TargetSHA); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("publish", "Candidate summary")
+	if code != 0 {
+		t.Fatalf("resubmit reviewed head: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	candidate, err = fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Summary != "Candidate summary" || candidate.Verification != "go test ./... -> passed" || candidate.Proof != "Intent proof: verified" || candidate.Risk != "Risk: low\nRollback: revert" {
+		t.Fatalf("resubmission dropped candidate description: %+v", candidate)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "Complete PR description prepared"); code != 0 {
+		t.Fatalf("docs stage after same-head resubmission: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
+func TestDocsHelpUpdatesDescriptionFromReviewedCandidateCheckout(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixSHA := addCandidateFix(t, fixture)
+	recordCandidateReviewPass(t, fixture, fixSHA)
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE validation_candidates SET summary='',verification='',proof='',risk='' WHERE id=?`, candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	code, output, _ := runCandidateCLI(t, fixture, candidate, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "Complete PR description prepared")
+	if code != 1 || !strings.Contains(output, "validation_pr_description_incomplete") {
+		t.Fatalf("docs accepted incomplete description: exit=%d output=%s", code, output)
+	}
+	if !strings.Contains(output, "candidate checkout") {
+		t.Fatalf("docs help does not name a candidate-current path: %s", output)
+	}
+	code, output, stderr := runCandidateCLI(t, fixture, candidate, "publish", "--refresh", "Candidate summary", "--verify", "go test ./... -> passed", "--proof", "Intent proof: verified", "--risk", "Risk: low\nRollback: revert")
+	if code != 0 {
+		t.Fatalf("follow docs help in candidate checkout: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	updated, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.CandidateSHA != fixSHA || updated.State != store.ValidationCandidateActive || updated.Summary == "" || updated.Verification == "" || updated.Proof == "" || updated.Risk == "" {
+		t.Fatalf("candidate stopped being current or description was not updated: %+v", updated)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, updated, "validate", "docs", "--no-comments", "passed", "--no-owner-doc-change", "No owner documentation changes are warranted", "--proof", "Complete PR description prepared"); code != 0 {
+		t.Fatalf("docs after following help: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestPublishOnUnchangedCandidateAppliesNewDescriptionFlags(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	installFullPipelinePlan(t, fixture)
