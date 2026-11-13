@@ -422,6 +422,16 @@ func (s *Service) publishFullPipeline(out *axi.Context, db *store.DB, home strin
 		if err := s.ensureCandidateCheckout(ctx, db, home, lane.task, candidate); err != nil {
 			return err
 		}
+		if parsed.Bool("refresh") && candidate.State == store.ValidationCandidateActive && (len(parsed.Positionals) > 0 || len(parsed.Repeated["verify"]) > 0 || len(parsed.Repeated["proof"]) > 0 || len(parsed.Repeated["risk"]) > 0) {
+			if err := db.UpdateValidationCandidateDescription(ctx, candidate.ID, summary, strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n")); err != nil {
+				return err
+			}
+			candidate, err = db.LatestValidationCandidate(ctx, task.ID, repo)
+			if err != nil {
+				return err
+			}
+			return printCandidateSubmission(out, lane, candidate, true, nil, nil)
+		}
 		return s.promotePrivateCandidate(out, db, home, lane, cfg)
 	}
 	return s.submitPrivateCandidate(out, db, home, lane, cfg, summary, strings.Join(parsed.Repeated["verify"], "\n"), strings.Join(parsed.Repeated["proof"], "\n\n"), strings.Join(parsed.Repeated["risk"], "\n\n"), parsed.Bool("refresh"))
