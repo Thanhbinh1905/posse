@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -728,6 +729,26 @@ func (p Plan) Encode() (string, error) {
 	}
 	data, err := json.Marshal(p)
 	return string(data), err
+}
+
+func (p Plan) ChangedFields(previous Plan) []string {
+	currentValue, previousValue := reflect.ValueOf(p), reflect.ValueOf(previous)
+	typeOfPlan := currentValue.Type()
+	var fields []string
+	for index := 0; index < currentValue.NumField(); index++ {
+		field := typeOfPlan.Field(index)
+		if !field.IsExported() || field.Name == "Revision" || field.Name == "PreviousSHA256" {
+			continue
+		}
+		if !reflect.DeepEqual(currentValue.Field(index).Interface(), previousValue.Field(index).Interface()) {
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "" {
+				name = field.Name
+			}
+			fields = append(fields, name)
+		}
+	}
+	return fields
 }
 
 func (p Plan) SHA256() string {

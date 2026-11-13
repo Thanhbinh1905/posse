@@ -26,7 +26,29 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	setupassets "github.com/thanhbinh1905/posse/internal/setup"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
+
+func TestRelaunchPlanRevisionRequiresEffectiveChanges(t *testing.T) {
+	admitted := &taskplan.Plan{Launch: taskplan.Launch{ProfileName: "reviewer"}}
+	unchanged := *admitted
+	if relaunchNeedsPlanRevision(admitted, &unchanged) {
+		t.Fatal("unchanged resolved launch requested a plan revision")
+	}
+	changedLaunch := *admitted
+	changedLaunch.Launch.Profile.Model = "model-b"
+	if !relaunchNeedsPlanRevision(admitted, &changedLaunch) {
+		t.Fatal("changed resolved launch did not request a plan revision")
+	}
+	changedReview := *admitted
+	changedReview.Review = "full-pipeline"
+	if !relaunchNeedsPlanRevision(admitted, &changedReview) {
+		t.Fatal("review policy change did not request a plan revision")
+	}
+	if relaunchNeedsPlanRevision(nil, &changedLaunch) {
+		t.Fatal("legacy Task without an admitted plan requested a plan revision")
+	}
+}
 
 func TestResearchAndReviewWorkerProtocolsKeepAttachmentListingWithLead(t *testing.T) {
 	project := store.Project{Name: "shop"}

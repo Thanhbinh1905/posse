@@ -13,6 +13,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -199,6 +200,159 @@ func TestFullPipelinePublishSubmitsPrivateCandidateWithoutPushing(t *testing.T) 
 		t.Fatalf("private submission opened a pull request: %s", log)
 	} else if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
+	}
+}
+
+func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	planForRelaunch, err := fixture.task.AdmittedPlan()
+	if err != nil || planForRelaunch == nil {
+		t.Fatalf("admitted plan = %#v, %v", planForRelaunch, err)
+	}
+	previousPlanSHA := planForRelaunch.SHA256()
+	planForRelaunch.Revision++
+	planForRelaunch.PreviousSHA256 = previousPlanSHA
+	planForRelaunch.Inputs = append(planForRelaunch.Inputs, taskplan.Select("skill", "posse-spec", []byte("test skill content\n")))
+	if err := fixture.db.ReviseTaskPlan(context.Background(), fixture.task, *planForRelaunch); err != nil {
+		t.Fatalf("add selected launch skill: %v", err)
+	}
+	fixture.task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(fixture.home, "config.toml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configBytes, []byte("\n[profiles.author]\nkind = \"claude\"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := dispatch.Resolve(cfg, fixture.task.Type, planForRelaunch.Launch.ProfileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := frozenLaunch(resolution, cfg.Kinds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPlan, err := planForRelaunch.Reconfigure(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPlan, err = selectReconfiguredLaunchInputs(nextPlan, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.ReviseTaskPlan(context.Background(), fixture.task, nextPlan); err != nil {
+		t.Fatalf("freeze effective launch configuration: %v", err)
+	}
+	fixture.task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitThroughCLI(t, fixture)
+	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCandidateReviewPass(t, fixture, candidate.CandidateSHA)
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("admitted plan = %#v, %v", plan, err)
+	}
+	if code, output, stderr := runCandidateCLI(t, fixture, candidate, "validate", "test", "--verify", "go test ./... -> passed", "--proof", "Intent and E2E behavior verified"); code != 0 {
+		t.Fatalf("test stage: exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	before := plan.SHA256()
+	ctx := context.Background()
+	if _, err := fixture.db.ExecContext(ctx, `INSERT INTO mounts(project_id,n,path,state,task_id) VALUES(?,1,?,'held',?)`, fixture.project.ID, fixture.worktree, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET profile='author', mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, fixture.task.ID, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateLost, "cli", "simulate Worker loss before relaunch"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	fixture.project.HerdrWorkspaceID, fixture.project.LeadPaneID, fixture.project.LeadLabel = "w1", "w1:p1", "posse:shop:lead"
+	lead := herdr.Pane{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "idle"}
+	fake.SnapshotValue.Panes = []herdr.Pane{lead}
+	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t1","workspace_id":"w1"},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t1"}}`)
+	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
+	fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fake.SnapshotValue.Panes = []herdr.Pane{lead, {PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", Label: fixture.task.PaneLabel, Agent: "claude"}}
+		}
+	}
+	cfg, err = config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.relaunchTask(ctx, fixture.db, fixture.home, fixture.project, cfg, fixture.task, plan.Launch.ProfileName); err != nil {
+		t.Fatalf("relaunch Task with its admitted Profile: %v", err)
+	}
+	current, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPlan, err := current.AdmittedPlan()
+	if err != nil || currentPlan == nil || currentPlan.SHA256() != before {
+		var changedFields []string
+		if currentPlan != nil {
+			changedFields = currentPlan.ChangedFields(*plan)
+		}
+		t.Fatalf("same-Profile relaunch changed admitted plan: fields=%v err=%v", changedFields, err)
+	}
+	currentCandidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
+	if err != nil || currentCandidate.ID != candidate.ID || currentCandidate.CandidateSHA != candidate.CandidateSHA {
+		t.Fatalf("same-Profile relaunch changed candidate: before=%+v after=%+v err=%v", candidate, currentCandidate, err)
+	}
+	verdicts, err := fixture.db.ReviewVerdictsFor(context.Background(), fixture.task.ID)
+	if err != nil || len(verdicts) != 1 || verdicts[0].Verdict != store.ReviewPass || verdicts[0].Targets[0].Commit != candidate.CandidateSHA {
+		t.Fatalf("same-Profile relaunch lost Review pass: %#v, %v", verdicts, err)
+	}
+	stage, err := fixture.db.ValidationStage(ctx, candidate.ID, "test", candidate.CandidateSHA, candidate.TargetSHA, before)
+	if err != nil || stage.Status != "passed" {
+		t.Fatalf("same-Profile relaunch invalidated test evidence: %#v, %v", stage, err)
+	}
+	changedReview := *currentPlan
+	changedReview.PreviousSHA256 = currentPlan.SHA256()
+	changedReview.Revision++
+	changedReview.Review = "quick"
+	changedReview.Preferences[1].Value = "quick"
+	if err := fixture.db.ReviseTaskPlan(ctx, current, changedReview); err != nil {
+		t.Fatalf("revise Review policy: %v", err)
+	}
+	revisedTask, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisedPlan, err := revisedTask.AdmittedPlan()
+	if err != nil || revisedPlan == nil || revisedPlan.Review != "quick" {
+		t.Fatalf("admitted Review policy after revision = %#v, %v", revisedPlan, err)
+	}
+	currentCandidate, err = fixture.db.LatestValidationCandidate(ctx, fixture.task.ID, "")
+	if err != nil || currentCandidate.State != store.ValidationCandidateStale {
+		t.Fatalf("review-relevant plan revision left candidate usable: %+v, %v", currentCandidate, err)
+	}
+	stages, err := fixture.db.ValidationStages(ctx, fixture.task.ID)
+	if err != nil || len(stages) != 1 || stages[0].Status != "invalidated" {
+		t.Fatalf("review-relevant plan revision retained candidate validation evidence: %+v, %v", stages, err)
+	}
+	verdicts, err = fixture.db.ReviewVerdictsFor(ctx, fixture.task.ID)
+	if err != nil || len(verdicts) != 0 {
+		t.Fatalf("review-relevant plan revision retained old verdicts: %#v, %v", verdicts, err)
 	}
 }
 
