@@ -46,6 +46,16 @@ func taskCheckoutBase(ctx context.Context, root string, task store.Task, member,
 		}
 	}
 	if commit == "" {
+		if len(plan.Dependencies) > 0 {
+			branch := strings.TrimPrefix(strings.TrimPrefix(ref, "refs/remotes/origin/"), "refs/heads/")
+			if _, err := gitOutput(ctx, root, "remote", "get-url", "origin"); err == nil {
+				if _, err := gitFetch(ctx, root, "origin", "refs/heads/"+branch); err != nil {
+					return "", err
+				}
+				ref = "refs/remotes/origin/" + branch
+			}
+			return gitOutput(ctx, root, "rev-parse", "--verify", ref+"^{commit}")
+		}
 		return fallback, nil
 	}
 	if _, err := gitOutput(ctx, root, "cat-file", "-e", commit+"^{commit}"); err != nil {
