@@ -2765,7 +2765,7 @@ func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, chec
 
 // fakePull is one PR in the fake GraphQL response; alias prN is Task tN.
 type fakePull struct {
-	alias, state, checks, review, mergeable, mergeCommit, head string
+	alias, state, checks, review, mergeable, mergeStateStatus, mergeCommit, head string
 	// detailsURL overrides the failed check's details link.
 	detailsURL string
 }
@@ -2796,7 +2796,7 @@ func (fixture *prLifecycleFixture) writeGraphQLPulls(t *testing.T, pulls ...fake
 		}
 		repository[fake.alias] = map[string]any{
 			"url":   "https://github.com/acme/shop/pull/" + strconv.Itoa(16+number),
-			"state": fake.state, "headRefOid": fake.head, "baseRefName": baseBranch, "mergeable": fake.mergeable, "reviewDecision": fake.review,
+			"state": fake.state, "headRefOid": fake.head, "baseRefName": baseBranch, "mergeable": fake.mergeable, "mergeStateStatus": fake.mergeStateStatus, "reviewDecision": fake.review,
 			"mergeCommit":       map[string]any{"oid": fake.mergeCommit},
 			"statusCheckRollup": map[string]any{"state": fake.checks, "contexts": map[string]any{"nodes": contexts}},
 		}
