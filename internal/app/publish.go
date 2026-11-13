@@ -174,8 +174,8 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("stack_retarget_incomplete", "stacked PR/MR target change is "+change.Status+": "+change.Error, change.Status == "pending", "Resolve the stacked PR/MR target change before publishing again")
 		}
 	}
-	if task.Type != "change" || (task.State != store.StateWorking && task.State != store.StateStalled) || task.WorktreePath == "" || task.Branch == "" {
-		return axi.Failure("publish_refused", "only a working PR-mode Change Worker with its own Task branch can publish", false)
+	if task.Type != "change" || (task.State != store.StateWorking && task.State != store.StateStalled && !(task.State == store.StateDone && isFullPipelineTask(task, repoFilter))) || task.WorktreePath == "" || task.Branch == "" {
+		return axi.Failure("publish_refused", "only an eligible PR-mode Change Task with its own Task branch can publish", false)
 	}
 	cwd, err := currentDir()
 	if err != nil {
