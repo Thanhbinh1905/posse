@@ -395,6 +395,166 @@ func TestFullPipelineWorkspaceMembersPublishOnlyValidatedCandidates(t *testing.T
 	}
 }
 
+func TestFullPipelineWorkspacePRMemberCanRepublishAfterPromotion(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	stopBackgroundWatch(t, f)
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "gh"), []byte(workspaceForgeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(f.root, "stack")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	api := filepath.Join(root, "api")
+	initRepository(t, api, filepath.Join(f.root, "ws-api.git"), f.env)
+	url := "https://github.com/acme/api.git"
+	gitTest(t, f.env, api, "remote", "set-url", "origin", url)
+	gitTest(t, f.env, api, "config", "url.file://"+filepath.Join(f.root, "ws-api.git")+".insteadOf", url)
+	project, err := f.db.CreateWorkspaceProject(context.Background(), "stack", root, []store.ProjectRepo{
+		{Name: "api", Path: "api", DefaultBranch: "main", Status: store.RepoActive, OriginHost: "github.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := createWorkspace(herdr.NewWithEnv("herdr", f.env), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SetProjectLead(context.Background(), project.ID, workspace.Workspace.WorkspaceID, workspace.RootPane.PaneID, "posse:stack:lead"); err != nil {
+		t.Fatal(err)
+	}
+	leadEnv := setEnv(f.leadEnv, "HERDR_PANE_ID", workspace.RootPane.PaneID)
+	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", workspace.Workspace.WorkspaceID)
+	runPosse(t, f.binary, root, f.env, "config", "set", "defaults.review", "full-pipeline", "--project", "stack")
+	runPosse(t, f.binary, root, f.env, "config", "set", "defaults.merge_mode", "pr", "--project", "stack")
+	brief := filepath.Join(f.root, "workspace-single-member.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace PR member\ndone_when: republish the new head\nrepos: [api]\n---\nChange the Member.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "start", "--brief", brief, "--name", "workspace-single-member", "--profile", "author"); code != 0 {
+		t.Fatalf("start workspace Change Task: code=%d %s", code, output)
+	}
+	change := mustProjectTask(t, f, project.ID, "t1")
+	repos, err := f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || len(repos) != 1 {
+		t.Fatalf("workspace Members: %+v %v", repos, err)
+	}
+	member := repos[0]
+	if err := os.WriteFile(filepath.Join(member.WorktreePath, "change.txt"), []byte("first candidate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, member.WorktreePath, "add", "change.txt")
+	gitTest(t, f.env, member.WorktreePath, "commit", "-m", "first candidate")
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	code, output := runReleaseCLI(t, f.binary, member.WorktreePath, workerEnv, "publish", "--repo", "api", "First candidate", "--verify", "go test ./... -> passed", "--proof", "Intent verified", "--risk", "Risk: low\nRollback: revert the change")
+	if code != 0 {
+		t.Fatalf("submit first candidate: code=%d %s", code, output)
+	}
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start Review: code=%d %s", code, output)
+	}
+	review := mustProjectTask(t, f, project.ID, "t2")
+	waitForReviewIdentityAgent(t, f, review.PaneID)
+	scratch := filepath.Join(f.home, "scratch", "stack", "t2")
+	report, findings := filepath.Join(scratch, "report.md"), filepath.Join(scratch, "findings.json")
+	if err := os.WriteFile(report, []byte("Candidate passed review.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findings, []byte(`{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
+	recordCandidateStages(t, f, workerEnv, candidate, func(string) {}, "--repo", "api")
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "--repo", "api", "Promote"); code != 0 {
+		t.Fatalf("promote first candidate: code=%d %s", code, output)
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "First head promoted"); code != 0 {
+		t.Fatalf("done after promotion: code=%d %s", code, output)
+	}
+	remote := filepath.Join(f.root, "ws-api.git")
+	command := exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+change.Branch)
+	command.Env = f.env
+	remoteOutput, err := command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(remoteOutput)) != candidate.CandidateSHA {
+		t.Fatalf("PR remote head=%q, want promoted candidate %s, err=%v", strings.TrimSpace(string(remoteOutput)), candidate.CandidateSHA, err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, "later.txt"), []byte("later commit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, candidate.WorktreePath, "add", "later.txt")
+	gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "later commit")
+	code, output = runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "publish", "--repo", "api", "Second candidate", "--verify", "go test ./... -> passed", "--proof", "New head verified", "--risk", "Risk: low\nRollback: revert the change")
+	if code != 0 || !strings.Contains(output, "validation required before publication") {
+		t.Fatalf("submit a post-promotion workspace head: code=%d %s", code, output)
+	}
+	pollEnv := setEnv(leadEnv, "POSSE_WATCH_TOKEN", "")
+	if code, output := runReleaseCLI(t, f.binary, root, pollEnv, "watch", "--poll-only", "--timeout", "2500"); code != 0 {
+		t.Fatalf("poll the superseded PR head: code=%d %s", code, output)
+	}
+	notices, err := f.db.Notices(context.Background(), project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "merge_ready" {
+			t.Fatalf("merge_ready emitted for a superseded PR head while a new candidate is pending: %+v", notice)
+		}
+	}
+	latest, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "api")
+	if err != nil || latest.State != store.ValidationCandidateActive || latest.CandidateSHA == candidate.CandidateSHA {
+		t.Fatalf("new candidate=%+v err=%v", latest, err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "review", "start", "t1", "--profile", "reviewer"); code != 0 {
+		t.Fatalf("start Review of the new head: code=%d %s", code, output)
+	}
+	secondReview := mustProjectTask(t, f, project.ID, "t3")
+	waitForReviewIdentityAgent(t, f, secondReview.PaneID)
+	scratch = filepath.Join(f.home, "scratch", "stack", "t3")
+	report, findings = filepath.Join(scratch, "report.md"), filepath.Join(scratch, "findings.json")
+	if err := os.WriteFile(report, []byte("The new candidate passed review.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findings, []byte(`{"schema":"posse.review-findings.v1","patterns":[],"resolutions":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signalReviewPolicyTask(t, f, secondReview, "--report", report, "--findings", findings, "--verdict", "pass")
+	recordCandidateStages(t, f, workerEnv, latest, func(string) {}, "--repo", "api")
+	if code, output := runReleaseCLI(t, f.binary, latest.WorktreePath, workerEnv, "publish", "--repo", "api", "Promote second candidate"); code != 0 {
+		t.Fatalf("promote second candidate: code=%d %s", code, output)
+	}
+	command = exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/"+change.Branch)
+	command.Env = f.env
+	remoteOutput, err = command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(remoteOutput)) != latest.CandidateSHA {
+		t.Fatalf("PR remote head=%q after second promotion, want new head %s, err=%v", strings.TrimSpace(string(remoteOutput)), latest.CandidateSHA, err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1"); code != 0 {
+		t.Fatalf("prepare Merge for the new head: code=%d %s", code, output)
+	}
+	repos, err = f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || repos[0].GatedSHA != latest.CandidateSHA {
+		t.Fatalf("Member gated head=%q after Merge preparation, want new candidate %s, err=%v", repos[0].GatedSHA, latest.CandidateSHA, err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, root, leadEnv, "merge", "t1", "--execute", "--user-approved", "Merge the newly reviewed head"); code != 0 {
+		t.Fatalf("Merge newly reviewed workspace head: code=%d %s", code, output)
+	}
+	command = exec.Command("git", "--git-dir", remote, "rev-parse", "refs/heads/main")
+	command.Env = f.env
+	remoteOutput, err = command.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(remoteOutput)) != latest.CandidateSHA {
+		t.Fatalf("Member target=%q after Merge, want newly promoted head %s, err=%v", strings.TrimSpace(string(remoteOutput)), latest.CandidateSHA, err)
+	}
+	repos, err = f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil || repos[0].GatedSHA != latest.CandidateSHA {
+		t.Fatalf("Member gated head=%q after Merge, want new candidate %s, err=%v", repos[0].GatedSHA, latest.CandidateSHA, err)
+	}
+}
+
 // workspaceForgeScript fakes GitHub for workspace Members acme/<repo>, each
 // backed by the bare origin $POSSE_TEST_ROOT/ws-<repo>.git. A merge moves the
 // Member's origin main to the PR head and records the PR as merged.
@@ -418,14 +578,30 @@ case "$1 $2" in
   "pr create")
     repo=$(git config --get remote.origin.url | sed -E 's#.*/acme/([^/.]+)(\.git)?$#\1#')
     : > "$state/$repo-open"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$state/$repo-title"; shift 2 ;;
+        --body) printf '%s' "$2" > "$state/$repo-body"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
     printf 'https://github.com/acme/%s/pull/%s\n' "$repo" "$(number "$repo")" ;;
   "pr view")
     repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
     case "$*" in
-      *'--json title,body'*) printf '{"title":"t","body":"b"}\n' ;;
+      *'--json title,body'*) python3 -c 'import json,sys; print(json.dumps({"title":open(sys.argv[1]).read(),"body":open(sys.argv[2]).read()}))' "$state/$repo-title" "$state/$repo-body" ;;
       *) pull_json "$repo"; printf '\n' ;;
     esac ;;
-  "pr edit") printf 'Edited\n' ;;
+  "pr edit")
+    repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title) printf '%s' "$2" > "$state/$repo-title"; shift 2 ;;
+        --body) printf '%s' "$2" > "$state/$repo-body"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf 'Edited\n' ;;
   "pr merge")
     repo=$(printf '%s' "$3" | sed -E 's#https://github.com/acme/([^/]+)/pull/.*#\1#')
     sha=$(printf '%s\n' "$*" | sed -E 's#.*--match-head-commit ([0-9a-f]+).*#\1#')
