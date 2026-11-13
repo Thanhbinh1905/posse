@@ -4,9 +4,37 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 )
+
+func TestUnansweredReviewCapDecisionReusesOriginalOptions(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "review-cap:head", Kind: "review_cap", Question: "Review cap reached?", Options: []string{"accept-head", "final-fix", "rethink", "discard"}}
+	original, err := db.RaiseDecision(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Options = []string{"accept-head", "rethink", "discard"}
+	reused, err := db.RaiseDecision(ctx, request)
+	if err != nil || reused.ID != original.ID || !slices.Equal(reused.Options, original.Options) {
+		t.Fatalf("review_cap Decision reuse = %#v, %v; want original Decision %#v", reused, err, original)
+	}
+}
 
 func TestDecisionOnceWithAtomicAnswerAndNotice(t *testing.T) {
 	ctx := context.Background()
