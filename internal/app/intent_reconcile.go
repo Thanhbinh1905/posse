@@ -112,7 +112,10 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 			err = s.recoverWorkspaceMergeIntent(ctx, db, project, task, intent)
 		case "teardown":
 			if task.State == store.StateTornDown {
-				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+				err = db.ObsoleteTaskDecisions(ctx, task.ID)
+				if err == nil {
+					err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+				}
 			} else {
 				var payload discardIntentPayload
 				if decodeErr := json.Unmarshal([]byte(intent.PayloadJSON), &payload); decodeErr != nil {
