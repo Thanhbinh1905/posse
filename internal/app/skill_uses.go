@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,8 +28,8 @@ var proseSkillStep = roleSkillStep{when: "on PR text, commit messages and Report
 
 var roleSkillSteps = map[string]roleSkillStep{
 	"posse-tdd":               {when: "before changing code; write the failing test first"},
-	"posse-deslop":            {when: "before the `done` Signal, on the lines this branch added or changed", steps: []string{"done"}},
-	"posse-no-comments":       {when: "before the `done` Signal, after `posse-deslop`", steps: []string{"done"}},
+	"posse-deslop":            {when: "when this Task changes code, before the `done` Signal", steps: []string{"done"}},
+	"posse-no-comments":       {when: "when this Task changes code, before the `done` Signal and after `posse-deslop`", steps: []string{"done"}},
 	"posse-technical-writing": proseSkillStep,
 	"posse-unslop":            proseSkillStep,
 	"posse-review":            {when: "for the whole review, before the `done` Signal", steps: []string{"done"}},
@@ -51,6 +52,32 @@ func planRoleSkills(plan *taskplan.Plan) []string {
 	return names
 }
 
+func taskRoleSkills(task store.Task, skills []string) []string {
+	if task.Type == "change" && taskHasChanges(task) {
+		return skills
+	}
+	var applicable []string
+	for _, skill := range skills {
+		if skill != "posse-deslop" && skill != "posse-no-comments" {
+			applicable = append(applicable, skill)
+		}
+	}
+	return applicable
+}
+
+func taskHasChanges(task store.Task) bool {
+	if task.WorktreePath == "" || task.BaseRef == "" {
+		return true
+	}
+	cmd := exec.Command("git", "-C", task.WorktreePath, "diff", "--quiet", task.BaseRef+"...HEAD")
+	if err := cmd.Run(); err != nil {
+		return true
+	}
+	cmd = exec.Command("git", "-C", task.WorktreePath, "status", "--porcelain")
+	status, err := cmd.Output()
+	return err != nil || len(status) > 0
+}
+
 func roleSkillWhen(name string) string {
 	if step, ok := roleSkillSteps[name]; ok {
 		return step.when
@@ -59,8 +86,11 @@ func roleSkillWhen(name string) string {
 }
 
 // roleSkillProtocol tells a Worker when to invoke each loaded role skill.
-func roleSkillProtocol(plan *taskplan.Plan) string {
+func roleSkillProtocol(plan *taskplan.Plan, task store.Task) string {
 	skills := planRoleSkills(plan)
+	if task.Type != "change" {
+		skills = taskRoleSkills(task, skills)
+	}
 	if len(skills) == 0 {
 		return ""
 	}
@@ -112,7 +142,7 @@ func unusedRoleSkills(ctx context.Context, db *store.DB, home string, project st
 		return nil, err
 	}
 	var unused []string
-	for _, name := range planRoleSkills(plan) {
+	for _, name := range taskRoleSkills(task, planRoleSkills(plan)) {
 		if uses[name] == 0 {
 			unused = append(unused, name)
 		}
@@ -196,7 +226,7 @@ func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project 
 		return nil, err
 	}
 	usesRecorded := skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) || len(uses) > 0
-	checks := roleSkillChecklist(planRoleSkills(plan), step, uses, usesRecorded)
+	checks := roleSkillChecklist(taskRoleSkills(task, planRoleSkills(plan)), step, uses, usesRecorded)
 	if len(checks) == 0 {
 		return nil, nil
 	}

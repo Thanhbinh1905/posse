@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T) {
@@ -34,8 +36,8 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 	for _, want := range []string{
 		"## Role skills",
 		"- `posse-tdd`: before changing code",
-		"- `posse-deslop`: before the `done` Signal",
-		"- `posse-no-comments`: before the `done` Signal, after `posse-deslop`",
+		"- `posse-deslop`: when this Task changes code, before the `done` Signal",
+		"- `posse-no-comments`: when this Task changes code, before the `done` Signal and after `posse-deslop`",
 		"- `posse-unslop`: on PR text, commit messages and Reports, before `posse publish` and the `done` Signal",
 	} {
 		if !strings.Contains(string(launch), want) {
@@ -119,7 +121,7 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 		}
 	}
 	done := outcomeCLI(t, f.service, 0, "signal", "done", "Changed", "--turn", "launch:1")
-	for _, want := range []string{"skill_checklist[3]{skill,when,invoked}:", "posse-deslop,\"before the `done` Signal", "posse-no-comments,", "posse-unslop,"} {
+	for _, want := range []string{"skill_checklist[3]{skill,when,invoked}:", "posse-deslop,\"when this Task changes code", "posse-no-comments,", "posse-unslop,"} {
 		if !strings.Contains(done, want) {
 			t.Fatalf("done output lacks %q:\n%s", want, done)
 		}
@@ -199,6 +201,163 @@ func TestPiWorkerRoleSkillUsesAreRecorded(t *testing.T) {
 	done := outcomeCLI(t, f.service, 0, "signal", "done", "Changed", "--turn", "launch:1")
 	if !strings.Contains(done, "posse-deslop,") || !strings.Contains(done, ",yes") {
 		t.Fatalf("Pi done Signal does not show the recorded skill: %s", done)
+	}
+}
+
+func TestReviewRoundDoneRequiresReportSkillsButNotCodeCleanupSkills(t *testing.T) {
+	f := newStartFixture(t)
+	configText := `[defaults]
+merge_mode = "local"
+
+[profiles.author]
+kind = "claude"
+model = "model-a"
+
+[profiles.reviewer]
+kind = "claude"
+model = "model-b"
+
+[dispatch.default]
+use = "author"
+
+[skills]
+review = ["posse-deslop", "posse-no-comments", "posse-technical-writing", "posse-review"]
+
+[review_loop]
+enabled = true
+max_rounds = 1
+auto_start = false
+block_at = "P1"
+`
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "changed.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, change.WorktreePath, "add", "changed.go")
+	gitTest(t, change.WorktreePath, "commit", "-m", "add code for review")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", "t1", "--profile", "reviewer"}); code != 0 {
+		t.Fatalf("review start code=%d %s", code, output.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("review rounds = %#v, %v", rounds, err)
+	}
+	review, err := db.TaskByID(ctx, f.project.ID, rounds[0].ReviewTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skillUseRecordingInstalled(f.home, f.project.Name, review.Seq) {
+		t.Fatal("Review Worker launch did not install skill-use recording")
+	}
+	if err := db.RecordTaskSkillUse(ctx, review.ID, "posse-review"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(review.WorktreePath, "report.md")
+	findingsPath := filepath.Join(review.WorktreePath, "findings.json")
+	if err := os.WriteFile(reportPath, []byte("Review completed.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findingsPath, []byte(`{"schema":"posse.review-findings.v1","patterns":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, f.home)
+	t.Setenv("HERDR_PANE_ID", review.PaneID)
+	t.Chdir(review.WorktreePath)
+	args := []string{"signal", "done", "Review completed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"}
+	var signalOutput bytes.Buffer
+	cli = f.service.CLI()
+	cli.Out, cli.ErrOut = &signalOutput, &signalOutput
+	if code := cli.Run(args); code == 0 || !strings.Contains(signalOutput.String(), "role_skills_unused") || !strings.Contains(signalOutput.String(), "posse-technical-writing") {
+		t.Fatalf("Review done without Report skill: code=%d output=%s", code, signalOutput.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordTaskSkillUse(ctx, review.ID, "posse-technical-writing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	signalOutput.Reset()
+	cli = f.service.CLI()
+	cli.Out, cli.ErrOut = &signalOutput, &signalOutput
+	if code := cli.Run(args); code != 0 || !strings.Contains(signalOutput.String(), "signal: done") {
+		t.Fatalf("Review done with Report skill: code=%d output=%s", code, signalOutput.String())
+	}
+	if strings.Contains(signalOutput.String(), "posse-deslop") || strings.Contains(signalOutput.String(), "posse-no-comments") {
+		t.Fatalf("Review done checklist includes code-cleanup skills: %s", signalOutput.String())
+	}
+}
+
+func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T) {
+	root := t.TempDir()
+	gitTest(t, root, "init", "-b", "main")
+	gitTest(t, root, "config", "user.email", "test@example.com")
+	gitTest(t, root, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, root, "add", "README.md")
+	gitTest(t, root, "commit", "-m", "base")
+	gitTest(t, root, "switch", "-c", "posse/task")
+	skills := []string{"posse-deslop", "posse-no-comments", "posse-technical-writing"}
+	for _, taskType := range []string{"review", "research"} {
+		got := taskRoleSkills(store.Task{Type: taskType}, skills)
+		if strings.Join(got, ",") != "posse-technical-writing" {
+			t.Errorf("%s Task skills = %v, want report skill only", taskType, got)
+		}
+	}
+	change := store.Task{Type: "change", WorktreePath: root, BaseRef: "main"}
+	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != "posse-technical-writing" {
+		t.Fatalf("unchanged Change Task skills = %v, want report skill only", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "change.go"), []byte("package change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, root, "add", "change.go")
+	gitTest(t, root, "commit", "-m", "change")
+	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != strings.Join(skills, ",") {
+		t.Fatalf("changed Change Task skills = %v, want %v", got, skills)
+	}
+	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
+	if got := roleSkillProtocol(plan, store.Task{Type: "review"}); strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
+		t.Fatalf("Review launch skill instructions = %q", got)
 	}
 }
 

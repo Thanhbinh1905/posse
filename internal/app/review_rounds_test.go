@@ -20,6 +20,84 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func TestFailedReviewLaunchDoesNotConsumeRoundCap(t *testing.T) {
+	f := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]
+merge_mode = "local"
+
+[profiles.author]
+kind = "claude"
+
+[profiles.reviewer]
+kind = "claude"
+
+[dispatch.default]
+use = "author"
+
+[review_loop]
+enabled = true
+max_rounds = 1
+auto_start = false
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start Change Task: code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "change.txt"), []byte("candidate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, change.WorktreePath, "add", "change.txt")
+	gitTest(t, change.WorktreePath, "commit", "-m", "candidate change")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	f.fake.Errors["agent.start"] = paneBusy()
+	startReview := func() (int, string) {
+		t.Helper()
+		var output bytes.Buffer
+		cli := f.service.CLI()
+		cli.Out, cli.ErrOut = &output, &output
+		code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq), "--profile", "reviewer"})
+		return code, output.String()
+	}
+	if code, output := startReview(); code != 1 || !strings.Contains(output, "agent_pane_busy") {
+		t.Fatalf("busy Review launch: code=%d %s", code, output)
+	}
+	usage, err := db.ReviewCapUsage(ctx, change.ID)
+	if err != nil || usage.ReviewRounds != 0 {
+		t.Fatalf("round cap after void launch = %+v, %v", usage, err)
+	}
+	var status bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &status, &status
+	if code := cli.Run([]string{"review", fmt.Sprintf("t%d", change.Seq)}); code != 0 || !strings.Contains(status.String(), "remaining: 1") || !strings.Contains(status.String(), "pending_review_rounds: 0") {
+		t.Fatalf("failed launch consumed the visible round cap: code=%d %s", code, status.String())
+	}
+	f.fake.Errors = map[string]error{}
+	if code, output := startReview(); code != 0 {
+		t.Fatalf("start Review after void launch: code=%d %s", code, output)
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 2 || rounds[0].Status != "void" || rounds[1].Round != 1 || rounds[1].Status != "admitted" {
+		t.Fatalf("rounds after retry = %#v, %v", rounds, err)
+	}
+}
+
 func TestReviewRoundCarriesScopeInstructionsThroughThirdCompletion(t *testing.T) {
 	f := newStartFixture(t)
 	if code, output := f.start(t); code != 0 {

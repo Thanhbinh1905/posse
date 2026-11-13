@@ -15,6 +15,7 @@ type prTargetFreshness struct {
 	Branch string
 	Tip    string
 	Fresh  bool
+	Local  bool
 }
 
 func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA string) (prTargetFreshness, error) {
@@ -198,15 +199,29 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 		memberLabel = "Workspace member " + member + ": "
 	}
 	var instruction string
-	if member == "" && fullPipelineSelected(task, "") {
+	if fullPipelineSelected(task, member) {
+		target := "origin/" + freshness.Branch
+		mergeTarget := "origin/" + freshness.Branch
+		if freshness.Local {
+			target = "local target " + freshness.Branch
+			mergeTarget = freshness.Branch
+		}
+		publish := "posse publish"
+		if member != "" {
+			publish += " --repo " + member
+		}
 		instruction = fmt.Sprintf(
-			"PR head %s is missing current target commit %s from origin/%s, so its full-pipeline validation is stale. From the Task Sandbox, run `posse publish \"<summary>\"` with --verify, --proof and --risk to submit a fresh private candidate; Posse merges origin/%s into it. If the submission reports `candidate_target_conflict`, merge origin/%s into the Task branch (never rebase a pushed branch), resolve the conflicts and publish again. If the output names `review_carried_from`, the passed Review carries: in the candidate checkout run `posse validate test`, `posse validate docs` and `posse validate lint`, then `posse publish \"<summary>\"` there to promote, and signal done with the PR URL. Otherwise signal done from the candidate checkout to request a Review Round.",
-			headSHA, freshness.Tip, freshness.Branch, freshness.Branch, freshness.Branch,
+			"%sCandidate head %s is missing current target commit %s from %s, so its full-pipeline validation is stale. From the Task Sandbox, run `%s --refresh \"<summary>\"` to submit a fresh private candidate; Posse merges the current target into it. If the submission reports `candidate_target_conflict`, merge %s into the Task branch, resolve the conflicts and publish again. If the output names `review_carried_from`, the passed Review carries: in the candidate checkout run `posse validate test`, `posse validate docs` and `posse validate lint`, then `%s \"<summary>\"` there to promote. Otherwise signal done from the candidate checkout to request a Review Round.",
+			memberLabel, headSHA, freshness.Tip, target, publish, mergeTarget, publish,
 		)
 	} else {
+		target := "origin/" + freshness.Branch
+		if freshness.Local {
+			target = freshness.Branch
+		}
 		instruction = fmt.Sprintf(
-			"%sPR head %s is missing current target commit %s from origin/%s. Merge origin/%s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
-			memberLabel, headSHA, freshness.Tip, freshness.Branch, freshness.Branch,
+			"%sPR head %s is missing current target commit %s from %s. Merge %s into the Task branch (never rebase a pushed branch), resolve any conflicts, republish the updated head through this Task's delivery mode, and signal done again.",
+			memberLabel, headSHA, freshness.Tip, target, target,
 		)
 		if member != "" {
 			instruction += " For publication, use `posse publish --repo " + member + " \"<summary>\"` and report done without `--pr`."

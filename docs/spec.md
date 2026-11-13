@@ -1294,7 +1294,7 @@ Admission (through `posse review start <change>` or a Brief with `review_of:`) r
 
 - `review_round_active` while another round of the same Change Task is live;
 - `review_round_unchanged` when the Change head equals the last reviewed head, or a carry already covers it;
-- `review_round_cap` when the verdict-recorded rounds equal the frozen `max_rounds`. Under an admitted `full-pipeline` plan, Review fix rounds count toward the same cap, so `max_rounds = 3` allows at most two Review verdicts with one Review fix round between them. CI fix rounds never count toward `max_rounds`; they use `ci_loop.max_fix_rounds` and exhaust as `ci_fix_exhausted` (25.13). `posse review <change>` states this split in its `cap` field before round 1.
+- `review_round_cap` when the verdict-recorded rounds equal the frozen `max_rounds`. A Review Round that fails to launch and records no verdict is void and does not consume the cap; the next Review attempt can use that round number. Under an admitted `full-pipeline` plan, Review fix rounds count toward the same cap, so `max_rounds = 3` allows at most two Review verdicts with one Review fix round between them. CI fix rounds never count toward `max_rounds`; they use `ci_loop.max_fix_rounds` and exhaust as `ci_fix_exhausted` (25.13). `posse review <change>` states this split in its `cap` field before round 1.
 
 CI fixes, review fixes and target merges are author changes, never rounds. They enter the next round's delta.
 

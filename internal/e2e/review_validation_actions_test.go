@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -89,6 +90,129 @@ func recordPassingReview(t *testing.T, f *prLifecycleFixture, changeSeq string) 
 		t.Fatal(err)
 	}
 	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "pass")
+}
+
+func TestReviewStartQueuesOneRefreshWhenCandidateTargetMoves(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	changePath, _, changeSeq := startPrivateReviewChange(t, f, "3")
+	change := f.mustTask(t, changeSeq)
+	gitTest(t, f.env, f.repo, "commit", "--allow-empty", "-m", "advance frozen target")
+	gitTest(t, f.env, f.repo, "push", "origin", "HEAD:refs/heads/main")
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "working", "Rechecking stale candidate"); code != 0 {
+		t.Fatalf("reopen stale candidate task: %d %s", code, output)
+	}
+	turn, err := f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Stale candidate submitted for review", "--turn", turn); code != 0 {
+		t.Fatalf("signal stale candidate: %d %s", code, output)
+	}
+	var staleNoticeData string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT data_json FROM notices WHERE task_id=? AND kind='task_done' ORDER BY id DESC LIMIT 1`, change.ID).Scan(&staleNoticeData); err != nil || strings.Contains(staleNoticeData, "next_action") {
+		t.Fatalf("stale candidate done Notice suggests another Review start: data=%s err=%v", staleNoticeData, err)
+	}
+
+	code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer")
+	if code != 0 || !strings.Contains(output, "refresh") {
+		t.Fatalf("stale candidate Review start did not queue its target refresh: code=%d output=%s", code, output)
+	}
+	if code, output = runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 || !strings.Contains(output, "refresh_queued") {
+		t.Fatalf("repeated stale candidate Review start did not report the existing refresh: code=%d output=%s", code, output)
+	}
+	var instruction string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, change.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "posse publish") {
+		t.Fatalf("refresh instruction=%q err=%v", instruction, err)
+	}
+	var rounds int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness'`, change.ID).Scan(&rounds); err != nil || rounds != 1 {
+		t.Fatalf("queued target refresh rounds=%d err=%v, want one", rounds, err)
+	}
+	workerEnv = setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	if code, output := runReleaseCLI(t, f.binary, changePath, workerEnv, "signal", "working", "Applying queued target refresh"); code != 0 {
+		t.Fatalf("reopen Change Task for refresh: %d %s", code, output)
+	}
+	gitTest(t, f.env, changePath, "fetch", "origin", "main")
+	gitTest(t, f.env, changePath, "merge", "--no-edit", "origin/main")
+	if code, output := runReleaseCLI(t, f.binary, changePath, workerEnv, "publish", "Refreshed candidate", "--verify", "go test ./... -> passed", "--proof", "Refresh intent verified", "--risk", "Risk: low\nRollback: revert"); code != 0 {
+		t.Fatalf("refresh candidate: %d %s", code, output)
+	}
+	candidate, err = f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE messages SET status='delivered',delivered_at=? WHERE task_id=? AND status='queued'`, time.Now().UnixMilli(), change.ID); err != nil {
+		t.Fatal(err)
+	}
+	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Candidate refreshed", "--turn", turn); code != 0 {
+		t.Fatalf("signal refreshed candidate: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 || !strings.Contains(output, "round") {
+		t.Fatalf("Review did not start after refreshed candidate Signal: code=%d output=%s", code, output)
+	}
+}
+
+func TestWorkspaceReviewStartQueuesRefreshForStalePRAndLocalCandidates(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	ws := newFullPipelineWorkspace(t, f)
+	brief := filepath.Join(f.root, "workspace-refresh.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace refresh\ndone_when: checked\nrepos: [api, web]\n---\nRefresh changed candidates.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "start", "--brief", brief, "--name", "workspace-refresh", "--profile", "author"); code != 0 {
+		t.Fatalf("start workspace Change Task: %d %s", code, output)
+	}
+	change := mustProjectTask(t, f, ws.project.ID, "t1")
+	repos, err := f.db.TaskRepos(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	for _, repo := range repos {
+		if err := os.WriteFile(filepath.Join(repo.WorktreePath, "refresh.txt"), []byte(repo.Repo+" candidate\\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitTest(t, f.env, repo.WorktreePath, "add", "refresh.txt")
+		gitTest(t, f.env, repo.WorktreePath, "commit", "-m", "change "+repo.Repo)
+		if code, output := runReleaseCLI(t, f.binary, repo.WorktreePath, workerEnv, "publish", "--repo", repo.Repo, repo.Repo+" summary", "--verify", "go test ./... -> passed", "--proof", "Intent verified", "--risk", "Risk: low\\nRollback: revert"); code != 0 {
+			t.Fatalf("submit %s candidate: %d %s", repo.Repo, code, output)
+		}
+	}
+	turn, err := f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "done", "Workspace candidates submitted", "--turn", turn); code != 0 {
+		t.Fatalf("signal workspace candidate submission: %d %s", code, output)
+	}
+	gitTest(t, f.env, f.repo, "commit", "--allow-empty", "-m", "advance api target")
+	gitTest(t, f.env, f.repo, "push", "origin", "HEAD:refs/heads/main")
+	gitTest(t, f.env, ws.web, "commit", "--allow-empty", "-m", "advance web target")
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "review", "start", "t1", "--profile", "reviewer"); code != 0 || !strings.Contains(output, "refresh_queued") {
+		t.Fatalf("stale workspace Review start: %d %s", code, output)
+	}
+	var rounds int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness'`, change.ID).Scan(&rounds); err != nil || rounds != 2 {
+		t.Fatalf("workspace freshness rounds=%d err=%v, want one per stale Member", rounds, err)
+	}
+	for member, target := range map[string]string{"api": "origin/main", "web": "local target main"} {
+		var body string
+		if err := f.db.QueryRowContext(context.Background(), `SELECT m.body FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind='freshness' AND r.dedupe_key LIKE ?`, change.ID, "freshness:"+member+":%").Scan(&body); err != nil || !strings.Contains(body, target) || !strings.Contains(body, "posse publish --repo "+member+" --refresh") {
+			t.Fatalf("%s refresh instruction=%q err=%v", member, body, err)
+		}
+	}
 }
 
 func TestLeadCanDeferP2FindingWithIssue(t *testing.T) {
