@@ -123,7 +123,7 @@ func (s *Service) taskAddMember(ctx *axi.Context, args []string) error {
 	}
 	deleteBranch := cfg.MemberDeleteBranchOnMerge(repoName)
 	selected := taskplan.Member{Name: repoName, Path: repo.Path, Base: member.BaseRef, Target: member.TargetBranch, Delivery: member.MergeMode,
-		Review: cfg.MemberReview(repoName), ReviewSource: "defaults.review", DeleteBranchOnMerge: &deleteBranch}
+		Review: cfg.MemberReview(repoName), ReviewSource: "defaults.review", ReviewProvider: cfg.EffectiveReviewProvider(repoName), DeleteBranchOnMerge: &deleteBranch}
 	if cfg.Repositories[repoName].Review != "" {
 		selected.ReviewSource = "repositories." + repoName + ".review"
 	}

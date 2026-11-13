@@ -16,7 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 7
+const Version = 8
 
 // planVersionRuntimeWorkflow marks the first plan version that binds a frozen
 // workflow to its run and stage identity.
@@ -26,6 +26,8 @@ const planVersionRuntimeWorkflow = 5
 // no-mistakes Merge Mode and review policy were removed. Older plans may still
 // name them so stored Tasks and their review receipts stay readable.
 const planVersionWithoutNoMistakes = 6
+
+const planVersionReviewProvider = 8
 
 var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
 
@@ -110,14 +112,15 @@ func PreferenceFields(brief dispatch.Brief) []string {
 }
 
 type Member struct {
-	Review       string `json:"review,omitempty"`
-	ReviewSource string `json:"review_source,omitempty"`
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	Base         string `json:"base"`
-	BaseCommit   string `json:"base_commit,omitempty"`
-	Target       string `json:"target"`
-	Delivery     string `json:"delivery"`
+	Review         string `json:"review,omitempty"`
+	ReviewSource   string `json:"review_source,omitempty"`
+	ReviewProvider string `json:"review_provider,omitempty"`
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	Base           string `json:"base"`
+	BaseCommit     string `json:"base_commit,omitempty"`
+	Target         string `json:"target"`
+	Delivery       string `json:"delivery"`
 	// DeleteBranchOnMerge is nil in plans admitted before the setting existed.
 	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
 }
@@ -173,6 +176,7 @@ type Plan struct {
 	Executor         string                    `json:"executor"`
 	Execution        Execution                 `json:"execution"`
 	Review           string                    `json:"review"`
+	ReviewProvider   string                    `json:"review_provider,omitempty"`
 	BudgetTokens     int64                     `json:"budget_tokens,omitempty"`
 	ReviewOf         int64                     `json:"review_of,omitempty"`
 	Dependencies     []dispatch.Dependency     `json:"dependencies,omitempty"`
@@ -215,6 +219,7 @@ type Request struct {
 	Execution           Execution
 	Launch              Launch
 	Review              string
+	ReviewProvider      string
 	ReviewOf            int64
 	Delivery            string
 	Autonomy            config.Autonomy
@@ -269,6 +274,9 @@ func Resolve(r Request) (Plan, error) {
 		outcome = "change"
 	}
 	source := "effective config: " + strings.Join(r.ConfigSources, ", ")
+	if r.ReviewProvider == "" {
+		r.ReviewProvider = "builtin"
+	}
 	reviewSource, mergeSource := source, source
 	if brief.AutonomyReview != "" {
 		reviewSource = "brief: " + r.Brief.Source
@@ -287,7 +295,7 @@ func Resolve(r Request) (Plan, error) {
 		}
 	}
 	p := Plan{Version: Version, Revision: 1, Type: brief.Type, Outcome: outcome, Executor: "worker",
-		Execution: r.Execution, Review: review, BudgetTokens: budgetTokens, ReviewOf: r.ReviewOf, Delivery: delivery,
+		Execution: r.Execution, Review: review, ReviewProvider: r.ReviewProvider, BudgetTokens: budgetTokens, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
 		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool,
@@ -309,6 +317,9 @@ func Resolve(r Request) (Plan, error) {
 	p.Execution.Members = append([]Member(nil), p.Execution.Members...)
 	for i := range p.Execution.Members {
 		member := &p.Execution.Members[i]
+		if member.ReviewProvider == "" {
+			member.ReviewProvider = r.ReviewProvider
+		}
 		current := member.Review
 		if current == "" {
 			current = r.Review
@@ -332,6 +343,7 @@ func Resolve(r Request) (Plan, error) {
 	settings, err := json.Marshal(struct {
 		Execution           Execution                 `json:"execution"`
 		Review              string                    `json:"review"`
+		ReviewProvider      string                    `json:"review_provider"`
 		Delivery            string                    `json:"delivery"`
 		Grants              []Grant                   `json:"grants"`
 		WorkflowJobs        bool                      `json:"workflow_jobs,omitempty"`
@@ -341,7 +353,7 @@ func Resolve(r Request) (Plan, error) {
 		ProseLanguage       string                    `json:"prose_language"`
 		Pool                config.Pool               `json:"pool"`
 		DeleteBranchOnMerge *bool                     `json:"delete_branch_on_merge,omitempty"`
-	}{p.Execution, p.Review, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool, p.DeleteBranchOnMerge})
+	}{p.Execution, p.Review, p.ReviewProvider, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool, p.DeleteBranchOnMerge})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -394,6 +406,12 @@ func (p Plan) Validate() error {
 		}
 	} else if err := p.validateReview(p.Review); err != nil {
 		return invalid(err.Error())
+	}
+	if p.Version >= planVersionReviewProvider && p.ReviewProvider == "" {
+		return invalid("missing review provider")
+	}
+	if p.ReviewProvider != "" && p.ReviewProvider != "builtin" && p.ReviewProvider != "greenhouse" {
+		return invalid("unsupported review provider")
 	}
 	storedNoMistakes := p.Version < planVersionWithoutNoMistakes && p.Delivery == config.NoMistakes
 	if p.Delivery != "local" && p.Delivery != "pr" && !storedNoMistakes {
@@ -470,6 +488,12 @@ func (p Plan) Validate() error {
 		}
 		if !validCommit(member.BaseCommit) {
 			return invalid("invalid pinned Member base commit")
+		}
+		if p.Version >= planVersionReviewProvider && member.ReviewProvider == "" {
+			return invalid("Member " + member.Name + ": missing review provider")
+		}
+		if member.ReviewProvider != "" && member.ReviewProvider != "builtin" && member.ReviewProvider != "greenhouse" {
+			return invalid("Member " + member.Name + ": unsupported review provider")
 		}
 		if p.Version >= 2 {
 			validateReview := p.validateReview

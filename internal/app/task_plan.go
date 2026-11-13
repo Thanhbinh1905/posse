@@ -74,7 +74,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		}
 	}
 	for _, member := range members {
-		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review"}
+		selected := taskplan.Member{Name: member.Name, Path: member.Path, Base: member.BaseRef, Target: defaultValue(member.TargetBranch, member.DefaultBranch), Delivery: member.MergeMode, Review: cfg.MemberReview(member.Name), ReviewSource: "defaults.review", ReviewProvider: cfg.EffectiveReviewProvider(member.Name)}
 		deleteBranch := cfg.MemberDeleteBranchOnMerge(member.Name)
 		selected.DeleteBranchOnMerge = &deleteBranch
 		if cfg.Repositories[member.Name].Review != "" {
@@ -127,7 +127,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		delivery = task.MergeMode
 	}
 	return taskplan.Resolve(taskplan.Request{Brief: taskplan.Select("brief", source, briefData), Inputs: inputs, Execution: execution, Launch: launch,
-		Review: review, ReviewOf: task.ReviewsTaskID, Delivery: delivery,
+		Review: review, ReviewProvider: cfg.EffectiveReviewProvider(""), ReviewOf: task.ReviewsTaskID, Delivery: delivery,
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage,
 		Paths:           taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
