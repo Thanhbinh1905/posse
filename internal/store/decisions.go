@@ -459,7 +459,7 @@ const resolvedDecisionPredicate = `
 // ObsoleteTaskDecisions retires every unanswered question when its Task is torn down.
 func (db *DB) ObsoleteTaskDecisions(ctx context.Context, taskID int64) error {
 	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Task was torn down'
-		WHERE task_id=? AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), taskID)
+		WHERE task_id=? AND kind<>'orphan' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), taskID)
 	if err != nil {
 		return err
 	}
