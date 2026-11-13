@@ -2737,6 +2737,9 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	if kind == "" {
 		kind = taskKind(cfg, task)
 	}
+	if kind == "codex" {
+		return interruptOutcome{}, axi.Failure("interrupt_unsupported_kind", "Codex does not support verified turn interruption", false, "Wait for the Worker turn to finish, then run `posse send`")
+	}
 	keys := cfg.Kinds[kind].InterruptKeys
 	if len(keys) == 0 {
 		return interruptOutcome{}, axi.Failure("interrupt_unsupported_kind", "no abort key sequence is configured for Worker kind "+kind, false, "Set `kinds."+kind+".interrupt_keys` to the harness sequence that stops a running turn")

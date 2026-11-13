@@ -146,6 +146,20 @@ var shellFunctionName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // arguments, are written to script. The pane sources script, and Herdr then
 // types the bare command, which runs the function once.
 func (s *Service) launchAgent(ctx context.Context, paneID, name, kind string, args []string, env map[string]string, script string) error {
+	if kind == "codex" {
+		updateCheck := []string{"-c", "check_for_update_on_startup=false"}
+		insertAt := len(args)
+		for index, arg := range args {
+			if arg == "resume" {
+				insertAt = index
+				break
+			}
+		}
+		if insertAt == len(args) && insertAt > 0 && args[insertAt-1] == codexOpeningPrompt {
+			insertAt--
+		}
+		args = append(args[:insertAt], append(updateCheck, args[insertAt:]...)...)
+	}
 	command := agentCLIName(kind)
 	keys := make([]string, 0, len(env))
 	for key := range env {
@@ -288,6 +302,11 @@ func (s *Service) confirmPrompt(ctx context.Context, paneID, text string, send f
 			return nil
 		}
 		if !isPromptStall(lastErr) {
+			if isAgentBlocked(lastErr) {
+				if updatePrompt := s.codexUpdatePrompt(ctx, paneID); updatePrompt {
+					return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
+				}
+			}
 			return lastErr
 		}
 		if s.agentActive(ctx, paneID) {
@@ -330,6 +349,25 @@ func (s *Service) visibleScreen(ctx context.Context, paneID string) string {
 		return ""
 	}
 	return screen.Read.Text
+}
+
+func (s *Service) codexUpdatePrompt(ctx context.Context, paneID string) bool {
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	pane, found := findAppPane(snapshot.Panes, paneID, "")
+	if !found || pane.Agent != "codex" {
+		return false
+	}
+	screen := strings.ToLower(s.visibleScreen(ctx, paneID))
+	return strings.Contains(screen, "codex is available") &&
+		(strings.Contains(screen, "update") || strings.Contains(screen, "upgrade"))
+}
+
+func isAgentBlocked(err error) bool {
+	var failure *axi.Error
+	return errors.As(err, &failure) && failure.Code == "agent_blocked"
 }
 
 func isPromptStall(err error) bool {
