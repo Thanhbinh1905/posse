@@ -110,9 +110,18 @@ func TestStatsReportProfileHistoryAndDispatchShowsItWithoutChangingRules(t *test
 		t.Fatal(err)
 	}
 
-	empty := jsonProfileStats(t, runPosse(t, f.binary, f.repo, env, "stats", "--json"))
+	emptyOutput := runPosse(t, f.binary, f.repo, env, "stats", "--json")
+	empty := jsonProfileStats(t, emptyOutput)
 	if len(empty) != 0 {
 		t.Fatalf("stats without history invented rows: %#v", empty)
+	}
+	var emptyFields map[string]any
+	if err := json.Unmarshal([]byte(emptyOutput), &emptyFields); err != nil {
+		t.Fatalf("decode stats review comparison: %v\n%s", err, emptyOutput)
+	}
+	comparison, ok := emptyFields["review_comparison"].(map[string]any)
+	if !ok || comparison["total"] == nil {
+		t.Fatalf("stats omitted the empty G1 comparison: %s", emptyOutput)
 	}
 	before, _ := runPosseAllowFailure(f, f.repo, env, "dispatch", "--brief", brief, "--json")
 

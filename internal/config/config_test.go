@@ -290,6 +290,19 @@ func TestLoadRefusesRemovedAutoRecover(t *testing.T) {
 	}
 }
 
+func TestReviewParallelProjectSetting(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `review_parallel = "greenhouse"`)
+	cfg, err := Load(home, "shop")
+	if err != nil || cfg.ReviewParallel != "greenhouse" {
+		t.Fatalf("review_parallel = %q, %v", cfg.ReviewParallel, err)
+	}
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `review_parallel = "builtin"`)
+	if _, err := Load(home, "shop"); err == nil || !strings.Contains(err.Error(), "review_parallel") {
+		t.Fatalf("unsupported review_parallel was accepted: %v", err)
+	}
+}
+
 func TestValidationLoopDefaultsAndProjectOverrides(t *testing.T) {
 	home := t.TempDir()
 	writeConfig(t, filepath.Join(home, "config.toml"), `[review_loop]

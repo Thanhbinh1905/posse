@@ -34,6 +34,41 @@ func TestRecordGreenhouseVerdictChecksHeadInsideTheInsert(t *testing.T) {
 	}
 }
 
+func TestGreenhouseReviewRequestLedgerIsImmutableAndRecordsEveryOutcome(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	requests := []GreenhouseReviewRequest{
+		{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 120, Outcome: "failed"},
+		{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 130, SettledAt: 150, Outcome: "head_mismatch"},
+	}
+	for _, request := range requests {
+		if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := f.db.GreenhouseReviewRequests(f.ctx, task.ProjectID)
+	if err != nil || len(got) != 2 || got[0].Outcome != "failed" || got[1].Outcome != "head_mismatch" {
+		t.Fatalf("request ledger = %+v, %v", got, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE greenhouse_review_requests SET outcome='verdict' WHERE id=?`, got[0].ID); err == nil {
+		t.Fatal("updated an insert-only request row")
+	}
+}
+
+func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	for _, reason := range []string{"network failure", "protocol refusal"} {
+		if _, err := f.db.CreateGreenhouseFailureNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failure Notices = %d, %v; want one per head", count, err)
+	}
+}
+
 func TestGreenhouseRecoveryNoticeOncePerRecovery(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	task := f.task(t, f.change)

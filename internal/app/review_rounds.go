@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -129,6 +132,15 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	maxRounds := plan.ValidationLoops.MaxReviewRounds()
 	if maxRounds < 1 || maxRounds > 3 {
 		return axi.Failure("plan_invalid", "Change Task has an invalid frozen Review Round cap", false)
+	}
+	if plan.ValidationLoops.ReviewParallel == "greenhouse" {
+		targets, err := changeCandidateTargets(ctx.Context, db, project, change)
+		if err != nil {
+			return err
+		}
+		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+			return err
+		}
 	}
 	if profile == "" {
 		profile, err = s.autoStartReviewProfile(ctx.Context, project, home)
@@ -872,12 +884,86 @@ func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project
 	return err
 }
 
+func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
+	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		exists := false
+		for _, request := range requests {
+			if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" {
+				exists = true
+				break
+			}
+		}
+		pending := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse", target.Repository+".pending.json")
+		if _, err := os.Stat(pending); err == nil {
+			exists = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if exists {
+			continue
+		}
+		requestStarted := time.Now().UnixMilli()
+		recordFailure := func(reason string) error {
+			if err := db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: change.ID, Repository: target.Repository, RequestedHead: target.Commit, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStarted, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); err != nil {
+				return err
+			}
+			_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, change.ID, target.Repository, target.Commit, reason)
+			return err
+		}
+		binary, err := os.Executable()
+		if err != nil {
+			if recordErr := recordFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		args := []string{"_greenhouse", "review", taskIDString(change.Seq)}
+		if project.IsWorkspace() {
+			args = append(args, "--repo", target.Repository)
+		}
+		command := exec.Command(binary, args...)
+		command.Dir = project.Root
+		command.Env = os.Environ()
+		command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		logDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
+		if err := os.MkdirAll(logDir, 0o700); err != nil {
+			if recordErr := recordFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		log, err := os.OpenFile(filepath.Join(logDir, target.Repository+".parallel.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			if recordErr := recordFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		command.Stdout, command.Stderr = log, log
+		if err := command.Start(); err != nil {
+			log.Close()
+			if recordErr := recordFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		_ = log.Close()
+		go func() { _ = command.Wait() }()
+	}
+	return nil
+}
+
 func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, change store.Task) (bool, error) {
 	plan, err := change.AdmittedPlan()
 	if err != nil {
 		return false, admittedPlanFailure(err)
 	}
-	if !autoStartReviewLoop(plan) {
+	parallel := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse"
+	if !parallel && !autoStartReviewLoop(plan) {
 		return false, nil
 	}
 	targets, err := changeCandidateTargets(ctx.Context, db, project, change)
@@ -899,6 +985,14 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 			}
 		}
 	} else if len(targets) != 1 || change.GatedSHA == "" || targets[0].Commit != change.GatedSHA {
+		return false, nil
+	}
+	if !autoStartReviewLoop(plan) {
+		if parallel {
+			if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+				return false, err
+			}
+		}
 		return false, nil
 	}
 	if covered, err := db.ReviewTargetsCovered(ctx.Context, change.ID, targets); err != nil || covered {
