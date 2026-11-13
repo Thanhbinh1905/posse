@@ -519,6 +519,17 @@ func TestStartAgentReturnsOtherErrorsWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestLaunchAgentRetriesBusyPaneInput(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.ErrorQueue["pane.send_input"] = []error{paneBusy(), paneBusy(), nil}
+	if err := service.launchAgent(context.Background(), "w1:p1", "w", "opencode", nil, map[string]string{"OPENCODE_CONFIG_CONTENT": "config"}, filepath.Join(t.TempDir(), "agent-launch.sh")); err != nil {
+		t.Fatalf("launchAgent after pane became available: %v", err)
+	}
+	if got := fake.CallCount("pane.send_input"); got != 3 {
+		t.Fatalf("pane.send_input calls = %d, want 3", got)
+	}
+}
+
 func TestLaunchAgentTypesShortLaunchDirectly(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	script := filepath.Join(t.TempDir(), "agent-launch.sh")

@@ -89,8 +89,9 @@ auto_start = false
 		t.Fatalf("failed launch consumed the visible round cap: code=%d %s", code, status.String())
 	}
 	f.fake.Errors = map[string]error{}
+	f.fake.ErrorQueue["agent.start"] = []error{paneBusy(), paneBusy(), nil}
 	if code, output := startReview(); code != 0 {
-		t.Fatalf("start Review after void launch: code=%d %s", code, output)
+		t.Fatalf("start Review after the pane became available: code=%d %s", code, output)
 	}
 	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
 	if err != nil || len(rounds) != 2 || rounds[0].Status != "void" || rounds[1].Round != 1 || rounds[1].Status != "admitted" {
