@@ -144,11 +144,11 @@ func reviewComparisonForProject(ctx context.Context, db *store.DB, project store
 	latencies := []int64{}
 	for _, request := range requests {
 		row.Requests++
-		headSet[fmt.Sprintf("%d/%s/%s/%s", request.TaskID, request.Repository, request.RequestedHead, request.Provider)] = true
 		if request.Outcome == "head_mismatch" {
 			row.WrongHead++
 		}
 		if request.Outcome == "verdict" {
+			headSet[fmt.Sprintf("%d/%s/%s/%s", request.TaskID, request.Repository, request.RequestedHead, request.Provider)] = true
 			row.Verdicts++
 			latencies = append(latencies, request.SettledAt-request.RequestedAt)
 			var outcome string
