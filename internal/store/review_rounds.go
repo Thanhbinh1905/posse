@@ -53,6 +53,13 @@ func (db *DB) ReviewLedgerFor(ctx context.Context, changeTaskID int64) ([]Review
 	return entries, rows.Err()
 }
 
+func (db *DB) VoidUnverdictReviewRound(ctx context.Context, reviewTaskID int64) error {
+	_, err := db.ExecContext(ctx, `UPDATE review_rounds SET status='void'
+WHERE review_task_id=? AND status='admitted'
+  AND NOT EXISTS (SELECT 1 FROM review_verdicts v WHERE v.task_id=review_rounds.review_task_id)`, reviewTaskID)
+	return err
+}
+
 // ReviewRoundsFor returns the immutable bindings and current status for every
 // round of a Change Task.
 func (db *DB) ReviewRoundsFor(ctx context.Context, changeTaskID int64) ([]ReviewRound, error) {

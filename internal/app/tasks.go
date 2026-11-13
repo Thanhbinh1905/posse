@@ -1315,6 +1315,9 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 	if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", reason); err != nil {
 		return err
 	}
+	if err := db.VoidUnverdictReviewRound(ctx, id); err != nil {
+		return err
+	}
 	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: id, Kind: "task_failed", Summary: title + " failed to start", DataJSON: `{}`}); err != nil {
 		return err
 	}
