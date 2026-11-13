@@ -29,28 +29,24 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func TestRelaunchDoesNotRevisePlanForSameProfile(t *testing.T) {
-	plan := &taskplan.Plan{Launch: taskplan.Launch{ProfileName: "reviewer"}}
-	before := plan.SHA256()
-	if relaunchNeedsPlanRevision(plan, "reviewer") {
-		t.Fatal("relaunching with the admitted Profile would revise the plan")
+func TestRelaunchPlanRevisionRequiresEffectiveChanges(t *testing.T) {
+	admitted := &taskplan.Plan{Launch: taskplan.Launch{ProfileName: "reviewer"}}
+	unchanged := *admitted
+	if relaunchNeedsPlanRevision(admitted, &unchanged) {
+		t.Fatal("unchanged resolved launch requested a plan revision")
 	}
-	if got := plan.SHA256(); got != before {
-		t.Fatalf("same-Profile relaunch changed plan digest from %s to %s", before, got)
+	changedLaunch := *admitted
+	changedLaunch.Launch.Profile.Model = "model-b"
+	if !relaunchNeedsPlanRevision(admitted, &changedLaunch) {
+		t.Fatal("changed resolved launch did not request a plan revision")
 	}
-	changedReview := *plan
+	changedReview := *admitted
 	changedReview.Review = "full-pipeline"
-	if changedReview.SHA256() == before {
-		t.Fatal("review policy change did not change the plan digest")
+	if !relaunchNeedsPlanRevision(admitted, &changedReview) {
+		t.Fatal("review policy change did not request a plan revision")
 	}
-	if fields := changedReview.ChangedFields(*plan); len(fields) != 1 || fields[0] != "review" {
-		t.Fatalf("review policy change fields = %v, want [review]", fields)
-	}
-	if !relaunchNeedsPlanRevision(plan, "reviewer-v2") {
-		t.Fatal("relaunching with a different Profile did not revise the plan")
-	}
-	if !relaunchNeedsPlanRevision(nil, "reviewer") {
-		t.Fatal("legacy Task Profile change did not retain its normal path")
+	if relaunchNeedsPlanRevision(nil, &changedLaunch) {
+		t.Fatal("legacy Task without an admitted plan requested a plan revision")
 	}
 }
 

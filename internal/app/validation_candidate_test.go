@@ -221,6 +221,41 @@ func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	configPath := filepath.Join(fixture.home, "config.toml")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configBytes, []byte("\n[profiles.author]\nkind = \"claude\"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := dispatch.Resolve(cfg, fixture.task.Type, planForRelaunch.Launch.ProfileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := frozenLaunch(resolution, cfg.Kinds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPlan, err := planForRelaunch.Reconfigure(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPlan, err = selectReconfiguredLaunchInputs(nextPlan, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.ReviseTaskPlan(context.Background(), fixture.task, nextPlan); err != nil {
+		t.Fatalf("freeze effective launch configuration: %v", err)
+	}
+	fixture.task, err = fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	submitThroughCLI(t, fixture)
 	candidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil {
@@ -242,14 +277,6 @@ func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
 	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET profile='author', mount_id=(SELECT id FROM mounts WHERE task_id=?) WHERE id=?`, fixture.task.ID, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(fixture.home, "config.toml")
-	configBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, append(configBytes, []byte("\n[profiles.author]\nkind = \"claude\"\n")...), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateWorking, store.StateLost, "cli", "simulate Worker loss before relaunch"); err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +295,7 @@ func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
 			fake.SnapshotValue.Panes = []herdr.Pane{lead, {PaneID: "w1:p2", WorkspaceID: "w1", TabID: "w1:t1", Label: fixture.task.PaneLabel, Agent: "claude"}}
 		}
 	}
-	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	cfg, err = config.Load(fixture.home, fixture.project.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +308,11 @@ func TestSameProfileRelaunchKeepsCandidateAndReviewPass(t *testing.T) {
 	}
 	currentPlan, err := current.AdmittedPlan()
 	if err != nil || currentPlan == nil || currentPlan.SHA256() != before {
-		t.Fatalf("same-Profile relaunch changed admitted plan: %#v, %v", currentPlan, err)
+		var changedFields []string
+		if currentPlan != nil {
+			changedFields = currentPlan.ChangedFields(*plan)
+		}
+		t.Fatalf("same-Profile relaunch changed admitted plan: fields=%v err=%v", changedFields, err)
 	}
 	currentCandidate, err := fixture.db.LatestValidationCandidate(context.Background(), fixture.task.ID, "")
 	if err != nil || currentCandidate.ID != candidate.ID || currentCandidate.CandidateSHA != candidate.CandidateSHA {

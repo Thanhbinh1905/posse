@@ -2957,8 +2957,8 @@ func (s *Service) relaunchTask(ctx context.Context, db *store.DB, home string, p
 	return result, err
 }
 
-func relaunchNeedsPlanRevision(plan *taskplan.Plan, requestedProfile string) bool {
-	return requestedProfile != "" && (plan == nil || requestedProfile != plan.Launch.ProfileName)
+func relaunchNeedsPlanRevision(plan, revision *taskplan.Plan) bool {
+	return plan != nil && revision != nil && len(revision.ChangedFields(*plan)) > 0
 }
 
 func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
@@ -2983,7 +2983,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		profileName, profile, kindConfig, ok = plan.Launch.ProfileName, plan.Launch.Profile, plan.Launch.Kind, true
 	}
 	var revision *taskplan.Plan
-	if relaunchNeedsPlanRevision(plan, requestedProfile) {
+	if requestedProfile != "" {
 		resolution, err := dispatch.Resolve(cfg, task.Type, requestedProfile)
 		if err != nil {
 			return failure(profileError(err))
@@ -3002,7 +3002,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			if err != nil {
 				return failure(err)
 			}
-			revision = &next
+			if relaunchNeedsPlanRevision(plan, &next) {
+				revision = &next
+			}
 		}
 	}
 	if !ok {
