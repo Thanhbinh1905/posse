@@ -139,19 +139,28 @@ const quotaPiHelp = piErrorHelpLine
 
 const piWrappedCooldownPane = ` Error: OpenAI API error (429): {"code":"model_cooldown","last_upstream_error":"usage_limit_reached:
  The usage limit has been reached","message":"All credentials for model gpt-6-luna are cooling down via
- provider codex ...
- Error: Retry failed after 3 attempts: OpenAI API error (429):
- {"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been
- reached", ...
+ provider codex (last error: usage_limit_reached: The usage limit has been
+ reached)","model":"gpt-6-luna","provider":"codex","reset_seconds":15357,"reset_time":"4h15m56s"}
 ` + quotaPiHelp + "\n\n~/work/posse\n"
 
 func TestClassifyQuotaExhaustionPiWrappedErrorWithPrefix(t *testing.T) {
-	found, ok := classifyQuotaExhaustion("pi", piWrappedCooldownPane)
-	if !ok {
-		t.Fatalf("wrapped Pi usage limit not recognized in %q", piWrappedCooldownPane)
-	}
-	if !strings.HasPrefix(found.Line, "Retry failed after 3 attempts: OpenAI API error (429): {") {
-		t.Fatalf("quota line = %q", found.Line)
+	for _, testCase := range []struct {
+		name   string
+		output string
+		prefix string
+	}{
+		{name: "initial error", output: piWrappedCooldownPane, prefix: "OpenAI API error (429): {"},
+		{name: "retry error", output: strings.Replace(piWrappedCooldownPane, "OpenAI API error (429):", "Retry failed after 3 attempts: OpenAI API error (429):", 1), prefix: "Retry failed after 3 attempts: OpenAI API error (429): {"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			found, ok := classifyQuotaExhaustion("pi", testCase.output)
+			if !ok {
+				t.Fatalf("wrapped Pi usage limit not recognized in %q", testCase.output)
+			}
+			if !strings.HasPrefix(found.Line, testCase.prefix) || found.Resets != "4h15m56s" {
+				t.Fatalf("quota = %#v, want prefix %q and reset 4h15m56s", found, testCase.prefix)
+			}
+		})
 	}
 }
 
@@ -171,6 +180,8 @@ func TestClassifyQuotaExhaustionIgnoresQuotaTextTheWorkerMovedPast(t *testing.T)
 		{name: "codex rate limit is not quota", kind: "codex", output: "■ stream error: exceeded retry limit, last status: 429 Too Many Requests\n\n› Implement {feature}\n"},
 		{name: "claude phrase in another harness", kind: "codex", output: "■ Your credit balance is too low\n"},
 		{name: "pi quota in tool output", kind: "pi", output: "────────────────────\n$ cat fixture\nError: You have hit your ChatGPT usage limit (plus plan).\n" + quotaPiHelp + "\n────────────────────\n\n Done.\n"},
+		{name: "pi quota echoed in worker output", kind: "pi", output: "⏺ The error was \"Error: OpenAI API error (429): " + piModelCooldownBody + "\"\n" + quotaPiHelp + "\n"},
+		{name: "pi quota in diff output", kind: "pi", output: "────────────────────\n$ git diff\n+ Error: OpenAI API error (429): " + piModelCooldownBody + "\n+ " + quotaPiHelp + "\n────────────────────\n\n Done.\n"},
 		{name: "pi stream error", kind: "pi", output: " Error: stream error: stream disconnected before completion: stream closed before response.completed\n" + quotaPiHelp + "\n"},
 		{name: "unknown kind", kind: "custom", output: "You've hit your session limit · resets 7pm\n"},
 	} {
