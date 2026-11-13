@@ -1246,6 +1246,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task state update", err)
 	}
+	if err := db.ObsoleteTaskDecisions(ctx, task.ID); err != nil {
+		return result, err
+	}
 	if err := s.regenerateProjects(ctx, db); err != nil {
 		return result, err
 	}

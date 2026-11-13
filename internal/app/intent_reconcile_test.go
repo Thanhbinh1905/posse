@@ -251,6 +251,57 @@ func TestInterruptedMergeIntentFinishesOrUndoesFromRepositoryState(t *testing.T)
 	}
 }
 
+func TestInterruptedTeardownObsoletesDecisionsAfterTaskCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted teardown", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: project.ID, TaskID: taskID, Kind: "worker_question", Origin: "lead:question", Question: "Continue?", Options: []string{"yes", "no"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}, {store.StateDone, store.StateMerging, "cli"}, {store.StateMerging, store.StateMerged, "cli"}, {store.StateMerged, store.StateTornDown, "cli"}} {
+		if err := db.Transition(ctx, taskID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.StartIntent(ctx, project.ID, taskID, "teardown", "done:task.torn_down", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := testService(home, nil).reconcileIntents(ctx, db, project, cfg, herdr.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.Decisions(ctx, project.ID, true)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending Decisions after interrupted teardown = %#v, %v; want none", pending, err)
+	}
+	all, err := db.Decisions(ctx, project.ID, false)
+	if err != nil || len(all) != 1 || all[0].ID != decision.ID || all[0].ObsoleteAt == 0 {
+		t.Fatalf("Decision after interrupted teardown = %#v, %v; want obsolete history", all, err)
+	}
+}
+
 func TestInterruptedTeardownRerunsThroughSandboxRelease(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
