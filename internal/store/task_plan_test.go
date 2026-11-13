@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -127,6 +128,10 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	}
 	if err := db.ReviseTaskPlan(ctx, task, revision); !errors.Is(err, ErrStateRace) {
 		t.Fatalf("stale revision accepted: %v", err)
+	}
+	transitions, err := db.TaskTransitions(ctx, id, 10)
+	if err != nil || len(transitions) == 0 || !strings.Contains(transitions[0].Note, "changed fields: launch") {
+		t.Fatalf("plan revision did not report changed fields to the Lead: %#v, %v", transitions, err)
 	}
 	if _, err := db.NextTaskLaunchWithIdentity(ctx, id, "next", "new-model", true); err != nil {
 		t.Fatal(err)
