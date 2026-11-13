@@ -483,7 +483,7 @@ func TestRestartLeadUsesDefaultAutoApproveArgsForCodexAndOpenCode(t *testing.T) 
 				// The inline Lead instructions pass the tty line limit, so the
 				// launch is sourced from a script instead of typed.
 				script, err := os.ReadFile(filepath.Join(home, "projects", "shop", "lead-launch.sh"))
-				if len(args) != 0 || err != nil || !strings.Contains(string(script), "\tcommand codex '--dangerously-bypass-approvals-and-sandbox' '--sandbox' 'danger-full-access' ") || !strings.Contains(string(script), " "+shellQuote(codexOpeningPrompt)+` "$@"`) {
+				if len(args) != 0 || err != nil || !strings.Contains(string(script), "\tcommand codex '--dangerously-bypass-approvals-and-sandbox' '--sandbox' 'danger-full-access' ") || !strings.Contains(string(script), "'-c' 'check_for_update_on_startup=false'") || !strings.Contains(string(script), " "+shellQuote(codexOpeningPrompt)+` "$@"`) {
 					t.Fatalf("restarted Codex Lead args=%#v script=%s err=%v", args, script, err)
 				}
 			case "opencode":

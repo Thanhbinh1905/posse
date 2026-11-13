@@ -1087,6 +1087,47 @@ func TestSendFileStoresInstructionInTaskDirectory(t *testing.T) {
 	}
 }
 
+func TestSendInterruptRefusesCodex(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Fix", MergeMode: "local", PaneID: "w2:p1", PaneLabel: "posse:shop:t1", HerdrWorkspaceID: "w2", WorktreePath: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := herdr.NewFake()
+	fake.Results["pane.read"] = []byte(`{"read":{"text":"worker output"}}`)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "working"}}}
+	service := testService(home, fake)
+	t.Chdir(repo)
+	var output bytes.Buffer
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"send", "t1", "--interrupt", "Fresh redirect"}); code == 0 || !strings.Contains(output.String(), "Codex does not support verified turn interruption") {
+		t.Fatalf("send --interrupt Codex exit=%d output=%s", code, output.String())
+	}
+	if got := fake.CallCount("agent.send_keys"); got != 0 {
+		t.Fatalf("Codex abort key calls = %d, want 0", got)
+	}
+}
+
 func TestSendInterruptRetriesAbortWhenHarnessStartsQueuedTurn(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

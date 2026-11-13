@@ -1244,6 +1244,9 @@ func (s *Service) waitAgent(ctx context.Context, paneID string, anyStatus bool) 
 			}
 			if json.Unmarshal(raw, &response) == nil {
 				lastStatus = response.Agent.AgentStatus
+				if anyStatus && lastStatus == "blocked" && s.codexUpdatePrompt(ctx, paneID) {
+					return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
+				}
 				// Herdr keeps launch_pending set while a start prompt runs.
 				if anyStatus && lastStatus != "" && lastStatus != "unknown" {
 					return nil
@@ -2736,6 +2739,9 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	kind := pane.Agent
 	if kind == "" {
 		kind = taskKind(cfg, task)
+	}
+	if kind == "codex" {
+		return interruptOutcome{}, axi.Failure("interrupt_unsupported_kind", "Codex does not support verified turn interruption", false, "Wait for the Worker turn to finish, then run `posse send`")
 	}
 	keys := cfg.Kinds[kind].InterruptKeys
 	if len(keys) == 0 {
