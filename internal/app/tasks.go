@@ -1244,6 +1244,9 @@ func (s *Service) waitAgent(ctx context.Context, paneID string, anyStatus bool) 
 			}
 			if json.Unmarshal(raw, &response) == nil {
 				lastStatus = response.Agent.AgentStatus
+				if anyStatus && lastStatus == "blocked" && s.codexUpdatePrompt(ctx, paneID) {
+					return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
+				}
 				// Herdr keeps launch_pending set while a start prompt runs.
 				if anyStatus && lastStatus != "" && lastStatus != "unknown" {
 					return nil
