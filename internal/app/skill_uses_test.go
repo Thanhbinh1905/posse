@@ -204,6 +204,127 @@ func TestPiWorkerRoleSkillUsesAreRecorded(t *testing.T) {
 	}
 }
 
+func TestReviewRoundDoneRequiresReportSkillsButNotCodeCleanupSkills(t *testing.T) {
+	f := newStartFixture(t)
+	configText := `[defaults]
+merge_mode = "local"
+
+[profiles.author]
+kind = "claude"
+model = "model-a"
+
+[profiles.reviewer]
+kind = "claude"
+model = "model-b"
+
+[dispatch.default]
+use = "author"
+
+[skills]
+review = ["posse-deslop", "posse-no-comments", "posse-technical-writing", "posse-review"]
+
+[review_loop]
+enabled = true
+max_rounds = 1
+auto_start = false
+block_at = "P1"
+`
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	gitTest(t, f.repo, "init", "--bare", remote)
+	gitTest(t, f.repo, "remote", "add", "origin", remote)
+	gitTest(t, f.repo, "push", "-u", "origin", "main")
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	if err := os.WriteFile(filepath.Join(change.WorktreePath, "changed.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, change.WorktreePath, "add", "changed.go")
+	gitTest(t, change.WorktreePath, "commit", "-m", "add code for review")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.Transition(ctx, change.ID, change.State, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", "t1", "--profile", "reviewer"}); code != 0 {
+		t.Fatalf("review start code=%d %s", code, output.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := db.ReviewRoundsFor(ctx, change.ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("review rounds = %#v, %v", rounds, err)
+	}
+	review, err := db.TaskByID(ctx, f.project.ID, rounds[0].ReviewTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skillUseRecordingInstalled(f.home, f.project.Name, review.Seq) {
+		t.Fatal("Review Worker launch did not install skill-use recording")
+	}
+	if err := db.RecordTaskSkillUse(ctx, review.ID, "posse-review"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(review.WorktreePath, "report.md")
+	findingsPath := filepath.Join(review.WorktreePath, "findings.json")
+	if err := os.WriteFile(reportPath, []byte("Review completed.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(findingsPath, []byte(`{"schema":"posse.review-findings.v1","patterns":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, f.home)
+	t.Setenv("HERDR_PANE_ID", review.PaneID)
+	t.Chdir(review.WorktreePath)
+	args := []string{"signal", "done", "Review completed", "--report", reportPath, "--findings", findingsPath, "--verdict", "pass"}
+	var signalOutput bytes.Buffer
+	cli = f.service.CLI()
+	cli.Out, cli.ErrOut = &signalOutput, &signalOutput
+	if code := cli.Run(args); code == 0 || !strings.Contains(signalOutput.String(), "role_skills_unused") || !strings.Contains(signalOutput.String(), "posse-technical-writing") {
+		t.Fatalf("Review done without Report skill: code=%d output=%s", code, signalOutput.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordTaskSkillUse(ctx, review.ID, "posse-technical-writing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	signalOutput.Reset()
+	cli = f.service.CLI()
+	cli.Out, cli.ErrOut = &signalOutput, &signalOutput
+	if code := cli.Run(args); code != 0 || !strings.Contains(signalOutput.String(), "signal: done") {
+		t.Fatalf("Review done with Report skill: code=%d output=%s", code, signalOutput.String())
+	}
+	if strings.Contains(signalOutput.String(), "posse-deslop") || strings.Contains(signalOutput.String(), "posse-no-comments") {
+		t.Fatalf("Review done checklist includes code-cleanup skills: %s", signalOutput.String())
+	}
+}
+
 func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T) {
 	root := t.TempDir()
 	gitTest(t, root, "init", "-b", "main")
