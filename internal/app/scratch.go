@@ -148,8 +148,7 @@ func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMar
 	quotedMarker := shellQuote(taskMarker)
 	quotedCache := shellQuote(workerCache)
 	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker + " GOCACHE=" + quotedCache
-	_, err = s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
-	return err
+	return s.sendLaunchInput(ctx, paneID, command)
 }
 
 func exportTaskAuthorGeneration(ctx context.Context, s *Service, paneID string, generation int64) error {
@@ -157,6 +156,5 @@ func exportTaskAuthorGeneration(ctx context.Context, s *Service, paneID string, 
 		return fmt.Errorf("task author generation requires a pane and positive generation")
 	}
 	command := "export POSSE_TASK_GENERATION=" + strconv.FormatInt(generation, 10)
-	_, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": command, "keys": []string{"enter"}})
-	return err
+	return s.sendLaunchInput(ctx, paneID, command)
 }

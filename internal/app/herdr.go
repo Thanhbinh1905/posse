@@ -178,7 +178,7 @@ func (s *Service) launchAgent(ctx context.Context, paneID, name, kind string, ar
 		lines, args = []string{". " + shellQuote(script)}, []string{}
 	}
 	for _, line := range lines {
-		if _, err := s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": line, "keys": []string{"enter"}}); err != nil {
+		if err := s.sendLaunchInput(ctx, paneID, line); err != nil {
 			return err
 		}
 	}
@@ -191,13 +191,26 @@ func (s *Service) launchAgent(ctx context.Context, paneID, name, kind string, ar
 // while the shell is still running its startup commands, so the start is
 // retried until the shell reaches its prompt. Exhausting that bound reports a
 // retryable busy error so a later relaunch can try again after Herdr catches up.
+func (s *Service) sendLaunchInput(ctx context.Context, paneID, text string) error {
+	_, err := retryAgentPaneBusy(ctx, func() (json.RawMessage, error) {
+		return s.herdrCall(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": text, "keys": []string{"enter"}})
+	})
+	return err
+}
+
 func (s *Service) startAgent(ctx context.Context, params map[string]any) (json.RawMessage, error) {
+	return retryAgentPaneBusy(ctx, func() (json.RawMessage, error) {
+		return s.herdrCall(ctx, "agent.start", params)
+	})
+}
+
+func retryAgentPaneBusy(ctx context.Context, attempt func() (json.RawMessage, error)) (json.RawMessage, error) {
 	deadline := time.Now().Add(agentStartBusyWait)
 	for {
-		started, err := s.herdrCall(ctx, "agent.start", params)
+		result, err := attempt()
 		var failure *axi.Error
 		if err == nil || !errors.As(err, &failure) || failure.Code != "agent_pane_busy" {
-			return started, err
+			return result, err
 		}
 		if time.Now().After(deadline) {
 			return nil, axi.Failure("agent_pane_busy", failure.Message, true, "Wait for the Worker pane's shell to become available, then retry")
