@@ -149,7 +149,7 @@ func (d *Daemon) axi(ctx context.Context, dir string, request []byte) (response,
 		}
 		return v, fmt.Errorf("greenhouse axi returned no envelope: %w", err)
 	}
-	if v.Outcome == "error" && strings.Contains(v.Error, "daemon unavailable") {
+	if v.Outcome == "error" && (strings.Contains(v.Error, "daemon unavailable") || v.Error == "EOF") {
 		return v, fmt.Errorf("%w: %s", errUnavailable, v.Error)
 	}
 	if v.Outcome == "error" {
