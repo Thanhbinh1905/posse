@@ -47,6 +47,24 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 	if request.Outcome == "verdict" && verdictID == nil {
 		return errors.New("greenhouse verdict request has no linked Verdict")
 	}
+	if request.Grant != "" {
+		var existing GreenhouseReviewRequest
+		err := db.QueryRowContext(ctx, `SELECT id,project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,COALESCE(grant_id,'') FROM greenhouse_review_requests WHERE task_id=? AND repo=? AND grant_id=?`, request.TaskID, request.Repository, request.Grant).Scan(
+			&existing.ID, &existing.ProjectID, &existing.TaskID, &existing.Repository, &existing.RequestedHead, &existing.Provider, &existing.RequestedAt, &existing.SettledAt, &existing.Outcome, &existing.Grant)
+		if err == nil {
+			if existing.ProjectID != request.ProjectID || existing.RequestedHead != request.RequestedHead || existing.RequestedAt != request.RequestedAt {
+				return errors.New("Greenhouse review grant changed request identity")
+			}
+			if existing.Outcome != "failed" {
+				return nil
+			}
+			_, err = db.ExecContext(ctx, `UPDATE greenhouse_review_requests SET settled_at=?,outcome=?,verdict_id=? WHERE id=?`, request.SettledAt, request.Outcome, verdictID, existing.ID)
+			return err
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	_, err := db.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id) VALUES(?,?,?,?,?,?,?,?,?,NULLIF(?,''))`,
 		request.ProjectID, request.TaskID, request.Repository, request.RequestedHead, request.Provider, request.RequestedAt, request.SettledAt, request.Outcome, verdictID, request.Grant)
 	return err
