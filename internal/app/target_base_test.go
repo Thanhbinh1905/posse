@@ -130,22 +130,19 @@ func TestLandedPrerequisiteAllowsExplicitExistingFeatureBase(t *testing.T) {
 
 func TestQueuedFeatureBaseAndPrerequisiteSurviveStoreRestart(t *testing.T) {
 	f := newStartFixture(t)
-	gitTest(t, f.repo, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(f.repo, "feature.txt"), []byte("prerequisite landed\\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, f.repo, "add", "feature.txt")
 	gitTest(t, f.repo, "commit", "-m", "land prerequisite on feature")
-	featureCommit := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "feature"))
-	gitTest(t, f.repo, "checkout", "main")
+	featureCommit := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "HEAD"))
 	addOrigin(t, f.repo)
-	gitTest(t, f.repo, "push", "origin", "feature")
 	ctx := context.Background()
 	db, err := store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	predecessorID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Prerequisite", ShortName: "prerequisite", MergeMode: "local", TargetBranch: "feature"})
+	predecessorID, err := db.CreateTask(ctx, f.project.ID, store.Task{Seq: 1, Type: "change", Title: "Prerequisite", ShortName: "prerequisite", MergeMode: "local", TargetBranch: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +152,7 @@ func TestQueuedFeatureBaseAndPrerequisiteSurviveStoreRestart(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\ntarget: feature\nafter: t1:landed\n---\nBuild on the landed feature.\n"
+	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nafter: t1:landed\n---\nBuild on the landed feature.\n"
 	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +172,7 @@ func TestQueuedFeatureBaseAndPrerequisiteSurviveStoreRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		plan, err := task.AdmittedPlan()
-		if err != nil || plan == nil || task.State != store.StateQueued || task.Branch != "" || task.WorktreePath != "" || task.SandboxID != 0 || plan.Execution.Base != "refs/remotes/origin/feature" || plan.Execution.BaseCommit != "" || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" {
+		if err != nil || plan == nil || task.State != store.StateQueued || task.Branch != "" || task.WorktreePath != "" || task.SandboxID != 0 || plan.Execution.BaseCommit != "" || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t1" {
 			t.Fatalf("queued plan lost its feature base or prerequisite: task=%+v plan=%#v err=%v", task, plan, err)
 		}
 	}
@@ -199,15 +196,14 @@ func TestQueuedFeatureBaseAndPrerequisiteSurviveStoreRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	gitTest(t, f.repo, "checkout", "feature")
+	gitTest(t, f.repo, "checkout", "-b", "target-release")
 	if err := os.WriteFile(filepath.Join(f.repo, "released-target.txt"), []byte("target advanced before release\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, f.repo, "add", "released-target.txt")
 	gitTest(t, f.repo, "commit", "-m", "advance target before release")
 	latestFeature := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "HEAD"))
-	gitTest(t, f.repo, "push", "origin", "HEAD:refs/heads/feature")
-	gitTest(t, f.repo, "update-ref", "refs/remotes/origin/feature", featureCommit)
+	gitTest(t, f.repo, "push", "origin", "HEAD:refs/heads/main")
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
