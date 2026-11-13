@@ -1457,6 +1457,27 @@ auto_start = false
 	}
 }
 
+func TestParallelGreenhouseReviewActionReconcilesAbandonedPendingRequests(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		hasVerdict bool
+		hasPending bool
+		want       parallelReviewAction
+	}{
+		{name: "completed head", hasVerdict: true, want: parallelReviewSkip},
+		{name: "new request", want: parallelReviewStart},
+		{name: "abandoned pending same head", hasPending: true, want: parallelReviewResume},
+		{name: "abandoned pending old head", hasPending: true, want: parallelReviewResume},
+		{name: "completed but pending", hasVerdict: true, hasPending: true, want: parallelReviewResume},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nextParallelReviewAction(test.hasVerdict, test.hasPending); got != test.want {
+				t.Fatalf("nextParallelReviewAction(%v, %v) = %v, want %v", test.hasVerdict, test.hasPending, got, test.want)
+			}
+		})
+	}
+}
+
 func TestReviewDispositionRefreshesAdmittedReviewerLedger(t *testing.T) {
 	f := newStartFixture(t)
 	if code, output := f.start(t); code != 0 {

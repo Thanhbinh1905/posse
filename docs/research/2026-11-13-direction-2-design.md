@@ -171,13 +171,15 @@ Fault table for G0 (each is an automated test; the pass condition is "no passing
 
 Parallel-run thresholds (G1), measured per reviewed head from stored rows by one command (`posse stats` gains a review comparison):
 
+For the initial shadow run, only Project `posse` has the built-in review loop. Project `greenhouse` has `defaults.review = none`, so its gated PR heads add reliability, inconclusive-share, wrong-head and latency data, but not recall. This measures the adapter without enabling built-in Review Tasks in `greenhouse`. G1 does not measure precision from findings disputed by the author and upheld by the User. Parallel findings never reach the author, so measure precision in G2.
+
 | Measure | Threshold | Why |
 |---|---|---|
 | Verdicts recorded for a head other than the one requested | 0 | exact-head binding |
 | Requests that settle with a verdict without manual action | at least 95% | reliability of the host path |
 | `inconclusive` share | at most 10% | a gate that often cannot answer blocks delivery |
 | Recall of blocking findings: built-in P0 or P1 findings that the author then fixed, also reported by Greenhouse on the same head | at least 90% | Greenhouse must not be a weaker gate |
-| Greenhouse blocking findings the author disputes and the User upholds as false | at most 10% of blocking findings | precision; false blockers burn Fix Rounds |
+| Greenhouse blocking findings the author disputes and the User upholds as false | Not measured in G1; measure in G2 | Parallel findings never reach the author |
 | Median time from request to settled verdict | no more than 1.5 times the built-in Review Round | the User's waiting time |
 
 Gate thresholds (G2), in addition:

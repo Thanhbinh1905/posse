@@ -206,5 +206,9 @@ func (s *Service) stats(ctx *axi.Context, args []string) error {
 	if len(rows) == 0 {
 		help = []string{"No Tasks started in the last 30 days"}
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "window_days", Value: statsWindowDays}, {Key: "profiles", Value: rows}, {Key: "help", Value: help}})
+	comparison, err := reviewComparison(ctx.Context, db)
+	if err != nil {
+		return err
+	}
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "window_days", Value: statsWindowDays}, {Key: "profiles", Value: rows}, {Key: "review_comparison", Value: comparison}, {Key: "help", Value: help}})
 }
