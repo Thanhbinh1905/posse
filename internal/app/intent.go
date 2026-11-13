@@ -207,6 +207,9 @@ func (s *Service) finishSettledTeardownIntent(ctx context.Context, db *store.DB,
 	if err != nil || task.State != store.StateTornDown {
 		return false, err
 	}
+	if err := db.ObsoleteTaskDecisions(ctx, task.ID); err != nil {
+		return false, err
+	}
 	if err := s.regenerateProjects(ctx, db); err != nil {
 		return false, err
 	}

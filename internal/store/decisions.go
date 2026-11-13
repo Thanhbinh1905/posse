@@ -456,6 +456,24 @@ const resolvedDecisionPredicate = `
 				OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(d.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (d.kind='orphan' AND d.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')`
 
+// ObsoleteTaskDecisions retires every unanswered question when its Task is torn down.
+func (db *DB) ObsoleteTaskDecisions(ctx context.Context, taskID int64) error {
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Task was torn down'
+		WHERE task_id=? AND kind<>'orphan' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), taskID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
+}
+
 // ObsoleteResolvedDecisions removes unanswered questions whose situation has
 // resolved. Answered Decisions are otherwise retained.
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {
