@@ -69,3 +69,15 @@ func (c Config) MemberReview(name string) string {
 	}
 	return c.Defaults.Review
 }
+
+func (c Config) EffectiveReviewProvider(member string) string {
+	if member != "" {
+		if provider := c.Repositories[member].ReviewProvider; provider != "" {
+			return provider
+		}
+	}
+	if c.ReviewProvider != "" {
+		return c.ReviewProvider
+	}
+	return "builtin"
+}
