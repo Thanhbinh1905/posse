@@ -53,7 +53,7 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 			&existing.ID, &existing.ProjectID, &existing.TaskID, &existing.Repository, &existing.RequestedHead, &existing.Provider, &existing.RequestedAt, &existing.SettledAt, &existing.Outcome, &existing.Grant)
 		if err == nil {
 			if existing.ProjectID != request.ProjectID || existing.RequestedHead != request.RequestedHead || existing.RequestedAt != request.RequestedAt {
-				return errors.New("Greenhouse review grant changed request identity")
+				return errors.New("greenhouse review grant changed request identity")
 			}
 			if existing.Outcome != "failed" {
 				return nil
