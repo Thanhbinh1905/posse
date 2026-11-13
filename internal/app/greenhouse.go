@@ -270,7 +270,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if ctx.Context.Err() != nil {
 				return ctx.Context.Err()
 			}
-			if err != nil || result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused {
+			if err != nil || !parallelMode || result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused {
 				break
 			}
 			if time.Until(deadline) <= 0 {
