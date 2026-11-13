@@ -897,31 +897,52 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 				break
 			}
 		}
-		pending := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse", target.Repository+".pending.json")
-		if _, err := os.Stat(pending); err == nil {
-			exists = true
-		} else if !errors.Is(err, os.ErrNotExist) {
+		roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
+		pending := filepath.Join(roundDir, target.Repository+".pending.json")
+		_, pendingErr := os.Stat(pending)
+		hasPending := pendingErr == nil
+		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+			return pendingErr
+		}
+		lock, busy, err := acquireParallelReviewLock(parallelReviewLockPath(roundDir, target.Repository))
+		if err != nil {
 			return err
 		}
-		if exists {
+		if busy {
 			continue
 		}
-		requestStarted := time.Now().UnixMilli()
-		recordFailure := func(reason string) error {
-			if err := db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: change.ID, Repository: target.Repository, RequestedHead: target.Commit, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStarted, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); err != nil {
+		ownerPath := parallelReviewOwnerPath(roundDir, target.Repository)
+		owner, err := readParallelReviewOwner(ownerPath)
+		if err != nil {
+			_ = releaseParallelReviewLock(lock)
+			return err
+		}
+		action := nextParallelReviewAction(exists, hasPending)
+		if action == parallelReviewSkip {
+			if err := os.Remove(ownerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				_ = releaseParallelReviewLock(lock)
 				return err
 			}
-			_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, change.ID, target.Repository, target.Commit, reason)
+			_ = releaseParallelReviewLock(lock)
+			continue
+		}
+		requestHead, requestStarted := parallelRequestMetadata(target.Commit, time.Now().UnixMilli(), hasPending, owner)
+		recordFailure := func(reason string) error {
+			if err := db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: change.ID, Repository: target.Repository, RequestedHead: requestHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStarted, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); err != nil {
+				return err
+			}
+			_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, change.ID, target.Repository, requestHead, reason)
 			return err
 		}
 		binary, err := os.Executable()
 		if err != nil {
+			_ = releaseParallelReviewLock(lock)
 			if recordErr := recordFailure(err.Error()); recordErr != nil {
 				return recordErr
 			}
 			continue
 		}
-		args := []string{"_greenhouse", "review", taskIDString(change.Seq)}
+		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
 		if project.IsWorkspace() {
 			args = append(args, "--repo", target.Repository)
 		}
@@ -929,8 +950,10 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 		command.Dir = project.Root
 		command.Env = os.Environ()
 		command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		command.ExtraFiles = []*os.File{lock}
 		logDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
 		if err := os.MkdirAll(logDir, 0o700); err != nil {
+			_ = releaseParallelReviewLock(lock)
 			if recordErr := recordFailure(err.Error()); recordErr != nil {
 				return recordErr
 			}
@@ -938,20 +961,41 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 		}
 		log, err := os.OpenFile(filepath.Join(logDir, target.Repository+".parallel.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
+			_ = releaseParallelReviewLock(lock)
 			if recordErr := recordFailure(err.Error()); recordErr != nil {
 				return recordErr
 			}
 			continue
 		}
 		command.Stdout, command.Stderr = log, log
+		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: requestHead, RequestedAt: requestStarted}); err != nil {
+			log.Close()
+			_ = releaseParallelReviewLock(lock)
+			if recordErr := recordFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
 		if err := command.Start(); err != nil {
 			log.Close()
+			_ = releaseParallelReviewLock(lock)
 			if recordErr := recordFailure(err.Error()); recordErr != nil {
 				return recordErr
 			}
 			continue
 		}
 		_ = log.Close()
+		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: command.Process.Pid, Head: requestHead, RequestedAt: requestStarted}); err != nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			_ = os.Remove(ownerPath)
+			_ = releaseParallelReviewLock(lock)
+			if recordErr := recordFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			continue
+		}
+		_ = lock.Close()
 		go func() { _ = command.Wait() }()
 	}
 	return nil

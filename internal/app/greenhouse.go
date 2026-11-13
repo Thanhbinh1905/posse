@@ -35,7 +35,7 @@ type greenhouseMember struct {
 // Change Task Member and records it as a parallel-mode Verdict. Only the Lead
 // side calls it; no gate reads Greenhouse Verdicts yet.
 func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}})
+	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}})
 	if err != nil {
 		return err
 	}
@@ -84,6 +84,18 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return admittedPlanFailure(err)
 	}
 	parallelMode := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse"
+	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
+	pendingPath := filepath.Join(roundDir, member.name+".pending.json")
+	_, pendingErr := os.Stat(pendingPath)
+	hasPending := pendingErr == nil
+	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+		return pendingErr
+	}
+	ownerPath := parallelReviewOwnerPath(roundDir, member.name)
+	requestOwner, ownerErr := readParallelReviewOwner(ownerPath)
+	if ownerErr != nil {
+		return ownerErr
+	}
 	notifyFailure := func(head, reason string) error {
 		if !parallelMode {
 			return nil
@@ -97,6 +109,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	requestStartedAt := requestedAt
+	requestedHead, requestStartedAt = parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
 	target, err := greenhouseTarget(ctx.Context, member)
 	if err != nil {
 		if parallelMode {
@@ -141,7 +154,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return false
 	}}
 	hostID := project.Name + "/" + taskIDString(task.Seq) + "/" + member.name
-	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
 	if err := os.MkdirAll(roundDir, 0o700); err != nil {
 		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
 			return recordErr
@@ -152,14 +164,58 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID,
 		Intent: greenhouseIntent(task, plan), Target: target,
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
-		Pending:  filepath.Join(roundDir, member.name+".pending.json"), Wait: wait,
+		Pending:  pendingPath, Wait: wait,
 		Checkpoint: func(step string) { crashIntentAt("greenhouse-review", "after", step) },
+	}
+	var parallelLock *os.File
+	suppliedOwner := parsed.Flags["parallel-owner"]
+	suppliedLockFD := parsed.Flags["parallel-lock-fd"]
+	if !parallelMode && (suppliedOwner != "" || suppliedLockFD != "") {
+		return axi.Usage("parallel owner flags require a frozen review_parallel setting")
+	}
+	if parallelMode {
+		if suppliedOwner != "" && suppliedOwner != ownerPath {
+			return axi.Usage("invalid internal Greenhouse parallel owner path")
+		}
+		lockPath := parallelReviewLockPath(roundDir, member.name)
+		if suppliedLockFD != "" {
+			fd, parseErr := strconv.Atoi(suppliedLockFD)
+			if parseErr != nil || fd != 3 {
+				return axi.Usage("invalid internal Greenhouse parallel lock descriptor")
+			}
+			parallelLock, err = inheritedParallelReviewLock(fd, lockPath)
+		} else {
+			var busy bool
+			parallelLock, busy, err = acquireParallelReviewLock(lockPath)
+			if busy {
+				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: "in_flight"}})
+			}
+		}
+		if err != nil {
+			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			return err
+		}
+		ownerHead, ownerStarted := parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
+		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: ownerHead, RequestedAt: ownerStarted}); err != nil {
+			_ = releaseParallelReviewLock(parallelLock)
+			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			return err
+		}
+		defer func() {
+			_ = clearParallelReviewOwner(ownerPath, pendingPath, os.Getpid())
+			_ = releaseParallelReviewLock(parallelLock)
+		}()
 	}
 	blockAt := "P1"
 	if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.BlockAt != "" {
 		blockAt = plan.ValidationLoops.Review.BlockAt
 	}
 	var refused []axi.Object
+	parallelAttempt := 0
 	for range greenhouseStaleRounds {
 		deadline := time.Now().Add(wait)
 		requestedAt := time.Now().UnixMilli()
@@ -167,6 +223,13 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if headErr != nil {
 			return headErr
 		}
+		if parallelLock != nil {
+			requestHead, requestedAt = parallelRequestMetadata(requestHead, requestedAt, parallelAttempt == 0 && hasPending, requestOwner)
+			if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: requestHead, RequestedAt: requestedAt}); err != nil {
+				return err
+			}
+		}
+		parallelAttempt++
 		var requestSettledAt int64
 		recordRequest := func(outcome, grant string, settledAt int64) error {
 			if !parallelMode {
@@ -182,10 +245,33 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			})
 		}
 		var result greenhouse.RoundResult
+		retries := 0
 		for {
 			round.Wait = time.Until(deadline)
 			result, err = daemon.Review(ctx.Context, round)
-			if err != nil || result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused || time.Until(deadline) <= 0 {
+			if err != nil {
+				var protocolErr *greenhouse.ProtocolError
+				if parallelMode && !errors.As(err, &protocolErr) && retries < 3 {
+					if recordErr := recordRequest("failed", "", time.Now().UnixMilli()); recordErr != nil {
+						return recordErr
+					}
+					timer := time.NewTimer(time.Duration(1<<retries) * time.Second)
+					retries++
+					select {
+					case <-ctx.Context.Done():
+						timer.Stop()
+						return ctx.Context.Err()
+					case <-timer.C:
+					}
+					deadline = time.Now().Add(wait)
+					continue
+				}
+				break
+			}
+			if result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused {
+				break
+			}
+			if time.Until(deadline) <= 0 {
 				break
 			}
 			timer := time.NewTimer(time.Second)

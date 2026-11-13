@@ -31,18 +31,25 @@ func TestReviewComparisonUsesAttemptRowsAndReportsG1PrecisionGap(t *testing.T) {
 	if _, err := f.db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,?,? ,1,?,'main.go','save','return err',1,?,'P1','introduced',1,'fixed')`, f.task.ID, patternID, strings.Repeat("a", 64), f.project.Name, head); err != nil {
 		t.Fatal(err)
 	}
+	failedHead := strings.Repeat("b", 40)
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,2,?,? ,1,?,'main.go','save','return err',1,?,'P1','introduced',1,'fixed')`, f.task.ID, patternID, strings.Repeat("b", 64), f.project.Name, failedHead); err != nil {
+		t.Fatal(err)
+	}
 	grant := "shop/t1/shop/r1"
 	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: grant, Head: head, Target: head, ReviewBase: head, Outcome: "inconclusive", FindingsPath: findingsPath, Mode: "parallel"}
 	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
 		t.Fatalf("record inconclusive parallel Verdict: recorded=%v err=%v", recorded, err)
 	}
 	base := store.GreenhouseReviewRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: head, Provider: store.GreenhouseReviewProvider}
-	for i, outcome := range []string{"verdict", "failed", "head_mismatch"} {
+	for i, outcome := range []string{"verdict", "failed", "head_mismatch", "failed", "verdict"} {
 		request := base
+		if i == 3 {
+			request.RequestedHead = failedHead
+		}
 		request.RequestedAt = int64(100 + i*100)
 		request.SettledAt = request.RequestedAt + 50
 		request.Outcome = outcome
-		if outcome == "verdict" {
+		if outcome == "verdict" || i == 1 {
 			request.Grant = grant
 		}
 		if err := f.db.RecordGreenhouseReviewRequest(ctx, request); err != nil {
@@ -53,7 +60,7 @@ func TestReviewComparisonUsesAttemptRowsAndReportsG1PrecisionGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.ReviewedHeads != 1 || row.Requests != 3 || row.Verdicts != 1 || row.Reliability != 1.0/3 || row.WrongHead != 1 || row.WrongHeadRate != 1.0/3 || row.Inconclusive != 1 || row.InconclusiveShare != 1 || row.Precision != "not measured in G1" || row.Recall == nil || *row.Recall != 1 || row.RecallMatched != 1 || row.RecallPairs != 1 || len(row.UnmatchedPairs) != 0 {
+	if row.ReviewedHeads != 1 || row.Requests != 5 || row.Verdicts != 2 || row.Reliability != 0.4 || row.WrongHead != 1 || row.WrongHeadRate != 0.2 || row.Inconclusive != 2 || row.InconclusiveShare != 1 || row.Precision != "not measured in G1" || row.Recall == nil || *row.Recall != 0.5 || row.RecallMatched != 1 || row.RecallPairs != 2 || len(row.UnmatchedPairs) != 1 || !strings.Contains(row.UnmatchedPairs[0], "builtin-only") {
 		t.Fatalf("review comparison = %+v", row)
 	}
 	if row.MedianLatencyMS == nil || *row.MedianLatencyMS != 50 {

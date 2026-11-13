@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS greenhouse_review_requests (
     settled_at INTEGER NOT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('verdict', 'refused', 'failed', 'head_mismatch')),
     verdict_id INTEGER REFERENCES verdicts(id),
-    grant_id TEXT UNIQUE,
+    grant_id TEXT,
     CHECK (outcome <> 'verdict' OR verdict_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS greenhouse_review_requests_project_idx ON greenhouse_review_requests(project_id, requested_at);

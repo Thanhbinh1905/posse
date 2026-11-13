@@ -55,6 +55,28 @@ func TestGreenhouseReviewRequestLedgerIsImmutableAndRecordsEveryOutcome(t *testi
 	}
 }
 
+func TestGreenhouseReviewLedgerKeepsResumeOutcomeForSameGrant(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	grant := "shop/t1/shop/r1"
+	failed := GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 200, Outcome: "failed", Grant: grant}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, greenhouseVerdict(task.ID, grant, reviewShaA), func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record resumed Verdict = %v, %v", recorded, err)
+	}
+	settled := failed
+	settled.RequestedAt, settled.SettledAt, settled.Outcome = 210, 310, "verdict"
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, settled); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(f.ctx, task.ProjectID)
+	if err != nil || len(requests) != 2 || requests[0].Outcome != "failed" || requests[1].Outcome != "verdict" || requests[1].VerdictID == nil {
+		t.Fatalf("resumed request rows = %+v, %v", requests, err)
+	}
+}
+
 func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	task := f.task(t, f.change)

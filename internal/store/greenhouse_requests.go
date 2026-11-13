@@ -47,7 +47,7 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 	if request.Outcome == "verdict" && verdictID == nil {
 		return errors.New("greenhouse verdict request has no linked Verdict")
 	}
-	_, err := db.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id) VALUES(?,?,?,?,?,?,?,?,?,NULLIF(?,'')) ON CONFLICT(grant_id) DO NOTHING`,
+	_, err := db.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id) VALUES(?,?,?,?,?,?,?,?,?,NULLIF(?,''))`,
 		request.ProjectID, request.TaskID, request.Repository, request.RequestedHead, request.Provider, request.RequestedAt, request.SettledAt, request.Outcome, verdictID, request.Grant)
 	return err
 }

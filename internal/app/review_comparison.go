@@ -17,6 +17,12 @@ type comparisonFinding struct {
 	Explanation string `json:"explanation"`
 }
 
+type comparisonHead struct {
+	TaskID int64
+	Repo   string
+	Head   string
+}
+
 type builtinFixedFinding struct {
 	TaskID int64
 	Head   string
@@ -141,9 +147,11 @@ func reviewComparisonForProject(ctx context.Context, db *store.DB, project store
 		return row, nil, err
 	}
 	headSet := map[string]bool{}
+	requestedHeads := map[comparisonHead]bool{}
 	latencies := []int64{}
 	for _, request := range requests {
 		row.Requests++
+		requestedHeads[comparisonHead{TaskID: request.TaskID, Repo: request.Repository, Head: request.RequestedHead}] = true
 		if request.Outcome == "head_mismatch" {
 			row.WrongHead++
 		}
@@ -202,36 +210,25 @@ func reviewComparisonForProject(ctx context.Context, db *store.DB, project store
 	if err != nil {
 		return row, nil, err
 	}
-	greenhouse, err := db.QueryContext(ctx, `SELECT r.task_id,r.repo,r.requested_head,v.findings_path FROM greenhouse_review_requests r JOIN verdicts v ON v.id=r.verdict_id WHERE r.project_id=? AND r.outcome='verdict'`, project.ID)
+	parallelByHead, err := greenhouseFindingsByHead(ctx, db, project.ID, requestedHeads)
 	if err != nil {
 		return row, nil, err
 	}
-	for greenhouse.Next() {
-		var taskID int64
-		var repo, head, findingsPath string
-		if err := greenhouse.Scan(&taskID, &repo, &head, &findingsPath); err != nil {
-			greenhouse.Close()
-			return row, nil, err
+	builtinByHead := map[comparisonHead][]builtinFixedFinding{}
+	for _, finding := range findings {
+		key := comparisonHead{TaskID: finding.TaskID, Repo: finding.Repo, Head: finding.Head}
+		if requestedHeads[key] {
+			builtinByHead[key] = append(builtinByHead[key], finding)
 		}
-		data, err := os.ReadFile(findingsPath)
-		if err != nil {
-			greenhouse.Close()
-			return row, nil, err
-		}
-		var ghFindings []comparisonFinding
-		if err := json.Unmarshal(data, &ghFindings); err != nil {
-			greenhouse.Close()
-			return row, nil, err
-		}
-		matchedParallel := make([]bool, len(ghFindings))
-		for _, builtin := range findings {
-			if builtin.TaskID != taskID || builtin.Head != head || builtin.Repo != repo {
-				continue
-			}
-			row.RecallPairs++
+	}
+	for key, builtins := range builtinByHead {
+		row.RecallPairs += len(builtins)
+		parallel := parallelByHead[key]
+		matchedParallel := make([]bool, len(parallel))
+		for _, builtin := range builtins {
 			matched := false
-			for i, parallel := range ghFindings {
-				if !matchedParallel[i] && parallel.File == builtin.Path && strings.Contains(strings.ToLower(parallel.Explanation), strings.ToLower(builtin.Cause)) {
+			for i, parallelFinding := range parallel {
+				if !matchedParallel[i] && parallelFinding.File == builtin.Path && strings.Contains(strings.ToLower(parallelFinding.Explanation), strings.ToLower(builtin.Cause)) {
 					matched = true
 					matchedParallel[i] = true
 					break
@@ -240,20 +237,23 @@ func reviewComparisonForProject(ctx context.Context, db *store.DB, project store
 			if matched {
 				row.RecallMatched++
 			} else {
-				row.UnmatchedPairs = append(row.UnmatchedPairs, fmt.Sprintf("builtin-only t%d %s@%s: %s", taskID, repo, head, builtin.Path+" | "+builtin.Cause))
+				row.UnmatchedPairs = append(row.UnmatchedPairs, fmt.Sprintf("builtin-only t%d %s@%s: %s", key.TaskID, key.Repo, key.Head, builtin.Path+" | "+builtin.Cause))
 			}
 		}
-		for i, parallel := range ghFindings {
+		for i, parallelFinding := range parallel {
 			if !matchedParallel[i] {
-				row.UnmatchedPairs = append(row.UnmatchedPairs, fmt.Sprintf("greenhouse-only t%d %s@%s: %s | %s", taskID, repo, head, parallel.File, parallel.Explanation))
+				row.UnmatchedPairs = append(row.UnmatchedPairs, fmt.Sprintf("greenhouse-only t%d %s@%s: %s | %s", key.TaskID, key.Repo, key.Head, parallelFinding.File, parallelFinding.Explanation))
 			}
 		}
 	}
-	if err := greenhouse.Err(); err != nil {
-		greenhouse.Close()
-		return row, nil, err
+	for key, parallel := range parallelByHead {
+		if _, hasBuiltin := builtinByHead[key]; hasBuiltin {
+			continue
+		}
+		for _, finding := range parallel {
+			row.UnmatchedPairs = append(row.UnmatchedPairs, fmt.Sprintf("greenhouse-only t%d %s@%s: %s | %s", key.TaskID, key.Repo, key.Head, finding.File, finding.Explanation))
+		}
 	}
-	greenhouse.Close()
 	if row.RecallPairs > 0 {
 		recall := float64(row.RecallMatched) / float64(row.RecallPairs)
 		row.Recall = &recall
@@ -262,6 +262,45 @@ func reviewComparisonForProject(ctx context.Context, db *store.DB, project store
 	}
 	sort.Strings(row.UnmatchedPairs)
 	return row, latencies, nil
+}
+
+func greenhouseFindingsByHead(ctx context.Context, db *store.DB, projectID int64, requested map[comparisonHead]bool) (map[comparisonHead][]comparisonFinding, error) {
+	rows, err := db.QueryContext(ctx, `SELECT r.task_id,r.repo,r.requested_head,v.findings_path FROM greenhouse_review_requests r JOIN verdicts v ON v.id=r.verdict_id WHERE r.project_id=? AND r.outcome='verdict' ORDER BY r.task_id,r.repo,r.requested_head,r.id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	findingsByHead := map[comparisonHead][]comparisonFinding{}
+	seen := map[comparisonHead]map[comparisonFinding]bool{}
+	for rows.Next() {
+		var key comparisonHead
+		var path string
+		if err := rows.Scan(&key.TaskID, &key.Repo, &key.Head, &path); err != nil {
+			return nil, err
+		}
+		if !requested[key] {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var findings []comparisonFinding
+		if err := json.Unmarshal(data, &findings); err != nil {
+			return nil, err
+		}
+		if seen[key] == nil {
+			seen[key] = map[comparisonFinding]bool{}
+		}
+		for _, finding := range findings {
+			if seen[key][finding] {
+				continue
+			}
+			seen[key][finding] = true
+			findingsByHead[key] = append(findingsByHead[key], finding)
+		}
+	}
+	return findingsByHead, rows.Err()
 }
 
 func builtinReviewLatency(ctx context.Context, db *store.DB, projectID int64) (*int64, error) {
@@ -292,7 +331,7 @@ func builtinReviewLatency(ctx context.Context, db *store.DB, projectID int64) (*
 }
 
 func builtinFixedFindings(ctx context.Context, db *store.DB, projectID int64) ([]builtinFixedFinding, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.ship_task_id,f.head_sha,f.repository,f.path,p.root_cause FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id JOIN tasks t ON t.id=f.ship_task_id WHERE t.project_id=? AND f.origin='introduced' AND f.in_scope=1 AND f.state='fixed' AND f.severity IN ('P0','P1')`, projectID)
+	rows, err := db.QueryContext(ctx, `SELECT f.ship_task_id,f.head_sha,f.repository,f.path,p.root_cause FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id JOIN tasks t ON t.id=f.ship_task_id WHERE t.project_id=? AND f.origin='introduced' AND f.in_scope=1 AND f.state='fixed' AND f.severity IN ('P0','P1') ORDER BY f.ship_task_id,f.repository,f.head_sha,f.path,f.id`, projectID)
 	if err != nil {
 		return nil, err
 	}
