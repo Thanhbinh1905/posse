@@ -832,7 +832,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan, task) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
@@ -1315,6 +1315,9 @@ func (s *Service) failSpawn(ctx context.Context, db *store.DB, project store.Pro
 	if err := db.Transition(ctx, id, store.StateSpawning, store.StateFailed, "cli", reason); err != nil {
 		return err
 	}
+	if err := db.VoidUnverdictReviewRound(ctx, id); err != nil {
+		return err
+	}
 	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: id, Kind: "task_failed", Summary: title + " failed to start", DataJSON: `{}`}); err != nil {
 		return err
 	}
@@ -1488,6 +1491,36 @@ func renderArgs(template []string, token, value string) []string {
 		result[i] = strings.ReplaceAll(arg, token, value)
 	}
 	return result
+}
+
+func fullPipelineCandidateTargetStale(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
+	lanes, err := changedCandidateLanes(ctx, db, project, task)
+	if err != nil {
+		return false, err
+	}
+	for _, lane := range lanes {
+		candidate, err := db.LatestValidationCandidate(ctx, task.ID, lane.repo)
+		if err != nil {
+			if store.IsNotFound(err) {
+				continue
+			}
+			return false, err
+		}
+		if candidate.State == store.ValidationCandidateStale {
+			return true, nil
+		}
+		if candidate.State != store.ValidationCandidateActive {
+			continue
+		}
+		targetHead, err := lane.targetHead(ctx)
+		if err != nil {
+			return false, err
+		}
+		if targetHead != candidate.TargetSHA {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) signal(ctx *axi.Context, args []string) error {
@@ -1946,7 +1979,13 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if plan, err := task.AdmittedPlan(); err != nil {
 			return admittedPlanFailure(err)
 		} else if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {
-			data["next_action"] = "posse review start " + taskIDString(task.Seq)
+			stale, err := fullPipelineCandidateTargetStale(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			if !stale {
+				data["next_action"] = "posse review start " + taskIDString(task.Seq)
+			}
 		}
 	}
 	if workerResumed {
