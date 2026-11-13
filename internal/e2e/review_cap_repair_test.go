@@ -227,6 +227,87 @@ func (h *ciRepairChange) hasNotice(kind string) bool {
 	return false
 }
 
+func TestFullPipelineCIRepairQueuesWhileTargetRefreshIsInFlight(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	h := startCIRepairChange(t, f, [2]string{"ci_loop.max_fix_rounds", "3"})
+	candidate := h.submitCandidate(t, "Target refresh candidate")
+	h.validateCandidate(t, candidate, "t2")
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Target refresh candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+		t.Fatalf("promote candidate: %d %s", code, output)
+	}
+	h.originHead = candidate.CandidateSHA
+	turn, err := f.db.TaskTurnToken(context.Background(), h.change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, h.change.WorktreePath, h.workerEnv, "signal", "done", "Candidate validated", "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
+		t.Fatalf("complete Task: %d %s", code, output)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+		t.Fatalf("open PR: %s", output)
+	}
+	h.change = f.mustTask(t, "t1")
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE id=?`, h.change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.QueueValidationFixInstruction(context.Background(), h.change.ID, "freshness", h.change.GatedSHA, "freshness:target-refresh", "Merge the updated target and refresh validation"); err != nil {
+		t.Fatal(err)
+	}
+	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", h.change.GatedSHA)
+	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	if !waitForCondition(20*time.Second, func() bool { return h.hasNotice("ci_fix_queued") }) {
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("gated PR failure during target refresh did not queue a CI fix: notices=%#v", notices)
+	}
+}
+
+func TestFullPipelineRefreshRelaunchesReleasedWorkerAfterTargetMoves(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	h := startCIRepairChange(t, f)
+	candidate := h.submitCandidate(t, "Released Worker candidate")
+	h.validateCandidate(t, candidate, "t2")
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Released Worker candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+		t.Fatalf("promote candidate: %d %s", code, output)
+	}
+	h.originHead = candidate.CandidateSHA
+	turn, err := f.db.TaskTurnToken(context.Background(), h.change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, h.change.WorktreePath, h.workerEnv, "signal", "done", "Candidate validated", "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
+		t.Fatalf("complete Task: %d %s", code, output)
+	}
+	f.writeGraphQL(t, "pr1", "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", candidate.CandidateSHA)
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+		t.Fatalf("open PR: %s", output)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "pr", "release", "t1", "--policy", "release"); !strings.Contains(output, "sandbox_released: true") {
+		t.Fatalf("release Worker: %s", output)
+	}
+	advanceMainWithFile(t, f, "released-worker-target.txt")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	if !waitForCondition(20*time.Second, func() bool {
+		task, err := f.db.Task(context.Background(), f.project.ID, "t1")
+		if err != nil || task.Launches < 2 {
+			return false
+		}
+		var rounds int
+		_ = f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness'`, h.change.ID).Scan(&rounds)
+		return rounds == 1
+	}) {
+		task, _ := f.db.Task(context.Background(), f.project.ID, "t1")
+		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+		t.Fatalf("stale validation did not queue refresh and relaunch released Worker: task=%+v notices=%#v", task, notices)
+	}
+	var body string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND body LIKE '%Candidate head%' ORDER BY id DESC LIMIT 1`, h.change.ID).Scan(&body); err != nil {
+		t.Fatalf("relaunch did not preserve the target-refresh instruction: %v", err)
+	}
+	if !strings.Contains(body, "posse publish --refresh") {
+		t.Fatalf("target-refresh message body=%q", body)
+	}
+}
+
 func TestFullPipelineCIRepairDoesNotConsumeReviewCap(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	// t731: with a two-round cap, Review Round 1 passed and a CI repair

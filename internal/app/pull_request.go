@@ -1597,12 +1597,12 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		behind = nil
 	}
 	for _, pending := range behind {
-		if _, err := queuePRTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
+		if _, err := s.queuePRTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
 			return err
 		}
 	}
 	for _, pending := range conflicts {
-		if err := queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
+		if err := s.queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
 			return err
 		}
 	}

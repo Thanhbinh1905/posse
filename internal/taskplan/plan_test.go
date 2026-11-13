@@ -53,6 +53,24 @@ func TestReviewProvidersAreFrozenPerPlanMember(t *testing.T) {
 	}
 }
 
+func TestReviewParallelIsFrozenWithValidationLoops(t *testing.T) {
+	r := request("change")
+	r.ValidationLoops = &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1", AutoStart: true}, ReviewParallel: "greenhouse"}
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ValidationLoops.ReviewParallel = ""
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(encoded)
+	if err != nil || decoded.ValidationLoops == nil || decoded.ValidationLoops.ReviewParallel != "greenhouse" {
+		t.Fatalf("parallel review setting was not frozen: %#v, %v", decoded.ValidationLoops, err)
+	}
+}
+
 func TestFullPipelineReviewModeCanBeFrozenBeforeVPCRuntime(t *testing.T) {
 	r := request("change")
 	r.Review = "full-pipeline"

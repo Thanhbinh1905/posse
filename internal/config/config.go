@@ -234,6 +234,7 @@ type Budget struct {
 const DefaultKnowledgeBudgetBytes = 8192
 
 type Config struct {
+	ReviewParallel      string                     `toml:"review_parallel" json:"review_parallel"`
 	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
 	ReviewProvider      string                     `toml:"review_provider" json:"review_provider"`
 	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`

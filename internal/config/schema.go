@@ -30,6 +30,7 @@ type KeySpec struct {
 }
 
 var keySpecs = []KeySpec{
+	{Key: "review_parallel", Type: TypeString, Allowed: []string{"greenhouse"}, Meaning: "Record Greenhouse Verdicts in parallel with the built-in review loop; unset disables parallel requests.", UserOnly: true},
 	{Key: "budget.daily_tokens", Type: TypeInteger, Default: int64(0), Meaning: "Per-Project token limit for the host-local calendar day; 0 disables it."},
 	{Key: "budget.task_tokens", Type: TypeInteger, Default: int64(0), Meaning: "Default total-token limit per Task; a Brief budget_tokens value overrides it. 0 disables it."},
 	{Key: "identity.lead.name", Type: TypeString, Default: "Lead", Meaning: "Display name and Lead voice toward the User."},
