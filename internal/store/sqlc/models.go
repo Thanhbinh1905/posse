@@ -149,6 +149,20 @@ type Event struct {
 	DataJson   string
 }
 
+type GreenhouseReviewRequest struct {
+	ID            int64
+	ProjectID     int64
+	TaskID        int64
+	Repo          string
+	RequestedHead string
+	Provider      string
+	RequestedAt   int64
+	SettledAt     int64
+	Outcome       string
+	VerdictID     sql.NullInt64
+	GrantID       sql.NullString
+}
+
 type Intent struct {
 	ID               int64
 	ProjectID        int64

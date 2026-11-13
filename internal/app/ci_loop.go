@@ -174,7 +174,7 @@ func omitRerunShardAggregates(all, candidates, remaining []failedCheck) []failed
 }
 
 func ciTaskCanReceiveFix(task store.Task) bool {
-	return task.State == store.StateDone || task.State == store.StateMerging
+	return task.State == store.StateWorking || task.State == store.StateDone || task.State == store.StateMerging
 }
 
 func ciPlanAllowsMember(plan *taskplan.Plan, member string) bool {

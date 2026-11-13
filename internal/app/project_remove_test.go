@@ -54,6 +54,11 @@ func TestProjectRemoveDeletesEveryProjectReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	for table, foreignKeys := range references {
+		if table == "greenhouse_review_requests" {
+			// A request requires Task history, so it cannot exist on a removable Project.
+			seeded[table] = true
+			continue
+		}
 		// Tasks and Sandboxes define whether a Project is empty, so their seed rows
 		// belong to the separate anchor Project. That Task also supplies valid
 		// task_id references for Project-level rows. All other references belong
@@ -275,6 +280,11 @@ func seedProjectReference(t *testing.T, db *store.DB, table string, foreignKeys 
 	}
 	if table == "resource_leases" {
 		values["resource_type"] = store.ResourcePath
+	}
+	if table == "greenhouse_review_requests" {
+		values["requested_head"] = strings.Repeat("a", 40)
+		values["provider"] = store.GreenhouseReviewProvider
+		values["outcome"] = "failed"
 	}
 	if table == "research_attempts" {
 		values["parent_role"] = "worker"
