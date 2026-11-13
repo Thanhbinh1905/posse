@@ -67,10 +67,15 @@ func TestPRMergeWithoutCurrentTargetRuleMergesBehindPR(t *testing.T) {
 	}
 
 	merged := fakePull{alias: "pr1", state: "MERGED", checks: "SUCCESS", review: "APPROVED", mergeable: "MERGEABLE", mergeCommit: firstMerge, head: tasks["t1"].GatedSHA}
-	fixture.writeGraphQLPulls(t, merged, openPull("t2", "MERGEABLE"), openPull("t3", "CONFLICTING"))
+	var readyBefore int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='merge_ready'`, tasks["t3"].ID).Scan(&readyBefore); err != nil {
+		t.Fatal(err)
+	}
+	behindProtected := openPull("t3", "MERGEABLE")
+	behindProtected.mergeStateStatus = "BEHIND"
+	fixture.writeGraphQLPulls(t, merged, openPull("t2", "MERGEABLE"), behindProtected)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
 
-	// The conflicting PR is asked to merge the target without queueing.
 	fixture.waitTaskState(t, "t3", store.StateWorking)
 	var instruction string
 	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, tasks["t3"].ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "Merge origin/main") {
@@ -97,7 +102,16 @@ func TestPRMergeWithoutCurrentTargetRuleMergesBehindPR(t *testing.T) {
 		t.Fatalf("clean-but-behind t2 did not reach the forge merge command: %v", err)
 	}
 
-	// A conflicting PR still cannot merge: the forge reports it unmergeable.
+	fixture.waitTaskState(t, "t3", store.StateWorking)
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, tasks["t3"].ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "Merge origin/main") {
+		t.Fatalf("BEHIND protected PR got no merge-target instruction: body=%q err=%v", instruction, err)
+	}
+	fixture.requireNotice(t, "t3", "pr_conflict")
+	var ready int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='merge_ready'`, tasks["t3"].ID).Scan(&ready); err != nil || ready != readyBefore {
+		t.Fatalf("BEHIND protected PR emitted merge_ready: before=%d after=%d err=%v", readyBefore, ready, err)
+	}
+
 	command := exec.Command(fixture.binary, "merge", "t3", "--execute")
 	command.Dir, command.Env = fixture.repo, fixture.leadEnv
 	if output, err := command.CombinedOutput(); err == nil {
