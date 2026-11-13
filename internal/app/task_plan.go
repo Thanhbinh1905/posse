@@ -131,7 +131,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Autonomy: cfg.Autonomy, ConfigSources: cfg.Files, UserChoice: choice, ProseLanguage: artifactProseLanguage,
 		Paths:           taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
-		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop},
+		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop, ReviewParallel: cfg.ReviewParallel},
 		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup},
 		DeleteBranchOnMerge: cfg.Defaults.DeleteBranchOnMerge, TaskBudgetTokens: cfg.Budget.TaskTokens})
 }

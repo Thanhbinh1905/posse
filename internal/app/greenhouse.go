@@ -35,7 +35,7 @@ type greenhouseMember struct {
 // Change Task Member and records it as a parallel-mode Verdict. Only the Lead
 // side calls it; no gate reads Greenhouse Verdicts yet.
 func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}})
+	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}})
 	if err != nil {
 		return err
 	}
@@ -83,16 +83,70 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
-	target, err := greenhouseTarget(ctx.Context, member)
+	parallelMode := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse"
+	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
+	pendingPath := filepath.Join(roundDir, member.name+".pending.json")
+	hasPending, err := parallelReviewPending(pendingPath)
 	if err != nil {
 		return err
 	}
+	ownerPath := parallelReviewOwnerPath(roundDir, member.name)
+	requestOwner, ownerErr := readParallelReviewOwner(ownerPath)
+	if ownerErr != nil {
+		return ownerErr
+	}
+	notifyFailure := func(head, reason string) error {
+		if !parallelMode {
+			return nil
+		}
+		_, err := db.CreateGreenhouseFailureNoticeOnce(ctx.Context, project.ID, task.ID, member.name, head, reason)
+		return err
+	}
+	requestedAt := time.Now().UnixMilli()
+	requestedHead, err := gitOutput(ctx.Context, member.worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	requestStartedAt := requestedAt
+	requestedHead, requestStartedAt = parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
+	target, err := greenhouseTarget(ctx.Context, member)
+	if err != nil {
+		if parallelMode {
+			if shouldRecordParallelRequestFailure(hasPending) {
+				if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); recordErr != nil {
+					return recordErr
+				}
+			}
+			if noticeErr := notifyFailure(requestedHead, err.Error()); noticeErr != nil {
+				return noticeErr
+			}
+		}
+		return err
+	}
+	recordInitialFailure := func(reason string) error {
+		if !parallelMode {
+			return nil
+		}
+		if !shouldRecordParallelRequestFailure(hasPending) {
+			return notifyFailure(requestedHead, reason)
+		}
+		if err := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed"}); err != nil {
+			return err
+		}
+		return notifyFailure(requestedHead, reason)
+	}
 	binary, err := exec.LookPath("greenhouse")
 	if err != nil {
+		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+			return recordErr
+		}
 		return axi.Failure("greenhouse_missing", "greenhouse is not installed on PATH", false, "Install Greenhouse, then retry")
 	}
 	tasks, err := posseTasks(ctx.Context, db)
 	if err != nil {
+		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+			return recordErr
+		}
 		return err
 	}
 	daemon := &greenhouse.Daemon{Binary: binary, Home: greenhouse.HomeFor(home), Env: os.Environ(), InTask: func(pid int) bool {
@@ -104,37 +158,185 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return false
 	}}
 	hostID := project.Name + "/" + taskIDString(task.Seq) + "/" + member.name
-	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
 	if err := os.MkdirAll(roundDir, 0o700); err != nil {
+		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+			return recordErr
+		}
 		return err
 	}
 	round := greenhouse.Round{
 		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID,
 		Intent: greenhouseIntent(task, plan), Target: target,
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
-		Pending:  filepath.Join(roundDir, member.name+".pending.json"), Wait: wait,
+		Pending:  pendingPath, Wait: wait,
 		Checkpoint: func(step string) { crashIntentAt("greenhouse-review", "after", step) },
+	}
+	var parallelLock *os.File
+	suppliedOwner := parsed.Flags["parallel-owner"]
+	suppliedLockFD := parsed.Flags["parallel-lock-fd"]
+	if !parallelMode && (suppliedOwner != "" || suppliedLockFD != "") {
+		return axi.Usage("parallel owner flags require a frozen review_parallel setting")
+	}
+	if parallelMode {
+		if suppliedOwner != "" && suppliedOwner != ownerPath {
+			return axi.Usage("invalid internal Greenhouse parallel owner path")
+		}
+		lockPath := parallelReviewLockPath(roundDir, member.name)
+		if suppliedLockFD != "" {
+			fd, parseErr := strconv.Atoi(suppliedLockFD)
+			if parseErr != nil || fd != 3 {
+				return axi.Usage("invalid internal Greenhouse parallel lock descriptor")
+			}
+			parallelLock, err = inheritedParallelReviewLock(fd, lockPath)
+		} else {
+			var busy bool
+			parallelLock, busy, err = acquireParallelReviewLock(lockPath)
+			if busy {
+				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: "in_flight"}})
+			}
+		}
+		if err != nil {
+			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			return err
+		}
+		ownerHead, ownerStarted := parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
+		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: ownerHead, RequestedAt: ownerStarted}); err != nil {
+			_ = releaseParallelReviewLock(parallelLock)
+			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+				return recordErr
+			}
+			return err
+		}
+		defer func() {
+			_ = clearParallelReviewOwner(ownerPath, pendingPath, os.Getpid())
+			_ = releaseParallelReviewLock(parallelLock)
+		}()
 	}
 	blockAt := "P1"
 	if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.BlockAt != "" {
 		blockAt = plan.ValidationLoops.Review.BlockAt
 	}
 	var refused []axi.Object
+	parallelAttempt := 0
 	for range greenhouseStaleRounds {
-		result, err := daemon.Review(ctx.Context, round)
+		deadline := time.Now().Add(wait)
+		requestedAt := time.Now().UnixMilli()
+		requestHead, headErr := gitOutput(ctx.Context, member.worktree, "rev-parse", "HEAD")
+		if headErr != nil {
+			return headErr
+		}
+		if parallelLock != nil {
+			requestHead, requestedAt = parallelRequestMetadata(requestHead, requestedAt, parallelAttempt == 0 && hasPending, requestOwner)
+			if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: requestHead, RequestedAt: requestedAt}); err != nil {
+				return err
+			}
+		}
+		parallelAttempt++
+		var requestSettledAt int64
+		recordRequest := func(outcome, grant string, settledAt int64) error {
+			if !parallelMode {
+				return nil
+			}
+			if outcome == "failed" || outcome == "refused" {
+				hasPending, err := parallelReviewPending(pendingPath)
+				if err != nil {
+					return err
+				}
+				if !shouldRecordParallelRequestFailure(hasPending) {
+					return nil
+				}
+			}
+			if requestSettledAt > 0 {
+				settledAt = requestSettledAt
+			}
+			return db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{
+				ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestHead,
+				Provider: store.GreenhouseReviewProvider, RequestedAt: requestedAt, SettledAt: settledAt,
+				Outcome: outcome, Grant: grant,
+			})
+		}
+		var result greenhouse.RoundResult
+		for {
+			var attempts int
+			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
+				round.Wait = attemptWait
+				return daemon.Review(ctx.Context, round)
+			})
+			if attempts > 0 {
+				requestSettledAt = time.Now().UnixMilli()
+			}
+			if ctx.Context.Err() != nil {
+				return ctx.Context.Err()
+			}
+			if err != nil || !parallelMode || result.Outcome != greenhouse.Running && result.Outcome != greenhouse.Paused {
+				break
+			}
+			if time.Until(deadline) <= 0 {
+				break
+			}
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Context.Done():
+				timer.Stop()
+				return ctx.Context.Err()
+			case <-timer.C:
+			}
+		}
+		requestSettledAt = time.Now().UnixMilli()
 		var protocolErr *greenhouse.ProtocolError
 		if errors.As(err, &protocolErr) {
+			if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
+				return recordErr
+			}
+			if noticeErr := notifyFailure(requestHead, protocolErr.Error()); noticeErr != nil {
+				return noticeErr
+			}
 			return axi.Failure("greenhouse_protocol", protocolErr.Error(), false, "No Verdict was requested")
 		}
 		if err != nil {
+			if recordErr := recordRequest("failed", "", time.Now().UnixMilli()); recordErr != nil {
+				return recordErr
+			}
+			if noticeErr := notifyFailure(requestHead, err.Error()); noticeErr != nil {
+				return noticeErr
+			}
 			return axi.Failure("greenhouse_failed", err.Error(), true)
+		}
+		if result.Outcome == greenhouse.Running || result.Outcome == greenhouse.Paused {
+			if err := recordRequest("failed", result.Grant, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+			if noticeErr := notifyFailure(requestHead, "review did not settle before the timeout"); noticeErr != nil {
+				return noticeErr
+			}
+			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: string(result.Outcome)}, {Key: "grant", Value: result.Grant}})
 		}
 		output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: string(result.Outcome)}, {Key: "grant", Value: result.Grant}}
 		switch result.Outcome {
 		case greenhouse.Settled:
 			crashIntentAt("greenhouse-review", "after", "settled")
+			if result.Result == nil || !result.Result.Current || result.Result.Head != requestHead {
+				if err := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); err != nil {
+					return err
+				}
+				if noticeErr := notifyFailure(requestHead, "Greenhouse settled on a different or non-current head"); noticeErr != nil {
+					return noticeErr
+				}
+				if err := greenhouse.ClearPending(round.Pending); err != nil {
+					return err
+				}
+				continue
+			}
 			recorded, verdict, err := recordGreenhouseVerdict(ctx.Context, db, task, member, roundDir, blockAt, result)
 			if errors.Is(err, store.ErrVerdictHeadMoved) {
+				if recordErr := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); recordErr != nil {
+					return recordErr
+				}
+				if noticeErr := notifyFailure(requestHead, err.Error()); noticeErr != nil {
+					return noticeErr
+				}
 				refused = append(refused, axi.Object{{Key: "grant", Value: result.Grant}, {Key: "reason", Value: err.Error()}})
 				if err := greenhouse.ClearPending(round.Pending); err != nil {
 					return err
@@ -142,6 +344,12 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				continue
 			}
 			if err != nil {
+				if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
+					return recordErr
+				}
+				return err
+			}
+			if err := recordRequest("verdict", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
 			}
 			if err := greenhouse.ClearPending(round.Pending); err != nil {
@@ -150,15 +358,30 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			output = append(output, axi.Field{Key: "head", Value: verdict.Head}, axi.Field{Key: "verdict", Value: verdict.Outcome},
 				axi.Field{Key: "blocking", Value: verdict.Blocking}, axi.Field{Key: "findings", Value: verdict.FindingsPath}, axi.Field{Key: "recorded", Value: recorded}, axi.Field{Key: "replayed", Value: result.Replayed})
 		case greenhouse.Stale:
+			if err := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+			if noticeErr := notifyFailure(requestHead, "the head moved during the review"); noticeErr != nil {
+				return noticeErr
+			}
 			refused = append(refused, axi.Object{{Key: "grant", Value: result.Grant}, {Key: "reason", Value: "the head moved during the review"}})
 			if err := greenhouse.ClearPending(round.Pending); err != nil {
 				return err
 			}
 			continue
 		case greenhouse.RecoveryRequired:
-			summary := fmt.Sprintf("%s: Greenhouse review %s of %s parked after an interruption (%s); Posse issues no new grant until it recovers", taskIDString(task.Seq), result.Grant, member.name, result.Recovery.Reason)
-			if _, err := db.CreateGreenhouseRecoveryNoticeOnce(ctx.Context, project.ID, task.ID, member.name, result.Recovery.ID, summary); err != nil {
+			if err := recordRequest("failed", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
+			}
+			if plan == nil || plan.ValidationLoops == nil || plan.ValidationLoops.ReviewParallel != "greenhouse" {
+				summary := fmt.Sprintf("%s: Greenhouse review %s of %s parked after an interruption (%s); Posse issues no new grant until it recovers", taskIDString(task.Seq), result.Grant, member.name, result.Recovery.Reason)
+				if _, err := db.CreateGreenhouseRecoveryNoticeOnce(ctx.Context, project.ID, task.ID, member.name, result.Recovery.ID, summary); err != nil {
+					return err
+				}
+			} else {
+				if noticeErr := notifyFailure(requestHead, result.Recovery.Reason); noticeErr != nil {
+					return noticeErr
+				}
 			}
 			output = append(output, axi.Field{Key: "recovery", Value: result.Recovery.ID})
 		}

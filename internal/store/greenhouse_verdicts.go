@@ -57,6 +57,29 @@ func (db *DB) RecordGreenhouseVerdict(ctx context.Context, verdict Verdict, curr
 	return true, tx.Commit()
 }
 
+func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
+	data, err := json.Marshal(struct {
+		Repository string `json:"repo"`
+		Head       string `json:"head"`
+	}{repository, head})
+	if err != nil {
+		return false, err
+	}
+	summary := fmt.Sprintf("Greenhouse parallel review failed for %s at %s: %s", repository, head, reason)
+	result, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
+		SELECT ?, ?, 'greenhouse_review_failed', ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=?)`,
+		projectID, taskID, summary, string(data), time.Now().UnixMilli(), taskID, string(data))
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows == 0 {
+		return false, err
+	}
+	return true, db.PersistProject(ctx, projectID)
+}
+
 // CreateGreenhouseRecoveryNoticeOnce raises one Notice per parked Greenhouse
 // recovery of a Task Member.
 func (db *DB) CreateGreenhouseRecoveryNoticeOnce(ctx context.Context, projectID, taskID int64, repository, recoveryID, summary string) (bool, error) {
