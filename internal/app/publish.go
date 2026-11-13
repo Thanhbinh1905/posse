@@ -239,6 +239,15 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err := refuseAgentAttribution(out.Context, task.WorktreePath, sha, task); err != nil {
 		return err
 	}
+	if parsed.Bool("refresh") {
+		freshness, err := inspectPRTargetFreshness(out.Context, project.Root, taskTargetBranch(project, task), sha)
+		if err != nil {
+			return err
+		}
+		if !freshness.Fresh {
+			return prBranchBehindFailure(task.Seq, sha, freshness, targetSync{})
+		}
+	}
 	forge, err := forgeForRepository(out.Context, project.Root, cfg, parsed.Flags["repo"])
 	if err != nil {
 		return err

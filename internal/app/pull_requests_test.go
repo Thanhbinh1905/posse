@@ -151,6 +151,26 @@ func TestPublishWritesSevenSectionPullRequestBody(t *testing.T) {
 	}
 }
 
+func TestPublishRefreshOnBehindBranchExplainsTargetMerge(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	if code, output, stderr := fixture.run("publish", "Initial publication"); code != 0 {
+		t.Fatalf("initial publish: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target-update.txt"), []byte("target update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "add", "target-update.txt")
+	gitTest(t, fixture.repo, "commit", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	code, output, stderr := fixture.run("publish", "--refresh", "Refreshed publication")
+	if code == 0 || !strings.Contains(output+stderr, "Merge origin/main into the Task branch") {
+		t.Fatalf("refresh did not tell the Worker to merge the behind target: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestPublishWithoutOptionalBodyFieldsWritesDefaults(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	if code, output, stderr := fixture.run("publish", "Worker completion summary"); code != 0 {
