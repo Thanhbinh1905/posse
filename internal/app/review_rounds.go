@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -981,7 +980,11 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, change.ID, target.Repository, requestHead, reason)
 			return err
 		}
-		binary, err := os.Executable()
+		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
+		if project.IsWorkspace() {
+			args = append(args, "--repo", target.Repository)
+		}
+		command, err := selfExecCommand(args...)
 		if err != nil {
 			_ = releaseParallelReviewLock(lock)
 			if recordErr := recordFailure(err.Error()); recordErr != nil {
@@ -989,11 +992,6 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			}
 			continue
 		}
-		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
-		if project.IsWorkspace() {
-			args = append(args, "--repo", target.Repository)
-		}
-		command := exec.Command(binary, args...)
 		command.Dir = project.Root
 		command.Env = os.Environ()
 		command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
