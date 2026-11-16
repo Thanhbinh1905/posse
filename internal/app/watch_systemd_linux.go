@@ -10,9 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -27,22 +25,9 @@ func systemdUserManagerAvailable(ctx context.Context) bool {
 	return command.Run() == nil
 }
 
-func systemdWatchPID(ctx context.Context, unit string) (int, error) {
-	deadline := time.Now().Add(watchStartupGracePeriod)
-	for time.Now().Before(deadline) {
-		output, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "--property=MainPID", "--value", unit).Output()
-		if err == nil {
-			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(output)))
-			if parseErr == nil && pid > 1 {
-				return pid, nil
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return 0, fmt.Errorf("systemd did not start Project Watch unit %s", unit)
-}
+var startSystemdWatchUnit = startSystemdWatch
 
-func startSystemdWatch(ctx context.Context, home string, project store.Project, binary, token string, startedAt int64, logPath string) (int, error) {
+func startSystemdWatch(ctx context.Context, home string, project store.Project, binary, token string, startedAt int64, logPath string) error {
 	unit := systemdWatchUnitName(home, project.ID)
 	args := []string{"--user", "--quiet", "--unit", unit, "--collect", "--property=Restart=always", "--property=RestartSec=1s", "--property=MemoryMax=2G", "--property=TasksMax=256", "--property=KillMode=control-group", "--property=WorkingDirectory=" + project.Root, "--property=StandardOutput=append:" + logPath, "--property=StandardError=append:" + logPath}
 	for _, entry := range watchRuntimeEnvironment(os.Environ(), home, project, token, startedAt) {
@@ -51,9 +36,9 @@ func startSystemdWatch(ctx context.Context, home string, project store.Project, 
 	args = append(args, "--", binary, "watch", "--poll-only")
 	output, err := exec.CommandContext(ctx, "systemd-run", args...).CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("start Project Watch systemd unit: %w: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("start Project Watch systemd unit: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return systemdWatchPID(ctx, unit)
+	return nil
 }
 
 func stopSystemdWatch(ctx context.Context, home string, projectID int64) error {
@@ -68,6 +53,11 @@ func stopSystemdWatch(ctx context.Context, home string, projectID int64) error {
 		return fmt.Errorf("stop Project Watch systemd unit: %w: %s", err, strings.TrimSpace(text))
 	}
 	return nil
+}
+
+func systemdWatchUnitLoaded(ctx context.Context, home string, projectID int64) bool {
+	output, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "--property=LoadState", "--value", systemdWatchUnitName(home, projectID)).Output()
+	return err == nil && strings.TrimSpace(string(output)) == "loaded"
 }
 
 func systemdWatchUnitActive(ctx context.Context, home string, projectID int64) bool {

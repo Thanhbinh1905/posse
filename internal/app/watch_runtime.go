@@ -503,11 +503,11 @@ func stopStoredWatchRuntimeForDown(ctx context.Context, home string, process wat
 }
 
 func stopStoredWatchRuntimeWithEscalation(ctx context.Context, home string, process watchProcess, escalate bool) error {
+	if process.WatchProjectID > 0 && systemdWatchUnitLoaded(ctx, home, process.WatchProjectID) {
+		return stopSystemdWatch(ctx, home, process.WatchProjectID)
+	}
 	if !watchPIDRunning(process.PID) {
 		return nil
-	}
-	if process.WatchProjectID > 0 && systemdWatchUnitActive(ctx, home, process.WatchProjectID) {
-		return stopSystemdWatch(ctx, home, process.WatchProjectID)
 	}
 	if process.Executable.Inode == 0 {
 		return fmt.Errorf("refusing to signal Watch PID %d with an unknown executable identity", process.PID)
@@ -606,8 +606,9 @@ func (s *Service) startWatchRuntime(ctx context.Context, db *store.DB, home stri
 		return fmt.Errorf("open Project Watch log: %w", err)
 	}
 	pid := 0
-	if systemdUserManagerAvailable(ctx) {
-		pid, err = startSystemdWatch(ctx, home, project, binary, token, startedAt, logPath)
+	systemd := systemdUserManagerAvailable(ctx)
+	if systemd {
+		err = startSystemdWatchUnit(ctx, home, project, binary, token, startedAt, logPath)
 		if err != nil {
 			_ = logFile.Close()
 			return err
@@ -625,19 +626,47 @@ func (s *Service) startWatchRuntime(ctx context.Context, db *store.DB, home stri
 		pid = command.Process.Pid
 	}
 	_ = logFile.Close()
+	if systemd {
+		if err := waitForSystemdWatchRegistration(ctx, db, project.ID, token); err != nil {
+			_ = stopSystemdWatch(ctx, home, project.ID)
+			return err
+		}
+		return nil
+	}
 	watch := store.WatchRuntime{
 		PID: pid, Token: token, StartedAt: startedAt, HeartbeatAt: startedAt,
 		ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode,
 	}
 	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
-		if systemdWatchUnitActive(ctx, home, project.ID) {
-			_ = stopSystemdWatch(ctx, home, project.ID)
-		} else if pid > 1 {
+		if pid > 1 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 		return fmt.Errorf("record hidden Project Watch: %w", err)
 	}
 	return nil
+}
+
+func waitForSystemdWatchRegistration(ctx context.Context, db *store.DB, projectID int64, token string) error {
+	deadline := time.NewTimer(watchStartupGracePeriod)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := db.WatchRuntime(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		if state.PID > 1 && state.Token == token {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("systemd Project Watch did not register its runtime")
+		case <-ticker.C:
+		}
+	}
 }
 
 func watchRuntimeEnvironment(parent []string, home string, project store.Project, token string, startedAt int64) []string {

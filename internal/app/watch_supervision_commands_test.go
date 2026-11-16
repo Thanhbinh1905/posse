@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +26,188 @@ const (
 	watchFixtureWorkerPaneID = "w2:p1"
 	watchFixtureWorkerTabID  = "w2:t1"
 )
+
+func TestSystemdWatchStopsActiveUnitWhenStoredPIDExited(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd user units are Linux-only")
+	}
+	directory := t.TempDir()
+	stopped := filepath.Join(directory, "stopped")
+	script := "#!/bin/sh\ncase \"$*\" in *LoadState*) printf loaded;; *\" stop \"*) printf stopped > \"$STOP_MARKER\";; *) exit 1;; esac\n"
+	if err := os.WriteFile(filepath.Join(directory, "systemctl"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	t.Setenv("STOP_MARKER", stopped)
+	err := stopStoredWatchRuntimeForDown(context.Background(), directory, watchProcess{PID: 99999999, WatchProjectID: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contents, err := os.ReadFile(stopped); err != nil || string(contents) != "stopped" {
+		t.Fatalf("active systemd unit was not stopped after stored PID exited: %q, %v", contents, err)
+	}
+}
+
+func TestSystemdWatchStartKeepsReplacementRuntimeRow(t *testing.T) {
+	if runtime.GOOS != "linux" || !systemdUserManagerAvailable(context.Background()) {
+		t.Skip("requires a Linux systemd user manager")
+	}
+	root, err := os.MkdirTemp(os.Getenv("TMPDIR"), "posse-systemd-start-race-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	fixture := newWorkerWatchFixture(t, root)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.ProjectByID(context.Background(), fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	previousStarter := startSystemdWatchUnit
+	startSystemdWatchUnit = func(_ context.Context, _ string, project store.Project, binary, token string, startedAt int64, _ string) error {
+		identity, ok := watchExecutableAt(binary)
+		if !ok {
+			return errors.New("test binary identity unavailable")
+		}
+		replacement := store.WatchRuntime{PID: 34568, Token: token, StartedAt: startedAt, HeartbeatAt: startedAt, ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode}
+		if err := db.SetWatchRuntime(context.Background(), project.ID, replacement); err != nil {
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() { startSystemdWatchUnit = previousStarter })
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := New(fixture.home, nil)
+	if err := service.startWatchRuntime(context.Background(), db, fixture.home, project, binary); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.WatchRuntime(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PID != 34568 {
+		t.Fatalf("systemd replacement runtime PID = %d, want 34568", got.PID)
+	}
+}
+
+func TestSystemdWatchScopeLauncherHelper(t *testing.T) {
+	if os.Getenv("POSSE_TEST_WATCH_SCOPE_HELPER") != "1" {
+		return
+	}
+	home := os.Getenv("POSSE_TEST_WATCH_HOME")
+	projectID, err := strconv.ParseInt(os.Getenv("POSSE_TEST_WATCH_PROJECT_ID"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := os.Getenv("POSSE_TEST_WATCH_BINARY")
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	defer func() { watchExecutableVerifier = previousVerifier }()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.ProjectByID(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := New(home, nil).startWatchRuntime(context.Background(), db, home, project, binary); err != nil {
+		t.Fatal(err)
+	}
+	select {}
+}
+
+func TestSystemdWatchSurvivesLaunchingScopeTermination(t *testing.T) {
+	if runtime.GOOS != "linux" || !systemdUserManagerAvailable(context.Background()) {
+		t.Skip("requires a Linux systemd user manager")
+	}
+	root, err := os.MkdirTemp(os.Getenv("TMPDIR"), "posse-watch-scope-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	fixture := newWorkerWatchFixture(t, root)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	binary := filepath.Join(root, "bin", "posse")
+	if err := os.MkdirAll(filepath.Dir(binary), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-o", binary, "./cmd/posse")
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	build.Dir = filepath.Clean(filepath.Join(workingDir, "../.."))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build Posse CLI: %v\n%s", err, output)
+	}
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := fmt.Sprintf("posse-watch-launch-%d.scope", os.Getpid())
+	args := []string{"--user", "--scope", "--unit=" + scope, "--setenv=POSSE_TEST_WATCH_SCOPE_HELPER=1", "--setenv=POSSE_TEST_WATCH_HOME=" + fixture.home, "--setenv=POSSE_TEST_WATCH_PROJECT_ID=" + strconv.FormatInt(fixture.project.ID, 10), "--setenv=POSSE_TEST_WATCH_BINARY=" + binary, "--setenv=POSSE_HOME=" + fixture.home, "--working-directory=" + fixture.repo, "--", testBinary, "-test.run=^TestSystemdWatchScopeLauncherHelper$"}
+	launcher := exec.Command("systemd-run", args...)
+	var launcherOutput bytes.Buffer
+	launcher.Stdout, launcher.Stderr = &launcherOutput, &launcherOutput
+	if err := launcher.Start(); err != nil {
+		t.Fatal(err)
+	}
+	watch, err := waitForWatchRuntime(context.Background(), db, fixture.project.ID)
+	if err != nil {
+		_ = exec.Command("systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", scope).Run()
+		_ = launcher.Wait()
+		t.Fatalf("wait for Project Watch started in launching scope: %v; launcher output: %s", err, launcherOutput.String())
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", scope).Run()
+		_ = stopSystemdWatch(context.Background(), fixture.home, fixture.project.ID)
+		_ = db.ClearWatchRuntime(context.Background(), fixture.project.ID, watch.PID, watch.Token)
+	})
+	if output, err := exec.Command("systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", scope).CombinedOutput(); err != nil {
+		_ = launcher.Process.Kill()
+		_ = launcher.Wait()
+		t.Fatalf("kill launching scope %s: %v: %s", scope, err, output)
+	}
+	_ = launcher.Wait()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && watchPIDRunning(watch.PID) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !watchPIDRunning(watch.PID) || !systemdWatchUnitActive(context.Background(), fixture.home, fixture.project.ID) {
+		t.Fatalf("Project Watch did not survive termination of launching scope %s: %#v", scope, watch)
+	}
+}
+
+func waitForWatchRuntime(ctx context.Context, db *store.DB, projectID int64) (store.WatchRuntime, error) {
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		watch, err := db.WatchRuntime(ctx, projectID)
+		if err != nil {
+			return store.WatchRuntime{}, err
+		}
+		if watch.PID > 1 && watch.Token != "" && watchPIDRunning(watch.PID) {
+			return watch, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return store.WatchRuntime{}, errors.New("systemd Project Watch did not register before timeout")
+}
 
 func TestSystemdWatchUnitNameIsStableAndHomeScoped(t *testing.T) {
 	first := systemdWatchUnitName("/home/user/.posse", 42)

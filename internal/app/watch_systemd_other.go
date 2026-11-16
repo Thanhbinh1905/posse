@@ -17,10 +17,13 @@ func systemdWatchUnitName(home string, projectID int64) string {
 	return fmt.Sprintf("posse-watch-%s-%d.service", hex.EncodeToString(sum[:6]), projectID)
 }
 
-func systemdUserManagerAvailable(context.Context) bool     { return false }
-func systemdWatchPID(context.Context, string) (int, error) { return 0, nil }
-func startSystemdWatch(context.Context, string, store.Project, string, string, int64, string) (int, error) {
-	return 0, nil
+func systemdUserManagerAvailable(context.Context) bool { return false }
+
+var startSystemdWatchUnit = startSystemdWatch
+
+func startSystemdWatch(context.Context, string, store.Project, string, string, int64, string) error {
+	return nil
 }
 func stopSystemdWatch(context.Context, string, int64) error      { return nil }
+func systemdWatchUnitLoaded(context.Context, string, int64) bool { return false }
 func systemdWatchUnitActive(context.Context, string, int64) bool { return false }
