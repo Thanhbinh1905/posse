@@ -48,7 +48,17 @@ func taskUsesGreenhouseReviewProvider(task store.Task, cfg config.Config, reposi
 }
 
 func greenhouseFullPipelineTaskWithConfig(task store.Task, cfg config.Config, repository string) bool {
-	return taskUsesGreenhouseReviewProvider(task, cfg, repository) && fullPipelineSelected(task, repository)
+	if repository != "" {
+		return taskUsesGreenhouseReviewProvider(task, cfg, repository) && fullPipelineSelected(task, repository)
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil {
+		return false
+	}
+	if len(plan.Execution.Members) > 0 {
+		return workspaceGreenhouseFullPipelinePlan(task, cfg)
+	}
+	return taskUsesGreenhouseReviewProvider(task, cfg, "") && fullPipelineSelected(task, "")
 }
 
 func fullPipelineTaskWithConfig(task store.Task, cfg config.Config, repository string) bool {
@@ -100,6 +110,19 @@ func workspaceGreenhouseHeadsNeedReview(ctx context.Context, db *store.DB, task 
 		}
 	}
 	return false, nil
+}
+
+func workspaceGreenhouseFullPipelinePlan(task store.Task, cfg config.Config) bool {
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Execution.Members) == 0 {
+		return false
+	}
+	for _, member := range plan.Execution.Members {
+		if !fullPipelineSelected(task, member.Name) || !taskUsesGreenhouseReviewProvider(task, cfg, member.Name) {
+			return false
+		}
+	}
+	return true
 }
 
 func workspaceGreenhouseFullPipeline(ctx context.Context, db *store.DB, task store.Task, cfg config.Config) (bool, error) {

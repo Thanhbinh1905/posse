@@ -1367,18 +1367,27 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 		turnToken = turnTokens[0]
 	}
 	merge := task.MergeMode
+	cfg, _ := config.Load(home, project.Name)
+	greenhouseSingle := !project.IsWorkspace() && greenhouseFullPipelineTaskWithConfig(task, cfg, "")
+	greenhouseWorkspace := project.IsWorkspace() && workspaceGreenhouseFullPipelinePlan(task, cfg)
 	work := "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
 	if merge == "pr" && task.Type == "change" && !project.IsWorkspace() {
 		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly or force-push outside `posse publish --rewrite --user-approved \"<User's words>\"`; never delete branches, change the default branch, or merge."
 	} else if project.IsWorkspace() && task.Type == "change" {
-		work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
+		if greenhouseWorkspace {
+			work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit changes inside each changed Member repository, leave every changed worktree clean, then signal done and end the turn. Do not publish before Posse requests Greenhouse reviews for the exact Member heads. Publish only the unchanged heads after Posse sends its publication instruction. Never push directly, force-push, delete branches, change default branches, or merge."
+		} else {
+			work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
+		}
 	}
 	if task.Type == "change" && merge == "pr" && !project.IsWorkspace() {
 		work += " When the User asks you to amend, squash or force-push this published Task branch, use `posse publish --rewrite --user-approved \"<User's words>\"` with the User's exact quote. Never rewrite published history without that quote or force-push outside this command."
 	}
 	if task.Type == "change" {
-		if plan, err := task.AdmittedPlan(); err == nil && plan != nil && greenhouseFullPipelineTask(task) {
+		if greenhouseSingle {
 			work += "\n\nGreenhouse full-pipeline: do not publish first. Commit the change, then run `posse signal done \"<summary>\" --head <current-commit-sha> --turn <token>`. Posse reviews this exact Task branch head through Greenhouse outside the Task Sandbox. If it passes, Posse queues an instruction to publish that unchanged head; if the head moves, signal done again for the new head. No private candidate or `posse validate` stages are used."
+		} else if greenhouseWorkspace {
+			work += "\n\nGreenhouse full-pipeline Workspace: run `posse signal done \"<summary>\" --turn <token>` after committing every changed Member. Posse requests one Greenhouse Verdict for each exact Member head. If a Verdict queues findings, apply the Review fix and signal done again with the required `--resolutions <file>`. Publish only the exact heads Posse names after every Member Verdict passes. Do not use `--head`, private candidates, or `posse validate` stages."
 		} else if plan, err := task.AdmittedPlan(); err == nil && plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan)) {
 			repoFlag := ""
 			requestFrom := "from that checkout"
