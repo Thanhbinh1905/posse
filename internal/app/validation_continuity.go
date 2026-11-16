@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -13,6 +14,7 @@ func (s *Service) recordWorkerSignalWithContinuity(
 	ctx context.Context,
 	db *store.DB,
 	project store.Project,
+	cfg config.Config,
 	task store.Task,
 	verb, note string,
 	data any,
@@ -37,7 +39,7 @@ func (s *Service) recordWorkerSignalWithContinuity(
 		}
 		return db.RecordWorkerSignalWithVerdict(ctx, task, verb, note, data, noticeKind, verdict)
 	}
-	if verb != "done" || task.Type != "change" || inPlace || project.IsWorkspace() {
+	if verb != "done" || task.Type != "change" || inPlace || project.IsWorkspace() || greenhouseFullPipelineTaskWithConfig(task, cfg, "") {
 		return record(nil)
 	}
 	for attempt := 0; attempt < 3; attempt++ {

@@ -149,6 +149,12 @@ type Event struct {
 	DataJson   string
 }
 
+type FixRoundProviderFinding struct {
+	FixRoundID int64
+	FindingID  int64
+	PatternSeq int64
+}
+
 type GreenhouseReviewRequest struct {
 	ID            int64
 	ProjectID     int64
@@ -391,6 +397,40 @@ type ProjectWatchState struct {
 	ReconcileBlockCause        string
 	ReconcileBlockNoticeRaised int64
 	PrPollLastError            string
+}
+
+type ProviderFinding struct {
+	ID         int64
+	VerdictID  int64
+	TaskID     int64
+	Provider   string
+	Repo       string
+	HeadSha    string
+	FindingKey string
+	PatternSeq int64
+	Path       string
+	Line       int64
+	Excerpt    string
+	Severity   string
+	Origin     string
+	State      string
+}
+
+type ProviderFindingEvent struct {
+	ID        int64
+	FindingID int64
+	Event     string
+	Note      string
+	At        int64
+}
+
+type ProviderFindingPattern struct {
+	TaskID      int64
+	Seq         int64
+	Key         string
+	Title       string
+	Rule        string
+	FixGuidance string
 }
 
 type PublishPrePushHead struct {

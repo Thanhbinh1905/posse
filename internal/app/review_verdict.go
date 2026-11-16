@@ -26,7 +26,10 @@ func changeCandidateTargetsForCandidate(ctx context.Context, db *store.DB, proje
 	if planErr != nil {
 		return nil, admittedPlanFailure(planErr)
 	}
-	if !project.IsWorkspace() && plan != nil && (plan.Review == "full-pipeline" || isFullPipelineTask(change, project.Name)) {
+	projectHome := filepath.Dir(db.Path)
+	cfg, cfgErr := config.Load(projectHome, project.Name)
+	greenhouseFullPipeline := cfgErr == nil && greenhouseFullPipelineTaskWithConfig(change, cfg, "")
+	if !project.IsWorkspace() && plan != nil && !greenhouseFullPipeline && (plan.Review == "full-pipeline" || isFullPipelineTask(change, project.Name)) {
 		candidate, err := db.LatestValidationCandidate(ctx, change.ID, "")
 		if selected != nil && selected.Repo == "" {
 			candidate, err = *selected, nil
@@ -70,7 +73,7 @@ func changeCandidateTargetsForCandidate(ctx context.Context, db *store.DB, proje
 		if repo.State == store.TaskRepoUnchanged {
 			continue
 		}
-		if memberReviews[repo.Repo] == "full-pipeline" {
+		if memberReviews[repo.Repo] == "full-pipeline" && !taskUsesGreenhouseReviewProvider(change, cfg, repo.Repo) {
 			candidate, err := db.LatestValidationCandidate(ctx, change.ID, repo.Repo)
 			if selected != nil && selected.Repo == repo.Repo {
 				candidate, err = *selected, nil
@@ -181,6 +184,47 @@ func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candida
 
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
 // given, otherwise the current Task branch tips.
+func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, repository string) error {
+	var targets []store.ReviewTarget
+	var err error
+	if greenhouseFullPipelineTaskWithConfig(task, cfg, "") && !project.IsWorkspace() {
+		head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		targets = []store.ReviewTarget{{Repository: project.Name, Commit: head}}
+	} else {
+		targets, err = changeCandidateTargets(ctx, db, project, task)
+		if err != nil {
+			return err
+		}
+	}
+	if repository != "" {
+		filtered := targets[:0]
+		for _, target := range targets {
+			if target.Repository == repository {
+				if commit != "" {
+					target.Commit = commit
+				}
+				filtered = append(filtered, target)
+			}
+		}
+		targets = filtered
+	} else if !project.IsWorkspace() && commit != "" {
+		targets = []store.ReviewTarget{{Repository: project.Name, Commit: commit}}
+	}
+	for _, target := range targets {
+		passed, err := db.GreenhouseGatePass(ctx, task.ID, target.Repository, target.Commit)
+		if err != nil {
+			return err
+		}
+		if !passed {
+			return axi.Failure("greenhouse_verdict_required", "Task "+taskIDString(task.Seq)+" has no current passing Greenhouse Verdict for "+target.Repository+" at "+shortSHA(target.Commit), false, "Wait for the Greenhouse Verdict for this exact head before Merge")
+		}
+	}
+	return nil
+}
+
 func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task, commit string) error {
 	var targets []store.ReviewTarget
 	var err error
@@ -241,7 +285,7 @@ func requireSelectedReviewForMerge(ctx context.Context, db *store.DB, project st
 	if err != nil {
 		return err
 	}
-	local, fullPipeline := false, false
+	local, fullPipeline, greenhouse := false, false, false
 	for _, selected := range policies {
 		switch selected {
 		case "none":
@@ -249,6 +293,8 @@ func requireSelectedReviewForMerge(ctx context.Context, db *store.DB, project st
 			local = true
 		case "full-pipeline":
 			fullPipeline = true
+		case store.GreenhouseReviewProvider:
+			greenhouse = true
 		case config.NoMistakes:
 			return noMistakesRemoved(task)
 		default:
@@ -264,6 +310,11 @@ func requireSelectedReviewForMerge(ctx context.Context, db *store.DB, project st
 	}
 	if local {
 		if err := requireReviewPass(ctx, db, project, task, commit); err != nil {
+			return err
+		}
+	}
+	if greenhouse {
+		if err := requireGreenhouseGatePass(ctx, db, project, cfg, task, commit, ""); err != nil {
 			return err
 		}
 	}
@@ -299,7 +350,14 @@ func selectedReviewPolicies(ctx context.Context, db *store.DB, project store.Pro
 	}
 	policy := cfg.Defaults.Review
 	if plan != nil {
-		policy = plan.Review
+		if taskUsesGreenhouseReviewProvider(task, cfg, "") {
+			if !project.IsWorkspace() {
+				return []string{store.GreenhouseReviewProvider}, nil
+			}
+			policy = store.GreenhouseReviewProvider
+		} else {
+			policy = plan.Review
+		}
 		if plan.Version == 1 {
 			if policy == "always" {
 				return []string{"always"}, nil
@@ -327,7 +385,10 @@ func selectedReviewPolicies(ctx context.Context, db *store.DB, project store.Pro
 			continue
 		}
 		selected := cfg.MemberReview(repo.Repo)
-		if plan != nil {
+		if taskUsesGreenhouseReviewProvider(task, cfg, repo.Repo) {
+			selected = store.GreenhouseReviewProvider
+		}
+		if plan != nil && selected != store.GreenhouseReviewProvider {
 			selected = ""
 			for _, member := range plan.Execution.Members {
 				if member.Name == repo.Repo {

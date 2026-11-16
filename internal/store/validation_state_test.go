@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -12,6 +13,18 @@ import (
 func TestValidationStateSurvivesSnapshotRebuild(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	insertValidationStateFixture(t, f)
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/snapshot", reviewShaA)
+	verdict.Mode = "gate"
+	verdict.Outcome = "findings"
+	verdict.Blocking = 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "internal/store/example.go", Line: 12, Excerpt: "Unchecked write", Guidance: "Check errors", Rule: "write-errors", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record provider findings for snapshot: %v, %v", recorded, err)
+	}
+	queued, err := f.db.QueueProviderReviewFixInstruction(f.ctx, f.change, reviewShaA, nil, "review:"+reviewShaA+":P-1", "Fix P-1", []int{1}, nil, nil)
+	if err != nil || !queued.Queued {
+		t.Fatalf("queue provider fix for snapshot: %+v, %v", queued, err)
+	}
 	if err := f.db.PersistTask(f.ctx, f.change); err != nil {
 		t.Fatalf("persist validation state: %v", err)
 	}
@@ -20,7 +33,8 @@ func TestValidationStateSurvivesSnapshotRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(before.ReviewRounds) != 1 || len(before.ReviewPatterns) != 1 || len(before.ReviewFindings) != 1 ||
-		len(before.ReviewFindingEvents) != 1 || len(before.ReviewCarries) != 1 || len(before.ReviewDispositions) != 1 || len(before.ValidationFixRounds) != 3 || len(before.ValidationFixRounds[2].MemberHeads) != 2 {
+		len(before.ReviewFindingEvents) != 1 || len(before.ReviewCarries) != 1 || len(before.ReviewDispositions) != 1 || len(before.ValidationFixRounds) != 4 || len(before.ValidationFixRounds[3].MemberHeads) != 0 ||
+		len(before.ProviderFindingPatterns) != 1 || len(before.ProviderFindings) != 1 || len(before.FixRoundProviderFindings) != 1 {
 		t.Fatalf("fixture did not cover every validation table: %#v", before)
 	}
 	if count, err := f.db.RebuildFromSnapshots(f.ctx, f.home); err != nil || count != 2 {

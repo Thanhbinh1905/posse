@@ -790,7 +790,11 @@ func TestFullPipelineDoneChecksCandidateContinuityAgainstFixInstruction(t *testi
 		t.Fatalf("queue candidate fix instruction: %#v, %v", fix, err)
 	}
 	gitTest(t, candidate.WorktreePath, "commit", "--allow-empty", "--amend", "-m", "rewrite candidate history")
-	_, err = fixture.service.recordWorkerSignalWithContinuity(context.Background(), fixture.db, fixture.project, fixture.task, "done", "Finished the fix", nil, "task_done", nil, false)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.recordWorkerSignalWithContinuity(context.Background(), fixture.db, fixture.project, cfg, fixture.task, "done", "Finished the fix", nil, "task_done", nil, false)
 	if err == nil || !strings.Contains(err.Error(), "does not descend from expected head") {
 		t.Fatalf("discontinuous full-pipeline candidate was accepted: %v", err)
 	}

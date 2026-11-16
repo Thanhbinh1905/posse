@@ -290,6 +290,19 @@ func TestLoadRefusesRemovedAutoRecover(t *testing.T) {
 	}
 }
 
+func TestReviewProviderProjectSetting(t *testing.T) {
+	home := t.TempDir()
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `review_provider = "greenhouse"`)
+	cfg, err := Load(home, "shop")
+	if err != nil || cfg.ReviewProvider != "greenhouse" {
+		t.Fatalf("review_provider = %q, %v", cfg.ReviewProvider, err)
+	}
+	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `review_provider = "unknown"`)
+	if _, err := Load(home, "shop"); err == nil || !strings.Contains(err.Error(), "review_provider") {
+		t.Fatalf("unsupported review_provider was accepted: %v", err)
+	}
+}
+
 func TestReviewParallelProjectSetting(t *testing.T) {
 	home := t.TempDir()
 	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `review_parallel = "greenhouse"`)

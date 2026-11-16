@@ -106,8 +106,20 @@ func ensureCandidateParents(home, candidatePath string) error {
 	return nil
 }
 
+func taskUsesGreenhouseGate(task store.Task) bool {
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil {
+		return false
+	}
+	return plan.ReviewProvider == store.GreenhouseReviewProvider || plan.ValidationLoops != nil && plan.ValidationLoops.ReviewProvider == store.GreenhouseReviewProvider
+}
+
+func greenhouseFullPipelineTask(task store.Task) bool {
+	return taskUsesGreenhouseGate(task) && fullPipelineSelected(task, "")
+}
+
 func isFullPipelineTask(task store.Task, repo string) bool {
-	return fullPipelineSelected(task, repo)
+	return !taskUsesGreenhouseGate(task) && fullPipelineSelected(task, repo)
 }
 
 func authorBranchHead(ctx context.Context, task store.Task) (string, string, error) {

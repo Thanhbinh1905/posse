@@ -725,6 +725,106 @@ func TestWorkerPublishesPRToFrozenNonDefaultTarget(t *testing.T) {
 	}
 }
 
+func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `INSERT OR REPLACE INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, f.task.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(context.Background(), f.task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("signal", "done", "Greenhouse prepublication test", "--head", head); code != 0 {
+		t.Fatalf("prepublication done: %d %s %s", code, output, stderr)
+	}
+	task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil || task.State != store.StateDone || task.PRURL != "" {
+		t.Fatalf("prepublication Signal state = %+v, %v", task, err)
+	}
+	if code, output, _ := f.run("publish", "Greenhouse prepublication test"); code == 0 || !strings.Contains(output, "full-pipeline requires a passing Greenhouse Verdict") {
+		t.Fatalf("publish without Verdict was not refused: %d %s", code, output)
+	}
+	findings := store.Verdict{TaskID: task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: head, Target: head, ReviewBase: head, Outcome: "findings", Blocking: 1, Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), findings, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record no-blocker findings Verdict = %v, %v", recorded, err)
+	}
+	if code, output, _ := f.run("publish", "Greenhouse prepublication test"); code == 0 || !strings.Contains(output, "full-pipeline requires a passing Greenhouse Verdict") {
+		t.Fatalf("publish after findings Verdict was not refused: %d %s", code, output)
+	}
+	verdict := store.Verdict{TaskID: task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r2", Head: head, Target: head, ReviewBase: head, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record Gate pass = %v, %v", recorded, err)
+	}
+	if code, output, stderr := f.run("publish", "Greenhouse prepublication test"); code != 0 {
+		t.Fatalf("publish after exact-head Gate pass: %d %s %s", code, output, stderr)
+	}
+	if got := strings.TrimSpace(gitTest(t, f.remote, "rev-parse", "refs/heads/posse/t1")); got != head {
+		t.Fatalf("published head %s, want %s", got, head)
+	}
+	var candidates int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_candidates WHERE task_id=?`, task.ID).Scan(&candidates); err != nil || candidates != 0 {
+		t.Fatalf("private candidates = %d, %v; want none", candidates, err)
+	}
+	task, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgForGate, err := config.Load(f.home, f.project.Name)
+	if err != nil || !greenhouseFullPipelineTaskWithConfig(task, cfgForGate, "") || !greenhouseFullPipelineTask(task) {
+		t.Fatalf("Greenhouse full-pipeline Task was not recognized for merge: provider=%s review=%s err=%v", plan.ReviewProvider, plan.Review, err)
+	}
+	if targets, targetErr := changeCandidateTargets(context.Background(), f.db, f.project, task); targetErr != nil || len(targets) != 1 || targets[0].Commit != head {
+		t.Fatalf("Greenhouse merge targets = %+v, %v", targets, targetErr)
+	}
+	if code, output, stderr := f.run("merge", "t1"); code != 0 {
+		t.Fatalf("merge after Gate-passed publication: %d %s %s", code, output, stderr)
+	}
+	mergedTask, err := f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || mergedTask.State != store.StateMerging || mergedTask.GatedSHA != head {
+		t.Fatalf("merge was not gated at the reviewed head: %+v %v", mergedTask, err)
+	}
+	f.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", head)
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("merge", "t1", "--execute", "--user-approved", "User approved the Greenhouse-reviewed PR"); code != 0 {
+		t.Fatalf("execute Gate-passed merge: %d %s %s", code, output, stderr)
+	}
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/main")
+	f.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", head, head)
+	if err := f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	mergedTask, err = f.db.Task(context.Background(), f.project.ID, "t1")
+	if err != nil || mergedTask.GatedSHA != head || mergedTask.MergedRef != head {
+		t.Fatalf("merged head differs from passing Gate head %s: %+v %v", head, mergedTask, err)
+	}
+}
+
 func TestWorkerPublishesSignalsAndLeadGatesWatchesAndMerges(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"never\"\n"), 0o600); err != nil {
