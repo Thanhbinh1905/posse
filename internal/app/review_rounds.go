@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1007,6 +1008,19 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			return err
 		}
 		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
+		if token := os.Getenv(watchRuntimeTokenEnv); token != "" {
+			watch, err := db.WatchRuntime(ctx, project.ID)
+			if err != nil {
+				_ = releaseParallelReviewLock(lock)
+				return err
+			}
+			projectID := os.Getenv(watchRuntimeProjectEnv)
+			startedAt := os.Getenv(watchRuntimeStartedEnv)
+			started, parseErr := strconv.ParseInt(startedAt, 10, 64)
+			if projectID == strconv.FormatInt(project.ID, 10) && watch.PID == os.Getpid() && watch.Token == token && parseErr == nil && watch.StartedAt == started && watchRuntimeProcessHealthy(home, project.ID, watch) {
+				args = append(args, "--watch-project-id", projectID, "--watch-token", token, "--watch-started-at", startedAt, "--watch-pid", strconv.Itoa(watch.PID))
+			}
+		}
 		if project.IsWorkspace() {
 			args = append(args, "--repo", target.Repository)
 		}

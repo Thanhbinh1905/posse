@@ -33,10 +33,10 @@ type greenhouseMember struct {
 }
 
 // greenhouseReview requests one Greenhouse Verdict for the exact head of a
-// Change Task Member and records it as a parallel-mode Verdict. Only the Lead
-// side calls it; no gate reads Greenhouse Verdicts yet.
+// Change Task Member and records it as a parallel-mode Verdict. A Project Lead
+// or its verified Watch may request it; no gate reads Greenhouse Verdicts yet.
 func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}})
+	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}, "watch-project-id": {}, "watch-token": {}, "watch-started-at": {}, "watch-pid": {}})
 	if err != nil {
 		return err
 	}
@@ -52,8 +52,14 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.requireLead(ctx.Context, db, project); err != nil {
+	watchChild, err := s.verifiedWatchChild(ctx.Context, db, home, project, parsed.Flags)
+	if err != nil {
 		return err
+	}
+	if !watchChild {
+		if err := s.requireLead(ctx.Context, db, project); err != nil {
+			return err
+		}
 	}
 	if s.workerCaller(ctx.Context, home) {
 		return axi.Failure("lead_only", "a Worker never calls Greenhouse", false, "Run this from the Project Lead pane")
