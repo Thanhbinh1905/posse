@@ -75,6 +75,7 @@ var keySpecs = []KeySpec{
 	{Key: "review_loop.docs", Type: TypeBoolean, Default: false, Meaning: "Include documentation gaps in the Review rubric.", UserOnly: true},
 	{Key: "review_loop.guidance", Type: TypeStringArray, Default: []string{}, Meaning: "Repository guidance paths supplied to Reviewers from the frozen target branch.", UserOnly: true},
 	{Key: "review_loop.profile", Type: TypeString, Default: "", Meaning: "Profile every Review Task launches with when `posse review start` names none; empty leaves the choice to the review Dispatch Rules. A Review Task always runs in its own session, so this Profile may match the author's.", UserOnly: true},
+	{Key: "review_loop.greenhouse_timeout", Type: TypeDuration, Default: "90m", Meaning: "Maximum time Posse waits for one Greenhouse review attempt before raising a Notice. Greenhouse may enforce a shorter executor timeout.", UserOnly: true},
 	{Key: "ci_loop.max_fix_rounds", Type: TypeInteger, Default: 3, Meaning: "Maximum automatic CI fix instructions per Change Task; 0 disables them.", UserOnly: true},
 	{Key: "ci_loop.rerun_cancelled", Type: TypeInteger, Default: 1, Meaning: "Same-head retries for provider-cancelled checks per check and Change Task.", UserOnly: true},
 	{Key: "ci_loop.flake_window", Type: TypeDuration, Default: "168h", Meaning: "Rerun a failed check once instead of queueing a CI fix round when every failing test is outside the packages the PR changes and failed on another PR within this window; 0 disables.", UserOnly: true},

@@ -20,7 +20,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func TestReviewStartRefusesBuiltInRoundForGreenhouseTask(t *testing.T) {
+func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -59,11 +59,14 @@ func TestReviewStartRefusesBuiltInRoundForGreenhouseTask(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	previousSelfExec := selfExecCommand
+	selfExecCommand = func(...string) (*exec.Cmd, error) { return exec.Command("true"), nil }
+	t.Cleanup(func() { selfExecCommand = previousSelfExec })
 	var output bytes.Buffer
 	cli := f.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), "Greenhouse") || !strings.Contains(output.String(), "Verdict") {
-		t.Fatalf("review start did not direct the Lead to Greenhouse: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code != 0 || !strings.Contains(output.String(), "Greenhouse") || !strings.Contains(output.String(), "requested") {
+		t.Fatalf("review start did not request the Greenhouse Verdict: code=%d output=%s", code, output.String())
 	}
 	db, err = store.Open(f.home)
 	if err != nil {

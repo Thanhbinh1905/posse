@@ -53,6 +53,15 @@ const (
 	Running Outcome = "running"
 )
 
+type TerminalReviewError struct {
+	Status string
+	Reason string
+}
+
+func (e *TerminalReviewError) Error() string {
+	return fmt.Sprintf("Greenhouse review ended with status %q: %s", e.Status, e.Reason)
+}
+
 type RoundResult struct {
 	Outcome  Outcome
 	Grant    string
@@ -218,6 +227,10 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 			return result, nil
 		}
 		if hr := v.HostResult; hr != nil && hr.Grant == grant {
+			if hr.Verdict == "" && terminalReviewStatus(hr.Status) {
+				_ = ClearPending(round.Pending)
+				return result, &TerminalReviewError{Status: hr.Status, Reason: hr.Reason}
+			}
 			switch {
 			case !hr.Current && hr.Status == "running":
 				// Greenhouse refuses a successor while the stale review runs. A
@@ -241,6 +254,14 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			if hr := v.HostResult; hr != nil && hr.Grant == grant && hr.Status == "running" {
+				request, _ := json.Marshal(d.request(round, v, grant, "cancel", nil))
+				if _, err := d.axi(ctx, round.Worktree, request); err != nil {
+					return result, err
+				}
+				_ = ClearPending(round.Pending)
+				return result, &TerminalReviewError{Status: "timeout", Reason: "Posse's Greenhouse review wait expired and the run was cancelled"}
+			}
 			result.Outcome = Running
 			return result, nil
 		}
@@ -256,6 +277,15 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 			continue
 		}
 		stream, sequence = watched.Stream, watched.Sequence
+	}
+}
+
+func terminalReviewStatus(status string) bool {
+	switch status {
+	case "cancelled", "failed", "timeout", "timed-out", "unconfigured", "refused":
+		return true
+	default:
+		return false
 	}
 }
 

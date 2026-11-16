@@ -332,12 +332,13 @@ rerun_cancelled = 0
 	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), `[review_loop]
 max_rounds = 1
 auto_start = false
+greenhouse_timeout = "45m"
 `)
 	cfg, err := Load(home, "shop")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ReviewLoop.MaxRounds != 1 || cfg.ReviewLoop.AutoStart || cfg.ReviewLoop.BlockAt != "P1" || !cfg.ReviewLoop.Enabled || !reflect.DeepEqual(cfg.ReviewLoop.Guidance, []string{"docs/review.md"}) {
+	if cfg.ReviewLoop.MaxRounds != 1 || cfg.ReviewLoop.AutoStart || cfg.ReviewLoop.BlockAt != "P1" || !cfg.ReviewLoop.Enabled || cfg.ReviewLoop.GreenhouseTimeout != "45m" || !reflect.DeepEqual(cfg.ReviewLoop.Guidance, []string{"docs/review.md"}) {
 		t.Fatalf("effective review loop = %#v", cfg.ReviewLoop)
 	}
 	if cfg.CILoop.MaxFixRounds != 1 || cfg.CILoop.RerunCancelled != 0 || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "gate_loop was removed") {
@@ -346,7 +347,7 @@ auto_start = false
 
 	writeConfig(t, filepath.Join(home, "config.toml"), "[profiles.reviewer]\nkind = \"codex\"\n")
 	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), "[review_loop]\nprofile = \"reviewer\"\n")
-	if cfg, err := Load(home, "shop"); err != nil || cfg.ReviewLoop.Profile != "reviewer" {
+	if cfg, err := Load(home, "shop"); err != nil || cfg.ReviewLoop.Profile != "reviewer" || cfg.ReviewLoop.GreenhouseTimeout != "90m" {
 		t.Fatalf("Project review_loop.profile = %q, %v", cfg.ReviewLoop.Profile, err)
 	}
 	writeConfig(t, filepath.Join(home, "projects", "shop", "config.toml"), "[review_loop]\nprofile = \"missing\"\n")

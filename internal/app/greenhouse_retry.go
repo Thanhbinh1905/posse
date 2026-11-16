@@ -15,7 +15,8 @@ func reviewGreenhouseWithRetries(ctx context.Context, parallel bool, wait time.D
 			return result, retries + 1, nil
 		}
 		var protocolErr *greenhouse.ProtocolError
-		if !parallel || errors.As(err, &protocolErr) || retries >= 3 {
+		var terminalErr *greenhouse.TerminalReviewError
+		if !parallel || errors.As(err, &protocolErr) || errors.As(err, &terminalErr) || retries >= 3 {
 			return result, retries + 1, err
 		}
 		timer := time.NewTimer(time.Duration(1<<retries) * time.Second)

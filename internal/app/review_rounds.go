@@ -115,7 +115,26 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		return err
 	}
 	if taskUsesGreenhouseReviewProvider(change, cfg, "") {
-		return axi.Failure("greenhouse_review_selected", "this Task uses Greenhouse; a built-in Review Task cannot provide its Verdict", false, "Request the Greenhouse Verdict with `posse _greenhouse review "+taskIDString(change.Seq)+"` or let Lead Watch run the pre-publication flow")
+		var targets []store.ReviewTarget
+		if project.IsWorkspace() {
+			heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, change)
+			if err != nil {
+				return err
+			}
+			for _, member := range heads {
+				targets = append(targets, store.ReviewTarget{Repository: member.Repository, Commit: member.Head})
+			}
+		} else {
+			head, err := gitOutput(ctx.Context, change.WorktreePath, "rev-parse", "HEAD")
+			if err != nil {
+				return err
+			}
+			targets = []store.ReviewTarget{{Repository: project.Name, Commit: head}}
+		}
+		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+			return err
+		}
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "review", Value: "Greenhouse Verdict requested"}})
 	}
 	candidateReview := plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan))
 	if candidateReview {

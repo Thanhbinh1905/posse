@@ -6,12 +6,37 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestGreenhouseVerdictComputesBaseAndChecksProviderBase(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	member := greenhouseMember{name: f.project.Name, worktree: f.task.WorktreePath}
+	ctx := context.Background()
+	base, err := greenhouseReviewBase(ctx, member.worktree, f.headSHA, f.headSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := greenhouse.RoundResult{Grant: "shop/t1/shop/r1", RunID: "run-without-base", Result: &greenhouse.HostResult{Head: f.headSHA, Target: f.headSHA, Verdict: "findings"}}
+	if recorded, verdict, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, t.TempDir(), "P1", config.Config{}, result); err != nil || !recorded || verdict.ReviewBase != base {
+		t.Fatalf("Verdict with Posse-computed base = %+v, %v", verdict, err)
+	}
+	result.Grant = "shop/t1/shop/r2"
+	result.Result.ReviewBase = strings.Repeat("f", 40)
+	if _, _, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, t.TempDir(), "P1", config.Config{}, result); err == nil || !strings.Contains(err.Error(), "differs from Posse-computed") {
+		t.Fatalf("mismatched Greenhouse review_base error = %v", err)
+	}
+	verdicts, err := f.db.VerdictsFor(ctx, f.task.ID)
+	if err != nil || len(verdicts) != 1 || verdicts[0].ReviewBase != base {
+		t.Fatalf("Greenhouse Verdicts = %+v, %v", verdicts, err)
+	}
+}
 
 func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) {
 	pendingPath := filepath.Join(t.TempDir(), "request.pending.json")
