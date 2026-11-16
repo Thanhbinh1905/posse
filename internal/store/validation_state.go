@@ -260,7 +260,7 @@ func (db *DB) QueueReviewFixInstruction(ctx context.Context, taskID int64, expec
 
 func (db *DB) QueueProviderReviewFixInstruction(ctx context.Context, taskID int64, expectedBaseHead string, members []ValidationFixMemberHead, dedupeKey, body string, patterns []int, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
 	if len(patterns) == 0 {
-		return QueueValidationFixResult{}, fmt.Errorf("Provider Review fixes require selected findings")
+		return QueueValidationFixResult{}, fmt.Errorf("provider Review fixes require selected findings")
 	}
 	if (maxRounds != nil && *maxRounds < 0) || (sharedMax != nil && *sharedMax < 1) {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")

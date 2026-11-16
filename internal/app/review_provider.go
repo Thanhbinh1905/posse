@@ -85,7 +85,7 @@ func greenhouseWorkspacePendingHeads(ctx context.Context, db *store.DB, task sto
 			return nil, err
 		}
 		if status != "" {
-			return nil, fmt.Errorf("Member %s worktree is not clean", repo.Repo)
+			return nil, fmt.Errorf("member %s worktree is not clean", repo.Repo)
 		}
 		head, err := gitOutput(ctx, repo.WorktreePath, "rev-parse", "HEAD")
 		if err != nil {
@@ -94,7 +94,7 @@ func greenhouseWorkspacePendingHeads(ctx context.Context, db *store.DB, task sto
 		heads = append(heads, greenhousePendingMember{Repository: repo.Repo, Head: head})
 	}
 	if len(heads) == 0 {
-		return nil, fmt.Errorf("workspace Task has no changed Members")
+		return nil, fmt.Errorf("workspace Task has no changed members")
 	}
 	return heads, nil
 }
