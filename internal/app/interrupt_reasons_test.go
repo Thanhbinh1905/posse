@@ -17,6 +17,7 @@ func TestInterruptReportsRefusalReasons(t *testing.T) {
 		focused                                  bool
 	}{
 		{name: "unsupported kind", kind: "custom", status: "working", wantCode: "interrupt_unsupported_kind"},
+		{name: "Codex verified interrupt", kind: "codex", status: "working", focused: true, wantOutput: "interrupted: true"},
 		{name: "blocked Worker", kind: "claude", status: "blocked", wantCode: "worker_blocked"},
 		{name: "focused Worker", kind: "claude", status: "working", focused: true, wantOutput: "interrupted: true"},
 		{name: "not working", kind: "claude", status: "idle", wantOutput: "reason: agent_not_working"},
