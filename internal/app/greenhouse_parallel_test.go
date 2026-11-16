@@ -126,6 +126,22 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 	}
 	f.home = shortHome
 	f.service = testService(f.home, f.service.Herdr)
+	greenhouseHome := greenhouse.HomeFor(f.home)
+	t.Cleanup(func() {
+		pid, live := greenhouse.LivePID(greenhouseHome)
+		if live {
+			if pid < 2 {
+				t.Errorf("Greenhouse daemon returned unsafe PID %d", pid)
+				return
+			}
+			if err := greenhouse.Stop(greenhouseHome, 30*time.Second); err != nil {
+				t.Errorf("stop Greenhouse daemon %d: %v", pid, err)
+			}
+		}
+		if pid, live := greenhouse.LivePID(greenhouseHome); live {
+			t.Errorf("Greenhouse daemon %d is still alive after cleanup", pid)
+		}
+	})
 	binDir, err := os.MkdirTemp(taskScratch, "gb")
 	if err != nil {
 		t.Fatal(err)
