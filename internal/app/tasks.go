@@ -2693,7 +2693,7 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	if task, err = s.currentTask(ctx.Context, db, project, args[0]); err != nil {
 		return err
 	}
-	outcome, err := s.interruptTask(ctx.Context, task, cfg)
+	outcome, err := s.interruptTask(ctx.Context, task, cfg, false)
 	if err != nil {
 		return err
 	}
@@ -2717,7 +2717,7 @@ func (s *Service) interrupt(ctx *axi.Context, args []string) error {
 	})
 }
 
-func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config.Config) (interruptOutcome, error) {
+func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config.Config, redirecting bool) (interruptOutcome, error) {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return interruptOutcome{}, err
@@ -2740,8 +2740,8 @@ func (s *Service) interruptTask(ctx context.Context, task store.Task, cfg config
 	if kind == "" {
 		kind = taskKind(cfg, task)
 	}
-	if kind == "codex" {
-		return interruptOutcome{}, axi.Failure("interrupt_unsupported_kind", "Codex does not support verified turn interruption", false, "Wait for the Worker turn to finish, then run `posse send`")
+	if redirecting && kind == "codex" {
+		return interruptOutcome{}, axi.Failure("interrupt_unsupported_kind", "Codex does not support verified turn interruption for redirected instructions", false, "Wait for the Worker turn to finish, then run `posse send`")
 	}
 	keys := cfg.Kinds[kind].InterruptKeys
 	if len(keys) == 0 {
@@ -2823,7 +2823,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, project store.Pr
 		}
 		return s.regenerateProjects(ctx.Context, db)
 	}
-	outcome, err := s.interruptTask(reservationCtx, task, cfg)
+	outcome, err := s.interruptTask(reservationCtx, task, cfg, true)
 	if err != nil {
 		return errors.Join(err, cleanupUnsent())
 	}
