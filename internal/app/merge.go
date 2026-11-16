@@ -157,6 +157,13 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if task.State == store.StateMerged || task.State == store.StateTornDown && task.MergedRef != "" {
+		fields := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "result", Value: "Task is already merged"}}
+		if task.MergedRef != "" {
+			fields = append(fields, axi.Field{Key: "merged_ref", Value: task.MergedRef})
+		}
+		return ctx.Print(fields)
+	}
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
@@ -528,6 +535,19 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
+	}
+	if task.PRURL != "" && task.State == store.StateDone {
+		cfg, err := config.Load(home, project.Name)
+		if err != nil {
+			return configError(err)
+		}
+		if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, true); err != nil {
+			return err
+		}
+		task, err = db.TaskByID(ctx.Context, project.ID, task.ID)
+		if err != nil {
+			return err
+		}
 	}
 	if task.State == store.StateTornDown {
 		if _, err := s.finishSettledTeardownIntent(ctx.Context, db, project.ID, task.ID); err != nil {
