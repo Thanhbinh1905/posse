@@ -536,17 +536,29 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if task.PRURL != "" && task.State == store.StateDone {
-		cfg, err := config.Load(home, project.Name)
-		if err != nil {
-			return configError(err)
+	if task.State == store.StateDone {
+		needsPRPoll := task.PRURL != ""
+		if project.IsWorkspace() {
+			repos, err := db.TaskRepos(ctx.Context, task.ID)
+			if err != nil {
+				return err
+			}
+			for _, repo := range repos {
+				needsPRPoll = needsPRPoll || repo.PRURL != ""
+			}
 		}
-		if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, true); err != nil {
-			return err
-		}
-		task, err = db.TaskByID(ctx.Context, project.ID, task.ID)
-		if err != nil {
-			return err
+		if needsPRPoll {
+			cfg, err := config.Load(home, project.Name)
+			if err != nil {
+				return configError(err)
+			}
+			if err := s.pollProjectPullRequests(ctx.Context, db, project, cfg, true); err != nil {
+				return err
+			}
+			task, err = db.TaskByID(ctx.Context, project.ID, task.ID)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if task.State == store.StateTornDown {

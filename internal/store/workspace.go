@@ -425,7 +425,7 @@ func (db *DB) RecordMemberPRObservation(ctx context.Context, repo string, observ
 		now := time.Now().UnixMilli()
 		switch effect.RepoState {
 		case TaskRepoMerged:
-			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=? AND state IN ('merging','open','gated')`, TaskRepoMerged, effect.MergedRef, now, observation.TaskID, repo)
+			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, landed_ref=?, updated_at=? WHERE task_id=? AND repo=? AND state IN ('merging','open','gated','unchanged')`, TaskRepoMerged, effect.MergedRef, now, observation.TaskID, repo)
 		case TaskRepoOpen:
 			_, err = tx.ExecContext(ctx, `UPDATE task_repos SET state=?, gated_sha='', updated_at=? WHERE task_id=? AND repo=? AND state=?`, TaskRepoOpen, now, observation.TaskID, repo, TaskRepoMerge)
 		}
