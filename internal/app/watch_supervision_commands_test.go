@@ -24,6 +24,16 @@ const (
 	watchFixtureWorkerTabID  = "w2:t1"
 )
 
+func TestSystemdWatchUnitNameIsStableAndHomeScoped(t *testing.T) {
+	first := systemdWatchUnitName("/home/user/.posse", 42)
+	if first == "" || first != systemdWatchUnitName("/home/user/.posse", 42) {
+		t.Fatalf("unit name is not stable: %q", first)
+	}
+	if first == systemdWatchUnitName("/home/user/other", 42) || first == systemdWatchUnitName("/home/user/.posse", 43) {
+		t.Fatalf("unit name does not distinguish home and Project: %q", first)
+	}
+}
+
 func TestWorkerCommandsSkipWatchSupervision(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	t.Setenv(workerHomeEnv, fixture.home)
@@ -164,6 +174,38 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 	if !watchPIDRunning(before.PID) {
 		t.Fatalf("Project Watch PID %d did not start", before.PID)
 	}
+	if systemdUserManagerAvailable(ctx) {
+		unit := systemdWatchUnitName(fixture.home, project.ID)
+		if !systemdWatchUnitActive(ctx, fixture.home, project.ID) {
+			t.Fatalf("Project Watch systemd unit %s is not active", unit)
+		}
+		properties, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "--property=Restart,MemoryMax,TasksMax", unit).CombinedOutput()
+		if err != nil || !strings.Contains(string(properties), "Restart=always") || !strings.Contains(string(properties), "MemoryMax=2147483648") || !strings.Contains(string(properties), "TasksMax=256") {
+			t.Fatalf("Project Watch unit properties = %s, err=%v", properties, err)
+		}
+		cgroup, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "--property=ControlGroup", "--value", unit).Output()
+		if err != nil || !strings.HasSuffix(strings.TrimSpace(string(cgroup)), ".service") {
+			t.Fatalf("Project Watch cgroup = %q, err=%v; want a service outside the launching scope", cgroup, err)
+		}
+		process, err := os.FindProcess(before.PID)
+		if err != nil || process.Kill() != nil {
+			t.Fatalf("kill Project Watch PID %d to exercise systemd restart: %v", before.PID, err)
+		}
+		restartDeadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(restartDeadline) {
+			before, err = db.WatchRuntime(ctx, project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.PID > 1 && before.PID != process.Pid && watchPIDRunning(before.PID) && systemdWatchUnitActive(ctx, fixture.home, project.ID) {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if before.PID <= 1 || before.PID == process.Pid || !watchPIDRunning(before.PID) {
+			t.Fatalf("systemd did not restart Project Watch after crash: %#v", before)
+		}
+	}
 	var watchToStop watchProcess
 	found := false
 	watchDeadline = time.Now().Add(5 * time.Second)
@@ -225,9 +267,14 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 		},
 	}
 	service = New(fixture.home, fake)
-	code, output := runCLI(t, service, "signal", "working", "Watch regression check")
-	if code != 0 {
-		t.Fatalf("Worker signal failed: exit=%d output=%s", code, output)
+	for _, args := range [][]string{{"signal", "working", "Watch regression check"}, {"validate", "status"}} {
+		code, output := runCLI(t, service, args...)
+		if strings.Contains(output, "worker_forbidden") {
+			t.Fatalf("Worker command %q attempted forbidden watch supervision: %s", args, output)
+		}
+		if args[0] == "signal" && code != 0 || args[0] == "validate" && (code == 0 || !strings.Contains(output, "validation_not_selected")) {
+			t.Fatalf("Worker command %q returned unexpected result: exit=%d output=%s", args, code, output)
+		}
 	}
 	if testBinaryStarted {
 		t.Fatal("Worker command attempted to start the Go test binary as a Project Watch")

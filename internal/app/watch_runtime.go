@@ -506,6 +506,9 @@ func stopStoredWatchRuntimeWithEscalation(ctx context.Context, home string, proc
 	if !watchPIDRunning(process.PID) {
 		return nil
 	}
+	if process.WatchProjectID > 0 && systemdWatchUnitActive(ctx, home, process.WatchProjectID) {
+		return stopSystemdWatch(ctx, home, process.WatchProjectID)
+	}
 	if process.Executable.Inode == 0 {
 		return fmt.Errorf("refusing to signal Watch PID %d with an unknown executable identity", process.PID)
 	}
@@ -602,22 +605,36 @@ func (s *Service) startWatchRuntime(ctx context.Context, db *store.DB, home stri
 	if err != nil {
 		return fmt.Errorf("open Project Watch log: %w", err)
 	}
-	command := exec.Command(binary, "watch", "--poll-only")
-	command.Dir = project.Root
-	command.Env = watchRuntimeEnvironment(os.Environ(), home, project, token, startedAt)
-	command.Stdout, command.Stderr = logFile, logFile
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := startWatchProcess(command); err != nil {
-		_ = logFile.Close()
-		return fmt.Errorf("start hidden Project Watch: %w", err)
+	pid := 0
+	if systemdUserManagerAvailable(ctx) {
+		pid, err = startSystemdWatch(ctx, home, project, binary, token, startedAt, logPath)
+		if err != nil {
+			_ = logFile.Close()
+			return err
+		}
+	} else {
+		command := exec.Command(binary, "watch", "--poll-only")
+		command.Dir = project.Root
+		command.Env = watchRuntimeEnvironment(os.Environ(), home, project, token, startedAt)
+		command.Stdout, command.Stderr = logFile, logFile
+		command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := startWatchProcess(command); err != nil {
+			_ = logFile.Close()
+			return fmt.Errorf("start hidden Project Watch: %w", err)
+		}
+		pid = command.Process.Pid
 	}
 	_ = logFile.Close()
 	watch := store.WatchRuntime{
-		PID: command.Process.Pid, Token: token, StartedAt: startedAt, HeartbeatAt: startedAt,
+		PID: pid, Token: token, StartedAt: startedAt, HeartbeatAt: startedAt,
 		ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode,
 	}
 	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
-		_ = command.Process.Kill()
+		if systemdWatchUnitActive(ctx, home, project.ID) {
+			_ = stopSystemdWatch(ctx, home, project.ID)
+		} else if pid > 1 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
 		return fmt.Errorf("record hidden Project Watch: %w", err)
 	}
 	return nil
