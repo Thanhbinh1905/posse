@@ -147,6 +147,16 @@ func TestLaunchPromptDoesNotResendWhenAgentIsAlreadyWorking(t *testing.T) {
 	}
 }
 
+func TestLaunchPromptNamesCodexUpdatePrompt(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"A new version of Codex is available. Install update? [Y/n]"}}`)
+	err := service.deliverLaunchPrompt(context.Background(), "w1:p1", "Read launch.md and follow it.")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "update prompt") {
+		t.Fatalf("Codex update prompt error = %v, want launch error naming the update prompt", err)
+	}
+}
+
 func TestLaunchPromptReturnsNonStallErrorsWithoutRetry(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
@@ -530,13 +540,34 @@ func TestLaunchAgentRetriesBusyPaneInput(t *testing.T) {
 	}
 }
 
+func TestLaunchAgentDisablesCodexUpdatePrompt(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	if err := service.launchAgent(context.Background(), "w1:p1", "w", "codex", nil, nil, filepath.Join(t.TempDir(), "agent-launch.sh")); err != nil {
+		t.Fatal(err)
+	}
+	args := fake.Calls[0].Params["args"].([]string)
+	if !equalStrings(args, []string{"-c", "check_for_update_on_startup=false"}) {
+		t.Fatalf("Codex args = %q, want update check disabled", args)
+	}
+	codex := filepath.Join(t.TempDir(), "codex")
+	fakeCodex := "#!/bin/sh\ncase \"$*\" in *check_for_update_on_startup=false*) exit 0;; esac\nprintf '%s\\n' 'A new version of Codex is available. Install update?'\n"
+	if err := os.WriteFile(codex, []byte(fakeCodex), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(codex, args...)
+	output, err := command.CombinedOutput()
+	if err != nil || strings.Contains(string(output), "update") {
+		t.Fatalf("fake Codex output = %q, err=%v; update prompt should be suppressed", output, err)
+	}
+}
+
 func TestLaunchAgentTypesShortLaunchDirectly(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	script := filepath.Join(t.TempDir(), "agent-launch.sh")
 	if err := service.launchAgent(context.Background(), "w1:p1", "w", "codex", []string{"--flag", "Read it"}, nil, script); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.Calls) != 1 || fake.Calls[0].Method != "agent.start" || !equalStrings(fake.Calls[0].Params["args"].([]string), []string{"--flag", "Read it"}) {
+	if len(fake.Calls) != 1 || fake.Calls[0].Method != "agent.start" || !equalStrings(fake.Calls[0].Params["args"].([]string), []string{"--flag", "Read it", "-c", "check_for_update_on_startup=false"}) {
 		t.Fatalf("short launch calls = %#v", fake.Calls)
 	}
 	if _, err := os.Stat(script); !os.IsNotExist(err) {
@@ -571,8 +602,8 @@ func TestLaunchAgentSourcesLaunchOverTTYLineLimitFromScript(t *testing.T) {
 	command := exec.Command("/bin/sh", "-c", `. "$1" && codex extra && codex`, "sh", script)
 	command.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
 	output, err := command.CombinedOutput()
-	if want := long + "|--flag|" + long + "|extra|" + long + "|"; err != nil || string(output) != want {
-		t.Fatalf("sourced launch output = %q err=%v, want %q", output, err, want)
+	if err != nil || !strings.HasPrefix(string(output), long+"|--flag|"+long+"|-c|check_for_update_on_startup=false|extra|") || !strings.HasSuffix(string(output), long+"|") {
+		t.Fatalf("sourced launch output = %q err=%v, want launch args and extra arguments preserved", output, err)
 	}
 }
 
