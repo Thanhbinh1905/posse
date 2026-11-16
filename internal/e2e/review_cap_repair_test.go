@@ -227,37 +227,75 @@ func (h *ciRepairChange) hasNotice(kind string) bool {
 	return false
 }
 
-func TestFullPipelineCIRepairQueuesWhileTargetRefreshIsInFlight(t *testing.T) {
-	f := reviewIdentityFixture(t)
-	h := startCIRepairChange(t, f, [2]string{"ci_loop.max_fix_rounds", "3"})
-	candidate := h.submitCandidate(t, "Target refresh candidate")
-	h.validateCandidate(t, candidate, "t2")
-	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Target refresh candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
-		t.Fatalf("promote candidate: %d %s", code, output)
-	}
-	h.originHead = candidate.CandidateSHA
-	turn, err := f.db.TaskTurnToken(context.Background(), h.change.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code, output := runReleaseCLI(t, f.binary, h.change.WorktreePath, h.workerEnv, "signal", "done", "Candidate validated", "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
-		t.Fatalf("complete Task: %d %s", code, output)
-	}
-	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
-		t.Fatalf("open PR: %s", output)
-	}
-	h.change = f.mustTask(t, "t1")
-	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET state='working' WHERE id=?`, h.change.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.db.QueueValidationFixInstruction(context.Background(), h.change.ID, "freshness", h.change.GatedSHA, "freshness:target-refresh", "Merge the updated target and refresh validation"); err != nil {
-		t.Fatal(err)
-	}
-	f.writeGraphQL(t, "pr1", "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", h.change.GatedSHA)
-	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
-	if !waitForCondition(20*time.Second, func() bool { return h.hasNotice("ci_fix_queued") }) {
-		notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
-		t.Fatalf("gated PR failure during target refresh did not queue a CI fix: notices=%#v", notices)
+func TestFullPipelineCIRepairQueuesAfterOutstandingValidationInstruction(t *testing.T) {
+	for _, testCase := range []struct {
+		check, fixKind, expectedNotice string
+		maxRounds                      string
+	}{
+		{check: "lint", fixKind: "freshness", expectedNotice: "ci_fix_queued", maxRounds: "3"},
+		{check: "e2e shard 11", fixKind: "review", expectedNotice: "ci_fix_queued", maxRounds: "3"},
+		{check: "unit", fixKind: "freshness", expectedNotice: "ci_fix_exhausted", maxRounds: "0"},
+	} {
+		t.Run(testCase.check, func(t *testing.T) {
+			check := testCase.check
+			f := reviewIdentityFixture(t)
+			h := startCIRepairChange(t, f, [2]string{"ci_loop.max_fix_rounds", testCase.maxRounds})
+			candidate := h.submitCandidate(t, "Target refresh candidate")
+			h.validateCandidate(t, candidate, "t2")
+			if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "Target refresh candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+				t.Fatalf("promote candidate: %d %s", code, output)
+			}
+			h.originHead = candidate.CandidateSHA
+			turn, err := f.db.TaskTurnToken(context.Background(), h.change.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code, output := runReleaseCLI(t, f.binary, h.change.WorktreePath, h.workerEnv, "signal", "done", "Candidate validated", "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
+				t.Fatalf("complete Task: %d %s", code, output)
+			}
+			if output := runPosse(t, f.binary, f.repo, f.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
+				t.Fatalf("open PR: %s", output)
+			}
+			h.change = f.mustTask(t, "t1")
+			instruction := "Merge the updated target and refresh validation"
+			if testCase.fixKind == "review" {
+				instruction = "Fix the outstanding Review findings"
+			}
+			if _, err := f.db.QueueValidationFixInstruction(context.Background(), h.change.ID, testCase.fixKind, h.change.GatedSHA, testCase.fixKind+":validation-fix", instruction); err != nil {
+				t.Fatal(err)
+			}
+			if code, output := runReleaseCLI(t, f.binary, h.change.WorktreePath, h.workerEnv, "signal", "working", "Applying validation fix"); code != 0 {
+				t.Fatalf("begin target refresh: %d %s", code, output)
+			}
+			refreshedTask := f.mustTask(t, "t1")
+			if refreshedTask.GatedSHA != "" {
+				t.Fatalf("validation fix delivery retained gated head %s", refreshedTask.GatedSHA)
+			}
+			failureURL := "https://checks.example/" + strings.ReplaceAll(check, " ", "-")
+			f.writeGraphQLPulls(t, fakePull{alias: "pr1", state: "OPEN", checks: "FAILURE", review: "REVIEW_REQUIRED", mergeable: "MERGEABLE", head: h.change.GatedSHA, checkName: check, detailsURL: failureURL})
+			runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+			if !waitForCondition(20*time.Second, func() bool { return h.hasNotice(testCase.expectedNotice) }) {
+				notices, _ := f.db.Notices(context.Background(), f.project.ID, false)
+				t.Fatalf("gated PR failure after %s instruction delivery did not create %s: notices=%#v", testCase.fixKind, testCase.expectedNotice, notices)
+			}
+			var rounds, queued, exhausted int
+			if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, h.change.ID).Scan(&rounds); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, h.change.ID).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, h.change.ID).Scan(&exhausted); err != nil {
+				t.Fatal(err)
+			}
+			wantRounds, wantQueued, wantExhausted := 1, 1, 0
+			if testCase.expectedNotice == "ci_fix_exhausted" {
+				wantRounds, wantQueued, wantExhausted = 0, 0, 1
+			}
+			if rounds != wantRounds || queued != wantQueued || exhausted != wantExhausted {
+				t.Fatalf("CI repair after %s instruction: rounds=%d queued=%d exhausted=%d, want %d/%d/%d", testCase.fixKind, rounds, queued, exhausted, wantRounds, wantQueued, wantExhausted)
+			}
+		})
 	}
 }
 

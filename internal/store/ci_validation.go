@@ -149,8 +149,20 @@ func (db *DB) QueueCIFixInstruction(ctx context.Context, taskID int64, expectedB
 			return QueueValidationFixResult{}, ErrStaleValidationHead
 		}
 	}
-	if mergeMode != "pr" || currentPR != prURL || gatedSHA != expectedBaseHead {
+	if mergeMode != "pr" || currentPR != prURL {
 		return QueueValidationFixResult{}, ErrStaleValidationHead
+	}
+	if gatedSHA != expectedBaseHead {
+		if member != "" {
+			return QueueValidationFixResult{}, ErrStaleValidationHead
+		}
+		matches, err := sameHeadDuringValidationFix(ctx, tx, taskID, state, currentPR, prURL, gatedSHA, expectedBaseHead)
+		if err != nil {
+			return QueueValidationFixResult{}, err
+		}
+		if !matches {
+			return QueueValidationFixResult{}, ErrStaleValidationHead
+		}
 	}
 
 	var existingMessageID int64
@@ -231,6 +243,18 @@ func (db *DB) QueueCIFixInstruction(ctx context.Context, taskID int64, expectedB
 	return QueueValidationFixResult{MessageID: messageID, Queued: true, Coalesced: coalesced}, nil
 }
 
+func sameHeadDuringValidationFix(ctx context.Context, tx *writeTx, taskID int64, state, currentPR, prURL, gatedSHA, expectedHead string) (bool, error) {
+	if State(state) != StateWorking || currentPR != prURL || gatedSHA != "" {
+		return false, nil
+	}
+	query := `SELECT EXISTS(SELECT 1 FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind IN ('freshness','review') AND r.expected_base_head=? AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb='done'),0))`
+	var exists int
+	if err := tx.QueryRowContext(ctx, query, taskID, expectedHead, taskID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists != 0, nil
+}
+
 // CreateValidationNoticeOnce deduplicates one CI outcome by head and failing
 // check set while retaining detailed URLs and log tails in the Notice payload.
 func (db *DB) CreateValidationNoticeOnce(ctx context.Context, notice Notice, prURL, headSHA, checkSet string, member ...string) (bool, error) {
@@ -254,11 +278,11 @@ func (db *DB) CreateValidationNoticeOnce(ctx context.Context, notice Notice, prU
 	if createdAt == 0 {
 		createdAt = time.Now().UnixMilli()
 	}
-	gateCheck := `EXISTS (SELECT 1 FROM tasks t WHERE t.id=? AND t.project_id=? AND t.type='change' AND t.landing_mode='pr' AND t.pr_url=? AND t.gated_sha=? AND t.state IN ('done','merging'))`
-	gateArgs := []any{notice.TaskID, notice.ProjectID, prURL, headSHA}
+	gateCheck := `EXISTS (SELECT 1 FROM tasks t WHERE t.id=? AND t.project_id=? AND t.type='change' AND t.landing_mode='pr' AND t.pr_url=? AND ((t.gated_sha=? AND t.state IN ('done','merging')) OR (t.gated_sha='' AND t.state='working' AND EXISTS (SELECT 1 FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=t.id AND r.kind IN ('freshness','review') AND r.expected_base_head=? AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=t.id AND verb='done'),0)))))`
+	gateArgs := []any{notice.TaskID, notice.ProjectID, prURL, headSHA, headSHA}
 	if memberName != "" {
-		gateCheck = `EXISTS (SELECT 1 FROM tasks t JOIN task_repos r ON r.task_id=t.id WHERE t.id=? AND t.project_id=? AND t.type='change' AND t.state IN ('done','merging') AND r.repo=? AND r.landing_mode='pr' AND r.pr_url=? AND r.gated_sha=?)`
-		gateArgs = []any{notice.TaskID, notice.ProjectID, memberName, prURL, headSHA}
+		gateCheck = `EXISTS (SELECT 1 FROM tasks t JOIN task_repos r ON r.task_id=t.id WHERE t.id=? AND t.project_id=? AND r.repo=? AND ((t.state IN ('done','merging') AND r.landing_mode='pr' AND r.pr_url=? AND r.gated_sha=?) OR (t.state='working' AND r.landing_mode='pr' AND r.pr_url=? AND r.gated_sha='' AND EXISTS (SELECT 1 FROM validation_fix_rounds f JOIN messages m ON m.id=f.message_id WHERE f.ship_task_id=t.id AND f.kind IN ('freshness','review') AND f.expected_base_head=? AND m.status IN ('queued','claimed','interrupting','submitting','delivered') AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=t.id AND verb='done'),0)))))`
+		gateArgs = []any{notice.TaskID, notice.ProjectID, memberName, prURL, headSHA, prURL, headSHA}
 	}
 	if notice.Kind == "ci_fix_queued" {
 		// The fix round is already recorded, and delivering its message may have

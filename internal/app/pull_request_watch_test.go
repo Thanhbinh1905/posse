@@ -920,10 +920,10 @@ func TestPRWatchQueuesCIFixWhileFullPipelineRefreshInstructionIsInFlight(t *test
 	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='working' WHERE id=?`, fixture.task.ID); err != nil {
+	if _, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", fixture.headSHA, "freshness:target-refresh", "Merge the updated target and refresh validation"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", fixture.headSHA, "freshness:target-refresh", "Merge the updated target and refresh validation"); err != nil {
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET state='working',gated_sha='' WHERE id=?`, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)

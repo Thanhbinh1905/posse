@@ -2766,8 +2766,7 @@ func (fixture *prLifecycleFixture) writeGraphQL(t *testing.T, alias, state, chec
 // fakePull is one PR in the fake GraphQL response; alias prN is Task tN.
 type fakePull struct {
 	alias, state, checks, review, mergeable, mergeStateStatus, mergeCommit, head string
-	// detailsURL overrides the failed check's details link.
-	detailsURL string
+	checkName, detailsURL                                                        string
 }
 
 func (fixture *prLifecycleFixture) writeGraphQLPulls(t *testing.T, pulls ...fakePull) {
@@ -2776,11 +2775,15 @@ func (fixture *prLifecycleFixture) writeGraphQLPulls(t *testing.T, pulls ...fake
 	for _, fake := range pulls {
 		contexts := []any{}
 		if fake.checks == "FAILURE" {
+			name := fake.checkName
+			if name == "" {
+				name = "unit"
+			}
 			details := fake.detailsURL
 			if details == "" {
 				details = "https://checks.example/unit"
 			}
-			contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": details})
+			contexts = append(contexts, map[string]any{"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": details})
 		}
 		number, err := strconv.Atoi(strings.TrimPrefix(fake.alias, "pr"))
 		if err != nil {

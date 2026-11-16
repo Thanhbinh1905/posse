@@ -24,8 +24,14 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 	if task.Type != "change" || observation.State != "OPEN" || len(failures) == 0 || observation.HeadSHA == "" || !ciTaskCanReceiveFix(task) {
 		return nil
 	}
-	if member == "" && (task.MergeMode != "pr" || task.GatedSHA != observation.HeadSHA) {
-		return nil
+	if member == "" {
+		matches, err := ciObservationMatchesGate(ctx, db, task, observation.PRURL, observation.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if !matches {
+			return nil
+		}
 	}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
@@ -43,7 +49,11 @@ func (s *Service) processCIObservation(ctx context.Context, db *store.DB, projec
 	}
 	prURL := observation.PRURL
 	if member == "" {
-		if current.MergeMode != "pr" || current.PRURL != prURL || current.GatedSHA != observation.HeadSHA {
+		matches, err := ciObservationMatchesGate(ctx, db, current, prURL, observation.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if !matches {
 			return nil
 		}
 	} else {
@@ -175,6 +185,28 @@ func omitRerunShardAggregates(all, candidates, remaining []failedCheck) []failed
 
 func ciTaskCanReceiveFix(task store.Task) bool {
 	return task.State == store.StateWorking || task.State == store.StateDone || task.State == store.StateMerging
+}
+
+func ciObservationMatchesGate(ctx context.Context, db *store.DB, task store.Task, prURL, headSHA string) (bool, error) {
+	if task.MergeMode != "pr" || task.PRURL != prURL {
+		return false, nil
+	}
+	if task.GatedSHA == headSHA {
+		return true, nil
+	}
+	if task.State != store.StateWorking || task.GatedSHA != "" {
+		return false, nil
+	}
+	for _, kind := range []string{"freshness", "review"} {
+		fixHead, err := db.OutstandingValidationFixHead(ctx, task.ID, kind)
+		if err != nil {
+			return false, err
+		}
+		if fixHead == headSHA {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func ciPlanAllowsMember(plan *taskplan.Plan, member string) bool {
