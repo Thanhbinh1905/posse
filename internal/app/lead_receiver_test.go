@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -71,6 +74,109 @@ func TestPiLeadWithoutReceiverGetsTypedNoticesAndOneRecoveryNotice(t *testing.T)
 	}
 	if missing := fixture.receiverMissingNotices(t); len(missing) != 1 {
 		t.Fatalf("receiver-missing Notices = %d, want one until it is acknowledged", len(missing))
+	}
+}
+
+func TestClaudeLeadWithoutBackgroundWatchGetsReceiverMissingNoticeWhileBusy(t *testing.T) {
+	stubLeadReceiver(t, false, 0)
+	lead := idlePiLead
+	lead.Agent = "claude"
+	lead.AgentStatus = "working"
+	fixture := newCodexLeadFixture(t, lead, "", "0")
+	payloadPath := filepath.Join(t.TempDir(), "notify.json")
+	command := filepath.Join(t.TempDir(), "notify.sh")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\ncat > "+payloadPath+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.SetFile(config.ConfigPath(fixture.home, "shop"), "notify.command", command, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.deliverNotices(context.Background(), fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	if missing := fixture.receiverMissingNotices(t); len(missing) != 1 {
+		t.Fatalf("receiver-missing Notices = %d, want one for a Claude Lead with no background watch", len(missing))
+	}
+	if fixture.fake.CallCount("notification.show") != 1 {
+		t.Fatalf("out-of-band notification count = %d, want one", fixture.fake.CallCount("notification.show"))
+	}
+	waitForNotifyLines(t, payloadPath, 1)
+	payload, err := os.ReadFile(payloadPath)
+	if err != nil || !strings.Contains(string(payload), "lead_receiver_missing") {
+		t.Fatalf("notify.command payload = %q, err=%v; want lead_receiver_missing", payload, err)
+	}
+}
+
+func TestReceiverRecoveryClosesTheMissingEpisode(t *testing.T) {
+	stubLeadReceiver(t, true, 0)
+	fixture := newCodexLeadFixture(t, idlePiLead, "", "0")
+	ctx := context.Background()
+	if err := raiseLeadReceiverMissing(ctx, fixture.db, fixture.project, "pi"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.monitorLeadReceiver(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var missing, recovered *store.Notice
+	for i := range notices {
+		if notices[i].Kind == "lead_receiver_missing" {
+			missing = &notices[i]
+		}
+		if notices[i].Kind == "lead_receiver_recovered" {
+			recovered = &notices[i]
+		}
+	}
+	if missing == nil || missing.AckedAt == 0 || recovered == nil || recovered.AckedAt == 0 {
+		t.Fatalf("receiver episode was not closed: missing=%#v recovered=%#v", missing, recovered)
+	}
+}
+
+func TestDelayedActionableNoticeRaisesAndClearsOneAlert(t *testing.T) {
+	fixture := newCodexLeadFixture(t, idlePiLead, "", "0")
+	ctx := context.Background()
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE notices SET created_at=? WHERE project_id=? AND kind='task_done'`, currentTime()-delayedNoticeAlertAfter.Milliseconds()-1, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := raiseDelayedNoticeAlert(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	if err := raiseDelayedNoticeAlert(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	open, err := fixture.db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alerts []store.Notice
+	for _, notice := range open {
+		if notice.Kind == "notice_delivery_delayed" {
+			alerts = append(alerts, notice)
+		}
+	}
+	if len(alerts) != 1 || !noticeNeedsUser(alerts[0], "ask") {
+		t.Fatalf("delayed Notice alerts = %#v, want one User-actionable alert", alerts)
+	}
+	if err := fixture.db.MarkNoticesDelivered(ctx, fixture.project.ID, []int64{1}, currentTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.AckNotices(ctx, fixture.project.ID, []string{"1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := raiseDelayedNoticeAlert(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	open, err = fixture.db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range open {
+		if notice.Kind == "notice_delivery_delayed" {
+			t.Fatal("delayed Notice alert stayed open after its Notice was acknowledged")
+		}
 	}
 }
 

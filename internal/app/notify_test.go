@@ -167,6 +167,7 @@ func TestNoticeNeedsUserUsesLowkeyReportingKinds(t *testing.T) {
 		wantUserAction bool
 	}{
 		{kind: "task_failed", wantUserAction: true},
+		{kind: "notice_delivery_delayed", wantUserAction: true},
 		{kind: "pr_merged", wantUserAction: true},
 		{kind: "merge_ready", mergeAutonomy: "ask", wantUserAction: true},
 		{kind: "merge_ready", mergeAutonomy: "auto", wantUserAction: false},
@@ -174,7 +175,7 @@ func TestNoticeNeedsUserUsesLowkeyReportingKinds(t *testing.T) {
 		{kind: "quota_fallback", wantUserAction: false},
 		{kind: "pr_watch_failing", dataJSON: `{"consecutive_failures":1}`, wantUserAction: false},
 		{kind: "pr_watch_failing", dataJSON: `{"consecutive_failures":3}`, wantUserAction: true},
-		{kind: "pr_watch_failing", dataJSON: `{"watch_episode":"stale"}`, wantUserAction: false},
+		{kind: "pr_watch_failing", dataJSON: `{"watch_episode":"stale"}`, wantUserAction: true},
 		{kind: "root_fetch_failing", dataJSON: `{"consecutive_failures":2}`, wantUserAction: false},
 		{kind: "root_fetch_failing", dataJSON: `{"consecutive_failures":3}`, wantUserAction: true},
 	} {

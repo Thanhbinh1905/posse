@@ -101,12 +101,21 @@ func (s *Service) dispatchNoticeCommand(ctx context.Context, db *store.DB, proje
 
 func noticeNeedsUser(notice store.Notice, mergeAutonomy string) bool {
 	switch notice.Kind {
-	case "needs_decision", "message_delivery_uncertain", "notice_delivery_uncertain", "lead_receiver_missing",
+	case "needs_decision", "message_delivery_uncertain", "notice_delivery_uncertain", "notice_delivery_delayed", "lead_receiver_missing",
 		"task_failed", "task_lost", "quota_exhausted", "pr_closed",
 		"pr_merged_ungated", "review_policy_violation", "head_discontinuity",
 		"task_done", "pr_merged":
 		return true
-	case "root_fetch_failing", "pr_watch_failing":
+	case "pr_watch_failing":
+		var data struct {
+			ConsecutiveFailures int    `json:"consecutive_failures"`
+			WatchEpisode        string `json:"watch_episode"`
+		}
+		if json.Unmarshal([]byte(notice.DataJSON), &data) != nil {
+			return false
+		}
+		return data.WatchEpisode != "" || data.ConsecutiveFailures >= 3
+	case "root_fetch_failing":
 		var data struct {
 			ConsecutiveFailures int `json:"consecutive_failures"`
 		}
