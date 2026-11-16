@@ -12,6 +12,24 @@ func greenhouseVerdict(taskID int64, grant, head string) Verdict {
 		Head: head, Target: reviewShaA, ReviewBase: reviewShaA, Outcome: "clean", Mode: "parallel"}
 }
 
+func TestGreenhouseReviewRequestLinksGateModeVerdict(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r1", reviewShaA)
+	verdict.Mode = "gate"
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record gate Verdict = %v, %v", recorded, err)
+	}
+	request := GreenhouseReviewRequest{ProjectID: f.task(t, f.change).ProjectID, TaskID: f.change, Repository: "shop", RequestedHead: reviewShaA,
+		Provider: GreenhouseReviewProvider, RequestedAt: 10, SettledAt: 20, Outcome: "verdict", Grant: verdict.Grant}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatalf("record request for gate Verdict: %v", err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(f.ctx, request.ProjectID)
+	if err != nil || len(requests) != 1 || requests[0].VerdictID == nil {
+		t.Fatalf("gate Verdict request link = %+v, %v", requests, err)
+	}
+}
+
 func TestRecordGreenhouseVerdictChecksHeadInsideTheInsert(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	headNow := func(head string) func(context.Context) (string, error) {

@@ -61,7 +61,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			return err
 		}
 	}
-	if s.workerCaller(ctx.Context, home) {
+	if !watchChild && s.workerCaller(ctx.Context, home) {
 		return axi.Failure("lead_only", "a Worker never calls Greenhouse", false, "Run this from the Project Lead pane")
 	}
 	if project.IsDirectory() {
@@ -543,6 +543,17 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 	return nil
 }
 
+func (s *Service) noticeSkippedGreenhouseTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, reason string) error {
+	head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		head = task.GatedSHA
+		reason += "; current Task head could not be read: " + err.Error()
+	}
+	reason += "; run `posse review start " + taskIDString(task.Seq) + "` to request a Greenhouse Verdict"
+	_, err = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
+	return err
+}
+
 func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config) error {
 	tasks, err := db.TasksInState(ctx, project.ID, store.StateDone)
 	if err != nil {
@@ -553,13 +564,25 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		if err != nil {
 			return err
 		}
+		usesGreenhouse := taskUsesGreenhouseReviewProvider(task, cfg, "") && fullPipelineSelected(task, "")
 		if len(signals) == 0 || signals[0].Verb != "done" {
+			if usesGreenhouse {
+				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, "the completed Task has no latest done Signal to anchor an exact-head Greenhouse review"); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		var data struct {
 			Head string `json:"greenhouse_pending_head"`
 		}
 		if err := json.Unmarshal([]byte(signals[0].DataJSON), &data); err != nil || data.Head == "" {
+			if usesGreenhouse {
+				reason := "the latest done Signal has invalid or missing greenhouse_pending_head data"
+				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, reason); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if !taskUsesGreenhouseReviewProvider(task, cfg, "") || !fullPipelineSelected(task, "") {
