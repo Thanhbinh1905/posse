@@ -378,6 +378,22 @@ func adoptionFixture(t *testing.T) (string, *store.DB, store.Project, *herdr.Fak
 	return home, db, project, fake
 }
 
+func TestClaudeLeadReceiverAlertDoesNotBlockGenerationAdoption(t *testing.T) {
+	stubLeadReceiver(t, false, 0)
+	ctx := context.Background()
+	home, db, project, fake := adoptionFixture(t)
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testService(home, fake).reconcileProject(ctx, db, project, cfg, false); err != nil {
+		t.Fatalf("reconcile with a missing Claude receiver = %v, want adoption", err)
+	}
+	if generation, err := db.ProjectServerStartedAt(ctx, project.ID); err != nil || generation != "new-generation" {
+		t.Fatalf("generation = %q, %v; want new-generation adopted", generation, err)
+	}
+}
+
 func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 	ctx := context.Background()
 	home, db, project, fake := adoptionFixture(t)
