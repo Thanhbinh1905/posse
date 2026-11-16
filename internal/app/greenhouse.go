@@ -572,16 +572,15 @@ func greenhouseAfterDown(ctx context.Context, db *store.DB, home string) (string
 		}
 		return "stopped", nil
 	}
-	binary, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
 	log, err := os.OpenFile(filepath.Join(greenhouseHome, "posse-daemon.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", err
 	}
 	defer log.Close()
-	waiter := exec.Command(binary, "_greenhouse", "stop")
+	waiter, err := selfExecCommand("_greenhouse", "stop")
+	if err != nil {
+		return "", err
+	}
 	waiter.Dir = greenhouseHome
 	for _, entry := range os.Environ() {
 		if key, _, _ := strings.Cut(entry, "="); !watchRuntimeDropsEnvironmentVariable(key) {

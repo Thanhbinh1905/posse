@@ -38,11 +38,10 @@ func (s *Service) ExecPendingLead() error {
 	if err != nil {
 		return err
 	}
-	executable, err := os.Executable()
+	monitor, err := selfExecCommand("_finalize-lead", base64.RawURLEncoding.EncodeToString(payload))
 	if err != nil {
 		return err
 	}
-	monitor := exec.Command(executable, "_finalize-lead", base64.RawURLEncoding.EncodeToString(payload))
 	monitor.Stdin = nil
 	monitor.Stdout = io.Discard
 	monitor.Stderr = io.Discard
