@@ -131,8 +131,31 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(binDir) })
-	if err := os.Symlink("/usr/bin/false", filepath.Join(binDir, "greenhouse")); err != nil {
+	greenhouseBinary := os.Getenv("POSSE_TEST_GREENHOUSE_BINARY")
+	realGreenhouse := greenhouseBinary != ""
+	if !realGreenhouse {
+		greenhouseBinary = "/usr/bin/false"
+	}
+	if err := os.Symlink(greenhouseBinary, filepath.Join(binDir, "greenhouse")); err != nil {
 		t.Fatal(err)
+	}
+	if realGreenhouse {
+		fakeReviewer := `#!/usr/bin/python3
+import json, sys
+if "--list-models" in sys.argv:
+    print("provider model context")
+    print("openai gpt-5.6-luna 128K")
+    sys.exit(0)
+request = json.load(sys.stdin)
+path = request["Paths"][0]
+head = request["Head"]
+verdict = {"head": head, "verdict": "findings", "coverage": request["Paths"], "findings": [{"id": "watch-finding", "priority": "P1", "origin": "correctness", "file": path, "start": 1, "end": 1, "explanation": "Fixture review finding", "action": "Fix the reviewed issue", "rule": "", "head": head}]}
+print(json.dumps({"type": "message_end", "message": {"role": "assistant", "provider": "openai", "model": "gpt-5.6-luna", "stopReason": "stop", "content": [{"type": "text", "text": json.dumps(verdict)}]}}))
+print(json.dumps({"type": "agent_settled", "aborted": False}))
+`
+		if err := os.WriteFile(filepath.Join(binDir, "pi"), []byte(fakeReviewer), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	binary := filepath.Join(f.root, "bin", "posse")
@@ -198,13 +221,55 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(requests) > 0 || countNoticeKind(notices, "greenhouse_review_failed") > 0 {
+		if (len(requests) > 0 && (requests[0].Outcome == "verdict" || requests[0].Outcome == "failed")) || countNoticeKind(notices, "greenhouse_review_failed") > 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if len(requests) != 1 || requests[0].RequestedHead != head || requests[0].Outcome != "failed" {
+	if len(requests) != 1 || requests[0].RequestedHead != head {
 		t.Fatalf("watch pass did not reach the spawned review child: requests=%+v notices=%+v", requests, notices)
+	}
+	if realGreenhouse {
+		if requests[0].Outcome != "verdict" || requests[0].VerdictID == nil {
+			t.Fatalf("real Greenhouse request = %+v, want a persisted, linked Verdict", requests[0])
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		var pending bool
+		for time.Now().Before(deadline) {
+			pending, err = f.db.ReviewFixInstructionPending(context.Background(), f.task.ID)
+			if err != nil || pending {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		verdicts, err := f.db.VerdictsFor(context.Background(), f.task.ID)
+		if err != nil || len(verdicts) != 1 {
+			t.Fatalf("Greenhouse Verdicts = %+v, %v", verdicts, err)
+		}
+		verdict := verdicts[0]
+		wantBase, err := greenhouseReviewBase(context.Background(), f.task.WorktreePath, verdict.Target, head)
+		if err != nil || verdict.Head != head || verdict.ReviewBase != wantBase || len(verdict.ReviewBase) != 40 && len(verdict.ReviewBase) != 64 || verdict.Outcome != "findings" || verdict.Blocking < 1 {
+			t.Fatalf("persisted Greenhouse Verdict = %+v, expected blocking findings at head=%s base=%s, err=%v", verdict, head, wantBase, err)
+		}
+		providerFindings, err := f.db.ProviderFindingsForTask(context.Background(), f.task.ID)
+		if err != nil || len(providerFindings) != 1 || providerFindings[0].HeadSHA != head {
+			t.Fatalf("persisted provider findings = %+v, err=%v", providerFindings, err)
+		}
+		if err != nil || !pending {
+			notices, noticeErr := f.db.Notices(context.Background(), f.project.ID, false)
+			messages, messageErr := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+			t.Fatalf("Greenhouse finding did not queue a Fix Round: pending=%t err=%v notices=%+v noticeErr=%v messages=%+v messageErr=%v", pending, err, notices, noticeErr, messages, messageErr)
+		}
+		var fixRounds int
+		if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, f.task.ID).Scan(&fixRounds); err != nil || fixRounds != 1 {
+			t.Fatalf("queued review Fix Rounds = %d, err=%v", fixRounds, err)
+		}
+		t.Logf("E2E: done Signal head=%s -> Watch spawned _greenhouse review -> one real Greenhouse request and one findings Verdict (review_base_sha=%s) -> one queued Fix Round", head, verdict.ReviewBase)
+	} else if requests[0].Outcome != "failed" {
+		t.Fatalf("failed child request outcome = %q, want failed", requests[0].Outcome)
 	}
 	for _, notice := range notices {
 		if notice.Kind == "greenhouse_review_failed" && strings.Contains(notice.Summary, "lead_only") {
