@@ -208,7 +208,9 @@ AND m.created_at>COALESCE((SELECT MAX(at) FROM signals WHERE task_id=? AND verb=
 // instructions. CI fix rounds and provider cancellation reruns never count.
 func (db *DB) ReviewCapUsage(ctx context.Context, taskID int64) (ReviewCapUsage, error) {
 	var usage ReviewCapUsage
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status='verdict'`, taskID).Scan(&usage.ReviewRounds); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT
+(SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status='verdict') +
+(SELECT COUNT(*) FROM verdicts WHERE task_id=? AND provider='greenhouse' AND mode='gate')`, taskID, taskID).Scan(&usage.ReviewRounds); err != nil {
 		return usage, err
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, taskID).Scan(&usage.RepairRounds); err != nil {
@@ -453,7 +455,7 @@ func applyReviewFixResolutionsTx(ctx context.Context, tx *writeTx, taskID int64,
 	if len(round.MemberHeads) > 0 || len(input.Members) > 0 {
 		err = checkReviewFixMemberHeadsTx(ctx, tx, taskID, round.MemberHeads, input.Members)
 	} else {
-		err = checkReviewFixHeadTx(ctx, tx, taskID, input)
+		err = checkReviewFixHeadTx(ctx, tx, taskID, round.ID, input)
 	}
 	if err != nil {
 		return err
@@ -476,12 +478,19 @@ func applyReviewFixResolutionsTx(ctx context.Context, tx *writeTx, taskID int64,
 		}
 		answers[seq] = answer
 	}
+	var providerFindings bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fix_round_provider_findings WHERE fix_round_id=?)`, round.ID).Scan(&providerFindings); err != nil {
+		return err
+	}
+	if providerFindings {
+		return applyProviderFixAnswersTx(ctx, tx, taskID, round.ID, selected, answers)
+	}
 	return applyReviewFixAnswersTx(ctx, tx, taskID, selected, answers)
 }
 
 // checkReviewFixHeadTx binds a single-repository fix answer to its head and,
 // under full-pipeline, to the private candidate that holds it.
-func checkReviewFixHeadTx(ctx context.Context, tx *writeTx, taskID int64, input *ReviewFixResolutionsInput) error {
+func checkReviewFixHeadTx(ctx context.Context, tx *writeTx, taskID, roundID int64, input *ReviewFixResolutionsInput) error {
 	if !validValidationSHA(input.ActualHead) {
 		return fmt.Errorf("%w: Review fix head binding changed", ErrReviewResolutionsInvalid)
 	}
@@ -495,7 +504,13 @@ func checkReviewFixHeadTx(ctx context.Context, tx *writeTx, taskID int64, input 
 			return err
 		}
 		if plan.Review == "full-pipeline" && input.CandidateID < 1 {
-			return fmt.Errorf("%w: full-pipeline Review fixes require private candidate binding", ErrReviewResolutionsInvalid)
+			var providerFix bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fix_round_provider_findings WHERE fix_round_id=?)`, roundID).Scan(&providerFix); err != nil {
+				return err
+			}
+			if !providerFix {
+				return fmt.Errorf("%w: full-pipeline Review fixes require private candidate binding", ErrReviewResolutionsInvalid)
+			}
 		}
 	}
 	if input.CandidateID > 0 {

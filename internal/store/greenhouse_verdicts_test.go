@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,96 @@ func TestRecordGreenhouseVerdictChecksHeadInsideTheInsert(t *testing.T) {
 	verdicts, err := f.db.VerdictsFor(f.ctx, f.change)
 	if err != nil || len(verdicts) != 1 || verdicts[0].Provider != GreenhouseReviewProvider || verdicts[0].Grant != "shop/t1/shop/r2" || verdicts[0].Qualifies(reviewShaB) {
 		t.Fatalf("Verdicts = %+v, %v; want one parallel Greenhouse Verdict that no gate accepts", verdicts, err)
+	}
+}
+
+func TestGreenhouseAndBuiltinRoundsShareReviewCapHistory(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','verdict','changes_requested',1)`,
+		f.change, f.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	greenhouse := greenhouseVerdict(f.change, "shop/t1/shop/r4", reviewShaB)
+	greenhouse.Mode = "gate"
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, greenhouse, func(context.Context) (string, error) { return reviewShaB, nil }); err != nil || !recorded {
+		t.Fatalf("record Greenhouse round = %v, %v", recorded, err)
+	}
+	usage, err := f.db.ReviewCapUsage(f.ctx, f.change)
+	if err != nil || usage.ReviewRounds != 2 {
+		t.Fatalf("Review cap usage = %+v, %v; want earlier built-in round plus Greenhouse round", usage, err)
+	}
+}
+
+func TestGreenhouseVerdictPersistsFindingsByTaskRepositoryAndHead(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r3", reviewShaA)
+	verdict.Outcome, verdict.Mode = "findings", "gate"
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "internal/app/tasks.go", Line: 42,
+		Excerpt: "The task can publish without review", Guidance: "Require the Verdict", Rule: "review-gate", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record Verdict with findings = %v, %v", recorded, err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 || findings[0].Repository != "shop" || findings[0].HeadSHA != reviewShaA || findings[0].State != "open" || findings[0].Rule != "review-gate" {
+		t.Fatalf("Greenhouse findings = %+v, %v", findings, err)
+	}
+}
+
+func TestProviderFindingsUseReviewFixQueueAndResolution(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r5", reviewShaA)
+	verdict.Outcome, verdict.Mode = "findings", "gate"
+	verdict.Blocking = 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "internal/app/tasks.go", Line: 42,
+		Excerpt: "The gate is skipped", Guidance: "Require the gate", Rule: "gate-bypass", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict = %v, %v", recorded, err)
+	}
+	queued, err := f.db.QueueProviderReviewFixInstruction(f.ctx, f.change, reviewShaA, nil, "review:"+reviewShaA+":P-1", "Fix P-1", []int{1}, nil, nil)
+	if err != nil || !queued.Queued {
+		t.Fatalf("queue Greenhouse Review fix = %+v, %v", queued, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE messages SET status='delivered',delivered_at=created_at WHERE id=?`, queued.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.db.beginTxWithRetry(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := &ReviewFixResolutionsInput{ExpectedBaseHead: reviewShaA, ActualHead: reviewShaB, Patterns: []ReviewFixResolution{{Pattern: "P-1", Status: "fixed", Note: "Required the gate"}}}
+	if err := applyReviewFixResolutionsTx(f.ctx, tx, f.change, input); err != nil {
+		tx.Rollback()
+		t.Fatalf("apply Greenhouse Review fix resolution: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 || findings[0].State != "fix_claimed" {
+		t.Fatalf("Greenhouse finding after resolution = %+v, %v", findings, err)
+	}
+}
+
+func TestGreenhouseGatePassRequiresLatestCurrentCleanVerdict(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	pass := greenhouseVerdict(f.change, "shop/t1/shop/r1", reviewShaA)
+	pass.Mode = "gate"
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, pass, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record passing gate Verdict = %v, %v", recorded, err)
+	}
+	if ok, err := f.db.GreenhouseGatePass(f.ctx, f.change, "shop", reviewShaA); err != nil || !ok {
+		t.Fatalf("current passing gate Verdict = %v, %v", ok, err)
+	}
+	inconclusive := greenhouseVerdict(f.change, "shop/t1/shop/r2", reviewShaB)
+	inconclusive.Mode, inconclusive.Outcome = "gate", "inconclusive"
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, inconclusive, func(context.Context) (string, error) { return reviewShaB, nil }); err != nil || !recorded {
+		t.Fatalf("record inconclusive gate Verdict = %v, %v", recorded, err)
+	}
+	if ok, err := f.db.GreenhouseGatePass(f.ctx, f.change, "shop", reviewShaB); err != nil || ok {
+		t.Fatalf("inconclusive Verdict passed = %v, %v", ok, err)
+	}
+	if ok, err := f.db.GreenhouseGatePass(f.ctx, f.change, "shop", reviewShaA); err != nil || ok {
+		t.Fatalf("stale earlier pass passed = %v, %v", ok, err)
 	}
 }
 

@@ -1367,17 +1367,28 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 		turnToken = turnTokens[0]
 	}
 	merge := task.MergeMode
+	cfg, _ := config.Load(home, project.Name)
+	greenhouseSingle := !project.IsWorkspace() && greenhouseFullPipelineTaskWithConfig(task, cfg, "")
+	greenhouseWorkspace := project.IsWorkspace() && workspaceGreenhouseFullPipelinePlan(task, cfg)
 	work := "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
 	if merge == "pr" && task.Type == "change" && !project.IsWorkspace() {
 		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly or force-push outside `posse publish --rewrite --user-approved \"<User's words>\"`; never delete branches, change the default branch, or merge."
 	} else if project.IsWorkspace() && task.Type == "change" {
-		work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
+		if greenhouseWorkspace {
+			work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit changes inside each changed Member repository, leave every changed worktree clean, then signal done and end the turn. Do not publish before Posse requests Greenhouse reviews for the exact Member heads. Publish only the unchanged heads after Posse sends its publication instruction. Never push directly, force-push, delete branches, change default branches, or merge."
+		} else {
+			work = "Work only inside this Worker's Task Sandbox. Read anything, write nothing outside it. Commit inside changed member repositories. For each changed PR-mode member, run `posse publish --repo <member> \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only its Task branch and open or reuse its PR. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly, force-push, delete branches, change default branches, or merge."
+		}
 	}
 	if task.Type == "change" && merge == "pr" && !project.IsWorkspace() {
 		work += " When the User asks you to amend, squash or force-push this published Task branch, use `posse publish --rewrite --user-approved \"<User's words>\"` with the User's exact quote. Never rewrite published history without that quote or force-push outside this command."
 	}
 	if task.Type == "change" {
-		if plan, err := task.AdmittedPlan(); err == nil && plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan)) {
+		if greenhouseSingle {
+			work += "\n\nGreenhouse full-pipeline: do not publish first. Commit the change, then run `posse signal done \"<summary>\" --head <current-commit-sha> --turn <token>`. Posse reviews this exact Task branch head through Greenhouse outside the Task Sandbox. If it passes, Posse queues an instruction to publish that unchanged head; if the head moves, signal done again for the new head. No private candidate or `posse validate` stages are used."
+		} else if greenhouseWorkspace {
+			work += "\n\nGreenhouse full-pipeline Workspace: run `posse signal done \"<summary>\" --turn <token>` after committing every changed Member. Posse requests one Greenhouse Verdict for each exact Member head. If a Verdict queues findings, apply the Review fix and signal done again with the required `--resolutions <file>`. Publish only the exact heads Posse names after every Member Verdict passes. Do not use `--head`, private candidates, or `posse validate` stages."
+		} else if plan, err := task.AdmittedPlan(); err == nil && plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan)) {
 			repoFlag := ""
 			requestFrom := "from that checkout"
 			if project.IsWorkspace() {
@@ -1540,7 +1551,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			filtered = append(filtered, args[i])
 		}
 	}
-	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "verdict": {}, "turn": {}, "no-change": {boolean: true}})
+	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "head": {}, "verdict": {}, "turn": {}, "no-change": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -1569,6 +1580,11 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
+	}
+	greenhouseSelected := taskUsesGreenhouseReviewProvider(task, cfg, "")
 	if verb == "done" {
 		currentTurn, err := db.TaskTurnToken(ctx.Context, task.ID)
 		if err != nil {
@@ -1678,6 +1694,71 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	if admittedPlan != nil && admittedPlan.Execution.Mode == "in-place" {
 		return axi.Failure("in_place_removed", "in-place execution was removed; legacy Tasks are readable and can be torn down", false)
 	}
+	greenhouseFullPipeline := greenhouseSelected && fullPipelineSelected(task, "")
+	greenhouseWorkspaceFullPipeline := false
+	greenhouseWorkspacePrepublication := false
+	if project.IsWorkspace() {
+		greenhouseWorkspaceFullPipeline, err = workspaceGreenhouseFullPipeline(ctx.Context, db, task, cfg)
+		if err != nil {
+			return err
+		}
+		greenhouseFullPipeline = false
+	}
+	if parsed.Flags["head"] != "" && (verb != "done" || !greenhouseFullPipeline) {
+		return axi.Failure("signal_invalid", "--head is only valid on a Greenhouse full-pipeline done Signal", false)
+	}
+	if greenhouseFullPipeline && verb == "done" {
+		head, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if parsed.Flags["pr"] != "" {
+			if parsed.Flags["head"] != "" && parsed.Flags["head"] != head {
+				return axi.Failure("signal_invalid", "--head must match the current Task branch head", false, head)
+			}
+			remoteHead, err := remoteBranchHead(ctx.Context, task.WorktreePath, "refs/heads/"+task.Branch)
+			if err != nil {
+				return err
+			}
+			if remoteHead != head {
+				return axi.Failure("signal_invalid", "published PR completion requires the Task branch on origin to match its current head", false, "Publish the current exact head before signalling done")
+			}
+			verified, err := db.WasVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], head)
+			if err != nil {
+				return err
+			}
+			if !verified {
+				return axi.Failure("signal_invalid", "published PR completion requires a PR Posse already verified for the exact head", false)
+			}
+			if err := requireGreenhouseGatePass(ctx.Context, db, project, cfg, task, head, ""); err != nil {
+				return axi.Failure("signal_invalid", "published PR completion requires a passing Greenhouse Verdict for the exact head", false, err.Error())
+			}
+		} else {
+			if parsed.Flags["head"] == "" {
+				return axi.Failure("signal_invalid", "Greenhouse full-pipeline done Signals require --head <current Task branch head>", false)
+			}
+			if parsed.Flags["head"] != head {
+				return axi.Failure("signal_invalid", "--head must match the current Task branch head", false, head)
+			}
+			data["greenhouse_pending_head"] = head
+		}
+	}
+	if greenhouseWorkspaceFullPipeline && verb == "done" {
+		if err := validateWorkspaceChangeSignal(ctx.Context, db, task); err != nil {
+			return axi.Failure("signal_invalid", err.Error(), false, "Commit each changed Member and leave every worktree clean before signalling done")
+		}
+		heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, task)
+		if err != nil {
+			return err
+		}
+		greenhouseWorkspacePrepublication, err = workspaceGreenhouseHeadsNeedReview(ctx.Context, db, task, heads)
+		if err != nil {
+			return err
+		}
+		if greenhouseWorkspacePrepublication {
+			data["greenhouse_pending_members"] = heads
+		}
+	}
 	if parsed.Flags["pr"] != "" {
 		data["pr_url"] = parsed.Flags["pr"]
 	}
@@ -1701,31 +1782,29 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return configError(err)
 			}
-			// Every changed full-pipeline Member must be delivered from its
-			// promoted, fully validated private candidate. Answers to a Review
-			// fix and Review requests come from the private candidates
-			// instead, before promotion.
-			round, fixPending, err := db.ReviewFixRoundForTask(ctx.Context, task.ID)
-			if err != nil {
-				return err
-			}
-			candidateFix := fixPending && len(round.MemberHeads) > 0
-			if lanes, err := changedCandidateLanes(ctx.Context, db, project, task); err != nil {
-				return err
-			} else if len(lanes) > 0 && !candidateFix {
-				reviewRequest, err := s.workspaceCandidateReviewRequest(ctx.Context, db, home, project, task, lanes)
+			if !greenhouseWorkspaceFullPipeline {
+				round, fixPending, err := db.ReviewFixRoundForTask(ctx.Context, task.ID)
 				if err != nil {
 					return err
 				}
-				candidateFix = reviewRequest
-				if !reviewRequest {
-					if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, "", ""); err != nil {
+				candidateFix := fixPending && len(round.MemberHeads) > 0
+				if lanes, err := changedCandidateLanes(ctx.Context, db, project, task); err != nil {
+					return err
+				} else if len(lanes) > 0 && !candidateFix {
+					reviewRequest, err := s.workspaceCandidateReviewRequest(ctx.Context, db, home, project, task, lanes)
+					if err != nil {
 						return err
 					}
+					candidateFix = reviewRequest
+					if !reviewRequest {
+						if err := requireFullPipelineValidationAt(ctx.Context, db, project, cfg, task, "", ""); err != nil {
+							return err
+						}
+					}
 				}
-			}
-			if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg, candidateFix); err != nil {
-				return err
+				if err := s.validateWorkspacePublishedPRs(ctx.Context, db, project, task, cfg, candidateFix); err != nil {
+					return err
+				}
 			}
 		} else if task.Type == "change" && noChange {
 			work, err := s.unmergedWork(ctx.Context, db, project, task)
@@ -1737,7 +1816,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 		} else if task.Type == "change" {
 			privateCandidate := false
-			if !project.IsWorkspace() && fullPipelineSelected(task, "") {
+			if !project.IsWorkspace() && fullPipelineSelected(task, "") && !greenhouseSelected {
 				candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
 				if candidateErr == nil && candidate.State == store.ValidationCandidateActive {
 					if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
@@ -1777,15 +1856,15 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					return axi.Failure("signal_invalid", err.Error(), false, help)
 				}
 			}
-			if !project.IsWorkspace() {
+			if !project.IsWorkspace() && !greenhouseFullPipeline {
 				if _, err := s.checkedValidationContinuity(ctx.Context, db, project, task); err != nil {
 					return err
 				}
 			}
-			if task.MergeMode == "pr" && parsed.Flags["pr"] == "" && !privateCandidate {
+			if task.MergeMode == "pr" && parsed.Flags["pr"] == "" && !privateCandidate && !greenhouseFullPipeline {
 				return axi.Failure("signal_invalid", "a PR-mode Change Task requires --pr <url>", false)
 			}
-			if task.MergeMode == "pr" && !privateCandidate {
+			if task.MergeMode == "pr" && !privateCandidate && !greenhouseFullPipeline {
 				cfg, err := config.Load(home, project.Name)
 				if err != nil {
 					return configError(err)
@@ -1877,7 +1956,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			} else {
 				actualHead := ""
 				candidateID := int64(0)
-				if fullPipelineSelected(task, "") {
+				if isFullPipelineTask(task, "") && !greenhouseSelected {
 					candidate, err := db.LatestValidationCandidate(ctx.Context, task.ID, "")
 					if err != nil || candidate.State != store.ValidationCandidateActive {
 						return axi.Failure("candidate_missing", "full-pipeline Review fixes require the active private candidate", false)
@@ -1978,7 +2057,12 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
-	if verb == "done" && task.Type == "change" && fullPipelineSelected(task, "") {
+	if verb == "done" && task.Type == "change" && greenhouseFullPipeline {
+		if _, pending := data["greenhouse_pending_head"]; pending {
+			data["next_action"] = "Greenhouse review requested automatically for the exact Task head; wait for Posse to queue publication"
+		}
+	}
+	if verb == "done" && task.Type == "change" && isFullPipelineTask(task, "") {
 		if plan, err := task.AdmittedPlan(); err != nil {
 			return admittedPlanFailure(err)
 		} else if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {
@@ -2018,7 +2102,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
-	if verb == "done" && task.Type == "change" && !project.IsWorkspace() && task.MergeMode == "local" && !noChange && !fullPipelineSelected(task, "") {
+	if verb == "done" && task.Type == "change" && !project.IsWorkspace() && task.MergeMode == "local" && !noChange && !isFullPipelineTask(task, "") {
 		head, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
 		if err != nil {
 			return err
@@ -2034,7 +2118,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	} else if verb == "done" && reportReview != nil {
 		state, err = db.RecordWorkerSignalWithReportReview(ctx.Context, task, verb, note, data, noticeKind, reportReview.ReportTaskID, reportReview.ReportDigest, verdictFlag)
 	} else {
-		state, err = s.recordWorkerSignalWithContinuity(ctx.Context, db, project, task, verb, note, data, noticeKind, verdict, false, reviewResolutions)
+		state, err = s.recordWorkerSignalWithContinuity(ctx.Context, db, project, cfg, task, verb, note, data, noticeKind, verdict, false, reviewResolutions)
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrTaskMergeInProgress) {
@@ -2094,11 +2178,14 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
-	if verb == "done" && task.Type == "change" && !noChange {
+	if verb == "done" && task.Type == "change" && !noChange && !greenhouseSelected {
 		if err := s.checkReviewCapAfterDone(maintenanceCtx, db, home, project, task); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
-		} else if step, err := reviewCarryNextStep(maintenanceCtx, db, project, task, true); err == nil {
-			signalResult = append(signalResult, step...)
+		} else {
+			step, err := reviewCarryNextStep(maintenanceCtx, db, project, task, true)
+			if err == nil {
+				signalResult = append(signalResult, step...)
+			}
 		}
 	}
 	if verb == "done" && task.Type == "review" && verdict != nil {

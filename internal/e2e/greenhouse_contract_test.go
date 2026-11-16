@@ -72,6 +72,308 @@ type greenhouseContract struct {
 // case of its fault table runs against the real greenhouse binary with a fake
 // reviewer, an isolated POSSE_HOME and an isolated Herdr server. Every case
 // passes only if no Verdict is recorded for a head that was not reviewed.
+func TestGreenhouseFullPipelinePrepublicationReviewRunsFromWatch(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
+	t.Cleanup(func() {
+		find := func() ([]isolatedHerdrServerProcess, error) {
+			processes, err := findSpawnedProcesses(func(_ []byte, cwd string) bool { return strings.HasPrefix(cwd, f.root) })
+			var daemons []isolatedHerdrServerProcess
+			for _, process := range processes {
+				if strings.Contains(process.Args, "/bin/greenhouse daemon") {
+					daemons = append(daemons, process)
+				}
+			}
+			return daemons, err
+		}
+		for attempt := 0; attempt < 4; attempt++ {
+			if err := stopProcesses("Greenhouse daemon", find, 3*time.Second); err != nil {
+				t.Errorf("stop fixture Greenhouse daemon: %v", err)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+			processes, err := find()
+			if err != nil || len(processes) == 0 {
+				return
+			}
+		}
+		t.Errorf("Greenhouse daemon restarted during cleanup")
+	})
+	projectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := projectDB.ProjectByID(context.Background(), f.projectID)
+	projectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(f.home, "projects", project.Name)
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.change = f.start(t, "t1", "Greenhouse prepublication change", "greenhouse-prepubl")
+	head := c.authorCommit(t)
+	workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(workerEnv, c.change.WorktreePath, "signal", "done", "Greenhouse prepublication change", "--head", head); err != nil {
+		t.Fatalf("Worker done Signal: %v\n%s", err, output)
+	}
+	if task := f.task(t, "t1"); task.State != store.StateDone || task.PRURL != "" {
+		t.Fatalf("prepublication Task state = %#v", task)
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch: %v\n%s", err, output)
+	}
+	if !waitForCondition(60*time.Second, func() bool { return len(c.verdicts(t)) > 0 }) {
+		t.Fatal("Watch did not request a Greenhouse Verdict")
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch follow-up pass: %v\n%s", err, output)
+	}
+	verdicts := c.verdicts(t)
+	verdict := verdicts[len(verdicts)-1]
+	if verdict.Mode != "gate" || verdict.Head != head || !verdict.Qualifies(head) {
+		t.Fatalf("Watch Verdict = %+v, want passing gate for %s", verdict, head)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, "tasks", "t1", "candidate")); err == nil {
+		t.Fatal("Greenhouse full-pipeline created a private candidate")
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviews int
+	err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE reviews_task_id=?`, c.change.ID).Scan(&reviews)
+	var handoffs int
+	if err == nil && reviews == 0 {
+		err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND body LIKE '%Publish this exact head%'`, c.change.ID).Scan(&handoffs)
+	}
+	_ = db.Close()
+	if err != nil || reviews != 0 || handoffs != 1 {
+		t.Fatalf("Review Tasks = %d, publication handoffs = %d (want 1): %v", reviews, handoffs, err)
+	}
+	if output, err := c.posse(c.env, f.repo, "merge", "t1", "--execute", "--user-approved", "User approved the Greenhouse-reviewed change"); err != nil {
+		t.Fatalf("Lead merge: %v\n%s", err, output)
+	}
+	merged := f.task(t, "t1")
+	if merged.State != store.StateMerged || merged.MergedRef != head || merged.GatedSHA != head {
+		t.Fatalf("merged head is not the passing Greenhouse head %s: %#v", head, merged)
+	}
+}
+
+func TestGreenhousePrepublicationReconcilesMultipleDoneTasks(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
+	t.Cleanup(func() {
+		find := func() ([]isolatedHerdrServerProcess, error) {
+			processes, err := findSpawnedProcesses(func(_ []byte, cwd string) bool { return strings.HasPrefix(cwd, f.root) })
+			var daemons []isolatedHerdrServerProcess
+			for _, process := range processes {
+				if strings.Contains(process.Args, "/bin/greenhouse daemon") {
+					daemons = append(daemons, process)
+				}
+			}
+			return daemons, err
+		}
+		for attempt := 0; attempt < 4; attempt++ {
+			if err := stopProcesses("Greenhouse daemon", find, 3*time.Second); err != nil {
+				t.Errorf("stop fixture Greenhouse daemon: %v", err)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+			processes, err := find()
+			if err != nil || len(processes) == 0 {
+				return
+			}
+		}
+		t.Errorf("Greenhouse daemon restarted during cleanup")
+	})
+	projectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := projectDB.ProjectByID(context.Background(), f.projectID)
+	projectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(f.home, "projects", project.Name)
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.change = f.start(t, "t1", "First Greenhouse prepublication change", "first-greenhouse-prepubl")
+	firstHead := c.authorCommit(t)
+	firstEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	firstEnv = setEnv(firstEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(firstEnv, c.change.WorktreePath, "signal", "done", "first change", "--head", firstHead); err != nil {
+		t.Fatalf("first Worker done Signal: %v\n%s", err, output)
+	}
+	firstTask := c.change
+	firstDB, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateVerdict := store.Verdict{TaskID: firstTask.ID, Repository: project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/preexisting-gate", Head: firstHead, Target: firstHead, ReviewBase: firstHead, Outcome: "clean", Mode: "gate"}
+	if recorded, err := firstDB.RecordGreenhouseVerdict(context.Background(), gateVerdict, func(context.Context) (string, error) { return firstHead, nil }); err != nil || !recorded {
+		t.Fatalf("record preexisting Gate pass: recorded=%v err=%v", recorded, err)
+	}
+	parallelVerdict := gateVerdict
+	parallelVerdict.Grant = "shop/t1/shop/preexisting-parallel"
+	parallelVerdict.Mode = "parallel"
+	if recorded, err := firstDB.RecordGreenhouseVerdict(context.Background(), parallelVerdict, func(context.Context) (string, error) { return firstHead, nil }); err != nil || !recorded {
+		t.Fatalf("record preexisting parallel Verdict: recorded=%v err=%v", recorded, err)
+	}
+	now := time.Now().UnixMilli()
+	if err := firstDB.RecordGreenhouseReviewRequest(context.Background(), store.GreenhouseReviewRequest{ProjectID: f.projectID, TaskID: firstTask.ID, Repository: project.Name, RequestedHead: firstHead, Provider: store.GreenhouseReviewProvider, RequestedAt: now, SettledAt: now, Outcome: "verdict", Grant: parallelVerdict.Grant}); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second := f.start(t, "t2", "Second Greenhouse prepublication change", "second-greenhouse")
+	secondPath := filepath.Join(second.WorktreePath, "second-change.txt")
+	if err := os.WriteFile(secondPath, []byte("second change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "second-change.txt"}, {"commit", "-q", "-m", "second author change"}, {"rev-parse", "HEAD"}} {
+		command := exec.Command("git", args...)
+		command.Dir, command.Env = second.WorktreePath, f.env
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		if args[0] == "rev-parse" {
+			secondHead := strings.TrimSpace(string(output))
+			secondEnv := setEnv(c.env, "POSSE_TASK_ID", second.ContainmentMarker)
+			secondEnv = setEnv(secondEnv, "HERDR_PANE_ID", second.PaneID)
+			if result, err := c.posse(secondEnv, second.WorktreePath, "signal", "done", "second change", "--head", secondHead); err != nil {
+				t.Fatalf("second Worker done Signal: %v\n%s", err, result)
+			}
+		}
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch: %v\n%s", err, output)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if !waitForCondition(60*time.Second, func() bool {
+		verdicts, err := db.VerdictsFor(context.Background(), second.ID)
+		return err == nil && len(verdicts) > 0
+	}) {
+		t.Fatalf("Watch did not review the second pending Task; Verdicts=%+v", mustVerdicts(t, db, second.ID))
+	}
+	var firstGatePass bool
+	for _, verdict := range mustVerdicts(t, db, firstTask.ID) {
+		firstGatePass = firstGatePass || verdict.Mode == "gate" && verdict.Qualifies(firstHead)
+	}
+	if !firstGatePass {
+		t.Fatalf("first Task has no passing Gate Verdict: %+v", mustVerdicts(t, db, firstTask.ID))
+	}
+	var failedNotices int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, firstTask.ID).Scan(&failedNotices); err != nil || failedNotices != 0 {
+		t.Fatalf("passing first Task has %d Greenhouse failure notices, err=%v", failedNotices, err)
+	}
+}
+
+func mustVerdicts(t *testing.T, db *store.DB, taskID int64) []store.Verdict {
+	t.Helper()
+	verdicts, err := db.VerdictsFor(context.Background(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verdicts
+}
+
+func TestGreenhousePrepublicationFindingsQueueReviewFix(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
+	t.Cleanup(func() {
+		find := func() ([]isolatedHerdrServerProcess, error) {
+			processes, err := findSpawnedProcesses(func(_ []byte, cwd string) bool { return strings.HasPrefix(cwd, f.root) })
+			var daemons []isolatedHerdrServerProcess
+			for _, process := range processes {
+				if strings.Contains(process.Args, "/bin/greenhouse daemon") {
+					daemons = append(daemons, process)
+				}
+			}
+			return daemons, err
+		}
+		for attempt := 0; attempt < 4; attempt++ {
+			if err := stopProcesses("Greenhouse daemon", find, 3*time.Second); err != nil {
+				t.Errorf("stop fixture Greenhouse daemon: %v", err)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+			processes, err := find()
+			if err != nil || len(processes) == 0 {
+				return
+			}
+		}
+		t.Errorf("Greenhouse daemon restarted during cleanup")
+	})
+	projectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := projectDB.ProjectByID(context.Background(), f.projectID)
+	projectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(f.home, "projects", project.Name)
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.change = f.start(t, "t1", "Greenhouse findings change", "greenhouse-findings")
+	head := c.authorCommit(t)
+	c.setMode(t, "findings")
+	workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(workerEnv, c.change.WorktreePath, "signal", "done", "Greenhouse findings change", "--head", head); err != nil {
+		t.Fatalf("Worker done Signal: %v\n%s", err, output)
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch: %v\n%s", err, output)
+	}
+	if !waitForCondition(60*time.Second, func() bool { return len(c.verdicts(t)) > 0 }) {
+		t.Fatal("Watch did not record a Greenhouse Verdict")
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch follow-up pass: %v\n%s", err, output)
+	}
+	verdicts := c.verdicts(t)
+	if len(verdicts) == 0 || verdicts[len(verdicts)-1].Outcome != "findings" || verdicts[len(verdicts)-1].Blocking == 0 {
+		t.Fatalf("Watch did not record blocking Greenhouse findings: %+v", verdicts)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rounds, findingCount, reviewTasks int
+	var body, status string
+	err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, c.change.ID).Scan(&rounds)
+	if err == nil {
+		err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM provider_findings WHERE task_id=?`, c.change.ID).Scan(&findingCount)
+	}
+	if err == nil {
+		err = db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE reviews_task_id=?`, c.change.ID).Scan(&reviewTasks)
+	}
+	if err == nil {
+		err = db.QueryRowContext(context.Background(), `SELECT body,status FROM messages WHERE task_id=? AND body LIKE '%whole-pattern Review fix%' ORDER BY id DESC LIMIT 1`, c.change.ID).Scan(&body, &status)
+	}
+	_ = db.Close()
+	if err != nil || rounds != 1 || findingCount != 1 || reviewTasks != 0 || status != "queued" && status != "delivered" || !strings.Contains(body, "P-1") {
+		t.Fatalf("provider Fix Round = rounds %d findings %d Review Tasks %d body %q status %q err=%v", rounds, findingCount, reviewTasks, body, status, err)
+	}
+}
+
 func TestGreenhouseAdapterContract(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	c := newGreenhouseContract(t, f)
@@ -548,6 +850,7 @@ func (c *greenhouseContract) stopDaemon(t *testing.T) {
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 	if !waitForCondition(5*time.Second, func() bool { return syscall.Kill(pid, 0) != nil }) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
+		waitForCondition(3*time.Second, func() bool { return syscall.Kill(pid, 0) != nil })
 	}
 }
 

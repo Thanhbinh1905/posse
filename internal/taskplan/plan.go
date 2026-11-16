@@ -154,6 +154,7 @@ type Paths struct {
 type ValidationLoops struct {
 	Review            config.ReviewLoop `json:"review_loop"`
 	CI                config.CILoop     `json:"ci_loop"`
+	ReviewProvider    string            `json:"review_provider,omitempty"`
 	ReviewParallel    string            `json:"review_parallel,omitempty"`
 	BriefReviewRounds int               `json:"brief_review_rounds,omitempty"`
 }
@@ -607,6 +608,11 @@ func (p Plan) Validate() error {
 	} else {
 		if p.Type != "change" {
 			return invalid("validation loops are only valid for Change Tasks")
+		}
+		if p.ValidationLoops.ReviewProvider != "" {
+			if err := config.ValidateSetting("review_provider", p.ValidationLoops.ReviewProvider, false); err != nil {
+				return invalid(err.Error())
+			}
 		}
 		if p.ValidationLoops.ReviewParallel != "" {
 			if err := config.ValidateSetting("review_parallel", p.ValidationLoops.ReviewParallel, false); err != nil {

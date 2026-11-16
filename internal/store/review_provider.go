@@ -9,6 +9,18 @@ import (
 const BuiltinReviewProvider = "builtin"
 
 // Verdict is an immutable review result bound to one repository head and target.
+type ProviderFinding struct {
+	Key      string
+	Severity string
+	Origin   string
+	Path     string
+	Line     int
+	Excerpt  string
+	Guidance string
+	Rule     string
+	Head     string
+}
+
 type Verdict struct {
 	TaskID       int64
 	Repository   string
@@ -27,6 +39,7 @@ type Verdict struct {
 	Model        string
 	FindingsHash string
 	FindingsPath string
+	Findings     []ProviderFinding
 	Mode         string
 	RecordedAt   int64
 }
@@ -84,6 +97,22 @@ func insertVerdict(ctx context.Context, tx VerdictTx, verdict Verdict) error {
 func (verdict Verdict) Qualifies(head string) bool {
 	return verdict.Mode == "gate" && verdict.Head == head &&
 		(verdict.Outcome == "clean" || verdict.Outcome == "findings" && verdict.Blocking == 0)
+}
+
+func (db *DB) GreenhouseGatePass(ctx context.Context, taskID int64, repository, head string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT verdict,blocking,head_sha,mode FROM verdicts WHERE task_id=? AND repo=? AND provider=? ORDER BY recorded_at DESC,id DESC`, taskID, repository, GreenhouseReviewProvider)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return false, rows.Err()
+	}
+	var verdict Verdict
+	if err := rows.Scan(&verdict.Outcome, &verdict.Blocking, &verdict.Head, &verdict.Mode); err != nil {
+		return false, err
+	}
+	return verdict.Qualifies(head), rows.Err()
 }
 
 func countBlockingReviewFindingsTx(ctx context.Context, tx *writeTx, taskID int64, repository, blockAt string) (int, error) {

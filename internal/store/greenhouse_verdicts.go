@@ -54,6 +54,15 @@ func (db *DB) RecordGreenhouseVerdict(ctx context.Context, verdict Verdict, curr
 	if err := (greenhouseReviewProvider{}).RecordVerdict(ctx, tx, verdict); err != nil {
 		return false, err
 	}
+	if len(verdict.Findings) > 0 {
+		var verdictID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM verdicts WHERE grant_id=?`, verdict.Grant).Scan(&verdictID); err != nil {
+			return false, err
+		}
+		if err := recordProviderFindingsTx(ctx, tx.Tx, verdictID, verdict); err != nil {
+			return false, err
+		}
+	}
 	return true, tx.Commit()
 }
 

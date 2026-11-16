@@ -20,6 +20,71 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func TestReviewStartRefusesBuiltInRoundForGreenhouseTask(t *testing.T) {
+	f := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start Change Task: code=%d %s", code, output)
+	}
+	change, _ := f.onlyTask(t)
+	plan, err := change.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("admitted plan: %+v %v", plan, err)
+	}
+	plan.Version = 7
+	plan.ReviewProvider = ""
+	if plan.ValidationLoops != nil {
+		plan.ValidationLoops.ReviewProvider = ""
+	}
+	legacyPlan, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,?,'full',?,?,?,?,?,'[]','verdict','changes_requested',1)`, change.ID, change.ID, f.project.Name, strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("c", 40), strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, string(legacyPlan), change.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), "Greenhouse") || !strings.Contains(output.String(), "Verdict") {
+		t.Fatalf("review start did not direct the Lead to Greenhouse: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rounds, err := db.ReviewRoundsFor(context.Background(), change.ID)
+	if err != nil || len(rounds) != 1 || rounds[0].Round != 1 || rounds[0].Verdict != "changes_requested" {
+		t.Fatalf("earlier built-in Review history changed: %+v %v", rounds, err)
+	}
+	usage, err := db.ReviewCapUsage(context.Background(), change.ID)
+	if err != nil || usage.ReviewRounds != 1 {
+		t.Fatalf("earlier built-in Review round no longer counts toward cap: %+v %v", usage, err)
+	}
+	maxRounds := 1
+	fix, err := db.QueueProviderReviewFixInstruction(context.Background(), change.ID, strings.Repeat("b", 40), nil, "review:legacy:P-1", "Fix P-1", []int{1}, &maxRounds, &maxRounds)
+	if err != nil || !fix.SharedExhausted || fix.RoundsUsed != 1 {
+		t.Fatalf("provider Fix Round ignored the earlier built-in round at the frozen cap: %+v %v", fix, err)
+	}
+}
+
 func TestFailedReviewLaunchDoesNotConsumeRoundCap(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(`[defaults]

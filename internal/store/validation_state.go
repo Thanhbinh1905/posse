@@ -215,7 +215,7 @@ var ErrValidationHeadsChanged = errors.New("validation fix instructions changed 
 // QueueValidationFixInstruction records a fix round and queues or extends the
 // unsent validation message for the same head in one transaction.
 func (db *DB) QueueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead, dedupeKey, body string) (QueueValidationFixResult, error) {
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, nil, nil)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, nil, nil, nil)
 }
 
 // QueueValidationFixInstructionWithinBudget records a fix round only while its
@@ -224,7 +224,7 @@ func (db *DB) QueueValidationFixInstructionWithinBudget(ctx context.Context, tas
 	if maxRounds < 0 {
 		return QueueValidationFixResult{}, fmt.Errorf("validation fix round budget cannot be negative")
 	}
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, &maxRounds, nil)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, &maxRounds, nil, nil)
 }
 
 // QueueValidationFixInstructionWithSharedBudget enforces the frozen per-kind
@@ -233,7 +233,7 @@ func (db *DB) QueueValidationFixInstructionWithSharedBudget(ctx context.Context,
 	if maxRounds < 0 || sharedMax < 1 {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")
 	}
-	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, &maxRounds, &sharedMax)
+	return db.queueValidationFixInstruction(ctx, taskID, kind, expectedBaseHead, nil, dedupeKey, body, &maxRounds, &sharedMax, nil)
 }
 
 // QueueReviewFixInstruction records one whole-pattern Review fix round. A
@@ -255,10 +255,23 @@ func (db *DB) QueueReviewFixInstruction(ctx context.Context, taskID int64, expec
 			return QueueValidationFixResult{}, fmt.Errorf("workspace Review fix head must be the digest of its Member heads")
 		}
 	}
-	return db.queueValidationFixInstruction(ctx, taskID, "review", expectedBaseHead, members, dedupeKey, body, maxRounds, sharedMax)
+	return db.queueValidationFixInstruction(ctx, taskID, "review", expectedBaseHead, members, dedupeKey, body, maxRounds, sharedMax, nil)
 }
 
-func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead string, members []ValidationFixMemberHead, dedupeKey, body string, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
+func (db *DB) QueueProviderReviewFixInstruction(ctx context.Context, taskID int64, expectedBaseHead string, members []ValidationFixMemberHead, dedupeKey, body string, patterns []int, maxRounds, sharedMax *int) (QueueValidationFixResult, error) {
+	if len(patterns) == 0 {
+		return QueueValidationFixResult{}, fmt.Errorf("provider Review fixes require selected findings")
+	}
+	if (maxRounds != nil && *maxRounds < 0) || (sharedMax != nil && *sharedMax < 1) {
+		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix budget")
+	}
+	if len(members) > 0 && expectedBaseHead != ValidationMemberHeadsDigest(members) {
+		return QueueValidationFixResult{}, fmt.Errorf("workspace Review fix head must be the digest of its Member heads")
+	}
+	return db.queueValidationFixInstruction(ctx, taskID, "review", expectedBaseHead, members, dedupeKey, body, maxRounds, sharedMax, patterns)
+}
+
+func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, kind, expectedBaseHead string, members []ValidationFixMemberHead, dedupeKey, body string, maxRounds, sharedMax *int, greenhousePatterns []int) (QueueValidationFixResult, error) {
 	if taskID < 1 || (kind != "gate" && kind != "ci" && kind != "review" && kind != "freshness") {
 		return QueueValidationFixResult{}, fmt.Errorf("invalid validation fix task or kind")
 	}
@@ -288,7 +301,8 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 	var existingMessageID int64
 	var existingExpected string
 	var existingSeq int
-	err = tx.QueryRowContext(ctx, `SELECT expected_base_head,message_id,seq FROM validation_fix_rounds WHERE ship_task_id=? AND kind=? AND dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID, &existingSeq)
+	var existingRoundID int64
+	err = tx.QueryRowContext(ctx, `SELECT expected_base_head,message_id,seq,id FROM validation_fix_rounds WHERE ship_task_id=? AND kind=? AND dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID, &existingSeq, &existingRoundID)
 	if err == nil {
 		if existingExpected != expectedBaseHead {
 			return QueueValidationFixResult{}, fmt.Errorf("validation fix dedupe key %q was reused for another head", dedupeKey)
@@ -296,6 +310,11 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 		var roundsUsed int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, taskID, kind).Scan(&roundsUsed); err != nil {
 			return QueueValidationFixResult{}, err
+		}
+		if len(greenhousePatterns) > 0 {
+			if err := bindProviderFixRoundTx(ctx, tx, existingRoundID, taskID, expectedBaseHead, members, greenhousePatterns); err != nil {
+				return QueueValidationFixResult{}, err
+			}
 		}
 		return QueueValidationFixResult{MessageID: existingMessageID, Seq: existingSeq, RoundsUsed: roundsUsed}, nil
 	}
@@ -312,7 +331,9 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 	}
 	if sharedMax != nil {
 		var reviews, repairs int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')`, taskID).Scan(&reviews); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT
+(SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')) +
+(SELECT COUNT(*) FROM verdicts WHERE task_id=? AND provider='greenhouse' AND mode='gate')`, taskID, taskID).Scan(&reviews); err != nil {
 			return QueueValidationFixResult{}, err
 		}
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, taskID).Scan(&repairs); err != nil {
@@ -369,8 +390,14 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 	if err != nil {
 		return QueueValidationFixResult{}, err
 	}
-	if _, err := result.LastInsertId(); err != nil {
+	roundID, err := result.LastInsertId()
+	if err != nil {
 		return QueueValidationFixResult{}, err
+	}
+	if len(greenhousePatterns) > 0 {
+		if err := bindProviderFixRoundTx(ctx, tx, roundID, taskID, expectedBaseHead, members, greenhousePatterns); err != nil {
+			return QueueValidationFixResult{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return QueueValidationFixResult{}, err
@@ -464,14 +491,58 @@ func sameValidationHeadList(left, right []string) bool {
 	return true
 }
 
+type ProviderFindingPattern struct {
+	TaskID      int64
+	Seq         int
+	Key         string
+	Title       string
+	Rule        string
+	FixGuidance string
+}
+
+type ProviderFindingRecord struct {
+	ID         int64
+	VerdictID  int64
+	TaskID     int64
+	Provider   string
+	Repository string
+	HeadSHA    string
+	Key        string
+	PatternSeq int
+	Path       string
+	Line       int
+	Excerpt    string
+	Severity   string
+	Origin     string
+	State      string
+}
+
+type ProviderFindingEvent struct {
+	ID        int64
+	FindingID int64
+	Event     string
+	Note      string
+	At        int64
+}
+
+type FixRoundProviderFinding struct {
+	FixRoundID int64
+	FindingID  int64
+	PatternSeq int
+}
+
 type validationStateSnapshot struct {
-	ReviewRounds        []ReviewRound
-	ReviewPatterns      []ReviewPattern
-	ReviewFindings      []ReviewFinding
-	ReviewFindingEvents []ReviewFindingEvent
-	ReviewCarries       []ReviewCarry
-	ReviewDispositions  []ReviewDisposition
-	ValidationFixRounds []ValidationFixRound
+	ProviderFindingPatterns  []ProviderFindingPattern
+	ProviderFindings         []ProviderFindingRecord
+	ProviderFindingEvents    []ProviderFindingEvent
+	FixRoundProviderFindings []FixRoundProviderFinding
+	ReviewRounds             []ReviewRound
+	ReviewPatterns           []ReviewPattern
+	ReviewFindings           []ReviewFinding
+	ReviewFindingEvents      []ReviewFindingEvent
+	ReviewCarries            []ReviewCarry
+	ReviewDispositions       []ReviewDisposition
+	ValidationFixRounds      []ValidationFixRound
 }
 
 func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validationStateSnapshot, error) {
@@ -598,6 +669,70 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 			return state, err
 		}
 		state.ValidationFixRounds = append(state.ValidationFixRounds, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT task_id,seq,key,title,rule,fix_guidance FROM provider_finding_patterns WHERE task_id=? ORDER BY seq`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ProviderFindingPattern
+		if err := rows.Scan(&value.TaskID, &value.Seq, &value.Key, &value.Title, &value.Rule, &value.FixGuidance); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.ProviderFindingPatterns = append(state.ProviderFindingPatterns, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT id,verdict_id,task_id,provider,repo,head_sha,finding_key,pattern_seq,path,line,excerpt,severity,origin,state FROM provider_findings WHERE task_id=? ORDER BY id`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ProviderFindingRecord
+		if err := rows.Scan(&value.ID, &value.VerdictID, &value.TaskID, &value.Provider, &value.Repository, &value.HeadSHA, &value.Key, &value.PatternSeq, &value.Path, &value.Line, &value.Excerpt, &value.Severity, &value.Origin, &value.State); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.ProviderFindings = append(state.ProviderFindings, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT e.id,e.finding_id,e.event,e.note,e.at FROM provider_finding_events e JOIN provider_findings f ON f.id=e.finding_id WHERE f.task_id=? ORDER BY e.id`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value ProviderFindingEvent
+		if err := rows.Scan(&value.ID, &value.FindingID, &value.Event, &value.Note, &value.At); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.ProviderFindingEvents = append(state.ProviderFindingEvents, value)
+	}
+	if err := closeSnapshotRows(rows); err != nil {
+		return state, err
+	}
+
+	rows, err = db.QueryContext(ctx, `SELECT r.fix_round_id,r.finding_id,r.pattern_seq FROM fix_round_provider_findings r JOIN validation_fix_rounds v ON v.id=r.fix_round_id WHERE v.ship_task_id=? ORDER BY r.fix_round_id,r.finding_id`, taskID)
+	if err != nil {
+		return state, err
+	}
+	for rows.Next() {
+		var value FixRoundProviderFinding
+		if err := rows.Scan(&value.FixRoundID, &value.FindingID, &value.PatternSeq); err != nil {
+			_ = rows.Close()
+			return state, err
+		}
+		state.FixRoundProviderFindings = append(state.FixRoundProviderFindings, value)
 	}
 	if err := closeSnapshotRows(rows); err != nil {
 		return state, err

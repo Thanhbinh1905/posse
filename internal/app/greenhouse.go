@@ -17,6 +17,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -83,7 +84,11 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
-	parallelMode := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse"
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
+	}
+	parallelMode := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse" || taskUsesGreenhouseReviewProvider(task, cfg, member.name)
 	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
 	pendingPath := filepath.Join(roundDir, member.name+".pending.json")
 	hasPending, err := parallelReviewPending(pendingPath)
@@ -330,7 +335,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				}
 				continue
 			}
-			recorded, verdict, err := recordGreenhouseVerdict(ctx.Context, db, task, member, roundDir, blockAt, result)
+			recorded, verdict, err := recordGreenhouseVerdict(ctx.Context, db, task, member, roundDir, blockAt, cfg, result)
 			if errors.Is(err, store.ErrVerdictHeadMoved) {
 				if recordErr := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 					return recordErr
@@ -374,7 +379,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err := recordRequest("failed", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
 			}
-			if plan == nil || plan.ValidationLoops == nil || plan.ValidationLoops.ReviewParallel != "greenhouse" {
+			if plan == nil || plan.ValidationLoops == nil || plan.ValidationLoops.ReviewParallel != "greenhouse" && plan.ValidationLoops.ReviewProvider != store.GreenhouseReviewProvider {
 				summary := fmt.Sprintf("%s: Greenhouse review %s of %s parked after an interruption (%s); Posse issues no new grant until it recovers", taskIDString(task.Seq), result.Grant, member.name, result.Recovery.Reason)
 				if _, err := db.CreateGreenhouseRecoveryNoticeOnce(ctx.Context, project.ID, task.ID, member.name, result.Recovery.ID, summary); err != nil {
 					return err
@@ -394,7 +399,210 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: string(greenhouse.Stale)}, {Key: "refused", Value: refused}})
 }
 
-func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task, member greenhouseMember, roundDir, blockAt string, result greenhouse.RoundResult) (bool, store.Verdict, error) {
+func (s *Service) reconcileGreenhousePrepublication(ctx context.Context, db *store.DB, home string, project store.Project) error {
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
+	}
+	if project.IsWorkspace() {
+		return s.reconcileGreenhouseWorkspacePrepublication(ctx, db, home, project, cfg)
+	}
+	return s.reconcileGreenhouseRepositoryPrepublication(ctx, db, home, project, cfg)
+}
+
+func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config) error {
+	tasks, err := db.TasksInState(ctx, project.ID, store.StateDone)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		signals, err := db.TaskSignals(ctx, task.ID, 1)
+		if err != nil {
+			return err
+		}
+		if len(signals) == 0 || signals[0].Verb != "done" {
+			continue
+		}
+		var data struct {
+			Members []greenhousePendingMember `json:"greenhouse_pending_members"`
+		}
+		if err := json.Unmarshal([]byte(signals[0].DataJSON), &data); err != nil || len(data.Members) == 0 {
+			continue
+		}
+		current, err := greenhouseWorkspacePendingHeads(ctx, db, task)
+		if err != nil {
+			return err
+		}
+		currentByRepo := make(map[string]string, len(current))
+		for _, member := range current {
+			currentByRepo[member.Repository] = member.Head
+		}
+		targets := make([]store.ReviewTarget, 0, len(data.Members))
+		moved := false
+		for _, member := range data.Members {
+			if currentByRepo[member.Repository] != member.Head {
+				moved = true
+				break
+			}
+			targets = append(targets, store.ReviewTarget{Repository: member.Repository, Commit: member.Head})
+		}
+		if moved {
+			continue
+		}
+		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, targets); err != nil {
+			return err
+		}
+		verdicts, err := db.VerdictsFor(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		allPassed := true
+		var failed *store.Verdict
+		for _, target := range targets {
+			var latest *store.Verdict
+			for index := len(verdicts) - 1; index >= 0; index-- {
+				verdict := verdicts[index]
+				if verdict.Repository == target.Repository && verdict.Mode == "gate" && verdict.Head == target.Commit {
+					latest = &verdict
+					break
+				}
+			}
+			if latest == nil {
+				allPassed = false
+				break
+			}
+			if !latest.Qualifies(target.Commit) {
+				allPassed = false
+				failed = latest
+				break
+			}
+		}
+		if !allPassed {
+			if failed != nil && failed.Outcome == "findings" && failed.Blocking > 0 {
+				pending, err := db.ReviewFixInstructionPending(ctx, task.ID)
+				if err != nil {
+					return err
+				}
+				if !pending {
+					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+						return err
+					}
+				}
+			}
+			if failed != nil {
+				_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, failed.Repository, failed.Head, fmt.Sprintf("Greenhouse returned %s for Member %s at %s; publication is blocked", failed.Outcome, failed.Repository, shortSHA(failed.Head)))
+				if err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		var body strings.Builder
+		body.WriteString("Greenhouse passed these exact Member heads. Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
+		for _, target := range targets {
+			fmt.Fprintf(&body, "- %s at %s: `posse publish --repo %s \"<summary>\"`\n", target.Repository, shortSHA(target.Commit), target.Repository)
+		}
+		_, queued, err := db.QueueMessageOnceAfter(ctx, task.ID, body.String(), true, signals[0].At-1)
+		if err != nil {
+			return err
+		}
+		if queued {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: "Greenhouse passed all changed Member heads; Posse queued publication", DataJSON: marshalJSON(map[string]any{"members": targets})}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config) error {
+	tasks, err := db.TasksInState(ctx, project.ID, store.StateDone)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.State != store.StateDone || !taskUsesGreenhouseReviewProvider(task, cfg, "") || !fullPipelineSelected(task, "") {
+			continue
+		}
+		signals, err := db.TaskSignals(ctx, task.ID, 1)
+		if err != nil {
+			return err
+		}
+		if len(signals) == 0 || signals[0].Verb != "done" {
+			continue
+		}
+		var data struct {
+			Head string `json:"greenhouse_pending_head"`
+		}
+		if err := json.Unmarshal([]byte(signals[0].DataJSON), &data); err != nil || data.Head == "" {
+			continue
+		}
+		head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if head != data.Head {
+			continue
+		}
+		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, []store.ReviewTarget{{Repository: project.Name, Commit: head}}); err != nil {
+			return err
+		}
+		verdicts, err := db.VerdictsFor(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		var latest *store.Verdict
+		for index := len(verdicts) - 1; index >= 0; index-- {
+			verdict := verdicts[index]
+			if verdict.Repository == project.Name && verdict.Mode == "gate" && verdict.Head == head {
+				latest = &verdict
+				break
+			}
+		}
+		if latest != nil {
+			verdict := *latest
+			if verdict.Qualifies(head) {
+				body := fmt.Sprintf("Greenhouse passed Task head %s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", shortSHA(head), task.Title)
+				_, queued, err := db.QueueMessageOnceAfter(ctx, task.ID, body, true, signals[0].At-1)
+				if err != nil {
+					return err
+				}
+				if queued {
+					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: Greenhouse passed %s; Posse queued publication", task.Title, shortSHA(head)), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			reason := fmt.Sprintf("Greenhouse returned %s for Task head %s; Posse will not publish it. The review findings are at %s. A new head requires a new done Signal.", verdict.Outcome, shortSHA(head), verdict.FindingsPath)
+			if verdict.Outcome == "findings" && verdict.Blocking > 0 {
+				pending, err := db.ReviewFixInstructionPending(ctx, task.ID)
+				if err != nil {
+					return err
+				}
+				if !pending {
+					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+						_, _ = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
+						return err
+					}
+				}
+			}
+			if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func greenhouseVerdictMode(task store.Task, cfg config.Config, repository string) string {
+	if taskUsesGreenhouseReviewProvider(task, cfg, repository) {
+		return "gate"
+	}
+	return "parallel"
+}
+
+func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task, member greenhouseMember, roundDir, blockAt string, cfg config.Config, result greenhouse.RoundResult) (bool, store.Verdict, error) {
 	hr := result.Result
 	findings, err := json.MarshalIndent(hr.Findings, "", "  ")
 	if err != nil {
@@ -409,7 +617,13 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 		TaskID: task.ID, Repository: member.name, Provider: store.GreenhouseReviewProvider, Protocol: strconv.Itoa(greenhouse.Protocol),
 		Grant: result.Grant, Head: hr.Head, Target: hr.Target, ReviewBase: hr.ReviewBase, Outcome: hr.Verdict,
 		RulesDigest: hr.RulesDigest, ConfigDigest: hr.ConfigDigest, InputDigest: hr.InputDigest, Backend: hr.Backend, Model: hr.Model,
-		FindingsHash: hex.EncodeToString(digest[:]), FindingsPath: path, Mode: "parallel",
+		FindingsHash: hex.EncodeToString(digest[:]), FindingsPath: path, Mode: greenhouseVerdictMode(task, cfg, member.name),
+	}
+	for _, finding := range hr.Findings {
+		verdict.Findings = append(verdict.Findings, store.ProviderFinding{
+			Key: finding.ID, Severity: finding.Priority, Origin: finding.Origin, Path: finding.File, Line: finding.Start,
+			Excerpt: finding.Explanation, Guidance: finding.Action, Rule: finding.Rule, Head: finding.Head,
+		})
 	}
 	if hr.Verdict == "findings" {
 		verdict.Blocking = greenhouseBlocking(hr.Findings, blockAt)

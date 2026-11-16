@@ -58,19 +58,21 @@ type TaskSnapshot struct {
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
 	// ReviewReceipts are the no-mistakes receipts that qualified a Change Task
 	// before no-mistakes was removed; they are kept as history.
-	ReviewReceipts []ReviewReceipt `toml:"review_receipts,omitempty"`
-	// Validation state is owned by a Change Task and includes its review rounds,
-	// finding ledger, carry proofs, dispositions, and fix-round budget.
-	ReviewRounds         []ReviewRound           `toml:"review_rounds,omitempty"`
-	ReviewPatterns       []ReviewPattern         `toml:"review_patterns,omitempty"`
-	ReviewFindings       []ReviewFinding         `toml:"review_findings,omitempty"`
-	ReviewFindingEvents  []ReviewFindingEvent    `toml:"review_finding_events,omitempty"`
-	ReviewCarries        []ReviewCarry           `toml:"review_carries,omitempty"`
-	ReviewCapGrant       *ReviewCapGrant         `toml:"review_cap_grant,omitempty"`
-	ReviewDispositions   []ReviewDisposition     `toml:"review_dispositions,omitempty"`
-	ValidationFixRounds  []ValidationFixRound    `toml:"validation_fix_rounds,omitempty"`
-	ValidationCandidates []ValidationCandidate   `toml:"validation_candidates,omitempty"`
-	ValidationStages     []ValidationStageResult `toml:"validation_stages,omitempty"`
+	ReviewReceipts           []ReviewReceipt           `toml:"review_receipts,omitempty"`
+	ProviderFindingPatterns  []ProviderFindingPattern  `toml:"provider_finding_patterns,omitempty"`
+	ProviderFindings         []ProviderFindingRecord   `toml:"provider_findings,omitempty"`
+	ProviderFindingEvents    []ProviderFindingEvent    `toml:"provider_finding_events,omitempty"`
+	FixRoundProviderFindings []FixRoundProviderFinding `toml:"fix_round_provider_findings,omitempty"`
+	ReviewRounds             []ReviewRound             `toml:"review_rounds,omitempty"`
+	ReviewPatterns           []ReviewPattern           `toml:"review_patterns,omitempty"`
+	ReviewFindings           []ReviewFinding           `toml:"review_findings,omitempty"`
+	ReviewFindingEvents      []ReviewFindingEvent      `toml:"review_finding_events,omitempty"`
+	ReviewCarries            []ReviewCarry             `toml:"review_carries,omitempty"`
+	ReviewCapGrant           *ReviewCapGrant           `toml:"review_cap_grant,omitempty"`
+	ReviewDispositions       []ReviewDisposition       `toml:"review_dispositions,omitempty"`
+	ValidationFixRounds      []ValidationFixRound      `toml:"validation_fix_rounds,omitempty"`
+	ValidationCandidates     []ValidationCandidate     `toml:"validation_candidates,omitempty"`
+	ValidationStages         []ValidationStageResult   `toml:"validation_stages,omitempty"`
 }
 
 type projectSnapshot struct {
@@ -433,6 +435,10 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		snapshot.ReviewPatterns = validationState.ReviewPatterns
 		snapshot.ReviewFindings = validationState.ReviewFindings
 		snapshot.ReviewFindingEvents = validationState.ReviewFindingEvents
+		snapshot.ProviderFindingPatterns = validationState.ProviderFindingPatterns
+		snapshot.ProviderFindings = validationState.ProviderFindings
+		snapshot.ProviderFindingEvents = validationState.ProviderFindingEvents
+		snapshot.FixRoundProviderFindings = validationState.FixRoundProviderFindings
 		snapshot.ReviewCarries = validationState.ReviewCarries
 		snapshot.ReviewDispositions = validationState.ReviewDispositions
 		grant, err := db.ReviewCapGrant(ctx, taskID)
@@ -1125,7 +1131,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"provider_finding_events", "fix_round_provider_findings", "provider_findings", "provider_finding_patterns", "review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1349,6 +1355,27 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				return fmt.Errorf("rebuild t%d review finding event: %w", task.Seq, err)
 			}
 		}
+		for _, pattern := range snapshot.ProviderFindingPatterns {
+			if pattern.TaskID != 0 && pattern.TaskID != task.ID {
+				return fmt.Errorf("provider finding pattern in snapshot for t%d belongs to Task %d", task.Seq, pattern.TaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO provider_finding_patterns(task_id,seq,key,title,rule,fix_guidance) VALUES(?,?,?,?,?,?)`, task.ID, pattern.Seq, pattern.Key, pattern.Title, pattern.Rule, pattern.FixGuidance); err != nil {
+				return fmt.Errorf("rebuild t%d provider finding pattern: %w", task.Seq, err)
+			}
+		}
+		for _, finding := range snapshot.ProviderFindings {
+			if finding.TaskID != 0 && finding.TaskID != task.ID {
+				return fmt.Errorf("provider finding in snapshot for t%d belongs to Task %d", task.Seq, finding.TaskID)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO provider_findings(id,verdict_id,task_id,provider,repo,head_sha,finding_key,pattern_seq,path,line,excerpt,severity,origin,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, finding.ID, finding.VerdictID, task.ID, finding.Provider, finding.Repository, finding.HeadSHA, finding.Key, finding.PatternSeq, finding.Path, finding.Line, finding.Excerpt, finding.Severity, finding.Origin, finding.State); err != nil {
+				return fmt.Errorf("rebuild t%d provider finding: %w", task.Seq, err)
+			}
+		}
+		for _, event := range snapshot.ProviderFindingEvents {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO provider_finding_events(id,finding_id,event,note,at) VALUES(?,?,?,?,?)`, event.ID, event.FindingID, event.Event, event.Note, event.At); err != nil {
+				return fmt.Errorf("rebuild t%d provider finding event: %w", task.Seq, err)
+			}
+		}
 		for _, carry := range snapshot.ReviewCarries {
 			if carry.ChangeTaskID != 0 && carry.ChangeTaskID != task.ID {
 				return fmt.Errorf("review carry in snapshot for t%d belongs to Task %d", task.Seq, carry.ChangeTaskID)
@@ -1389,6 +1416,11 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if _, err := tx.ExecContext(ctx, `INSERT INTO validation_fix_rounds(id,ship_task_id,kind,seq,expected_base_head,dedupe_key,message_id,created_at,member_heads_json) VALUES(?,?,?,?,?,?,?,?,?)`,
 				fixRound.ID, task.ID, fixRound.Kind, fixRound.Seq, fixRound.ExpectedBaseHead, fixRound.DedupeKey, fixRound.MessageID, fixRound.CreatedAt, memberHeads); err != nil {
 				return fmt.Errorf("rebuild t%d validation fix round: %w", task.Seq, err)
+			}
+		}
+		for _, finding := range snapshot.FixRoundProviderFindings {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO fix_round_provider_findings(fix_round_id,finding_id,pattern_seq) VALUES(?,?,?)`, finding.FixRoundID, finding.FindingID, finding.PatternSeq); err != nil {
+				return fmt.Errorf("rebuild t%d provider finding fix-round binding: %w", task.Seq, err)
 			}
 		}
 		for _, candidate := range snapshot.ValidationCandidates {

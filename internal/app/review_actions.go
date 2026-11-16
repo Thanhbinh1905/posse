@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -62,10 +63,18 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if err != nil {
 		return reviewFixQueued{}, admittedPlanFailure(err)
 	}
-	if plan == nil || plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled {
+	cfg, err := config.Load(s.Home, project.Name)
+	if err != nil {
+		return reviewFixQueued{}, err
+	}
+	greenhouse := taskUsesGreenhouseReviewProvider(change, cfg, "")
+	if plan == nil || !greenhouse && (plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled) {
 		return reviewFixQueued{}, axi.Failure("review_loop_disabled", "Change Task has no enabled, frozen Review Loop", false)
 	}
-	maxRounds := plan.ValidationLoops.MaxReviewRounds()
+	maxRounds := cfg.ReviewLoop.MaxRounds
+	if plan.ValidationLoops != nil {
+		maxRounds = plan.ValidationLoops.MaxReviewRounds()
+	}
 	if !capAuthorized {
 		pending, err := db.ReviewFixInstructionPending(ctx, change.ID)
 		if err != nil {
@@ -83,9 +92,22 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if !capAuthorized && used >= maxRounds {
 		return reviewFixQueued{}, s.reviewCapFailure(ctx, db, project, change, used, maxRounds)
 	}
-	findings, err := db.ReviewFindingsForTask(ctx, change.ID)
-	if err != nil {
-		return reviewFixQueued{}, err
+	var findings []store.ReviewFindingDetail
+	if greenhouse {
+		stored, err := db.ProviderFindingsForTask(ctx, change.ID)
+		if err != nil {
+			return reviewFixQueued{}, err
+		}
+		for _, finding := range stored {
+			findings = append(findings, store.ReviewFindingDetail{FindingSeq: finding.FindingSeq, PatternSeq: finding.PatternSeq, PatternKey: finding.PatternKey,
+				Title: finding.Title, Rule: finding.Rule, FixGuidance: finding.FixGuidance, Repository: finding.Repository, Path: finding.Path,
+				Excerpt: finding.Excerpt, Severity: finding.Severity, Origin: "introduced", InScope: true, State: finding.State})
+		}
+	} else {
+		findings, err = db.ReviewFindingsForTask(ctx, change.ID)
+		if err != nil {
+			return reviewFixQueued{}, err
+		}
 	}
 	requestedSeqs := map[int]bool{}
 	for _, value := range requested {
@@ -124,7 +146,7 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 		selected = append(selected, seq)
 	}
 	sort.Ints(selected)
-	head, members, err := reviewFixHeads(ctx, db, project, change)
+	head, members, err := reviewFixHeads(ctx, db, project, change, greenhouse)
 	if err != nil {
 		return reviewFixQueued{}, err
 	}
@@ -156,7 +178,11 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 			body.WriteString("\nFix the other Members on their Task branch and commit the changes there.\n")
 		}
 	}
-	body.WriteString("\nFix every instance of each selected pattern, including any unlisted instances you find. For every pattern, write one answer with status `fixed` or `disputed` in a `posse.review-resolutions.v1` JSON file, then signal done with `--resolutions <file>`. A missing or extra answer is refused. Set each `status` and replace each `note`, which is optional:\n\n```json\n")
+	doneFlags := "--resolutions <file>"
+	if greenhouse && !project.IsWorkspace() && fullPipelineSelected(change, "") {
+		doneFlags += " --head <current-commit-sha>"
+	}
+	fmt.Fprintf(&body, "\nFix every instance of each selected pattern, including any unlisted instances you find. For every pattern, write one answer with status `fixed` or `disputed` in a `posse.review-resolutions.v1` JSON file, then signal done with `%s`. A missing or extra answer is refused. Set each `status` and replace each `note`, which is optional:\n\n```json\n", doneFlags)
 	answers := make([]reviewPatternResolution, len(selected))
 	for i, seq := range selected {
 		answers[i] = reviewPatternResolution{Pattern: "P-" + strconv.Itoa(seq), Status: "fixed", Note: "what changed, or why the pattern is disputed"}
@@ -196,7 +222,12 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 			sharedBudget = &maxRounds
 		}
 	}
-	result, err := db.QueueReviewFixInstruction(ctx, change.ID, expected, memberHeads, dedupe, strings.TrimSpace(body.String()), budget, sharedBudget)
+	var result store.QueueValidationFixResult
+	if greenhouse {
+		result, err = db.QueueProviderReviewFixInstruction(ctx, change.ID, expected, memberHeads, dedupe, strings.TrimSpace(body.String()), selected, budget, sharedBudget)
+	} else {
+		result, err = db.QueueReviewFixInstruction(ctx, change.ID, expected, memberHeads, dedupe, strings.TrimSpace(body.String()), budget, sharedBudget)
+	}
 	if err != nil {
 		return reviewFixQueued{}, err
 	}
@@ -230,7 +261,7 @@ type reviewFixHead struct {
 
 // reviewFixHeads returns the single-repository head, or one head per changed
 // workspace Member. A full-pipeline lane binds its active private candidate.
-func reviewFixHeads(ctx context.Context, db *store.DB, project store.Project, change store.Task) (reviewFixHead, []reviewFixHead, error) {
+func reviewFixHeads(ctx context.Context, db *store.DB, project store.Project, change store.Task, greenhouse bool) (reviewFixHead, []reviewFixHead, error) {
 	targets, err := changeCandidateTargets(ctx, db, project, change)
 	if err != nil {
 		return reviewFixHead{}, nil, err
@@ -240,7 +271,7 @@ func reviewFixHeads(ctx context.Context, db *store.DB, project store.Project, ch
 			return reviewFixHead{}, nil, axi.Failure("review_fix_unsupported", "Review fix requires one repository head", false)
 		}
 		head := reviewFixHead{ValidationFixMemberHead: store.ValidationFixMemberHead{ExpectedBaseHead: targets[0].Commit}}
-		if fullPipelineSelected(change, "") {
+		if fullPipelineSelected(change, "") && !greenhouse {
 			candidate, err := activeReviewFixCandidate(ctx, db, change, "")
 			if err != nil {
 				return reviewFixHead{}, nil, err
@@ -260,7 +291,7 @@ func reviewFixHeads(ctx context.Context, db *store.DB, project store.Project, ch
 	members := make([]reviewFixHead, 0, len(targets))
 	for _, target := range targets {
 		member := reviewFixHead{ValidationFixMemberHead: store.ValidationFixMemberHead{Repository: target.Repository, ExpectedBaseHead: target.Commit}, checkout: checkouts[target.Repository]}
-		if fullPipelineSelected(change, target.Repository) {
+		if fullPipelineSelected(change, target.Repository) && !greenhouse {
 			candidate, err := activeReviewFixCandidate(ctx, db, change, target.Repository)
 			if err != nil {
 				return reviewFixHead{}, nil, err

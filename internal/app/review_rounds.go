@@ -110,6 +110,13 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return err
+	}
+	if taskUsesGreenhouseReviewProvider(change, cfg, "") {
+		return axi.Failure("greenhouse_review_selected", "this Task uses Greenhouse; a built-in Review Task cannot provide its Verdict", false, "Request the Greenhouse Verdict with `posse _greenhouse review "+taskIDString(change.Seq)+"` or let Lead Watch run the pre-publication flow")
+	}
 	candidateReview := plan != nil && (plan.Review == "full-pipeline" || workspaceHasFullPipeline(plan))
 	if candidateReview {
 		pendingRefresh, err := db.OutstandingValidationFixHead(ctx.Context, change.ID, "freshness")
@@ -1051,8 +1058,13 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 	if err != nil {
 		return false, admittedPlanFailure(err)
 	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return false, err
+	}
+	greenhouseGate := taskUsesGreenhouseReviewProvider(change, cfg, "")
 	parallel := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse"
-	if !parallel && !autoStartReviewLoop(plan) {
+	if !parallel && !greenhouseGate && !autoStartReviewLoop(plan) {
 		return false, nil
 	}
 	targets, err := changeCandidateTargets(ctx.Context, db, project, change)
@@ -1076,8 +1088,8 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 	} else if len(targets) != 1 || change.GatedSHA == "" || targets[0].Commit != change.GatedSHA {
 		return false, nil
 	}
-	if !autoStartReviewLoop(plan) {
-		if parallel {
+	if !autoStartReviewLoop(plan) || greenhouseGate {
+		if parallel || greenhouseGate {
 			if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
 				return false, err
 			}

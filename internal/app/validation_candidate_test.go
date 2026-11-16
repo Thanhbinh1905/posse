@@ -790,7 +790,11 @@ func TestFullPipelineDoneChecksCandidateContinuityAgainstFixInstruction(t *testi
 		t.Fatalf("queue candidate fix instruction: %#v, %v", fix, err)
 	}
 	gitTest(t, candidate.WorktreePath, "commit", "--allow-empty", "--amend", "-m", "rewrite candidate history")
-	_, err = fixture.service.recordWorkerSignalWithContinuity(context.Background(), fixture.db, fixture.project, fixture.task, "done", "Finished the fix", nil, "task_done", nil, false)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fixture.service.recordWorkerSignalWithContinuity(context.Background(), fixture.db, fixture.project, cfg, fixture.task, "done", "Finished the fix", nil, "task_done", nil, false)
 	if err == nil || !strings.Contains(err.Error(), "does not descend from expected head") {
 		t.Fatalf("discontinuous full-pipeline candidate was accepted: %v", err)
 	}
@@ -1284,6 +1288,30 @@ func TestWorkerProtocolGuidesFullPipelineLanes(t *testing.T) {
 	workspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 2, Type: "change", PlanJSON: encoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t2", "none")
 	if !strings.Contains(workspace, "`posse validate lint --repo <member>") || !strings.Contains(workspace, "`posse publish --repo <member> \"<summary>\"` to promote") || !strings.Contains(workspace, "after submitting every changed Member and end the turn") {
 		t.Fatalf("workspace full-pipeline protocol lacks per-Member commands: %s", workspace)
+	}
+	workspacePlan, err := taskplan.Resolve(taskplan.Request{
+		Brief:     taskplan.Select("brief", "workspace.md", []byte("---\ntype: change\ntitle: Greenhouse workspace\ndone_when: changed Members pass\n---\nChange the selected Members.\n")),
+		Execution: taskplan.Execution{Scope: "workspace", Base: "main", Target: "main", Members: []taskplan.Member{{Name: "api", Path: "api", Base: "main", Target: "main", Delivery: "local"}, {Name: "web", Path: "web", Base: "main", Target: "main", Delivery: "local"}}},
+		Launch:    taskplan.Launch{ProfileName: "author", Profile: config.Profile{Kind: "claude"}},
+		Review:    "full-pipeline", ReviewProvider: store.GreenhouseReviewProvider, Delivery: "local", Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths:           taskplan.Paths{Scratch: "/home/user/.posse/scratch/stack/t4", Output: "/home/user/.posse/projects/stack/tasks/t4"},
+		ValidationLoops: &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"}, CI: config.CILoop{MaxFixRounds: 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceEncoded, err := workspacePlan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	greenhouseWorkspace := workerProtocol("/home/user/.posse", store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}, store.Task{Seq: 4, Type: "change", PlanJSON: workspaceEncoded}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/stack/t4", "none")
+	for _, want := range []string{"Greenhouse full-pipeline Workspace", "one Greenhouse Verdict for each exact Member head", "--resolutions <file>"} {
+		if !strings.Contains(greenhouseWorkspace, want) {
+			t.Fatalf("Greenhouse workspace protocol lacks %q: %s", want, greenhouseWorkspace)
+		}
+	}
+	if strings.Contains(greenhouseWorkspace, "signal done \"<summary>\" --head") || strings.Contains(greenhouseWorkspace, "posse validate test") || strings.Contains(greenhouseWorkspace, "submit a private candidate") {
+		t.Fatalf("Greenhouse workspace protocol includes built-in validation steps: %s", greenhouseWorkspace)
 	}
 	quick := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "change", MergeMode: "local"}, brief, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t3", "none")
 	if strings.Contains(quick, "Full-pipeline") {

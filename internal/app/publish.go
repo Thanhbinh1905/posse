@@ -153,7 +153,9 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		}
 		repoFilter = parsed.Flags["repo"]
 	}
-	if !isFullPipelineTask(task, repoFilter) {
+	greenhouseFullPipeline := greenhouseFullPipelineTaskWithConfig(task, cfg, repoFilter)
+	fullPipeline := fullPipelineSelected(task, repoFilter)
+	if !fullPipeline {
 		if err := s.processPendingStackedTargetChanges(out.Context, db, project, cfg, repoFilter); err != nil {
 			return err
 		}
@@ -174,14 +176,14 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return axi.Failure("stack_retarget_incomplete", "stacked PR/MR target change is "+change.Status+": "+change.Error, change.Status == "pending", "Resolve the stacked PR/MR target change before publishing again")
 		}
 	}
-	if task.Type != "change" || (task.State != store.StateWorking && task.State != store.StateStalled && !(task.State == store.StateDone && isFullPipelineTask(task, repoFilter))) || task.WorktreePath == "" || task.Branch == "" {
+	if task.Type != "change" || (task.State != store.StateWorking && task.State != store.StateStalled && !(task.State == store.StateDone && fullPipeline)) || task.WorktreePath == "" || task.Branch == "" {
 		return axi.Failure("publish_refused", "only an eligible PR-mode Change Task with its own Task branch can publish", false)
 	}
 	cwd, err := currentDir()
 	if err != nil {
 		return axi.Failure("publish_refused", "could not resolve the current directory", false)
 	}
-	if isFullPipelineTask(task, repoFilter) {
+	if fullPipeline && !greenhouseFullPipeline {
 		if rewrite {
 			return axi.Failure("publish_refused", "--rewrite does not support full-pipeline Tasks", false)
 		}
@@ -295,6 +297,11 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	expectedAuthorHead, err := validateWorkerBranchAuthorHeadUpdate(out.Context, db, task, requiredAuthorHead, sha, rewrite)
 	if err != nil {
 		return axi.Failure("publish_refused", "the branch author claim cannot authorize this head update", false, err.Error())
+	}
+	if greenhouseFullPipelineTaskWithConfig(task, cfg, repoFilter) {
+		if err := requireGreenhouseGatePass(out.Context, db, project, cfg, task, sha, repoFilter); err != nil {
+			return axi.Failure("publish_refused", "full-pipeline requires a passing Greenhouse Verdict for this head before push", false, err.Error())
+		}
 	}
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {
 		return err
@@ -488,7 +495,7 @@ func (s *Service) validateWorkspacePublishedPRs(ctx context.Context, db *store.D
 		return err
 	}
 	for _, member := range members {
-		if member.repo.MergeMode != "pr" || candidateFix && isFullPipelineTask(task, member.repo.Repo) {
+		if member.repo.MergeMode != "pr" || candidateFix && fullPipelineTaskWithConfig(task, cfg, member.repo.Repo) {
 			continue
 		}
 		baseRef := member.repo.BaseRef

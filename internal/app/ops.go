@@ -221,6 +221,11 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 			s.waitForWatchMaintenance(4 * time.Second)
 		}
 	}()
+	if ctx.Err() == nil {
+		if err := s.reconcileGreenhousePrepublication(ctx, db, home, project); err != nil {
+			return err
+		}
+	}
 	if project.IsWorkspace() {
 		var failures []error
 		if err := s.autoTeardownMergedTasks(ctx, db, project, cfg); err != nil {
