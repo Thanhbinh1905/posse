@@ -1047,10 +1047,10 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			if err := s.monitorLeadReceiver(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
 				fmt.Fprintf(ctx.ErrOut, "Lead receiver check failed for %s: %v\n", project.Name, err)
 			}
+			if err := s.deliverNotices(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
+				fmt.Fprintf(ctx.ErrOut, "Notice alert delivery failed for %s: %v\n", project.Name, err)
+			}
 			lastLeadReceiverCheck = time.Now()
-		}
-		if err := s.deliverNotices(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
-			fmt.Fprintf(ctx.ErrOut, "Notice alert delivery failed for %s: %v\n", project.Name, err)
 		}
 		if passRequest != "" && passRequest != servedPass {
 			if err := writeFile(watchPassDonePath(home, project), []byte(passRequest+"\n")); err != nil {

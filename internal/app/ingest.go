@@ -545,15 +545,16 @@ func (s *Service) monitorLeadReceiver(ctx context.Context, db *store.DB, project
 		}
 	}
 	monitorsReceiver := extensionOwnsNotices(s.leadNoticeDelivery(project, lead.Agent)) || lead.Agent == "claude"
-	idleLead := lead.AgentStatus == "idle" || lead.AgentStatus == "done"
-	if monitorsReceiver && (idleLead || lead.Agent == "claude") && oldestNoticeAge(pendingActionable) >= leadReceiverGrace {
-		missing, err := s.leadReceiverMissing(project, lead)
-		if err != nil {
-			return err
-		}
-		if missing {
+	missing, err := s.leadReceiverMissing(project, lead)
+	if err != nil {
+		return err
+	}
+	if missing {
+		idleLead := lead.AgentStatus == "idle" || lead.AgentStatus == "done"
+		if monitorsReceiver && (idleLead || lead.Agent == "claude") && oldestNoticeAge(pendingActionable) >= leadReceiverGrace {
 			return raiseLeadReceiverMissing(ctx, db, project, lead.Agent)
 		}
+		return nil
 	}
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
