@@ -163,6 +163,133 @@ func TestGreenhouseFullPipelinePrepublicationReviewRunsFromWatch(t *testing.T) {
 	}
 }
 
+func TestGreenhousePrepublicationReconcilesMultipleDoneTasks(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
+	t.Cleanup(func() {
+		find := func() ([]isolatedHerdrServerProcess, error) {
+			processes, err := findSpawnedProcesses(func(_ []byte, cwd string) bool { return strings.HasPrefix(cwd, f.root) })
+			var daemons []isolatedHerdrServerProcess
+			for _, process := range processes {
+				if strings.Contains(process.Args, "/bin/greenhouse daemon") {
+					daemons = append(daemons, process)
+				}
+			}
+			return daemons, err
+		}
+		for attempt := 0; attempt < 4; attempt++ {
+			if err := stopProcesses("Greenhouse daemon", find, 3*time.Second); err != nil {
+				t.Errorf("stop fixture Greenhouse daemon: %v", err)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+			processes, err := find()
+			if err != nil || len(processes) == 0 {
+				return
+			}
+		}
+		t.Errorf("Greenhouse daemon restarted during cleanup")
+	})
+	projectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := projectDB.ProjectByID(context.Background(), f.projectID)
+	projectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(f.home, "projects", project.Name)
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.change = f.start(t, "t1", "First Greenhouse prepublication change", "first-greenhouse-prepubl")
+	firstHead := c.authorCommit(t)
+	firstEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	firstEnv = setEnv(firstEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(firstEnv, c.change.WorktreePath, "signal", "done", "first change", "--head", firstHead); err != nil {
+		t.Fatalf("first Worker done Signal: %v\n%s", err, output)
+	}
+	firstTask := c.change
+	firstDB, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateVerdict := store.Verdict{TaskID: firstTask.ID, Repository: project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/preexisting-gate", Head: firstHead, Target: firstHead, ReviewBase: firstHead, Outcome: "clean", Mode: "gate"}
+	if recorded, err := firstDB.RecordGreenhouseVerdict(context.Background(), gateVerdict, func(context.Context) (string, error) { return firstHead, nil }); err != nil || !recorded {
+		t.Fatalf("record preexisting Gate pass: recorded=%v err=%v", recorded, err)
+	}
+	parallelVerdict := gateVerdict
+	parallelVerdict.Grant = "shop/t1/shop/preexisting-parallel"
+	parallelVerdict.Mode = "parallel"
+	if recorded, err := firstDB.RecordGreenhouseVerdict(context.Background(), parallelVerdict, func(context.Context) (string, error) { return firstHead, nil }); err != nil || !recorded {
+		t.Fatalf("record preexisting parallel Verdict: recorded=%v err=%v", recorded, err)
+	}
+	now := time.Now().UnixMilli()
+	if err := firstDB.RecordGreenhouseReviewRequest(context.Background(), store.GreenhouseReviewRequest{ProjectID: f.projectID, TaskID: firstTask.ID, Repository: project.Name, RequestedHead: firstHead, Provider: store.GreenhouseReviewProvider, RequestedAt: now, SettledAt: now, Outcome: "verdict", Grant: parallelVerdict.Grant}); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second := f.start(t, "t2", "Second Greenhouse prepublication change", "second-greenhouse")
+	secondPath := filepath.Join(second.WorktreePath, "second-change.txt")
+	if err := os.WriteFile(secondPath, []byte("second change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "second-change.txt"}, {"commit", "-q", "-m", "second author change"}, {"rev-parse", "HEAD"}} {
+		command := exec.Command("git", args...)
+		command.Dir, command.Env = second.WorktreePath, f.env
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		if args[0] == "rev-parse" {
+			secondHead := strings.TrimSpace(string(output))
+			secondEnv := setEnv(c.env, "POSSE_TASK_ID", second.ContainmentMarker)
+			secondEnv = setEnv(secondEnv, "HERDR_PANE_ID", second.PaneID)
+			if result, err := c.posse(secondEnv, second.WorktreePath, "signal", "done", "second change", "--head", secondHead); err != nil {
+				t.Fatalf("second Worker done Signal: %v\n%s", err, result)
+			}
+		}
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch: %v\n%s", err, output)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if !waitForCondition(60*time.Second, func() bool {
+		verdicts, err := db.VerdictsFor(context.Background(), second.ID)
+		return err == nil && len(verdicts) > 0
+	}) {
+		t.Fatalf("Watch did not review the second pending Task; Verdicts=%+v", mustVerdicts(t, db, second.ID))
+	}
+	var firstGatePass bool
+	for _, verdict := range mustVerdicts(t, db, firstTask.ID) {
+		firstGatePass = firstGatePass || verdict.Mode == "gate" && verdict.Qualifies(firstHead)
+	}
+	if !firstGatePass {
+		t.Fatalf("first Task has no passing Gate Verdict: %+v", mustVerdicts(t, db, firstTask.ID))
+	}
+	var failedNotices int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, firstTask.ID).Scan(&failedNotices); err != nil || failedNotices != 0 {
+		t.Fatalf("passing first Task has %d Greenhouse failure notices, err=%v", failedNotices, err)
+	}
+}
+
+func mustVerdicts(t *testing.T, db *store.DB, taskID int64) []store.Verdict {
+	t.Helper()
+	verdicts, err := db.VerdictsFor(context.Background(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verdicts
+}
+
 func TestGreenhousePrepublicationFindingsQueueReviewFix(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	c := newGreenhouseContract(t, f)

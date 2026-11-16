@@ -568,10 +568,11 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					return err
 				}
 				if queued {
-					_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: Greenhouse passed %s; Posse queued publication", task.Title, shortSHA(head)), DataJSON: marshalJSON(map[string]string{"head": head})})
-					return err
+					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: Greenhouse passed %s; Posse queued publication", task.Title, shortSHA(head)), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
+						return err
+					}
 				}
-				return nil
+				continue
 			}
 			reason := fmt.Sprintf("Greenhouse returned %s for Task head %s; Posse will not publish it. The review findings are at %s. A new head requires a new done Signal.", verdict.Outcome, shortSHA(head), verdict.FindingsPath)
 			if verdict.Outcome == "findings" && verdict.Blocking > 0 {
@@ -586,8 +587,9 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					}
 				}
 			}
-			_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
-			return err
+			if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

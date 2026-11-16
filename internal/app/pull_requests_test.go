@@ -781,6 +781,20 @@ func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing
 	if got := strings.TrimSpace(gitTest(t, f.remote, "rev-parse", "refs/heads/posse/t1")); got != head {
 		t.Fatalf("published head %s, want %s", got, head)
 	}
+	if code, output, stderr := f.run("signal", "working", "Publication instruction received"); code != 0 {
+		t.Fatalf("reopen after publication: %d %s %s", code, output, stderr)
+	}
+	turn, err := f.db.TaskTurnToken(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("signal", "done", "Published exact Greenhouse head", "--head", head, "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
+		t.Fatalf("done after publication: %d %s %s", code, output, stderr)
+	}
+	latestSignals, err := f.db.TaskSignals(context.Background(), task.ID, 2)
+	if err != nil || len(latestSignals) < 2 || latestSignals[0].Note != "Published exact Greenhouse head" || strings.Contains(latestSignals[0].DataJSON, "greenhouse_pending_head") {
+		t.Fatalf("published completion re-entered Greenhouse prepublication: %+v %v", latestSignals, err)
+	}
 	var candidates int
 	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_candidates WHERE task_id=?`, task.ID).Scan(&candidates); err != nil || candidates != 0 {
 		t.Fatalf("private candidates = %d, %v; want none", candidates, err)

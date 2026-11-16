@@ -1708,17 +1708,40 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		return axi.Failure("signal_invalid", "--head is only valid on a Greenhouse full-pipeline done Signal", false)
 	}
 	if greenhouseFullPipeline && verb == "done" {
-		if parsed.Flags["head"] == "" {
-			return axi.Failure("signal_invalid", "Greenhouse full-pipeline done Signals require --head <current Task branch head>", false)
-		}
 		head, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
 		if err != nil {
 			return err
 		}
-		if parsed.Flags["head"] != head {
-			return axi.Failure("signal_invalid", "--head must match the current Task branch head", false, head)
+		if parsed.Flags["pr"] != "" {
+			if parsed.Flags["head"] != "" && parsed.Flags["head"] != head {
+				return axi.Failure("signal_invalid", "--head must match the current Task branch head", false, head)
+			}
+			remoteHead, err := remoteBranchHead(ctx.Context, task.WorktreePath, "refs/heads/"+task.Branch)
+			if err != nil {
+				return err
+			}
+			if remoteHead != head {
+				return axi.Failure("signal_invalid", "published PR completion requires the Task branch on origin to match its current head", false, "Publish the current exact head before signalling done")
+			}
+			verified, err := db.WasVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], head)
+			if err != nil {
+				return err
+			}
+			if !verified {
+				return axi.Failure("signal_invalid", "published PR completion requires a PR Posse already verified for the exact head", false)
+			}
+			if err := requireGreenhouseGatePass(ctx.Context, db, project, cfg, task, head, ""); err != nil {
+				return axi.Failure("signal_invalid", "published PR completion requires a passing Greenhouse Verdict for the exact head", false, err.Error())
+			}
+		} else {
+			if parsed.Flags["head"] == "" {
+				return axi.Failure("signal_invalid", "Greenhouse full-pipeline done Signals require --head <current Task branch head>", false)
+			}
+			if parsed.Flags["head"] != head {
+				return axi.Failure("signal_invalid", "--head must match the current Task branch head", false, head)
+			}
+			data["greenhouse_pending_head"] = head
 		}
-		data["greenhouse_pending_head"] = head
 	}
 	if greenhouseWorkspaceFullPipeline && verb == "done" {
 		if err := validateWorkspaceChangeSignal(ctx.Context, db, task); err != nil {
@@ -2035,7 +2058,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
 	if verb == "done" && task.Type == "change" && greenhouseFullPipeline {
-		data["next_action"] = "Greenhouse review requested automatically for the exact Task head; wait for Posse to queue publication"
+		if _, pending := data["greenhouse_pending_head"]; pending {
+			data["next_action"] = "Greenhouse review requested automatically for the exact Task head; wait for Posse to queue publication"
+		}
 	}
 	if verb == "done" && task.Type == "change" && isFullPipelineTask(task, "") {
 		if plan, err := task.AdmittedPlan(); err != nil {
