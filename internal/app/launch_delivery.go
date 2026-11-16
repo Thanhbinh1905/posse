@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -381,10 +380,6 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 // start survives the caller being interrupted. The detached process owns the
 // start intent. It reports whether the Task left the queue.
 func (s *Service) launchQueuedTaskDetached(ctx context.Context, db *store.DB, home string, project store.Project, queued store.Task) (bool, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return false, err
-	}
 	logPath := filepath.Join(home, "projects", project.Name, "launch.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return false, err
@@ -394,7 +389,10 @@ func (s *Service) launchQueuedTaskDetached(ctx context.Context, db *store.DB, ho
 		return false, err
 	}
 	defer logFile.Close()
-	command := exec.Command(executable, "_launch-queued", strconv.FormatInt(project.ID, 10), strconv.FormatInt(queued.ID, 10))
+	command, err := selfExecCommand("_launch-queued", strconv.FormatInt(project.ID, 10), strconv.FormatInt(queued.ID, 10))
+	if err != nil {
+		return false, err
+	}
 	command.Stdout, command.Stderr = logFile, logFile
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := command.Start(); err != nil {

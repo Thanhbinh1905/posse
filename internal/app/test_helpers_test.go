@@ -34,6 +34,10 @@ func setTaskBranchAuthorEnv(t *testing.T, db *store.DB, task store.Task) {
 }
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-test.") {
+		fmt.Fprintf(os.Stderr, "app.test refuses to run CLI command %q\n", os.Args[1])
+		os.Exit(2)
+	}
 	if code, sharded := runAppTestShards(); sharded {
 		os.Exit(code)
 	}
@@ -111,6 +115,18 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func TestMainRejectsSelfExecCLICommand(t *testing.T) {
+	command := exec.Command(os.Args[0], "_greenhouse", "stop")
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 2 {
+		t.Fatalf("self-exec exit=%v output=%s, want exit code 2", err, output)
+	}
+	if !strings.Contains(string(output), "refuses to run CLI command") {
+		t.Fatalf("self-exec did not report the guard: %s", output)
+	}
 }
 
 func TestTestMainReapsTimedOutRun(t *testing.T) {

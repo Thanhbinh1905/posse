@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -34,10 +33,6 @@ const researchPromptLimit = 64 << 10
 // of one attempt. It survives its caller so a lost parent never loses the
 // child's result. Tests replace it.
 var startResearchRunner = func(home string, id int64) error {
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
 	dir := filepath.Dir(researchRunnerLog(home, id))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -47,7 +42,10 @@ var startResearchRunner = func(home string, id int64) error {
 		return err
 	}
 	defer logFile.Close()
-	command := exec.Command(executable, "_research-run", research.AttemptID(id))
+	command, err := selfExecCommand("_research-run", research.AttemptID(id))
+	if err != nil {
+		return err
+	}
 	command.Env = append(os.Environ(), "POSSE_HOME="+home)
 	command.Stdout, command.Stderr = logFile, logFile
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
