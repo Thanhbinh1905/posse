@@ -27,6 +27,14 @@ const (
 	watchFixtureWorkerTabID  = "w2:t1"
 )
 
+func TestSystemdWatchCanBeDisabledInTestEnvironment(t *testing.T) {
+	t.Setenv("POSSE_TEST_HERDR", "1")
+	t.Setenv("POSSE_TEST_DISABLE_SYSTEMD_WATCH", "1")
+	if systemdUserManagerAvailable(context.Background()) {
+		t.Fatal("systemd watch supervision is available while disabled for tests")
+	}
+}
+
 func TestSystemdWatchStopsActiveUnitWhenStoredPIDExited(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("systemd user units are Linux-only")

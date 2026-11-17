@@ -21,6 +21,9 @@ func systemdWatchUnitName(home string, projectID int64) string {
 }
 
 func systemdUserManagerAvailable(ctx context.Context) bool {
+	if os.Getenv("POSSE_TEST_HERDR") == "1" && os.Getenv("POSSE_TEST_DISABLE_SYSTEMD_WATCH") == "1" {
+		return false
+	}
 	command := exec.CommandContext(ctx, "systemctl", "--user", "show-environment")
 	return command.Run() == nil
 }
