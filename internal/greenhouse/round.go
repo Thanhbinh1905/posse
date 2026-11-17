@@ -254,14 +254,6 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			if hr := v.HostResult; hr != nil && hr.Grant == grant && hr.Status == "running" {
-				request, _ := json.Marshal(d.request(round, v, grant, "cancel", nil))
-				if _, err := d.axi(ctx, round.Worktree, request); err != nil {
-					return result, err
-				}
-				_ = ClearPending(round.Pending)
-				return result, &TerminalReviewError{Status: "timeout", Reason: "Posse's Greenhouse review wait expired and the run was cancelled"}
-			}
 			result.Outcome = Running
 			return result, nil
 		}

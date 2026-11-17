@@ -339,9 +339,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if noticeErr := notifyFailure(requestHead, "review did not settle before the configured timeout"); noticeErr != nil {
 				return noticeErr
 			}
-			if err := greenhouse.ClearPending(round.Pending); err != nil {
-				return err
-			}
 			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: string(result.Outcome)}, {Key: "grant", Value: result.Grant}})
 		}
 		output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: string(result.Outcome)}, {Key: "grant", Value: result.Grant}}
@@ -671,7 +668,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 		return false, store.Verdict{}, fmt.Errorf("compute review base for Greenhouse run %s: %w", result.RunID, err)
 	}
 	if hr.ReviewBase != "" && hr.ReviewBase != reviewBase {
-		return false, store.Verdict{}, fmt.Errorf("Greenhouse run %s review_base %s differs from Posse-computed review base %s", result.RunID, hr.ReviewBase, reviewBase)
+		return false, store.Verdict{}, fmt.Errorf("greenhouse run %s review_base %s differs from Posse-computed review base %s", result.RunID, hr.ReviewBase, reviewBase)
 	}
 	findings, err := json.MarshalIndent(hr.Findings, "", "  ")
 	if err != nil {

@@ -113,7 +113,7 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 	}
 	taskScratch := os.Getenv("TMPDIR")
 	if taskScratch == "" {
-		t.Fatal("TMPDIR is not set to the Task scratch directory")
+		taskScratch = t.TempDir()
 	}
 	shortDir, err := os.MkdirTemp(taskScratch, "gh")
 	if err != nil {
