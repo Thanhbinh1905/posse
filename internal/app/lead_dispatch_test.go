@@ -39,8 +39,8 @@ func TestLeadInstructionsRouteDurableUserInput(t *testing.T) {
 			if enabled && !strings.Contains(result.Text, "posse knowledge set <id>") {
 				t.Error("enabled Lead instructions omitted posse knowledge set")
 			}
-			if !enabled && !strings.Contains(result.Text, "offer to enable it with `posse config set knowledge.enabled true --user-approved") {
-				t.Error("disabled Lead instructions did not offer to enable knowledge")
+			if !enabled && !strings.Contains(result.Text, `posse config set knowledge.enabled true --project shop --user-approved "<User's words>"`) {
+				t.Error("disabled Lead instructions did not offer a scoped, approved enable command")
 			}
 		})
 	}

@@ -18,7 +18,7 @@ import (
 )
 
 // Knowledge is curated reference context with provenance (ADR 0032). It is
-// inert unless knowledge.enabled is set, and never carries authority.
+// disabled only when knowledge.enabled is explicitly false, and never carries authority.
 
 const (
 	knowledgeLoadAlways   = "always"
@@ -433,7 +433,12 @@ func (s *Service) knowledgeShow(ctx *axi.Context, args []string) error {
 	help := []any{"Run `posse knowledge show <id>` to read one entry"}
 	if !scope.settings.Knowledge.Enabled {
 		warnings = append(warnings, "knowledge.enabled is false: no knowledge loads and writes are refused")
-		help = append(help, "Enable knowledge with `posse config set knowledge.enabled true`")
+		enableCommand := "posse config set knowledge.enabled true"
+		if scope.project.Name != "" {
+			enableCommand += " --project " + scope.project.Name
+		}
+		enableCommand += ` --user-approved "<User's words>"`
+		help = append(help, "Enable knowledge with `"+enableCommand+"` after explicit User approval")
 	} else if budget.Over() {
 		warnings = append(warnings, fmt.Sprintf("startup knowledge and preferences are %d bytes, above the %d-byte budget; consolidate entries, archive stale or low-use ones, or make conditional ones on-demand", budget.Max(), budget.Limit))
 	}
@@ -612,7 +617,12 @@ func (s *Service) authorizeKnowledgeWrite(ctx *axi.Context, command string, flag
 		return knowledgeScope{}, "", err
 	}
 	if !scope.settings.Knowledge.Enabled {
-		return knowledgeScope{}, "", axi.Failure("knowledge_disabled", "knowledge is disabled for "+preferenceScope(scope.project), false, "Enable knowledge with `posse config set knowledge.enabled true`")
+		enableCommand := "posse config set knowledge.enabled true"
+		if scope.project.Name != "" {
+			enableCommand += " --project " + scope.project.Name
+		}
+		enableCommand += ` --user-approved "<User's words>"`
+		return knowledgeScope{}, "", axi.Failure("knowledge_disabled", "knowledge is disabled for "+preferenceScope(scope.project), false, "Enable knowledge with `"+enableCommand+"` after explicit User approval")
 	}
 	return scope, home, nil
 }

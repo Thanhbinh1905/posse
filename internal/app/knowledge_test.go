@@ -74,12 +74,12 @@ func TestKnowledgeIsEmptyByDefaultAndDisabledExplicitly(t *testing.T) {
 		t.Fatalf("disabled knowledge was admitted into a Worker plan: %#v, %v", inputs, err)
 	}
 	output := runPreferenceSetCLI(t, f.service, 0, "knowledge", "show")
-	if !strings.Contains(output, "enabled: false") || !strings.Contains(output, "no knowledge loads") {
+	if !strings.Contains(output, "enabled: false") || !strings.Contains(output, "no knowledge loads") || !strings.Contains(output, "posse config set knowledge.enabled true --project shop --user-approved") {
 		t.Fatalf("knowledge show did not report the disabled state: %s", output)
 	}
 	body := writeKnowledgeBody(t, f.root, "New fact.\n")
 	output = runPreferenceSetCLI(t, f.service, 1, "knowledge", "set", "fact", "--file", body, "--source", "user")
-	if !strings.Contains(output, "knowledge_disabled") || fileExists(filepath.Join(f.home, "projects", "shop", "knowledge", "fact.md")) {
+	if !strings.Contains(output, "knowledge_disabled") || !strings.Contains(output, "--project shop --user-approved") || fileExists(filepath.Join(f.home, "projects", "shop", "knowledge", "fact.md")) {
 		t.Fatalf("disabled knowledge accepted a write: %s", output)
 	}
 	if fileExists(filepath.Join(f.home, "knowledge")) {
