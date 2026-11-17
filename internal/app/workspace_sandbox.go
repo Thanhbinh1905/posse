@@ -178,6 +178,7 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 	if rootContext == "" {
 		rootContext = "legacy"
 	}
+	var lastFailure error
 	for attempts := 0; attempts < 64; attempts++ {
 		var sandbox store.Sandbox
 		err := withSandboxStateLock(ctx, db, func() error {
@@ -202,6 +203,7 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 			return sandbox, err
 		}
 		if err := s.prepareWorkspaceSandbox(ctx, project, targets, members, sandbox.Path, cleanMode, rootContext); err != nil {
+			lastFailure = sandboxAcquisitionFailure(sandbox, "prepare workspace members", err)
 			if breakErr := breakSandbox(ctx, db, project, task, sandbox, err.Error(), nil); breakErr != nil {
 				return sandbox, errors.Join(err, breakErr)
 			}
@@ -252,6 +254,9 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 			return sandbox, fmt.Errorf("capture workspace root at Sandbox acquisition: %w", err)
 		}
 		return sandbox, nil
+	}
+	if lastFailure != nil {
+		return store.Sandbox{}, lastFailure
 	}
 	return store.Sandbox{}, fmt.Errorf("no clean Sandbox could be acquired")
 }
@@ -478,6 +483,9 @@ func releaseWorkspaceSandbox(ctx context.Context, db *store.DB, project store.Pr
 			if _, err := os.Stat(target.Root); err != nil {
 				continue
 			}
+			if err := submodulesHaveNoUnsavedWork(ctx, worktree); err != nil {
+				return fmt.Errorf("%s submodule: %w", target.Name, err)
+			}
 			if err := resetWorktree(ctx, worktree, target.repoTarget, clean, false); err != nil {
 				return fmt.Errorf("%s: %w", target.Name, err)
 			}
@@ -514,6 +522,12 @@ func (s *Service) removeWorkspaceSandbox(ctx context.Context, db *store.DB, proj
 		worktree := filepath.Join(path, target.Path)
 		if _, err := os.Stat(filepath.Join(worktree, ".git")); err != nil {
 			continue
+		}
+		if err := submodulesHaveNoUnsavedWork(ctx, worktree); err != nil {
+			return fmt.Errorf("%s submodule: %w", target.Name, err)
+		}
+		if err := resetWorktree(ctx, worktree, target.repoTarget, "pristine", false); err != nil {
+			return fmt.Errorf("%s: %w", target.Name, err)
 		}
 		if err := s.removeSandbox(ctx, target.Root, worktree); err != nil {
 			return fmt.Errorf("%s: %w", target.Name, err)

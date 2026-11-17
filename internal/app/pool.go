@@ -512,6 +512,7 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return store.Sandbox{}, err
 	}
+	var lastFailure error
 	for attempts := 0; attempts < 64; attempts++ {
 		var sandbox store.Sandbox
 		err := withSandboxStateLock(ctx, db, func() error {
@@ -581,6 +582,7 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 				args = append(append([]string{"worktree", "add", "--detach"}, lock...), sandbox.Path, ref)
 			}
 			if _, err := gitOutput(ctx, project.Root, args...); err != nil {
+				lastFailure = sandboxAcquisitionFailure(sandbox, "create worktree", err)
 				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Git could not create the Sandbox worktree", err); breakErr != nil {
 					return sandbox, errors.Join(err, breakErr)
 				}
@@ -603,6 +605,7 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 			}
 		} else {
 			if err := resetSandbox(ctx, sandbox.Path, project, cleanMode); err != nil {
+				lastFailure = sandboxAcquisitionFailure(sandbox, "reset to a clean state", err)
 				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state", err); breakErr != nil {
 					return sandbox, errors.Join(err, breakErr)
 				}
@@ -639,7 +642,23 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 		}
 		return sandbox, nil
 	}
+	if lastFailure != nil {
+		return store.Sandbox{}, lastFailure
+	}
 	return store.Sandbox{}, fmt.Errorf("no clean Sandbox could be acquired")
+}
+
+func sandboxAcquisitionFailure(sandbox store.Sandbox, step string, err error) *axi.Error {
+	var resetErr *sandboxResetError
+	if errors.As(err, &resetErr) {
+		step, err = resetErr.step, resetErr.err
+	}
+	return axi.Failure(
+		"sandbox_acquisition_failed",
+		fmt.Sprintf("sandbox-%d failed during %s: %v", sandbox.Number, step, err),
+		true,
+		fmt.Sprintf("Run `posse pool repair sandbox-%d` to repair the broken Sandbox", sandbox.Number),
+	)
 }
 
 func abandonUnpreparedSandbox(ctx context.Context, db *store.DB, project store.Project, task store.Task, sandbox store.Sandbox) error {
@@ -733,25 +752,85 @@ func resetSandbox(ctx context.Context, path string, project store.Project, clean
 // ref; acquisition fetches before new work starts.
 func resetWorktree(ctx context.Context, path string, target repoTarget, clean string, fetch bool) error {
 	if defaultBranchUnborn(ctx, target) {
-		return resetUnbornWorktree(ctx, path, unbornIdleBranch, clean)
+		if err := resetUnbornWorktree(ctx, path, unbornIdleBranch, clean); err != nil {
+			return &sandboxResetError{step: "reset unborn worktree", err: err}
+		}
+		return nil
 	}
 	ref, remote, err := sandboxResetRef(ctx, target, fetch)
 	if err != nil {
-		return err
+		return &sandboxResetError{step: "resolve reset ref", err: err}
 	}
 	if remote && fetch {
 		if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
-			return err
+			return &sandboxResetError{step: "fetch default branch", err: err}
 		}
 	}
 	if _, err := gitOutput(ctx, path, "checkout", "--detach", "--force", ref); err != nil {
-		return err
+		return &sandboxResetError{step: "checkout default branch", err: err}
 	}
 	if _, err := gitOutput(ctx, path, "reset", "--hard", ref); err != nil {
-		return err
+		return &sandboxResetError{step: "reset tracked files", err: err}
 	}
-	return cleanWorktree(ctx, path, clean)
+	hasSubmodules, err := worktreeHasSubmodules(ctx, path)
+	if err != nil {
+		return &sandboxResetError{step: "check for submodules", err: err}
+	}
+	if hasSubmodules {
+		if _, err := commandStdoutArgsWithEnv(ctx, path, []string{"PATH=" + gitSubmodulePath()}, "git", "-C", path, "submodule", "update", "--init", "--recursive", "--force"); err != nil {
+			return &sandboxResetError{step: "update submodules", err: fmt.Errorf("git submodule update --init --recursive --force: %w", err)}
+		}
+	}
+	if err := cleanWorktree(ctx, path, clean); err != nil {
+		return &sandboxResetError{step: "clean untracked files", err: err}
+	}
+	return nil
 }
+
+func gitSubmodulePath() string {
+	paths := filepath.SplitList(os.Getenv("PATH"))
+	for _, standard := range []string{"/usr/local/bin", "/usr/bin", "/bin"} {
+		if info, err := os.Stat(standard); err == nil && info.IsDir() {
+			found := false
+			for _, path := range paths {
+				if path == standard {
+					found = true
+					break
+				}
+			}
+			if !found {
+				paths = append(paths, standard)
+			}
+		}
+	}
+	return strings.Join(paths, string(os.PathListSeparator))
+}
+
+func worktreeHasSubmodules(ctx context.Context, path string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(path, ".gitmodules")); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	entries, err := gitOutputRaw(ctx, path, "ls-files", "--stage", "-z")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range strings.Split(entries, "\x00") {
+		if strings.HasPrefix(entry, "160000 ") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type sandboxResetError struct {
+	step string
+	err  error
+}
+
+func (e *sandboxResetError) Error() string { return fmt.Sprintf("%s: %v", e.step, e.err) }
+func (e *sandboxResetError) Unwrap() error { return e.err }
 
 // cleanWorktree removes untracked files, and ignored ones for a pristine clean,
 // and verifies that nothing remains.
@@ -899,8 +978,16 @@ func sandboxWorktreeClean(ctx context.Context, path string) bool {
 	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
 		return false
 	}
-	status, err := gitStatusOutput(ctx, path, "--porcelain")
-	return err == nil && status == ""
+	status, err := gitStatusOutput(ctx, path, "--porcelain", "--ignore-submodules=all")
+	if err != nil || status != "" {
+		return false
+	}
+	return submodulesHaveNoUnsavedWork(ctx, path) == nil
+}
+
+func submodulesHaveNoUnsavedWork(ctx context.Context, path string) error {
+	_, err := gitOutput(ctx, path, "submodule", "foreach", "--recursive", `status=$(git status --porcelain --ignore-submodules=all); if test -n "$status"; then echo "uncommitted work in $displaypath: $status" >&2; exit 1; fi; upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || upstream=; if test -n "$upstream"; then if test -n "$(git rev-list "$upstream..HEAD")"; then echo "unpushed commits in $displaypath" >&2; exit 1; fi; elif test -z "$(git branch -r --contains HEAD)"; then echo "cannot verify whether commits are pushed in $displaypath" >&2; exit 1; fi`)
+	return err
 }
 
 func sandboxTrackedWorktreeClean(ctx context.Context, path string) bool {
@@ -983,6 +1070,9 @@ func releaseSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 	} else {
 		// Teardown is local and must not wait on origin. The next Sandbox
 		// acquisition fetches before starting new work.
+		if err := submodulesHaveNoUnsavedWork(ctx, sandbox.Path); err != nil {
+			return killed, err
+		}
 		resetErr = resetWorktree(ctx, sandbox.Path, projectRepoTarget(project), clean, false)
 	}
 	if err := resetErr; err != nil {
@@ -1199,7 +1289,7 @@ func sandboxBrokenSummary(project store.Project, sandbox store.Sandbox, reason s
 
 func sandboxBrokenRemedy(project store.Project, sandbox store.Sandbox) string {
 	if project.IsWorkspace() {
-		return ". Remove it with `posse pool prune --yes` once its work is saved"
+		return fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`", sandbox.Number)
 	}
 	return fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`, or remove it with `posse pool prune --yes`", sandbox.Number)
 }
