@@ -478,6 +478,9 @@ func releaseWorkspaceSandbox(ctx context.Context, db *store.DB, project store.Pr
 			if _, err := os.Stat(target.Root); err != nil {
 				continue
 			}
+			if err := submodulesHaveNoUnsavedWork(ctx, worktree); err != nil {
+				return fmt.Errorf("%s submodule: %w", target.Name, err)
+			}
 			if err := resetWorktree(ctx, worktree, target.repoTarget, clean, false); err != nil {
 				return fmt.Errorf("%s: %w", target.Name, err)
 			}
@@ -514,6 +517,12 @@ func (s *Service) removeWorkspaceSandbox(ctx context.Context, db *store.DB, proj
 		worktree := filepath.Join(path, target.Path)
 		if _, err := os.Stat(filepath.Join(worktree, ".git")); err != nil {
 			continue
+		}
+		if err := submodulesHaveNoUnsavedWork(ctx, worktree); err != nil {
+			return fmt.Errorf("%s submodule: %w", target.Name, err)
+		}
+		if err := resetWorktree(ctx, worktree, target.repoTarget, "pristine", false); err != nil {
+			return fmt.Errorf("%s: %w", target.Name, err)
 		}
 		if err := s.removeSandbox(ctx, target.Root, worktree); err != nil {
 			return fmt.Errorf("%s: %w", target.Name, err)

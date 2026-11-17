@@ -750,6 +750,9 @@ func resetWorktree(ctx context.Context, path string, target repoTarget, clean st
 	if _, err := gitOutput(ctx, path, "reset", "--hard", ref); err != nil {
 		return err
 	}
+	if _, err := gitOutput(ctx, path, "submodule", "update", "--init", "--recursive", "--force"); err != nil {
+		return err
+	}
 	return cleanWorktree(ctx, path, clean)
 }
 
@@ -899,8 +902,16 @@ func sandboxWorktreeClean(ctx context.Context, path string) bool {
 	if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
 		return false
 	}
-	status, err := gitStatusOutput(ctx, path, "--porcelain")
-	return err == nil && status == ""
+	status, err := gitStatusOutput(ctx, path, "--porcelain", "--ignore-submodules=all")
+	if err != nil || status != "" {
+		return false
+	}
+	return submodulesHaveNoUnsavedWork(ctx, path) == nil
+}
+
+func submodulesHaveNoUnsavedWork(ctx context.Context, path string) error {
+	_, err := gitOutput(ctx, path, "submodule", "foreach", "--recursive", `status=$(git status --porcelain --ignore-submodules=all); if test -n "$status"; then echo "uncommitted work in $displaypath: $status" >&2; exit 1; fi; upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || upstream=; if test -n "$upstream"; then if test -n "$(git rev-list "$upstream..HEAD")"; then echo "unpushed commits in $displaypath" >&2; exit 1; fi; elif test -z "$(git branch -r --contains HEAD)"; then echo "cannot verify whether commits are pushed in $displaypath" >&2; exit 1; fi`)
+	return err
 }
 
 func sandboxTrackedWorktreeClean(ctx context.Context, path string) bool {
@@ -983,6 +994,9 @@ func releaseSandbox(ctx context.Context, db *store.DB, project store.Project, ta
 	} else {
 		// Teardown is local and must not wait on origin. The next Sandbox
 		// acquisition fetches before starting new work.
+		if err := submodulesHaveNoUnsavedWork(ctx, sandbox.Path); err != nil {
+			return killed, err
+		}
 		resetErr = resetWorktree(ctx, sandbox.Path, projectRepoTarget(project), clean, false)
 	}
 	if err := resetErr; err != nil {
@@ -1199,7 +1213,7 @@ func sandboxBrokenSummary(project store.Project, sandbox store.Sandbox, reason s
 
 func sandboxBrokenRemedy(project store.Project, sandbox store.Sandbox) string {
 	if project.IsWorkspace() {
-		return ". Remove it with `posse pool prune --yes` once its work is saved"
+		return fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`", sandbox.Number)
 	}
 	return fmt.Sprintf(". Repair it with `posse pool repair sandbox-%d`, or remove it with `posse pool prune --yes`", sandbox.Number)
 }

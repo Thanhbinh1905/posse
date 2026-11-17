@@ -65,7 +65,14 @@ func (s *Service) repairPoolSandbox(ctx *axi.Context, args []string) error {
 			return axi.Failure("sandbox_not_broken", fmt.Sprintf("sandbox-%d is %s and cannot be repaired", number, repaired.State), false)
 		}
 		if project.IsWorkspace() {
-			return axi.Failure("sandbox_repair_unsupported", "workspace Sandboxes require Member-level recovery and cannot be repaired by this command", false)
+			if !safeManagedSandboxPath(home, project.Name, repaired.Path) {
+				return axi.Failure("sandbox_repair_unsafe_path", "refusing to repair a Sandbox outside its validated Pool directory", false)
+			}
+			if err := repairWorkspaceSandbox(ctx.Context, db, project, repaired, cfg.Pool.Clean); err != nil {
+				return err
+			}
+			repaired.State = "idle"
+			return nil
 		}
 		if !safeManagedSandboxPath(home, project.Name, repaired.Path) {
 			return axi.Failure("sandbox_repair_unsafe_path", "refusing to repair a Sandbox outside its validated Pool directory", false)
@@ -88,9 +95,12 @@ func (s *Service) repairPoolSandbox(ctx *axi.Context, args []string) error {
 			return axi.Failure("sandbox_repair_git_metadata", err.Error(), true, "Resolve the Git worktree registration or lock, then retry `posse pool repair`")
 		}
 
-		status, err := gitStatusOutput(ctx.Context, repaired.Path, "--porcelain", "--untracked-files=all")
+		status, err := gitStatusOutput(ctx.Context, repaired.Path, "--porcelain", "--ignore-submodules=all", "--untracked-files=all")
 		if err != nil {
 			return axi.Failure("sandbox_repair_git_metadata", err.Error(), true, "Repair the checkout's Git metadata, then retry `posse pool repair`")
+		}
+		if err := submodulesHaveNoUnsavedWork(ctx.Context, repaired.Path); err != nil {
+			return axi.Failure("sandbox_repair_unsaved_work", fmt.Sprintf("Sandbox has unsaved submodule work: %v", err), false)
 		}
 		if hasTask {
 			if err := preserveBrokenSandboxAttachments(ctx.Context, db, home, project, task); err != nil {
@@ -140,6 +150,59 @@ func (s *Service) repairPoolSandbox(ctx *axi.Context, args []string) error {
 		result = append(result, axi.Field{Key: "task_id", Value: taskIDString(preservedTaskSeq)})
 	}
 	return ctx.Print(result)
+}
+
+func repairWorkspaceSandbox(ctx context.Context, db *store.DB, project store.Project, sandbox store.Sandbox, clean string) error {
+	if err := requireSandboxRepairHasNoProcesses(sandbox.Path); err != nil {
+		return err
+	}
+	if err := validateWorkspaceSandboxRoot(sandbox.Path); err != nil {
+		return err
+	}
+	targets, err := workspaceSandboxTargets(ctx, db, project)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		worktree := filepath.Join(sandbox.Path, target.Path)
+		if err := validateWorkspaceSandboxMemberPath(sandbox.Path, target.Path); err != nil {
+			return err
+		}
+		present, err := workspaceSandboxWorktreePresent(worktree)
+		if err != nil {
+			return err
+		}
+		if !present {
+			continue
+		}
+		status, err := gitStatusOutput(ctx, worktree, "--porcelain", "--ignore-submodules=all", "--untracked-files=all")
+		if err != nil {
+			return err
+		}
+		if status != "" {
+			return axi.Failure("sandbox_repair_unsaved_work", fmt.Sprintf("Member %s has unsaved work: %s", target.Name, strings.TrimSpace(status)), false)
+		}
+		if err := submodulesHaveNoUnsavedWork(ctx, worktree); err != nil {
+			return axi.Failure("sandbox_repair_unsaved_work", fmt.Sprintf("Member %s has unsaved submodule work: %v", target.Name, err), false)
+		}
+	}
+	for _, target := range targets {
+		worktree := filepath.Join(sandbox.Path, target.Path)
+		present, err := workspaceSandboxWorktreePresent(worktree)
+		if err != nil {
+			return err
+		}
+		if !present {
+			continue
+		}
+		if err := resetWorktree(ctx, worktree, target.repoTarget, clean, false); err != nil {
+			return axi.Failure("sandbox_repair_reset_failed", fmt.Sprintf("Member %s: %v", target.Name, err), true)
+		}
+	}
+	if err := requireSandboxRepairHasNoProcesses(sandbox.Path); err != nil {
+		return err
+	}
+	return db.RepairBrokenSandbox(ctx, sandbox.ID)
 }
 
 func repairTaskForSandbox(ctx context.Context, db *store.DB, project store.Project, path string) (store.Task, bool, error) {
