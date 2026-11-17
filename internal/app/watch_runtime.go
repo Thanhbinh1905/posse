@@ -29,7 +29,7 @@ const (
 
 var watchStartupGracePeriod = 5 * time.Second
 var watchRuntimeHeartbeatInterval = watchRuntimeTestDuration("POSSE_TEST_WATCH_RUNTIME_HEARTBEAT_INTERVAL", 5*time.Second)
-var watchRuntimeStaleAfter = watchRuntimeTestDuration("POSSE_TEST_WATCH_RUNTIME_STALE_AFTER", 30*time.Second)
+var watchRuntimeStaleAfter = watchRuntimeTestDuration("POSSE_TEST_WATCH_RUNTIME_STALE_AFTER", time.Minute)
 var watchRuntimeLogMaxBytes int64 = 1 << 20
 
 const watchRuntimeRepairBudget = 2 * time.Second
@@ -335,17 +335,20 @@ func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home str
 	}
 
 	if state.PID > 0 {
+		reason := "stale heartbeat"
 		if stored != nil {
-			reason := "stale heartbeat"
 			if _, err := db.RaiseWatchRuntimeFailure(ctx, project.ID, state.Token, watchRuntimeFailureSummary(project, reason), currentTime()); err != nil {
 				return err
 			}
 			if err := stopStoredWatchRuntime(ctx, home, *stored); err != nil {
 				return fmt.Errorf("stop stale Project Watch: %w", err)
 			}
+		} else if state.HeartbeatAt > 0 && time.Since(time.UnixMilli(state.HeartbeatAt)) > time.Minute {
+			reason = "watch process stopped without a heartbeat for more than one minute"
+			if _, err := db.RaiseWatchRuntimeFailure(ctx, project.ID, state.Token, watchRuntimeFailureSummary(project, reason), currentTime()); err != nil {
+				return err
+			}
 		}
-		// Missing process rows are common after a reboot and do not prove that
-		// the watch was unhealthy while the machine was running.
 		if err := db.ClearWatchRuntime(ctx, project.ID, state.PID, state.Token); err != nil {
 			return err
 		}
@@ -1002,6 +1005,7 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		return err
 	}
 	lastFailures := map[string]string{}
+	lastLeadReceiverCheck := time.Time{}
 	servedPass := readWatchPassToken(watchPassDonePath(home, project))
 	for {
 		passRequest := readWatchPassToken(watchPassRequestPath(home, project))
@@ -1038,6 +1042,15 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		}
 		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "maintenance", err)
+		}
+		if lastLeadReceiverCheck.IsZero() || time.Since(lastLeadReceiverCheck) >= time.Minute {
+			if err := s.monitorLeadReceiver(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
+				fmt.Fprintf(ctx.ErrOut, "Lead receiver check failed for %s: %v\n", project.Name, err)
+			}
+			if err := s.deliverNotices(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
+				fmt.Fprintf(ctx.ErrOut, "Notice alert delivery failed for %s: %v\n", project.Name, err)
+			}
+			lastLeadReceiverCheck = time.Now()
 		}
 		if passRequest != "" && passRequest != servedPass {
 			if err := writeFile(watchPassDonePath(home, project), []byte(passRequest+"\n")); err != nil {

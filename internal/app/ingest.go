@@ -18,6 +18,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+const delayedNoticeAlertAfter = time.Minute
+
 type pluginEvent struct {
 	Event string         `json:"event"`
 	Data  map[string]any `json:"data"`
@@ -302,6 +304,9 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
 		return err
 	}
+	if err := raiseDelayedNoticeAlert(ctx, db, project); err != nil {
+		return err
+	}
 	notices, err := db.UndeliveredNotices(ctx, project.ID)
 	if err != nil {
 		return err
@@ -322,7 +327,6 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 	if err != nil {
 		return err
 	}
-	s.dispatchNoticeCommand(ctx, db, project, notices)
 	if len(snapshot.Panes) == 0 {
 		snapshot, err = s.snapshot(ctx)
 		if err != nil {
@@ -339,7 +343,9 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 	}
 	// An extension or plugin can be lost while its Lead keeps running, for
 	// example when Herdr resumes the Lead without Posse's launch arguments.
-	if extensionOwnsNotices(delivery) && (lead.AgentStatus == "idle" || lead.AgentStatus == "done") && oldestNoticeAge(notices) >= leadReceiverGrace {
+	monitorsReceiver := extensionOwnsNotices(delivery) || lead.Agent == "claude" && delivery == config.NoticeDeliveryWatch
+	idleLead := lead.AgentStatus == "idle" || lead.AgentStatus == "done"
+	if monitorsReceiver && (idleLead || lead.Agent == "claude") && oldestNoticeAge(notices) >= leadReceiverGrace {
 		missing, err := s.leadReceiverMissing(project, lead)
 		if err != nil {
 			return err
@@ -354,6 +360,7 @@ func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, 
 			delivery = config.NoticeDeliveryPrompt
 		}
 	}
+	s.dispatchNoticeCommand(ctx, db, project, notices)
 	// Lead watch plugins acknowledge these without involving the Lead. Do
 	// not display a Herdr notification for a batch that needs no turn.
 	if found && lead.Agent != "" && extensionOwnsNotices(delivery) {
@@ -463,7 +470,9 @@ var leadReceiverLive = func(home string, project store.Project) (bool, error) {
 }
 
 func (s *Service) leadReceiverMissing(project store.Project, lead herdr.Pane) (bool, error) {
-	if lead.Tokens["posse_attached"] == "true" || !extensionOwnsNotices(s.leadNoticeDelivery(project, lead.Agent)) {
+	delivery := s.leadNoticeDelivery(project, lead.Agent)
+	monitorsReceiver := extensionOwnsNotices(delivery) || lead.Agent == "claude" && delivery == config.NoticeDeliveryWatch
+	if lead.Tokens["posse_attached"] == "true" || !monitorsReceiver {
 		return false, nil
 	}
 	home, err := s.homePath()
@@ -472,6 +481,108 @@ func (s *Service) leadReceiverMissing(project store.Project, lead herdr.Pane) (b
 	}
 	live, err := leadReceiverLive(home, project)
 	return !live, err
+}
+
+func raiseDelayedNoticeAlert(ctx context.Context, db *store.DB, project store.Project) error {
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		return err
+	}
+	var overdue []int64
+	var currentAlert *store.Notice
+	alertSummaries := make(map[string]bool)
+	for i := range notices {
+		notice := &notices[i]
+		if notice.Kind == "notice_delivery_delayed" {
+			alertSummaries[notice.Summary] = true
+			if notice.AckedAt == 0 {
+				currentAlert = notice
+			}
+			continue
+		}
+		if !noticeNeedsUser(*notice, "ask") || notice.AckedAt != 0 && notice.DeliveredAt != 0 {
+			continue
+		}
+		if currentTime()-notice.CreatedAt >= delayedNoticeAlertAfter.Milliseconds() {
+			overdue = append(overdue, notice.ID)
+		}
+	}
+	if len(overdue) == 0 {
+		if currentAlert != nil {
+			_, err = db.AckNotices(ctx, project.ID, []string{fmt.Sprint(currentAlert.ID)})
+		}
+		return err
+	}
+	ids := make([]string, len(overdue))
+	for i, id := range overdue {
+		ids[i] = fmt.Sprint(id)
+	}
+	summary := "User-actionable Notices remain undelivered or unacknowledged after one minute: " + strings.Join(ids, ", ")
+	if currentAlert != nil || alertSummaries[summary] {
+		return nil
+	}
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "notice_delivery_delayed", Summary: summary, DataJSON: marshalJSON(map[string]any{"notice_ids": overdue})})
+	return err
+}
+
+func (s *Service) monitorLeadReceiver(ctx context.Context, db *store.DB, project store.Project) error {
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel)
+	if !found || lead.Agent == "" {
+		return nil
+	}
+	open, err := db.Notices(ctx, project.ID, true)
+	if err != nil {
+		return err
+	}
+	var pendingActionable []store.Notice
+	for _, notice := range open {
+		if noticeNeedsUser(notice, "ask") && (notice.DeliveredAt == 0 || notice.AckedAt == 0) {
+			pendingActionable = append(pendingActionable, notice)
+		}
+	}
+	monitorsReceiver := extensionOwnsNotices(s.leadNoticeDelivery(project, lead.Agent)) || lead.Agent == "claude"
+	missing, err := s.leadReceiverMissing(project, lead)
+	if err != nil {
+		return err
+	}
+	if missing {
+		idleLead := lead.AgentStatus == "idle" || lead.AgentStatus == "done"
+		if monitorsReceiver && (idleLead || lead.Agent == "claude") && oldestNoticeAge(pendingActionable) >= leadReceiverGrace {
+			return raiseLeadReceiverMissing(ctx, db, project, lead.Agent)
+		}
+		return nil
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	latestReceiverEvent := ""
+	for _, notice := range notices {
+		if notice.Kind == "lead_receiver_missing" || notice.Kind == "lead_receiver_recovered" {
+			latestReceiverEvent = notice.Kind
+		}
+		if notice.Kind == "lead_receiver_missing" && notice.AckedAt == 0 {
+			ids = append(ids, fmt.Sprint(notice.ID))
+		}
+	}
+	if len(ids) > 0 {
+		if _, err := db.AckNotices(ctx, project.ID, ids); err != nil {
+			return err
+		}
+	}
+	if latestReceiverEvent == "lead_receiver_missing" {
+		id, createErr := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "lead_receiver_recovered", Summary: "The Lead Notice receiver recovered"})
+		if createErr != nil {
+			return createErr
+		}
+		_, err = db.AckNotices(ctx, project.ID, []string{fmt.Sprint(id)})
+	}
+	return err
 }
 
 func oldestNoticeAge(notices []store.Notice) time.Duration {
@@ -488,15 +599,26 @@ func oldestNoticeAge(notices []store.Notice) time.Duration {
 }
 
 func raiseLeadReceiverMissing(ctx context.Context, db *store.DB, project store.Project, agent string) error {
-	var existing int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE project_id=? AND kind='lead_receiver_missing' AND acked_at IS NULL`, project.ID).Scan(&existing); err != nil || existing > 0 {
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
 		return err
 	}
+	for i := len(notices) - 1; i >= 0; i-- {
+		if notices[i].Kind == "lead_receiver_missing" {
+			return nil
+		}
+		if notices[i].Kind == "lead_receiver_recovered" {
+			break
+		}
+	}
 	summary := "Run `posse setup`, then `/reload` in the " + project.Name + " Lead pane: its Notice receiver is missing, so Notices are typed while it is idle."
+	if sessionref.NormalizeKind(agent) == "claude" {
+		summary = "Restart the `posse watch --handoff` background command in the " + project.Name + " Lead session: its Notice receiver is missing."
+	}
 	if sessionref.NormalizeKind(agent) == "opencode" {
 		summary = "Quit OpenCode in the " + project.Name + " Lead pane and run `posse up` there: its Notice receiver is missing, so Notices are typed while it is idle."
 	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "lead_receiver_missing", Summary: summary})
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "lead_receiver_missing", Summary: summary})
 	return err
 }
 
