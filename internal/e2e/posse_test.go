@@ -2273,6 +2273,8 @@ func isolatedE2EEnv(t *testing.T, root string) []string {
 	}
 	guardSpawnedProcesses(t, root)
 	env := herdr.IsolatedTestEnvironment(root)
+	env = setEnv(env, "POSSE_TEST_HERDR", "1")
+	env = setEnv(env, "POSSE_TEST_DISABLE_SYSTEMD_WATCH", "1")
 	env = setEnv(env, "GOMODCACHE", e2eGoCache.mod)
 	return setEnv(env, "GOCACHE", e2eGoCache.build)
 }

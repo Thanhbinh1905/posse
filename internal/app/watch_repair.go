@@ -134,6 +134,14 @@ func (s *Service) watchRuntimeHealth(ctx context.Context, db *store.DB, home str
 	if time.Since(time.UnixMilli(state.HeartbeatAt)) > watchRuntimeStaleAfter {
 		detail += "; heartbeat stale"
 	}
+	if systemdUserManagerAvailable(ctx) {
+		unit := systemdWatchUnitName(home, project.ID)
+		if systemdWatchUnitActive(ctx, home, project.ID) {
+			detail += "; systemd unit=" + unit + " active"
+		} else {
+			detail += "; systemd unit=" + unit + " inactive"
+		}
+	}
 	detail += "; log=" + watchRuntimeLogPath(home, project)
 	status, action := "ok", ""
 	if !healthy {
