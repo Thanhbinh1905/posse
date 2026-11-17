@@ -33,23 +33,15 @@ type greenhouseMember struct {
 }
 
 // greenhouseReview requests one Greenhouse Verdict for the exact head of a
-// Change Task Member and records it as a parallel-mode Verdict. Only the Lead
-// side calls it; no gate reads Greenhouse Verdicts yet.
+// Change Task Member and records it as a parallel-mode Verdict. A Project Lead
+// or its verified Watch may request it; no gate reads Greenhouse Verdicts yet.
 func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}})
+	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}, "watch-project-id": {}, "watch-token": {}, "watch-started-at": {}, "watch-pid": {}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("_greenhouse review requires one Task id")
-	}
-	wait := 30 * time.Minute
-	if value := parsed.Flags["timeout"]; value != "" {
-		millis, err := strconv.Atoi(value)
-		if err != nil || millis < 1 {
-			return axi.Usage("--timeout takes a positive number of milliseconds")
-		}
-		wait = time.Duration(millis) * time.Millisecond
 	}
 	db, home, err := s.openDB()
 	if err != nil {
@@ -60,10 +52,16 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.requireLead(ctx.Context, db, project); err != nil {
+	watchChild, err := s.verifiedWatchChild(ctx.Context, db, home, project, parsed.Flags)
+	if err != nil {
 		return err
 	}
-	if s.workerCaller(ctx.Context, home) {
+	if !watchChild {
+		if err := s.requireLead(ctx.Context, db, project); err != nil {
+			return err
+		}
+	}
+	if !watchChild && s.workerCaller(ctx.Context, home) {
 		return axi.Failure("lead_only", "a Worker never calls Greenhouse", false, "Run this from the Project Lead pane")
 	}
 	if project.IsDirectory() {
@@ -88,6 +86,21 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return configError(err)
 	}
+	waitValue := cfg.ReviewLoop.GreenhouseTimeout
+	if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.GreenhouseTimeout != "" {
+		waitValue = plan.ValidationLoops.Review.GreenhouseTimeout
+	}
+	wait, err := time.ParseDuration(waitValue)
+	if err != nil || wait <= 0 {
+		return axi.Failure("greenhouse_timeout_invalid", "review_loop.greenhouse_timeout must be a positive duration", false)
+	}
+	if value := parsed.Flags["timeout"]; value != "" {
+		millis, parseErr := strconv.Atoi(value)
+		if parseErr != nil || millis < 1 {
+			return axi.Usage("--timeout takes a positive number of milliseconds")
+		}
+		wait = time.Duration(millis) * time.Millisecond
+	}
 	parallelMode := plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.ReviewParallel == "greenhouse" || taskUsesGreenhouseReviewProvider(task, cfg, member.name)
 	roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "greenhouse")
 	pendingPath := filepath.Join(roundDir, member.name+".pending.json")
@@ -104,6 +117,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if !parallelMode {
 			return nil
 		}
+		reason += ". Request or retry the Greenhouse Verdict with `posse review start " + taskIDString(task.Seq) + "`"
 		_, err := db.CreateGreenhouseFailureNoticeOnce(ctx.Context, project.ID, task.ID, member.name, head, reason)
 		return err
 	}
@@ -268,6 +282,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
 				round.Wait = attemptWait
+				if s.greenhouseRound != nil {
+					return s.greenhouseRound(ctx.Context, round)
+				}
 				return daemon.Review(ctx.Context, round)
 			})
 			if attempts > 0 {
@@ -302,19 +319,24 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			return axi.Failure("greenhouse_protocol", protocolErr.Error(), false, "No Verdict was requested")
 		}
 		if err != nil {
-			if recordErr := recordRequest("failed", "", time.Now().UnixMilli()); recordErr != nil {
+			failureReason := err.Error()
+			var terminalErr *greenhouse.TerminalReviewError
+			if errors.As(err, &terminalErr) {
+				failureReason = fmt.Sprintf("Greenhouse terminal status %q: %s", terminalErr.Status, terminalErr.Reason)
+			}
+			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
-			if noticeErr := notifyFailure(requestHead, err.Error()); noticeErr != nil {
+			if noticeErr := notifyFailure(requestHead, failureReason); noticeErr != nil {
 				return noticeErr
 			}
-			return axi.Failure("greenhouse_failed", err.Error(), true)
+			return axi.Failure("greenhouse_failed", failureReason, true)
 		}
 		if result.Outcome == greenhouse.Running || result.Outcome == greenhouse.Paused {
 			if err := recordRequest("failed", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
 			}
-			if noticeErr := notifyFailure(requestHead, "review did not settle before the timeout"); noticeErr != nil {
+			if noticeErr := notifyFailure(requestHead, "review did not settle before the configured timeout"); noticeErr != nil {
 				return noticeErr
 			}
 			return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: string(result.Outcome)}, {Key: "grant", Value: result.Grant}})
@@ -352,6 +374,12 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err != nil {
 				if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 					return recordErr
+				}
+				if clearErr := greenhouse.ClearPending(round.Pending); clearErr != nil {
+					return clearErr
+				}
+				if noticeErr := notifyFailure(requestHead, fmt.Sprintf("could not record Greenhouse run %s Verdict: %v", result.RunID, err)); noticeErr != nil {
+					return noticeErr
 				}
 				return err
 			}
@@ -515,26 +543,53 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 	return nil
 }
 
+func (s *Service) noticeSkippedGreenhouseTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, reason string) error {
+	head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		head = task.GatedSHA
+		reason += "; current Task head could not be read: " + err.Error()
+	}
+	reason += "; run `posse review start " + taskIDString(task.Seq) + "` to request a Greenhouse Verdict"
+	_, err = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
+	return err
+}
+
 func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config) error {
 	tasks, err := db.TasksInState(ctx, project.ID, store.StateDone)
 	if err != nil {
 		return err
 	}
 	for _, task := range tasks {
-		if task.State != store.StateDone || !taskUsesGreenhouseReviewProvider(task, cfg, "") || !fullPipelineSelected(task, "") {
-			continue
-		}
 		signals, err := db.TaskSignals(ctx, task.ID, 1)
 		if err != nil {
 			return err
 		}
+		usesGreenhouse := taskUsesGreenhouseReviewProvider(task, cfg, "") && fullPipelineSelected(task, "")
 		if len(signals) == 0 || signals[0].Verb != "done" {
+			if usesGreenhouse {
+				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, "the completed Task has no latest done Signal to anchor an exact-head Greenhouse review"); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		var data struct {
 			Head string `json:"greenhouse_pending_head"`
 		}
 		if err := json.Unmarshal([]byte(signals[0].DataJSON), &data); err != nil || data.Head == "" {
+			if usesGreenhouse {
+				reason := "the latest done Signal has invalid or missing greenhouse_pending_head data"
+				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, reason); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if !taskUsesGreenhouseReviewProvider(task, cfg, "") || !fullPipelineSelected(task, "") {
+			reason := fmt.Sprintf("the done Signal requests Greenhouse review at %s, but the admitted Task plan does not select Greenhouse full-pipeline review; run `posse review start %s` to request a Verdict", shortSHA(data.Head), taskIDString(task.Seq))
+			if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, data.Head, reason); err != nil {
+				return err
+			}
 			continue
 		}
 		head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
@@ -542,6 +597,10 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			return err
 		}
 		if head != data.Head {
+			reason := fmt.Sprintf("the Task head moved from %s to %s after its done Signal; run `posse review start %s` to request a Verdict for the current head", shortSHA(data.Head), shortSHA(head), taskIDString(task.Seq))
+			if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, data.Head, reason); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, []store.ReviewTarget{{Repository: project.Name, Commit: head}}); err != nil {
@@ -604,6 +663,13 @@ func greenhouseVerdictMode(task store.Task, cfg config.Config, repository string
 
 func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task, member greenhouseMember, roundDir, blockAt string, cfg config.Config, result greenhouse.RoundResult) (bool, store.Verdict, error) {
 	hr := result.Result
+	reviewBase, err := greenhouseReviewBase(ctx, member.worktree, hr.Target, hr.Head)
+	if err != nil {
+		return false, store.Verdict{}, fmt.Errorf("compute review base for Greenhouse run %s: %w", result.RunID, err)
+	}
+	if hr.ReviewBase != "" && hr.ReviewBase != reviewBase {
+		return false, store.Verdict{}, fmt.Errorf("greenhouse run %s review_base %s differs from Posse-computed review base %s", result.RunID, hr.ReviewBase, reviewBase)
+	}
 	findings, err := json.MarshalIndent(hr.Findings, "", "  ")
 	if err != nil {
 		return false, store.Verdict{}, err
@@ -615,7 +681,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	digest := sha256.Sum256(findings)
 	verdict := store.Verdict{
 		TaskID: task.ID, Repository: member.name, Provider: store.GreenhouseReviewProvider, Protocol: strconv.Itoa(greenhouse.Protocol),
-		Grant: result.Grant, Head: hr.Head, Target: hr.Target, ReviewBase: hr.ReviewBase, Outcome: hr.Verdict,
+		Grant: result.Grant, Head: hr.Head, Target: hr.Target, ReviewBase: reviewBase, Outcome: hr.Verdict,
 		RulesDigest: hr.RulesDigest, ConfigDigest: hr.ConfigDigest, InputDigest: hr.InputDigest, Backend: hr.Backend, Model: hr.Model,
 		FindingsHash: hex.EncodeToString(digest[:]), FindingsPath: path, Mode: greenhouseVerdictMode(task, cfg, member.name),
 	}
@@ -635,6 +701,18 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 }
 
 // greenhouseBlocking counts findings at or above blockAt. An unknown priority blocks.
+func greenhouseReviewBase(ctx context.Context, worktree, target, candidate string) (string, error) {
+	base, err := exec.CommandContext(ctx, "git", "-C", worktree, "merge-base", target, candidate).Output()
+	if err == nil {
+		return strings.TrimSpace(string(base)), nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return target, nil
+	}
+	return "", fmt.Errorf("git merge-base %s %s: %w", target, candidate, err)
+}
+
 func greenhouseBlocking(findings []greenhouse.Finding, blockAt string) int {
 	rank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 	threshold := rank[blockAt]

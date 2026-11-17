@@ -55,13 +55,14 @@ type Defaults struct {
 }
 
 type ReviewLoop struct {
-	Enabled   bool     `toml:"enabled" json:"enabled"`
-	MaxRounds int      `toml:"max_rounds" json:"max_rounds"`
-	BlockAt   string   `toml:"block_at" json:"block_at"`
-	AutoStart bool     `toml:"auto_start" json:"auto_start"`
-	Docs      bool     `toml:"docs" json:"docs"`
-	Guidance  []string `toml:"guidance" json:"guidance"`
-	Profile   string   `toml:"profile" json:"profile"`
+	Enabled           bool     `toml:"enabled" json:"enabled"`
+	GreenhouseTimeout string   `toml:"greenhouse_timeout" json:"greenhouse_timeout"`
+	MaxRounds         int      `toml:"max_rounds" json:"max_rounds"`
+	BlockAt           string   `toml:"block_at" json:"block_at"`
+	AutoStart         bool     `toml:"auto_start" json:"auto_start"`
+	Docs              bool     `toml:"docs" json:"docs"`
+	Guidance          []string `toml:"guidance" json:"guidance"`
+	Profile           string   `toml:"profile" json:"profile"`
 }
 
 type CILoop struct {
@@ -714,7 +715,7 @@ func defaultMap() map[string]any {
 		"retention":       map[string]any{"task_artifacts": "2160h"},
 		"research":        map[string]any{"native": DefaultResearch.Native, "max_active": DefaultResearch.MaxActive, "max_result_bytes": DefaultResearch.MaxResultBytes, "max_output_bytes": DefaultResearch.MaxOutputBytes, "timeout": DefaultResearch.Timeout},
 		"worker_go_cache": map[string]any{"max_size": DefaultWorkerGoCache.MaxSize, "min_age": DefaultWorkerGoCache.MinAge, "interval": DefaultWorkerGoCache.Interval},
-		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}, "profile": ""},
+		"review_loop":     map[string]any{"enabled": true, "max_rounds": 3, "block_at": "P1", "auto_start": true, "docs": false, "guidance": []string{}, "profile": "", "greenhouse_timeout": "90m"},
 		"ci_loop":         map[string]any{"max_fix_rounds": 3, "rerun_cancelled": 1, "flake_window": "168h"},
 		"full_pipeline":   map[string]any{"run_workflows": false},
 		"pipeline":        map[string]any{"candidate_files": []string{}},
@@ -924,6 +925,9 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 		if _, ok := c.Profiles[c.DispatchDefault.Use]; !ok {
 			add("dispatch.default.use", "references unknown Profile "+c.DispatchDefault.Use)
 		}
+	}
+	if timeout, err := time.ParseDuration(c.ReviewLoop.GreenhouseTimeout); err != nil || timeout <= 0 {
+		add("review_loop.greenhouse_timeout", "must be a positive duration")
 	}
 	if c.ReviewLoop.Profile != "" {
 		if _, ok := c.Profiles[c.ReviewLoop.Profile]; !ok {

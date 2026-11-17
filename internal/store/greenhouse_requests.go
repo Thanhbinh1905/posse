@@ -37,7 +37,7 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 	var verdictID any
 	if request.Grant != "" {
 		var id int64
-		err := db.QueryRowContext(ctx, `SELECT id FROM verdicts WHERE grant_id=? AND task_id=? AND repo=? AND provider='greenhouse' AND mode='parallel'`, request.Grant, request.TaskID, request.Repository).Scan(&id)
+		err := db.QueryRowContext(ctx, `SELECT id FROM verdicts WHERE grant_id=? AND task_id=? AND repo=? AND provider='greenhouse' AND mode IN ('parallel','gate')`, request.Grant, request.TaskID, request.Repository).Scan(&id)
 		if err == nil {
 			verdictID = id
 		} else if !errors.Is(err, sql.ErrNoRows) {

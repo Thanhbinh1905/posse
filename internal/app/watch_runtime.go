@@ -877,6 +877,60 @@ func (s *Service) legacyPollerAdapter(ctx *axi.Context, args []string) (bool, er
 	return true, s.wait(ctx, args)
 }
 
+func (s *Service) verifiedWatchChild(ctx context.Context, db *store.DB, home string, project store.Project, flags map[string]string) (bool, error) {
+	projectID, projectErr := strconv.ParseInt(flags["watch-project-id"], 10, 64)
+	watchPID, pidErr := strconv.Atoi(flags["watch-pid"])
+	startedAt, startedErr := strconv.ParseInt(flags["watch-started-at"], 10, 64)
+	token := flags["watch-token"]
+	if projectErr != nil || pidErr != nil || startedErr != nil || projectID != project.ID || watchPID < 2 || startedAt < 1 || token == "" ||
+		os.Getenv(watchRuntimeProjectEnv) != strconv.FormatInt(projectID, 10) || os.Getenv(watchRuntimeTokenEnv) != token || os.Getenv(watchRuntimeStartedEnv) != strconv.FormatInt(startedAt, 10) {
+		return false, nil
+	}
+	watch, err := db.WatchRuntime(ctx, project.ID)
+	if err != nil {
+		return false, err
+	}
+	ancestors := processAncestors(procRoot, os.Getpid())
+	if !watchChildIdentityMatches(project.ID, flags, parseProcessEnvironment(strings.Join(os.Environ(), "\x00")), watch, ancestors) || !watchRuntimeProcessHealthy(home, project.ID, watch) {
+		return false, nil
+	}
+	for _, parent := range ancestors {
+		if parent.pid != watchPID {
+			continue
+		}
+		process, ok := inspectWatchProcess(home, watchPID)
+		if !ok || !process.PollOnly || !watchProcessMatchesWatch(process, project.ID, watch) ||
+			process.Executable.Device != watch.ExecutableDevice || process.Executable.Inode != watch.ExecutableInode ||
+			!samePath(parent.cwd, project.Root) || !samePath(process.WorkingDir, project.Root) {
+			return false, nil
+		}
+		cwd, err := currentDir()
+		if err != nil {
+			return false, err
+		}
+		return samePath(cwd, project.Root), nil
+	}
+	return false, nil
+}
+
+func watchChildIdentityMatches(projectID int64, flags, environment map[string]string, watch store.WatchRuntime, ancestors []ancestorProcess) bool {
+	flagProject, projectErr := strconv.ParseInt(flags["watch-project-id"], 10, 64)
+	flagPID, pidErr := strconv.Atoi(flags["watch-pid"])
+	startedAt, startedErr := strconv.ParseInt(flags["watch-started-at"], 10, 64)
+	if projectErr != nil || pidErr != nil || startedErr != nil || flagProject != projectID || flagPID != watch.PID ||
+		flags["watch-token"] == "" || flags["watch-token"] != watch.Token || startedAt != watch.StartedAt ||
+		environment[watchRuntimeProjectEnv] != strconv.FormatInt(projectID, 10) || environment[watchRuntimeTokenEnv] != watch.Token ||
+		environment[watchRuntimeStartedEnv] != strconv.FormatInt(watch.StartedAt, 10) {
+		return false
+	}
+	for _, parent := range ancestors {
+		if parent.pid == watch.PID {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal) error {
 	token := os.Getenv(watchRuntimeTokenEnv)
 	if token == "" {

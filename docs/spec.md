@@ -174,6 +174,7 @@ auto_start = true            # schedule within approved Review stage; mode-speci
 docs = false                 # include documentation gaps in the review rubric
 guidance = []                # repository paths supplied from the frozen target
 profile = ""                 # Review Profile; empty: review Dispatch Rules choose
+greenhouse_timeout = "90m"   # Maximum Posse wait for one Greenhouse review attempt
 
 [ci_loop]                    # User-only
 max_fix_rounds = 3           # automatic CI fix instructions per Change Task; 0 disables
