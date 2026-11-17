@@ -282,6 +282,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
 				round.Wait = attemptWait
+				if s.greenhouseRound != nil {
+					return s.greenhouseRound(ctx.Context, round)
+				}
 				return daemon.Review(ctx.Context, round)
 			})
 			if attempts > 0 {
@@ -316,18 +319,18 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			return axi.Failure("greenhouse_protocol", protocolErr.Error(), false, "No Verdict was requested")
 		}
 		if err != nil {
-			outcome := "failed"
+			failureReason := err.Error()
 			var terminalErr *greenhouse.TerminalReviewError
 			if errors.As(err, &terminalErr) {
-				outcome = terminalErr.Status
+				failureReason = fmt.Sprintf("Greenhouse terminal status %q: %s", terminalErr.Status, terminalErr.Reason)
 			}
-			if recordErr := recordRequest(outcome, result.Grant, time.Now().UnixMilli()); recordErr != nil {
+			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
-			if noticeErr := notifyFailure(requestHead, err.Error()); noticeErr != nil {
+			if noticeErr := notifyFailure(requestHead, failureReason); noticeErr != nil {
 				return noticeErr
 			}
-			return axi.Failure("greenhouse_failed", err.Error(), true)
+			return axi.Failure("greenhouse_failed", failureReason, true)
 		}
 		if result.Outcome == greenhouse.Running || result.Outcome == greenhouse.Paused {
 			if err := recordRequest("failed", result.Grant, time.Now().UnixMilli()); err != nil {

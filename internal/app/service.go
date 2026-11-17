@@ -16,6 +16,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -45,6 +46,7 @@ type Service struct {
 	teardowns            map[string]chan struct{}
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
 	checkQueuedBranch    func(context.Context, *store.DB, store.Project, string, []taskMember) error
+	greenhouseRound      func(context.Context, greenhouse.Round) (greenhouse.RoundResult, error)
 	// DetachQueuedLaunch runs each queued Task start in its own session. The
 	// posse binary sets it; unit tests keep the start in-process.
 	DetachQueuedLaunch bool
