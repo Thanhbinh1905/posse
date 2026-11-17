@@ -221,7 +221,7 @@ type Notify struct {
 	Command string `toml:"command" json:"command"`
 }
 
-// Knowledge opts into curated User and Project knowledge (ADR 0032).
+// Knowledge controls curated User and Project knowledge (ADR 0032).
 type Knowledge struct {
 	Enabled     bool `toml:"enabled" json:"enabled"`
 	BudgetBytes int  `toml:"budget_bytes" json:"budget_bytes"`
@@ -722,7 +722,7 @@ func defaultMap() map[string]any {
 		"lead":            map[string]any{"kind": "", "profiles": map[string]any{}},
 		"lowkey":          map[string]any{"lead": false},
 		"notify":          map[string]any{"command": ""},
-		"knowledge":       map[string]any{"enabled": false, "budget_bytes": DefaultKnowledgeBudgetBytes},
+		"knowledge":       map[string]any{"enabled": true, "budget_bytes": DefaultKnowledgeBudgetBytes},
 		"review_provider": "builtin",
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",

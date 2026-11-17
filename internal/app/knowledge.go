@@ -433,7 +433,7 @@ func (s *Service) knowledgeShow(ctx *axi.Context, args []string) error {
 	help := []any{"Run `posse knowledge show <id>` to read one entry"}
 	if !scope.settings.Knowledge.Enabled {
 		warnings = append(warnings, "knowledge.enabled is false: no knowledge loads and writes are refused")
-		help = append(help, "The User can opt in with `posse config set knowledge.enabled true`")
+		help = append(help, "Enable knowledge with `posse config set knowledge.enabled true`")
 	} else if budget.Over() {
 		warnings = append(warnings, fmt.Sprintf("startup knowledge and preferences are %d bytes, above the %d-byte budget; consolidate entries, archive stale or low-use ones, or make conditional ones on-demand", budget.Max(), budget.Limit))
 	}
@@ -612,7 +612,7 @@ func (s *Service) authorizeKnowledgeWrite(ctx *axi.Context, command string, flag
 		return knowledgeScope{}, "", err
 	}
 	if !scope.settings.Knowledge.Enabled {
-		return knowledgeScope{}, "", axi.Failure("knowledge_disabled", "knowledge is disabled for "+preferenceScope(scope.project), false, "The User can opt in with `posse config set knowledge.enabled true`")
+		return knowledgeScope{}, "", axi.Failure("knowledge_disabled", "knowledge is disabled for "+preferenceScope(scope.project), false, "Enable knowledge with `posse config set knowledge.enabled true`")
 	}
 	return scope, home, nil
 }

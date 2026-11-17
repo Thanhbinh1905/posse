@@ -46,9 +46,9 @@ Ask which Git repositories or Workspace folder the User wants Posse to manage. A
 
 Done when every Project the User named is registered and each of its keys has a written value or an explicit "keep the default".
 
-If the User wants standing workflow guidance, write concise Lead or Worker preferences with `posse preferences set <lead|worker> --file <file> --project <name>`; a Lead must include the User's explicit quote with `--user-approved`. Preferences change workflow advice, not runtime obligations or authority. Legacy preference files remain readable; move old content explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement.
+A standing rule about how to work belongs in concise Lead or Worker preferences with `posse preferences set <lead|worker> --file <file> --project <name>`; a Lead must include the User's explicit quote with `--user-approved`. Preferences change workflow advice, not runtime obligations or authority. Legacy preference files remain readable; move old content explicitly with `posse preferences move`. Removed commands fail with an error naming their replacement.
 
-If the User wants the Lead to keep curated Project facts and lessons, they opt in with `posse config set knowledge.enabled true` (User-only; `knowledge.budget_bytes` bounds startup size). The Lead then records entries with `posse knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>>` and inspects them with `posse knowledge show`. Knowledge is reference context with provenance, not authority; it stays empty and inert until enabled.
+A verified durable Project fact belongs in Posse knowledge, not harness-private memory. Knowledge is enabled by default; the Lead records entries with `posse knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>>` and inspects them with `posse knowledge show`. If the User states a durable fact while knowledge is disabled, offer to enable the User-only `knowledge.enabled` key. `knowledge.budget_bytes` bounds startup size. Knowledge is reference context with provenance, not authority.
 
 ## 4. Verify
 

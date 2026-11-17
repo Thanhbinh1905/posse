@@ -47,15 +47,26 @@ func composeShopLead(t *testing.T, f preferenceSetFixture) string {
 	return composed.Text
 }
 
-func TestKnowledgeIsEmptyAndInertByDefault(t *testing.T) {
+func TestKnowledgeIsEmptyByDefaultAndDisabledExplicitly(t *testing.T) {
 	f := newPreferenceSetFixture(t)
 	t.Chdir(f.repo)
 	before := composeShopLead(t, f)
-	writePreferenceFile(t, f.home, "projects/shop/knowledge/stack.md", "---\nsource: user\nverified: 2026-10-01\nload: always\n---\nHand-written knowledge marker.\n")
-	if after := composeShopLead(t, f); after != before || strings.Contains(after, "Hand-written knowledge marker") {
-		t.Fatalf("disabled knowledge changed Lead instructions:\n%s", after)
+	if strings.Contains(before, "## User and Project knowledge") {
+		t.Fatalf("empty default knowledge added a section:\n%s", before)
 	}
 	cfg, err := config.Load(f.home, "shop")
+	if err != nil || !cfg.Knowledge.Enabled {
+		t.Fatalf("knowledge without a config key is not enabled: %#v, %v", cfg.Knowledge, err)
+	}
+	if inputs, err := knowledgePlanInputs(f.home, f.project, cfg); err != nil || len(inputs) != 0 {
+		t.Fatalf("empty knowledge changed a Worker plan: %#v, %v", inputs, err)
+	}
+	writePreferenceFile(t, f.home, "projects/shop/config.toml", "[knowledge]\nenabled = false\n")
+	writePreferenceFile(t, f.home, "projects/shop/knowledge/stack.md", "---\nsource: user\nverified: 2026-10-01\nload: always\n---\nHand-written knowledge marker.\n")
+	if after := composeShopLead(t, f); strings.Contains(after, "Hand-written knowledge marker") {
+		t.Fatalf("explicitly disabled knowledge loaded its entry:\n%s", after)
+	}
+	cfg, err = config.Load(f.home, "shop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +84,19 @@ func TestKnowledgeIsEmptyAndInertByDefault(t *testing.T) {
 	}
 	if fileExists(filepath.Join(f.home, "knowledge")) {
 		t.Fatal("knowledge commands created a User knowledge directory by default")
+	}
+}
+
+func TestKnowledgeWriteNeedsNoEnablementByDefault(t *testing.T) {
+	f := newPreferenceSetFixture(t)
+	t.Chdir(f.repo)
+	body := writeKnowledgeBody(t, f.root, "Verified project fact.\n")
+	output := runPreferenceSetCLI(t, f.service, 0, "knowledge", "set", "fact", "--file", body, "--source", "user")
+	if !strings.Contains(output, "fact") || !fileExists(filepath.Join(f.home, "projects", "shop", "knowledge", "fact.md")) {
+		t.Fatalf("default knowledge write failed: %s", output)
+	}
+	if !strings.Contains(composeShopLead(t, f), "Verified project fact") {
+		t.Fatal("default knowledge entry was not rendered in Lead instructions")
 	}
 }
 
