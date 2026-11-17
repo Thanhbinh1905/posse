@@ -772,13 +772,56 @@ func resetWorktree(ctx context.Context, path string, target repoTarget, clean st
 	if _, err := gitOutput(ctx, path, "reset", "--hard", ref); err != nil {
 		return &sandboxResetError{step: "reset tracked files", err: err}
 	}
-	if _, err := gitOutput(ctx, path, "submodule", "update", "--init", "--recursive", "--force"); err != nil {
-		return &sandboxResetError{step: "update submodules", err: err}
+	hasSubmodules, err := worktreeHasSubmodules(ctx, path)
+	if err != nil {
+		return &sandboxResetError{step: "check for submodules", err: err}
+	}
+	if hasSubmodules {
+		if _, err := commandStdoutArgsWithEnv(ctx, path, []string{"PATH=" + gitSubmodulePath()}, "git", "-C", path, "submodule", "update", "--init", "--recursive", "--force"); err != nil {
+			return &sandboxResetError{step: "update submodules", err: fmt.Errorf("git submodule update --init --recursive --force: %w", err)}
+		}
 	}
 	if err := cleanWorktree(ctx, path, clean); err != nil {
 		return &sandboxResetError{step: "clean untracked files", err: err}
 	}
 	return nil
+}
+
+func gitSubmodulePath() string {
+	paths := filepath.SplitList(os.Getenv("PATH"))
+	for _, standard := range []string{"/usr/local/bin", "/usr/bin", "/bin"} {
+		if info, err := os.Stat(standard); err == nil && info.IsDir() {
+			found := false
+			for _, path := range paths {
+				if path == standard {
+					found = true
+					break
+				}
+			}
+			if !found {
+				paths = append(paths, standard)
+			}
+		}
+	}
+	return strings.Join(paths, string(os.PathListSeparator))
+}
+
+func worktreeHasSubmodules(ctx context.Context, path string) (bool, error) {
+	if _, err := os.Stat(filepath.Join(path, ".gitmodules")); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	entries, err := gitOutputRaw(ctx, path, "ls-files", "--stage", "-z")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range strings.Split(entries, "\x00") {
+		if strings.HasPrefix(entry, "160000 ") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type sandboxResetError struct {

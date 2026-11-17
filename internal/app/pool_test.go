@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,58 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestResetWorktreeSkipsSubmoduleUpdateWithoutSubmodulesOnRestrictedPath(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	worktree := filepath.Join(root, "worktree")
+	gitTest(t, repo, "worktree", "add", "--detach", worktree, "main")
+
+	gitBinary, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitCalls := filepath.Join(root, "git-calls")
+	shim := fmt.Sprintf("#!/bin/sh\nfor arg do\n  if [ \"$arg\" = submodule ]; then echo submodule >> %q; exit 99; fi\ndone\nexec %q \"$@\"\n", gitCalls, gitBinary)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	if got, err := gitOutput(ctx, repo, "rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}"); err != nil || got == "" {
+		t.Fatalf("resolve main through restricted PATH: %q, %v", got, err)
+	}
+	if err := resetWorktree(ctx, worktree, repoTarget{Root: repo, DefaultBranch: "main"}, "warm", false); err != nil {
+		t.Fatalf("reset without submodules and restricted PATH: %v", err)
+	}
+	if calls, err := os.ReadFile(gitCalls); err == nil && strings.Contains(string(calls), "submodule") {
+		t.Fatalf("git submodule was invoked without submodules: %s", calls)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestWorktreeHasSubmodulesDetectsGitlinkWithoutGitmodules(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	submodule := filepath.Join(root, "submodule")
+	initRepo(t, submodule)
+	commit := strings.TrimSpace(gitTest(t, submodule, "rev-parse", "HEAD"))
+	gitTest(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+commit+",vendor/sub")
+
+	hasSubmodules, err := worktreeHasSubmodules(ctx, repo)
+	if err != nil || !hasSubmodules {
+		t.Fatalf("worktreeHasSubmodules() = %v, %v; want true", hasSubmodules, err)
+	}
+}
 
 func TestResetWorktreeReportsSubmoduleUpdateFailure(t *testing.T) {
 	ctx := context.Background()
@@ -33,8 +86,20 @@ func TestResetWorktreeReportsSubmoduleUpdateFailure(t *testing.T) {
 	gitTest(t, repo, "commit", "-m", "add unavailable submodule")
 	worktree := filepath.Join(root, "worktree")
 	gitTest(t, repo, "worktree", "add", "--detach", worktree, "main")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitBinary, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(gitBinary, filepath.Join(binDir, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
 
-	err := resetWorktree(ctx, worktree, repoTarget{Root: repo, DefaultBranch: "main"}, "warm", false)
+	err = resetWorktree(ctx, worktree, repoTarget{Root: repo, DefaultBranch: "main"}, "warm", false)
 	var resetErr *sandboxResetError
 	if !errors.As(err, &resetErr) || resetErr.step != "update submodules" || !strings.Contains(resetErr.err.Error(), "does not exist") {
 		t.Fatalf("reset error = %v, want submodule update step and underlying Git failure", err)
