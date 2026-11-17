@@ -3366,6 +3366,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 			}
 		}
 	}
+	if err := stopTaskHarnessDaemons(task.WorktreePath); err != nil {
+		return failure(err)
+	}
 	if task.Type == "change" {
 		if generation == 0 {
 			generation, err = claimTaskBranchAuthor(ctx, db, task, launch, true)

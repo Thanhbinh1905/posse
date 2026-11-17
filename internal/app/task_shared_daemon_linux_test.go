@@ -38,6 +38,7 @@ func TestSharedTaskDaemonCommandRecognition(t *testing.T) {
 		{name: "Worker Vite server", comm: "node", args: []string{"node", "vite"}},
 		{name: "Worker browser", comm: "chrome", args: []string{"chrome", "--user-data-dir=/scratch/task"}},
 		{name: "Worker test helper", comm: "sleep", args: []string{"sleep", "60"}},
+		{name: "Codex app-server", comm: "codex", args: []string{"/test-home/bin/codex", "app-server"}, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

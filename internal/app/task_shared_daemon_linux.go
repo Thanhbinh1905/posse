@@ -146,6 +146,8 @@ func isSharedTaskDaemonCommand(comm string, args []string) bool {
 	comm = strings.ToLower(comm)
 
 	switch {
+	case commandName == "codex" && len(args) > 1 && args[1] == "app-server":
+		return true
 	case comm == "ssh" && strings.HasPrefix(command, "ssh: ") && strings.HasSuffix(command, " [mux]"):
 		return true
 	case commandName == "ssh":

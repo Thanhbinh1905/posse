@@ -1039,6 +1039,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		}
 		paneResult = latestPanes
 		if discardable && sandboxHeld {
+			if err := stopTaskHarnessDaemons(task.WorktreePath); err != nil {
+				return err
+			}
 			if err := verifyNoTaskOwnedProcesses(ctx, db, home, project, task); err != nil {
 				return err
 			}
