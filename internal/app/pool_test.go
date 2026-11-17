@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,45 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestResetWorktreeReportsSubmoduleUpdateFailure(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	submodule := filepath.Join(root, "submodule")
+	initRepo(t, submodule)
+	commit := strings.TrimSpace(gitTest(t, submodule, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, ".gitmodules"), []byte("[submodule \"sub\"]\n\tpath = vendor/sub\n\turl = /definitely/missing/submodule\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, repo, "add", ".gitmodules")
+	gitTest(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+commit+",vendor/sub")
+	gitTest(t, repo, "commit", "-m", "add unavailable submodule")
+	worktree := filepath.Join(root, "worktree")
+	gitTest(t, repo, "worktree", "add", "--detach", worktree, "main")
+
+	err := resetWorktree(ctx, worktree, repoTarget{Root: repo, DefaultBranch: "main"}, "warm", false)
+	var resetErr *sandboxResetError
+	if !errors.As(err, &resetErr) || resetErr.step != "update submodules" || !strings.Contains(resetErr.err.Error(), "does not exist") {
+		t.Fatalf("reset error = %v, want submodule update step and underlying Git failure", err)
+	}
+}
+
+func TestSandboxAcquisitionFailureNamesResetStepAndRecovery(t *testing.T) {
+	failure := sandboxAcquisitionFailure(store.Sandbox{Number: 7}, "reset", &sandboxResetError{step: "update submodules", err: errors.New("git submodule update: repository does not exist")})
+	if failure.Code != "sandbox_acquisition_failed" {
+		t.Fatalf("failure code = %q, want sandbox_acquisition_failed", failure.Code)
+	}
+	for _, want := range []string{"sandbox-7", "update submodules", "git submodule update", "repository does not exist"} {
+		if !strings.Contains(failure.Message, want) {
+			t.Errorf("failure message %q does not contain %q", failure.Message, want)
+		}
+	}
+	if !slices.Contains(failure.Help, "Run `posse pool repair sandbox-7` to repair the broken Sandbox") {
+		t.Errorf("failure help = %q, want sandbox repair command", failure.Help)
+	}
+}
 
 func TestTeardownFailedTaskDoesNotResetSandboxReusedByAnotherTask(t *testing.T) {
 	ctx := context.Background()

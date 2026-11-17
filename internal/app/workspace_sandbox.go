@@ -178,6 +178,7 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 	if rootContext == "" {
 		rootContext = "legacy"
 	}
+	var lastFailure error
 	for attempts := 0; attempts < 64; attempts++ {
 		var sandbox store.Sandbox
 		err := withSandboxStateLock(ctx, db, func() error {
@@ -202,6 +203,7 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 			return sandbox, err
 		}
 		if err := s.prepareWorkspaceSandbox(ctx, project, targets, members, sandbox.Path, cleanMode, rootContext); err != nil {
+			lastFailure = sandboxAcquisitionFailure(sandbox, "prepare workspace members", err)
 			if breakErr := breakSandbox(ctx, db, project, task, sandbox, err.Error(), nil); breakErr != nil {
 				return sandbox, errors.Join(err, breakErr)
 			}
@@ -252,6 +254,9 @@ func (s *Service) acquireWorkspaceSandbox(ctx context.Context, db *store.DB, pro
 			return sandbox, fmt.Errorf("capture workspace root at Sandbox acquisition: %w", err)
 		}
 		return sandbox, nil
+	}
+	if lastFailure != nil {
+		return store.Sandbox{}, lastFailure
 	}
 	return store.Sandbox{}, fmt.Errorf("no clean Sandbox could be acquired")
 }

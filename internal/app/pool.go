@@ -512,6 +512,7 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return store.Sandbox{}, err
 	}
+	var lastFailure error
 	for attempts := 0; attempts < 64; attempts++ {
 		var sandbox store.Sandbox
 		err := withSandboxStateLock(ctx, db, func() error {
@@ -581,6 +582,7 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 				args = append(append([]string{"worktree", "add", "--detach"}, lock...), sandbox.Path, ref)
 			}
 			if _, err := gitOutput(ctx, project.Root, args...); err != nil {
+				lastFailure = sandboxAcquisitionFailure(sandbox, "create worktree", err)
 				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Git could not create the Sandbox worktree", err); breakErr != nil {
 					return sandbox, errors.Join(err, breakErr)
 				}
@@ -603,6 +605,7 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 			}
 		} else {
 			if err := resetSandbox(ctx, sandbox.Path, project, cleanMode); err != nil {
+				lastFailure = sandboxAcquisitionFailure(sandbox, "reset to a clean state", err)
 				if breakErr := breakSandbox(ctx, db, project, task, sandbox, "Sandbox could not be reset to a clean state", err); breakErr != nil {
 					return sandbox, errors.Join(err, breakErr)
 				}
@@ -639,7 +642,23 @@ func acquireSandboxWithBranch(ctx context.Context, db *store.DB, project store.P
 		}
 		return sandbox, nil
 	}
+	if lastFailure != nil {
+		return store.Sandbox{}, lastFailure
+	}
 	return store.Sandbox{}, fmt.Errorf("no clean Sandbox could be acquired")
+}
+
+func sandboxAcquisitionFailure(sandbox store.Sandbox, step string, err error) *axi.Error {
+	var resetErr *sandboxResetError
+	if errors.As(err, &resetErr) {
+		step, err = resetErr.step, resetErr.err
+	}
+	return axi.Failure(
+		"sandbox_acquisition_failed",
+		fmt.Sprintf("sandbox-%d failed during %s: %v", sandbox.Number, step, err),
+		true,
+		fmt.Sprintf("Run `posse pool repair sandbox-%d` to repair the broken Sandbox", sandbox.Number),
+	)
 }
 
 func abandonUnpreparedSandbox(ctx context.Context, db *store.DB, project store.Project, task store.Task, sandbox store.Sandbox) error {
@@ -733,28 +752,42 @@ func resetSandbox(ctx context.Context, path string, project store.Project, clean
 // ref; acquisition fetches before new work starts.
 func resetWorktree(ctx context.Context, path string, target repoTarget, clean string, fetch bool) error {
 	if defaultBranchUnborn(ctx, target) {
-		return resetUnbornWorktree(ctx, path, unbornIdleBranch, clean)
+		if err := resetUnbornWorktree(ctx, path, unbornIdleBranch, clean); err != nil {
+			return &sandboxResetError{step: "reset unborn worktree", err: err}
+		}
+		return nil
 	}
 	ref, remote, err := sandboxResetRef(ctx, target, fetch)
 	if err != nil {
-		return err
+		return &sandboxResetError{step: "resolve reset ref", err: err}
 	}
 	if remote && fetch {
 		if _, err := gitFetch(ctx, target.Root, "origin"); err != nil {
-			return err
+			return &sandboxResetError{step: "fetch default branch", err: err}
 		}
 	}
 	if _, err := gitOutput(ctx, path, "checkout", "--detach", "--force", ref); err != nil {
-		return err
+		return &sandboxResetError{step: "checkout default branch", err: err}
 	}
 	if _, err := gitOutput(ctx, path, "reset", "--hard", ref); err != nil {
-		return err
+		return &sandboxResetError{step: "reset tracked files", err: err}
 	}
 	if _, err := gitOutput(ctx, path, "submodule", "update", "--init", "--recursive", "--force"); err != nil {
-		return err
+		return &sandboxResetError{step: "update submodules", err: err}
 	}
-	return cleanWorktree(ctx, path, clean)
+	if err := cleanWorktree(ctx, path, clean); err != nil {
+		return &sandboxResetError{step: "clean untracked files", err: err}
+	}
+	return nil
 }
+
+type sandboxResetError struct {
+	step string
+	err  error
+}
+
+func (e *sandboxResetError) Error() string { return fmt.Sprintf("%s: %v", e.step, e.err) }
+func (e *sandboxResetError) Unwrap() error { return e.err }
 
 // cleanWorktree removes untracked files, and ignored ones for a pristine clean,
 // and verifies that nothing remains.
