@@ -579,9 +579,11 @@ func taskNeedsRestartRecovery(task store.Task, snapshot herdr.Snapshot) bool {
 	if !recoverableTaskState(task.State) || snapshot.ServerStartedAt == "" {
 		return false
 	}
+	if task.AgentServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt {
+		return true
+	}
 	pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-	agentMissing := !found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped"
-	return agentMissing && (task.AgentServerStartedAt == "" || task.AgentServerStartedAt != snapshot.ServerStartedAt)
+	return (!found || pane.Agent == "" || pane.AgentStatus == "exited" || pane.AgentStatus == "stopped") && task.AgentServerStartedAt == ""
 }
 
 func recoverableTaskState(state store.State) bool {

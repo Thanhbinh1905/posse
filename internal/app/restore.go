@@ -30,9 +30,11 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 		return err
 	}
 	workers := []string{}
+	workerRelaunches := []string{}
 	for _, task := range tasks {
 		if recoverableTaskState(task.State) {
 			workers = append(workers, taskDisplayName(task))
+			workerRelaunches = append(workerRelaunches, "`posse relaunch "+taskIDString(task.Seq)+"`")
 		}
 	}
 	data := marshalJSON(map[string]any{"episode": episode, "tasks": workers})
@@ -46,6 +48,9 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 			summary += " and Workers " + strings.Join(workers, ", ")
 		}
 		summary += "; run `posse up --all` to restore them"
+		if len(workerRelaunches) > 0 {
+			summary += " or " + strings.Join(workerRelaunches, " or ") + " to restore a Worker"
+		}
 		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "restore_needed", Summary: summary, DataJSON: data}); err != nil {
 			return err
 		}
@@ -85,6 +90,9 @@ func (s *Service) adoptCurrentGeneration(ctx context.Context, db *store.DB, proj
 	for _, task := range tasks {
 		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
+		}
+		if task.AgentServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt {
+			return false, nil
 		}
 		if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); !found || !paneAgentRunning(pane) {
 			return false, nil

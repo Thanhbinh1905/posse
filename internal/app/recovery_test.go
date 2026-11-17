@@ -341,6 +341,14 @@ func TestRecoverRebuildFailureKeepsBeforeRebuildBackup(t *testing.T) {
 	}
 }
 
+func TestNativeHerdrResumeRequiresWorkerRecovery(t *testing.T) {
+	task := store.Task{State: store.StateWorking, PaneID: "w1:p2", PaneLabel: "posse:shop:t1", AgentServerStartedAt: "old-generation"}
+	resumed := herdr.Snapshot{ServerStartedAt: "new-generation", Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "codex", AgentStatus: "working"}}}
+	if !taskNeedsRestartRecovery(task, resumed) {
+		t.Fatal("native Herdr resume without the Posse launch environment was treated as a healthy Worker")
+	}
+}
+
 func TestRestartLeadPromptsWhenProfileArgsExistWithoutSystemPromptArg(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
