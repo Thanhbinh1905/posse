@@ -90,7 +90,6 @@ type setupInspection struct {
 	PluginPath       string
 	PluginPresent    bool
 	PluginListJSON   []byte
-	SidebarSupported bool
 
 	// NoRecommendedSkills keeps a config setup creates free of the
 	// recommended [skills] block.
@@ -107,7 +106,12 @@ type setupRun struct {
 }
 
 func (s *Service) setup(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "sidebar-layout": {boolean: true}, "no-sidebar-layout": {boolean: true}, "recommended-skills": {boolean: true}, "no-recommended-skills": {boolean: true}, "global-skills": {boolean: true}, "remove-global-skills": {boolean: true}, "binary": {}})
+	for _, arg := range args {
+		if arg == "--sidebar-layout" || arg == "--no-sidebar-layout" {
+			return axi.Usage(arg + " was removed; posse setup no longer configures the Herdr Agents sidebar")
+		}
+	}
+	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "recommended-skills": {boolean: true}, "no-recommended-skills": {boolean: true}, "global-skills": {boolean: true}, "remove-global-skills": {boolean: true}, "binary": {}})
 	if err != nil {
 		return err
 	}
@@ -123,9 +127,6 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 	}
 	if parsed.Bool("exit-code") && !parsed.Bool("check") {
 		return axi.Usage("--exit-code applies only to setup --check")
-	}
-	if parsed.Bool("sidebar-layout") && (parsed.Bool("check") || parsed.Bool("uninstall") || parsed.Bool("no-sidebar-layout")) || parsed.Bool("no-sidebar-layout") && (parsed.Bool("check") || parsed.Bool("uninstall")) {
-		return axi.Usage("sidebar layout flags apply only when installing setup")
 	}
 	home, err := s.homePath()
 	if err != nil {
@@ -156,29 +157,21 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
-	if err == nil && run.applied && sidebarOffer(run.plan) && !parsed.Bool("no-sidebar-layout") {
-		confirmed := parsed.Bool("sidebar-layout")
-		if !confirmed && !parsed.Bool("human") && setupInputIsTerminal() {
-			fmt.Fprint(ctx.ErrOut, "Add Posse Agents sidebar layout to Herdr config? [y/N] ")
-			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			confirmed = strings.EqualFold(strings.TrimSpace(answer), "y")
-		}
-		if confirmed {
-			path, pathErr := herdrConfigPath()
-			if pathErr == nil {
-				var changed bool
-				changed, pathErr = installSidebarLayout(path)
-				if changed && pathErr == nil {
-					run.changed = append(run.changed, "sidebar_layout:"+path)
-					for _, row := range run.plan {
-						if row["step"] == "sidebar_layout" {
-							row["action"] = "installed"
-						}
-					}
+	if err == nil && run.applied {
+		path, pathErr := herdrConfigPath()
+		if pathErr == nil {
+			var result string
+			result, pathErr = removeSidebarLayout(path)
+			for _, row := range run.plan {
+				if row["step"] == "sidebar_cleanup" {
+					row["action"] = result
 				}
 			}
-			err = pathErr
+			if result == "removed" {
+				run.changed = append(run.changed, "sidebar_layout_removed:"+path)
+			}
 		}
+		err = pathErr
 	}
 	if err == nil && run.applied && recommendedSkillsOffered(run.plan) && !parsed.Bool("no-recommended-skills") {
 		confirmed := parsed.Bool("recommended-skills")
@@ -249,20 +242,7 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 	if pathErr != nil {
 		return run, pathErr
 	}
-	state, stateErr := sidebarLayoutState(path)
-	row := map[string]any{"step": "sidebar_layout", "target": path, "action": state}
-	if stateErr != nil {
-		row["action"] = "manual"
-		row["error"] = stateErr.Error()
-	}
-	if state != "keep" {
-		row["snippet"] = sidebarLayoutSnippet
-	}
-	if state == "offer" && !run.inspection.SidebarSupported {
-		row["action"] = "manual"
-		row["error"] = "Herdr 0.9.1 or newer is required for styled sidebar rules"
-	}
-	run.plan = append(run.plan, row)
+	run.plan = append(run.plan, map[string]any{"step": "sidebar_cleanup", "target": path, "action": "none"})
 	if skillsRow, ok := recommendedSkillsOfferRow(home, run.plan, noRecommendedSkills); ok {
 		run.plan = append(run.plan, skillsRow)
 	}
@@ -306,7 +286,7 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 }
 
 func (s *Service) inspectSetup(ctx context.Context, home string) (setupInspection, error) {
-	versionData, versionErr := runHerdrCLI(s.Herdr, ctx, "--version")
+	_, versionErr := runHerdrCLI(s.Herdr, ctx, "--version")
 	if versionErr != nil {
 		return setupInspection{}, axi.Failure("herdr_version_failed", "could not determine Herdr version", true, versionErr.Error())
 	}
@@ -348,7 +328,6 @@ func (s *Service) inspectSetup(ctx context.Context, home string) (setupInspectio
 	return setupInspection{
 		Kinds: installKinds, ReferencedKinds: referenced, AvailableKinds: availableKinds, Integrations: status,
 		PluginPath: pluginPath, PluginPresent: pluginFound, PluginListJSON: pluginData,
-		SidebarSupported: herdrSupportsSidebarRules(string(versionData)),
 	}, nil
 }
 
@@ -723,7 +702,7 @@ const setupPendingExitCode = 3
 // read-only hook link stays a manual step, so it is never pending.
 func setupPending(plan []map[string]any) bool {
 	for _, row := range plan {
-		if action, _ := row["action"].(string); action != "keep" && action != "complete" && action != "setup_hook_symlink" && action != "offer" && action != "upgrade" && action != "offer_global" && action != "offer_removal" && action != "preserve" && action != "manual" {
+		if action, _ := row["action"].(string); action != "keep" && action != "complete" && action != "setup_hook_symlink" && action != "offer" && action != "upgrade" && action != "offer_global" && action != "offer_removal" && action != "preserve" && action != "manual" && action != "none" {
 			return true
 		}
 	}
@@ -732,23 +711,6 @@ func setupPending(plan []map[string]any) bool {
 
 func setupInputIsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
-}
-
-func herdrSupportsSidebarRules(version string) bool {
-	var major, minor, patch int
-	if _, err := fmt.Sscanf(strings.TrimPrefix(strings.TrimSpace(version), "herdr "), "%d.%d.%d", &major, &minor, &patch); err != nil {
-		return false
-	}
-	return major > 0 || minor > 9 || minor == 9 && patch >= 1
-}
-
-func sidebarOffer(plan []map[string]any) bool {
-	for _, row := range plan {
-		if row["step"] == "sidebar_layout" && (row["action"] == "offer" || row["action"] == "upgrade") {
-			return true
-		}
-	}
-	return false
 }
 
 func validateSetupPlan(plan []map[string]any) error {
@@ -809,11 +771,7 @@ func renderSetupPlan(plan []map[string]any) []axi.Object {
 			note = "edited through link " + configured
 		}
 		if value, ok := row["snippet"].(string); ok && value != "" {
-			if step == "sidebar_layout" {
-				note = "Posse Agents layout (existing rows are never replaced): " + value
-			} else {
-				note = "add the hook through the config manager; snippet: " + value
-			}
+			note = "add the hook through the config manager; snippet: " + value
 		}
 		if value, ok := row["link"].(string); ok && value != "" {
 			note = "Claude skill link: " + value

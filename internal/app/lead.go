@@ -200,12 +200,10 @@ func (s *Service) currentLeadKind(ctx context.Context, project store.Project, cf
 	return ""
 }
 
-// The role belongs in the title and posse_row, not in Herdr's harness field.
-// Like Workers, Leads show the resolved kind before start and detection afterward.
+// Leads show the resolved kind before start and detection afterward.
 func leadDisplayMetadata(project store.Project, paneID, detectedAgent, expectedAgent string) map[string]any {
 	metadata := map[string]any{
 		"pane_id": paneID, "source": "posse", "title": "Lead: " + project.Name,
-		"tokens": map[string]string{"posse_row": leadWorkspaceLabel(project)},
 	}
 	displayAgent := detectedAgent
 	if displayAgent == "" {

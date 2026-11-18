@@ -69,14 +69,12 @@ case $1 in
     mode=apply
     human=0
     exit_code=0
-    layout=0
     for arg in "$@"; do
       case $arg in
         --check) mode=check ;;
         --uninstall) mode=uninstall ;;
         --human) human=1 ;;
         --exit-code) exit_code=1 ;;
-        --sidebar-layout) layout=1 ;;
       esac
     done
     if [ "$human" -eq 1 ] && [ "${STUB_OLD_SETUP:-}" = 1 ]; then
@@ -93,7 +91,7 @@ case $1 in
         if [ "${STUB_UNLISTED_PENDING:-}" = 1 ]; then
           printf '%s\n' '-  Herdr plugin and agent integrations: already set'
         else
-          printf '%s\n' '+  Herdr plugin and agent integrations: will be added' '-  Agents sidebar in Herdr: optional (posse setup --sidebar-layout)' '+  SessionStart hook for Claude Code, Codex: will be added' '     Codex asks once to trust its new hook.' '+  Recommended workflow skills: will be added'
+          printf '%s\n' '+  Herdr plugin and agent integrations: will be added' '+  SessionStart hook for Claude Code, Codex: will be added' '     Codex asks once to trust its new hook.' '+  Recommended workflow skills: will be added'
         fi
         if [ "$exit_code" -eq 1 ]; then
           exit 3
@@ -105,12 +103,11 @@ case $1 in
         ;;
       *)
         printf 'setup-run\n' >> "$log"
-        if [ "$layout" -eq 1 ]; then printf 'setup-sidebar\n' >> "$log"; fi
         if [ "${STUB_SETUP_FAIL:-}" = 1 ]; then
           printf '%s\n' '✗  setup would overwrite an unmanaged path' '   /home/user/.claude/settings.json'
           exit 1
         fi
-        printf '%s\n' '✓  Herdr plugin and agent integrations' '-  Agents sidebar in Herdr: optional (posse setup --sidebar-layout)' '✓  SessionStart hook for Claude Code, Codex' '     Codex asks once to trust its new hook.' '✓  Recommended workflow skills'
+        printf '%s\n' '✓  Herdr plugin and agent integrations' '✓  SessionStart hook for Claude Code, Codex' '     Codex asks once to trust its new hook.' '✓  Recommended workflow skills'
         ;;
     esac
     ;;
@@ -215,7 +212,6 @@ for step in "[1/6] Check your system" "[2/6] Choose a version" "[3/6] Download a
 done
 contains "$output" "will be added" && fail "--yes printed the plan before the result"
 contains "$(cat "$yes_log")" "setup-run" || fail "--yes did not apply setup"
-contains "$(cat "$yes_log")" "setup-sidebar" && fail "--yes applied the retired sidebar layout"
 contains "$(cat "$yes_log")" "home-set" && fail "--yes saved a data folder nobody chose"
 contains "$output" "  ✓  SessionStart hook for Claude Code, Codex" || fail "--yes did not show the setup result"
 contains "$output" "posse keeps its data in $TEST_ROOT/home-yes/.posse" || fail "--yes did not name the data folder"

@@ -58,19 +58,8 @@ func TestRelabelProjectTabsUsesHerdrOrderAndLeavesUserTabsAlone(t *testing.T) {
 		}
 	}
 	want := map[string]string{"t1": "Lead", "t3": "second-worker-t2", "t4": "first-worker-t1"}
-	wantRows := map[string]string{"p1": "Lead:shop", "p3": "├─ second-worker-t2", "p4": "└─ first-worker-t1"}
-	for _, call := range fake.Calls {
-		if call.Method != "pane.report_metadata" {
-			continue
-		}
-		paneID := call.Params["pane_id"].(string)
-		if got := call.Params["tokens"].(map[string]string)["posse_row"]; got != wantRows[paneID] {
-			t.Errorf("pane %s row = %q, want %q", paneID, got, wantRows[paneID])
-		}
-		delete(wantRows, paneID)
-	}
-	if len(wantRows) != 0 {
-		t.Errorf("missing pane row metadata: %#v", wantRows)
+	if fake.CallCount("pane.report_metadata") != 0 {
+		t.Fatalf("tab relabeling wrote sidebar row metadata: %#v", fake.Calls)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("tab renames = %#v, want %#v", got, want)
@@ -98,16 +87,13 @@ func TestProjectTabPresentationDoesNotDuplicateLinkedWorkerName(t *testing.T) {
 			{PaneID: task.PaneID, TabID: "worker:t1", WorkspaceID: "worker", Label: task.PaneLabel, CWD: task.WorktreePath, Tokens: map[string]string{"posse_row": task.ShortName}},
 		},
 	}
-	labels, rows := projectTabPresentation(snap, project, []store.Task{task})
-	if row, owned := rows[task.PaneID]; !owned || row != "" {
-		t.Fatalf("linked Worker must clear its redundant custom row: %#v", rows)
-	}
+	labels := projectTabPresentation(snap, project, []store.Task{task})
 	if _, renamed := labels["worker:t1"]; renamed {
 		t.Fatalf("linked Worker's native tab label was changed: %#v", labels)
 	}
 }
 
-func TestRelabelProjectTabsRefreshesLeadHarnessWithoutChangingRow(t *testing.T) {
+func TestRelabelProjectTabsRefreshesLeadHarness(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -122,7 +108,7 @@ func TestRelabelProjectTabsRefreshesLeadHarnessWithoutChangingRow(t *testing.T) 
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{
 		Tabs:  []herdr.Tab{{TabID: "t1", Label: "Lead"}},
-		Panes: []herdr.Pane{{PaneID: "p1", TabID: "t1", Label: project.LeadLabel, Agent: "pi", DisplayAgent: "Lead", Tokens: map[string]string{"posse_row": "Lead:shop"}}},
+		Panes: []herdr.Pane{{PaneID: "p1", TabID: "t1", Label: project.LeadLabel, Agent: "pi", DisplayAgent: "Lead"}},
 	}
 	service := testService(t.TempDir(), fake)
 	service.relabelProjectTabs(ctx, db, project)

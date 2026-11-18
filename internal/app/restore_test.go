@@ -81,16 +81,8 @@ func TestHeldRestoreRefreshesHerdrAgentRows(t *testing.T) {
 	if _, err := service.prepareProjectObservation(ctx, db, project); err != nil {
 		t.Fatalf("observe Project after a Herdr restart: %v", err)
 	}
-	rows := map[string]string{}
-	for _, call := range fake.Calls {
-		if call.Method != "pane.report_metadata" {
-			continue
-		}
-		tokens, _ := call.Params["tokens"].(map[string]string)
-		rows[call.Params["pane_id"].(string)] = tokens["posse_row"]
-	}
-	if rows["w1:p1"] != leadWorkspaceLabel(project) || rows["w2:p1"] != "└─ worker-t1" {
-		t.Fatalf("held restore did not fill Herdr Agent rows: %#v; calls=%#v", rows, fake.Calls)
+	if fake.CallCount("pane.report_metadata") != 0 {
+		t.Fatalf("held restore wrote sidebar row metadata: %#v", fake.Calls)
 	}
 }
 

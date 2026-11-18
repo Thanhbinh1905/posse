@@ -33,7 +33,6 @@ Each Herdr workspace holds one Project and its Lead. Workers use tabs inside tha
 - [Full specification](docs/spec.md)
 - [Recommended skills](docs/skills.md)
 - [Upgrading and vocabulary changes](docs/adr/0026-functional-vocabulary.md)
-- [Herdr sidebar layout setup](docs/spec.md#herdr-agents-sidebar-layout)
 - [GitHub Releases](https://github.com/Thanhbinh1905/posse/releases)
 
 ## Acknowledgements

@@ -1798,7 +1798,7 @@ func assertLeadSidebarPresentation(t *testing.T, client *herdr.Client, workspace
 			}
 			for _, pane := range snapshot.Panes {
 				if pane.PaneID == paneID && pane.Label == "posse:shop:lead" {
-					if pane.Agent == "" || pane.DisplayAgent != pane.Agent || pane.Title != "Lead: shop" || pane.Tokens["posse_row"] != label {
+					if pane.Agent == "" || pane.DisplayAgent != pane.Agent || pane.Title != "Lead: shop" {
 						t.Fatalf("Lead must retain its role and display its detected harness: %#v", pane)
 					}
 					return

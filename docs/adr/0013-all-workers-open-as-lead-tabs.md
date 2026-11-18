@@ -2,6 +2,8 @@
 
 *Superseded for repository Workers by [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md).*
 
+*Sidebar layout superseded by sub-workspace placement ([#1047](https://github.com/Thanhbinh1905/posse/issues/1047), PR #1068, [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md)): Posse no longer writes `[ui.sidebar.agents]` or sets `posse_row`; `posse setup` removes its earlier snippet.*
+
 It amended [ADR 0009](0009-workers-open-as-tabs-of-the-lead-workspace.md) and superseded [ADR 0012](0012-group-repository-workers-under-lead.md) for new Worker placement.
 
 ## Decision

@@ -2,6 +2,8 @@
 
 *Amended by [ADR 0012](0012-group-repository-workers-under-lead.md), [ADR 0013](0013-all-workers-open-as-lead-tabs.md) and [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md): Workspace Project Workers open as tabs; Repository Workers open as linked worktree children. Existing layouts remain supported until teardown.*
 
+*Sidebar layout superseded by sub-workspace placement ([#1047](https://github.com/Thanhbinh1905/posse/issues/1047), PR #1068, [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md)): Posse no longer writes `[ui.sidebar.agents]` or sets `posse_row`; `posse setup` removes its earlier snippet.*
+
 Each Worker used to open in its own Herdr workspace ([ADR 0007](0007-isolate-workers-from-the-user-session.md) layer 1). With several Workers the sidebar held one row per Worker, interleaved with the User's own workspaces, and every launch or teardown renamed sibling Worker workspaces to keep the `├─`/`└─` connectors in order. The User chose one shared workspace for the Lead and its Workers.
 
 ## Decision
