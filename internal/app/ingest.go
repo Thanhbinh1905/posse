@@ -500,7 +500,7 @@ func raiseDelayedNoticeAlert(ctx context.Context, db *store.DB, project store.Pr
 			}
 			continue
 		}
-		if !noticeNeedsUser(*notice, "ask") || notice.AckedAt != 0 && notice.DeliveredAt != 0 {
+		if !noticeNeedsUser(*notice, "ask") || notice.AckedAt != 0 {
 			continue
 		}
 		if currentTime()-notice.CreatedAt >= delayedNoticeAlertAfter.Milliseconds() {

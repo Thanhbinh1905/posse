@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,59 @@ func TestReceiverRecoveryClosesTheMissingEpisode(t *testing.T) {
 	}
 	if missing == nil || missing.AckedAt == 0 || recovered == nil || recovered.AckedAt == 0 {
 		t.Fatalf("receiver episode was not closed: missing=%#v recovered=%#v", missing, recovered)
+	}
+}
+
+func TestDelayedActionableNoticeIgnoresAcknowledgedUndeliveredNotice(t *testing.T) {
+	fixture := newCodexLeadFixture(t, idlePiLead, "", "0")
+	ctx := context.Background()
+	old := currentTime() - delayedNoticeAlertAfter.Milliseconds() - 1
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE notices SET created_at=? WHERE project_id=? AND kind='task_done'`, old, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "task_done", Summary: "still pending", CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acknowledgedID, pendingID int64
+	for _, notice := range notices {
+		if notice.Kind != "task_done" {
+			continue
+		}
+		if notice.Summary == "still pending" {
+			pendingID = notice.ID
+		} else {
+			acknowledgedID = notice.ID
+		}
+	}
+	if acknowledgedID == 0 || pendingID == 0 {
+		t.Fatalf("task_done Notices = %#v, want acknowledged and pending Notices", notices)
+	}
+	if _, err := fixture.db.AckNotices(ctx, fixture.project.ID, []string{fmt.Sprint(acknowledgedID)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := raiseDelayedNoticeAlert(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	open, err := fixture.db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alerts []store.Notice
+	for _, notice := range open {
+		if notice.Kind != "notice_delivery_delayed" {
+			continue
+		}
+		alerts = append(alerts, notice)
+		if !strings.Contains(notice.Summary, fmt.Sprint(pendingID)) || strings.Contains(notice.Summary, fmt.Sprint(acknowledgedID)) {
+			t.Fatalf("delayed alert includes wrong Notices: %q", notice.Summary)
+		}
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("delayed alert count = %d, want one", len(alerts))
 	}
 }
 
