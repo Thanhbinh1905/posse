@@ -1330,9 +1330,7 @@ model = "test"
 		t.Fatalf("relaunch left detached daemon PID %d in the Sandbox", daemonPID)
 	}
 	fixture.fake.SnapshotValue.Panes = nil
-	if err := os.Chdir(fixture.project.Root); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(fixture.project.Root)
 	var output bytes.Buffer
 	cli := fixture.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output

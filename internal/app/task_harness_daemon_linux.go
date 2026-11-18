@@ -81,7 +81,7 @@ func stopTaskHarnessDaemons(root string) error {
 			return fmt.Errorf("check Task harness daemon %d: %w", pid, err)
 		}
 		if alive && processReferencesRoots(pid, []ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}}) {
-			return fmt.Errorf("Task harness daemon %d remains in the Sandbox", pid)
+			return fmt.Errorf("task harness daemon %d remains in the Sandbox", pid)
 		}
 	}
 	return nil
