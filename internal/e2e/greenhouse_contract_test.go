@@ -432,11 +432,16 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 			t.Fatalf("Greenhouse accepted spent grant %s: %v", spent, refused)
 		}
 		head := c.authorCommit(t)
+		workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+		workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+		if output, err := c.posse(workerEnv, c.change.WorktreePath, "signal", "done", "Fix round complete"); err != nil {
+			t.Fatalf("Worker done Signal: %v\n%s", err, output)
+		}
 		c.setMode(t, "clean")
 		result := c.review(t)
 		c.requireRecorded(t, result, head, "clean", 0)
-		if result["grant"] == spent {
-			t.Fatalf("Posse reused grant %s", spent)
+		if result["grant"] != "shop/t1/shop/r3" || result["grant"] == spent {
+			t.Fatalf("new head used grant %v after spent grant %s; want r3", result["grant"], spent)
 		}
 		if after := c.verdicts(t); len(after) != len(before)+1 {
 			t.Fatalf("Verdicts = %d, want %d", len(after), len(before)+1)

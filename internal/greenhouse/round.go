@@ -135,11 +135,11 @@ func (d *Daemon) continueReview(ctx context.Context, round Round, v response, pe
 }
 
 func (d *Daemon) startReview(ctx context.Context, round Round, v response) (RoundResult, error) {
-	used := 0
-	if v.Run != nil {
-		used = len(v.Run.HostGrants)
-	}
-	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, used+1)
+	return d.startReviewWithRecovery(ctx, round, v, 1)
+}
+
+func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v response, retries int) (RoundResult, error) {
+	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, nextGrantNumber(v.Run))
 	head, err := worktreeHead(ctx, round.Worktree)
 	if err != nil {
 		return RoundResult{}, err
@@ -196,6 +196,27 @@ func (d *Daemon) startReview(ctx context.Context, round Round, v response) (Roun
 		return RoundResult{}, err
 	}
 	if err := reviewed.refusal("review"); err != nil {
+		if retries > 0 && strings.Contains(err.Error(), "grant already used") {
+			inspected, inspectErr := d.axi(ctx, round.Worktree, []byte(`{"version":2,"op":"inspect"}`))
+			if inspectErr != nil {
+				return RoundResult{}, inspectErr
+			}
+			settled, found, inspectErr := settledInspection(ctx, round, grant, inspected)
+			if inspectErr != nil {
+				return RoundResult{}, inspectErr
+			}
+			if found {
+				return settled, nil
+			}
+			if clearErr := ClearPending(round.Pending); clearErr != nil {
+				return RoundResult{}, clearErr
+			}
+			refreshed, attachErr := d.attach(ctx, round)
+			if attachErr != nil {
+				return RoundResult{}, attachErr
+			}
+			return d.startReviewWithRecovery(ctx, round, refreshed, retries-1)
+		}
 		_ = ClearPending(round.Pending)
 		return RoundResult{}, err
 	}
@@ -270,6 +291,29 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 		}
 		stream, sequence = watched.Stream, watched.Sequence
 	}
+}
+
+func settledInspection(ctx context.Context, round Round, grant string, inspected response) (RoundResult, bool, error) {
+	result := inspected.HostResult
+	if result == nil || result.Grant != grant || !result.Current || result.Verdict == "" {
+		return RoundResult{}, false, nil
+	}
+	head, err := worktreeHead(ctx, round.Worktree)
+	if err != nil {
+		return RoundResult{}, false, err
+	}
+	if result.Head != head {
+		return RoundResult{}, false, nil
+	}
+	return RoundResult{Outcome: Settled, Grant: result.Grant, RunID: inspected.RunID, Result: result}, true, nil
+}
+
+func nextGrantNumber(current *run) int {
+	if current == nil {
+		return 1
+	}
+	used := max(len(current.HostGrants), current.ReviewUsed)
+	return used + 1
 }
 
 func terminalReviewStatus(status string) bool {
