@@ -139,7 +139,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "attach", Usage: "$ attach --pane <pane-id> --session <session-id>", Summary: "Attach a supported existing Herdr session as this Project's Lead without replacing its conversation.", Handler: s.attach},
 		{Name: "down", Usage: "$ down [--plan | --execute --user-approved <quote>]", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`. --plan previews tearing down every Task; --execute does it.", Handler: s.down},
 		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
-		{Name: "knowledge", Summary: "Inspect and curate opt-in User and Project knowledge.", Subcommands: []*axi.Command{
+		{Name: "knowledge", Summary: "Inspect and curate User and Project knowledge.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ knowledge show [<id>] [--project <name>|--user]", Summary: "Show knowledge entries with provenance and the startup budget, or one entry.", Handler: s.knowledgeShow},
 			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
 			{Name: "archive", Usage: "$ knowledge archive <id> --reason <why> [--project <name>|--user]", Summary: "Move an entry to the never-loaded archive with provenance.", Handler: s.knowledgeArchive},

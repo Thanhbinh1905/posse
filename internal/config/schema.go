@@ -41,7 +41,7 @@ var keySpecs = []KeySpec{
 	{Key: "lead.kind", Type: TypeString, Default: "", Meaning: "Default agent kind used by posse up."},
 	{Key: "lowkey.lead", Type: TypeBoolean, Default: false, Meaning: "Lowkey mode for the Lead: only report decisions and outcomes to the User. A display preference, not an autonomy grant."},
 	{Key: "notify.command", Type: TypeString, Default: "", Meaning: "Command that receives JSON User-actionable Notices on stdin; command failures and timeouts are logged without delaying Notice delivery.", UserOnly: true},
-	{Key: "knowledge.enabled", Type: TypeBoolean, Default: false, Meaning: "Load curated User and Project knowledge into Lead instructions and new Worker launches, and allow knowledge writes. Knowledge is reference context, not authority (ADR 0032).", UserOnly: true},
+	{Key: "knowledge.enabled", Type: TypeBoolean, Default: true, Meaning: "Load curated User and Project knowledge into Lead instructions and new Worker launches, and allow knowledge writes. Knowledge is reference context, not authority (ADR 0032).", UserOnly: true},
 	{Key: "knowledge.budget_bytes", Type: TypeInteger, Default: 8192, Meaning: "Startup budget for always-loaded knowledge plus the same role's preferences; a knowledge write that grows an over-budget total is refused until entries are curated."},
 	{Key: "skills.lead", Type: TypeStringArray, Default: []string{}, Meaning: "Workflow skills the Lead loads on top of the platform skills: bundled skill names or absolute or ~/ paths to directories holding SKILL.md. A Project list replaces the User list."},
 	{Key: "skills.change", Type: TypeStringArray, Default: []string{}, Meaning: "Workflow skills Change Task Workers load on top of the platform skills, frozen at admission; entries as in skills.lead."},

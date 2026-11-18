@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+func TestKnowledgeEnabledByDefaultAndExplicitFalse(t *testing.T) {
+	home := t.TempDir()
+	cfg, err := Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Knowledge.Enabled {
+		t.Fatal("knowledge.enabled default = false, want true")
+	}
+	writeConfig(t, filepath.Join(home, "config.toml"), "[knowledge]\nenabled = false\n")
+	cfg, err = Load(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Knowledge.Enabled {
+		t.Fatal("explicit knowledge.enabled = false was ignored")
+	}
+}
+
 func TestLoadMergesProjectOverridesAndPrependsDispatchRules(t *testing.T) {
 	home := t.TempDir()
 	global := `[identity.lead]
