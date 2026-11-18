@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +49,147 @@ func TestCodexUsageLimitFallsBackToAnotherProfile(t *testing.T) {
 
 func TestPiUsageLimitFallsBackToAnotherProfile(t *testing.T) {
 	runQuotaFallback(t, "pi", "quota-primary", "claude", "You have hit your ChatGPT usage limit (plus plan). Try again in ~158 min.", "in ~158 min")
+}
+
+func TestRealPiModelCooldownFallsBackThroughWatch(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("real Pi executable is not installed")
+	}
+	base := newPRLifecycleFixture(t)
+	t.Cleanup(func() { _ = base.db.Close() })
+	piHome := filepath.Join(base.root, "pi")
+	if err := os.MkdirAll(filepath.Join(piHome, "extensions"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been reached","message":"All credentials for model gpt-6-luna are cooling down via provider codex (last error: usage_limit_reached: The usage limit has been reached)","model":"gpt-6-luna","provider":"codex","reset_seconds":6003,"reset_time":"1h40m3s"}`))
+	}))
+	t.Cleanup(api.Close)
+	models := fmt.Sprintf(`{"providers":{"openai":{"baseUrl":%q,"api":"openai-responses","apiKey":"dummy-local-only","models":[{"id":"gpt-6-luna","contextWindow":200000,"maxTokens":1024}]}}}`, api.URL)
+	if err := os.WriteFile(filepath.Join(piHome, "models.json"), []byte(models), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(piHome, "settings.json"), []byte(`{"retry":{"enabled":true,"maxRetries":3},"showImages":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := herdr.NewWithEnv("herdr", base.env)
+	if _, err := client.Run(context.Background(), "integration", "install", "pi"); err != nil {
+		t.Fatal(err)
+	}
+	for _, setting := range [][2]string{
+		{"defaults.stall_after", "1s"},
+		{"profiles.primary.kind", "pi"},
+		{"profiles.primary.model", "gpt-6-luna"},
+		{"profiles.primary.args", `["--provider", "openai", "--no-skills", "--no-prompt-templates"]`},
+		{"profiles.backup.kind", "claude"},
+		{"profiles.backup.model", "quota-backup"},
+		{"profiles.primary.fallback", "backup"},
+	} {
+		runPosse(t, base.binary, base.repo, base.env, "config", "set", setting[0], setting[1])
+	}
+	brief := filepath.Join(base.root, "real-pi-quota.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Real Pi quota\ndone_when: fallback launches\n---\nContinue the task.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "real-pi-quota", "--profile", "primary"); !strings.Contains(output, "t1") {
+		t.Fatalf("start did not return t1: %s", output)
+	}
+	task := base.mustTask(t, "t1")
+	watch := exec.Command(base.binary, "watch", "--poll-only", "--timeout", "120000")
+	watch.Dir, watch.Env = base.repo, base.leadEnv
+	if err := watch.Start(); err != nil {
+		t.Fatalf("start Project Watch: %v", err)
+	}
+	defer func() {
+		if watch.Process.Pid > 1 {
+			_ = watch.Process.Kill()
+		}
+		_ = watch.Wait()
+	}()
+	if !waitForCondition(30*time.Second, func() bool { return requests.Load() >= 1 }) {
+		t.Fatal("real Pi did not call the local 429 endpoint")
+	}
+	var screen string
+	if !waitForCondition(30*time.Second, func() bool {
+		screen, _ = (posseRuntime.SystemProgress{}).ReadScreen(context.Background(), client, task.PaneID)
+		return strings.Contains(screen, "usage_limit_reached") && strings.Contains(screen, "Retry failed after 3 attempts:")
+	}) {
+		t.Fatalf("real Pi did not render the quota error and retry line: requests=%d screen=%q", requests.Load(), screen)
+	}
+	t.Logf("real Pi quota pane after %d provider requests:\n%s", requests.Load(), screen)
+	notice := waitForQuotaNotice(t, base, "quota_fallback", 30*time.Second, screen, client, task)
+	if !strings.Contains(notice.Summary, "relaunched with fallback Profile backup") {
+		t.Fatalf("quota_fallback notice = %#v", notice)
+	}
+	current := base.mustTask(t, "t1")
+	if current.Launches != 2 || current.Profile != "backup" || current.State != store.StateWorking {
+		t.Fatalf("fallback relaunch: launches=%d profile=%q state=%q", current.Launches, current.Profile, current.State)
+	}
+
+	runPosse(t, base.binary, base.repo, base.env, "config", "unset", "profiles.primary.fallback")
+	if output := runPosse(t, base.binary, base.repo, base.leadEnv, "start", "--brief", brief, "--name", "real-pi-no-fallback", "--profile", "primary"); !strings.Contains(output, "t2") {
+		t.Fatalf("start without fallback did not return t2: %s", output)
+	}
+	withoutFallback := base.mustTask(t, "t2")
+	if !waitForCondition(30*time.Second, func() bool { return requests.Load() >= 5 }) {
+		t.Fatal("second real Pi did not call the local 429 endpoint")
+	}
+	noFallbackNotice := waitForQuotaNotice(t, base, "quota_exhausted", 30*time.Second, "", client, withoutFallback)
+	var data map[string]any
+	if err := json.Unmarshal([]byte(noFallbackNotice.DataJSON), &data); err != nil {
+		t.Fatal(err)
+	}
+	line, _ := data["line"].(string)
+	if data["resets"] != "1h40m3s" || data["fallback"] != "" || !strings.Contains(noFallbackNotice.Summary, "1h40m3s") || !strings.Contains(line, "Retry failed after 3 attempts:") {
+		t.Fatalf("quota_exhausted notice = %#v data=%#v", noFallbackNotice, data)
+	}
+	for _, notice := range noticesForTask(t, base, withoutFallback.ID) {
+		if notice.Kind == "worker_idle" {
+			t.Fatalf("real Pi quota raised worker_idle instead of quota_exhausted: %#v", notice)
+		}
+	}
+}
+
+func noticesForTask(t *testing.T, base *prLifecycleFixture, taskID int64) []store.Notice {
+	t.Helper()
+	notices, err := base.db.Notices(context.Background(), base.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected []store.Notice
+	for _, notice := range notices {
+		if notice.TaskID == taskID {
+			selected = append(selected, notice)
+		}
+	}
+	return selected
+}
+
+func waitForQuotaNotice(t *testing.T, base *prLifecycleFixture, kind string, timeout time.Duration, screen string, client *herdr.Client, task store.Task) store.Notice {
+	t.Helper()
+	var found store.Notice
+	if waitForCondition(timeout, func() bool {
+		notices, err := base.db.Notices(context.Background(), base.project.ID, false)
+		if err != nil {
+			return false
+		}
+		for _, notice := range notices {
+			if notice.Kind == kind {
+				found = notice
+				return true
+			}
+		}
+		screen, _ = (posseRuntime.SystemProgress{}).ReadScreen(context.Background(), client, task.PaneID)
+		return false
+	}) {
+		return found
+	}
+	t.Fatalf("no %s Notice: state=%s launches=%d screen=%q", kind, task.State, task.Launches, screen)
+	return store.Notice{}
 }
 
 func TestClaudeQuotaFallbackPreparesSandboxBeforeRelaunch(t *testing.T) {

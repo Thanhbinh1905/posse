@@ -36,6 +36,7 @@ var modelErrorPatterns = map[string][]modelErrorPattern{
 }
 
 var modelTerminalControl = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)
+var piRetryErrorHead = regexp.MustCompile(`(?i)^error:\s*retry failed after \d+ attempts:`)
 
 // classifyModelError recognizes Pi's rendered error result, not arbitrary
 // transcript, User, or tool-output text containing a provider error string.
@@ -97,6 +98,25 @@ func piRenderedErrors(output string) []piRenderedError {
 		}
 		rendered = append(rendered, piRenderedError{message: message, text: text, streamErrorPrefix: streamErrorPrefix})
 	}
+	if len(rendered) > 0 {
+		return rendered
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !piRetryErrorHead.MatchString(line) || piErrorInsideToolOutput(lines, i) {
+			continue
+		}
+		end := i + 1
+		for end < len(lines) && strings.TrimSpace(lines[end]) != "" && !piTerminalBorder(strings.TrimSpace(lines[end])) {
+			end++
+		}
+		text := strings.TrimSpace(strings.Join(strings.Fields(strings.Join(lines[i:end], " ")), " "))
+		message := strings.TrimSpace(text[len("Error:"):])
+		footer := lines[end:]
+		if len(message) <= 2048 && piHasFooter(footer) && piFooterOnly(footer) {
+			return append(rendered, piRenderedError{text: message, message: strings.ToLower(message)})
+		}
+	}
 	return rendered
 }
 
@@ -147,6 +167,20 @@ func piErrorInsideToolOutput(lines []string, errorLine int) bool {
 	// border after a blank footer gap may instead close an earlier panel in
 	// a truncated pane tail.
 	return errorLine+2 < len(lines) && piTerminalBorder(strings.TrimSpace(lines[errorLine+2]))
+}
+
+func piHasFooter(lines []string) bool {
+	cwdSeen, statusSeen := false, false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "%/") {
+			statusSeen = true
+		}
+		if !cwdSeen && !statusSeen && (strings.HasPrefix(line, "/") || strings.HasPrefix(line, "~/")) {
+			cwdSeen = true
+		}
+	}
+	return cwdSeen || statusSeen
 }
 
 func piFooterOnly(lines []string) bool {

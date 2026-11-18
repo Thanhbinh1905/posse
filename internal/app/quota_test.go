@@ -166,6 +166,38 @@ func TestClassifyQuotaExhaustionPiWrappedErrorWithPrefix(t *testing.T) {
 
 const piModelCooldownBody = `{"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been reached","message":"All credentials for model gpt-5.6-luna are cooling down via provider codex (last error: usage_limit_reached: The usage limit has been reached)","model":"gpt-5.6-luna","provider":"codex","reset_seconds":1620130,"reset_time":"450h2m10s"}`
 
+func TestClassifyQuotaExhaustionRecognizesPiRetryErrorWithoutBugHelp(t *testing.T) {
+	output := `Error: Retry failed after 3 attempts: OpenAI API error (429): {"code":"model_cooldown","last_upstream_error":"usage_limit_reached:
+ The usage limit has been reached","message":"All credentials for model gpt-6-luna are cooling down via
+ provider codex (last error: usage_limit_reached: The usage limit has been
+ reached)","model":"gpt-6-luna","provider":"codex","reset_seconds":6003,"reset_time":"1h40m3s"}
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/home/worktree
+0.9%/200k gpt-6-luna
+`
+	for _, test := range []struct {
+		name   string
+		output string
+		resets string
+	}{
+		{name: "reset_time", output: output, resets: "1h40m3s"},
+		{name: "reset_seconds", output: strings.Replace(output, `,"reset_time":"1h40m3s"`, "", 1), resets: "1h40m3s"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			found, ok := classifyQuotaExhaustion("pi", test.output)
+			if !ok {
+				t.Fatalf("real Pi retry error not recognized in %q", test.output)
+			}
+			if found.Resets != test.resets {
+				t.Fatalf("quota resets = %q, want %q", found.Resets, test.resets)
+			}
+		})
+	}
+}
+
 func TestClassifyQuotaExhaustionIgnoresQuotaTextTheWorkerMovedPast(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
@@ -180,8 +212,12 @@ func TestClassifyQuotaExhaustionIgnoresQuotaTextTheWorkerMovedPast(t *testing.T)
 		{name: "codex rate limit is not quota", kind: "codex", output: "■ stream error: exceeded retry limit, last status: 429 Too Many Requests\n\n› Implement {feature}\n"},
 		{name: "claude phrase in another harness", kind: "codex", output: "■ Your credit balance is too low\n"},
 		{name: "pi quota in tool output", kind: "pi", output: "────────────────────\n$ cat fixture\nError: You have hit your ChatGPT usage limit (plus plan).\n" + quotaPiHelp + "\n────────────────────\n\n Done.\n"},
+		{name: "pi retry quota in tool output without bug help", kind: "pi", output: "────────────────────\n$ cat fixture\nError: Retry failed after 3 attempts: OpenAI API error (429): {\"code\":\"model_cooldown\",\"last_upstream_error\":\"usage_limit_reached\"}\n────────────────────\n\n/home/worktree\n0.9%/200k\n"},
 		{name: "pi quota echoed in worker output", kind: "pi", output: "⏺ The error was \"Error: OpenAI API error (429): " + piModelCooldownBody + "\"\n" + quotaPiHelp + "\n"},
+		{name: "pi retry quota echoed in worker output", kind: "pi", output: "⏺ The error was \"Error: Retry failed after 3 attempts: OpenAI API error (429): " + piModelCooldownBody + "\"\n\n/home/worktree\n0.9%/200k\n"},
+		{name: "pi retry error without its footer", kind: "pi", output: "Error: Retry failed after 3 attempts: OpenAI API error (429): " + piModelCooldownBody + "\n"},
 		{name: "pi quota in diff output", kind: "pi", output: "────────────────────\n$ git diff\n+ Error: OpenAI API error (429): " + piModelCooldownBody + "\n+ " + quotaPiHelp + "\n────────────────────\n\n Done.\n"},
+		{name: "pi retry quota in diff output", kind: "pi", output: "────────────────────\n$ git diff\n+ Error: Retry failed after 3 attempts: OpenAI API error (429): " + piModelCooldownBody + "\n────────────────────\n\n/home/worktree\n0.9%/200k\n"},
 		{name: "pi stream error", kind: "pi", output: " Error: stream error: stream disconnected before completion: stream closed before response.completed\n" + quotaPiHelp + "\n"},
 		{name: "unknown kind", kind: "custom", output: "You've hit your session limit · resets 7pm\n"},
 	} {
