@@ -964,25 +964,36 @@ func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project
 	return err
 }
 
+func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Project, change store.Task) (bool, error) {
+	current, err := db.TaskByID(ctx, project.ID, change.ID)
+	if err != nil {
+		return false, err
+	}
+	if current.State == store.StateTornDown {
+		return true, nil
+	}
+	intent, err := db.IntentByTask(ctx, change.ID)
+	if store.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return intent.Command == "teardown", nil
+}
+
 func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
 	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
 	if err != nil {
 		return err
 	}
 	for _, target := range targets {
-		current, err := db.TaskByID(ctx, project.ID, change.ID)
+		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
 		if err != nil {
 			return err
 		}
-		if current.State == store.StateTornDown {
+		if fenced {
 			continue
-		}
-		if intent, intentErr := db.IntentByTask(ctx, change.ID); intentErr == nil {
-			if intent.Command == "teardown" {
-				continue
-			}
-		} else if !store.IsNotFound(intentErr) {
-			return intentErr
 		}
 		exists := false
 		for _, request := range requests {
@@ -1003,6 +1014,13 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			return err
 		}
 		if busy {
+			continue
+		}
+		if fenced, err := greenhouseReviewFenced(ctx, db, project, change); err != nil || fenced {
+			_ = releaseParallelReviewLock(lock)
+			if err != nil {
+				return err
+			}
 			continue
 		}
 		ownerPath := parallelReviewOwnerPath(roundDir, target.Repository)
@@ -1074,6 +1092,14 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			continue
 		}
 		command.Stdout, command.Stderr = log, log
+		if fenced, err := greenhouseReviewFenced(ctx, db, project, change); err != nil || fenced {
+			log.Close()
+			_ = releaseParallelReviewLock(lock)
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: requestHead, RequestedAt: requestStarted}); err != nil {
 			log.Close()
 			_ = releaseParallelReviewLock(lock)
