@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,6 +106,65 @@ func TestClaudeLeadWithoutBackgroundWatchGetsReceiverMissingNoticeWhileBusy(t *t
 	payload, err := os.ReadFile(payloadPath)
 	if err != nil || !strings.Contains(string(payload), "lead_receiver_missing") {
 		t.Fatalf("notify.command payload = %q, err=%v; want lead_receiver_missing", payload, err)
+	}
+}
+
+func TestDeliveredHandoffDoesNotCountAsMissingReceiver(t *testing.T) {
+	stubLeadReceiver(t, false, time.Second)
+	fixture := newCodexLeadFixture(t, idlePiLead, "", "0")
+	ctx := context.Background()
+	fixture.fake.SnapshotValue.ServerStartedAt = "server-generation-1"
+	t.Chdir(filepath.Dir(fixture.home))
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+
+	code, output := runCLI(t, fixture.service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:session-1")
+	if code != 0 || !strings.Contains(output, `"state":"printed"`) {
+		t.Fatalf("one-shot handoff did not deliver the actionable Notice: code=%d output=%s", code, output)
+	}
+	var batch struct {
+		Delivery struct {
+			DeliveryID string `json:"delivery_id"`
+			OwnerToken string `json:"owner_token"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal([]byte(output), &batch); err != nil {
+		t.Fatalf("decode handoff: %s: %v", output, err)
+	}
+	code, output = runCLI(t, fixture.service, "watch", "--json", "--receipt", batch.Delivery.DeliveryID, "--receipt-outcome", "accepted", "--receipt-token", batch.Delivery.OwnerToken)
+	if code != 0 {
+		t.Fatalf("accept handoff receipt: %s", output)
+	}
+	notices, err := fixture.db.Notices(ctx, fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notices) != 1 || notices[0].DeliveredAt == 0 || notices[0].AckedAt != 0 {
+		t.Fatalf("handoff Notice state = %#v, want delivered and unacknowledged", notices)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE notices SET created_at=? WHERE id=?`, currentTime()-leadReceiverGrace.Milliseconds()-1, notices[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if missing := fixture.receiverMissingNotices(t); len(missing) != 0 {
+		t.Fatalf("one-shot handoff already raised lead_receiver_missing: %#v", missing)
+	}
+	if err := fixture.service.monitorLeadReceiver(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	if missing := fixture.receiverMissingNotices(t); len(missing) != 0 {
+		t.Fatalf("delivered handoff Notice raised lead_receiver_missing: %#v", missing)
+	}
+	pendingID, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "task_done", Summary: "still undelivered", CreatedAt: currentTime() - leadReceiverGrace.Milliseconds() - 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.monitorLeadReceiver(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	missing := fixture.receiverMissingNotices(t)
+	if len(missing) != 1 || missing[0].ID == pendingID {
+		t.Fatalf("old undelivered Notice did not raise lead_receiver_missing: pending=%d missing=%#v", pendingID, missing)
 	}
 }
 
