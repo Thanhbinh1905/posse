@@ -1264,6 +1264,85 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 	return relaunchFixture{db: db, fake: fake, service: service, home: home, project: project, cfg: cfg, task: task}
 }
 
+func TestRelaunchStopsDetachedCodexDaemonBeforeApprovedDiscard(t *testing.T) {
+	fixture := newRelaunchFixture(t, store.StateDone)
+	ctx := context.Background()
+	binDir := setupFollowupAgentPath(t, "pi", "codex")
+	fakeBinary := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`[kinds.codex]
+
+[kinds.pi]
+
+[profiles.deep]
+kind = "codex"
+model = "gpt-5"
+
+[profiles.fast]
+kind = "pi"
+model = "test"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET profile='deep', agent_name='posse-shop-t1-1' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.cfg, _ = config.Load(fixture.home, fixture.project.Name)
+	fixture.task, _ = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nwhile :; do :; done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("/usr/bin/setsid", "/bin/sh", "-c", `("$1" app-server) </dev/null >/dev/null 2>&1 & exit 0`, "sh", fakeBinary)
+	command.Dir = fixture.task.WorktreePath
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var daemonPID int
+	for time.Now().Before(deadline) {
+		pids, err := processIDsInRoots([]ownedProcessRoot{{path: fixture.task.WorktreePath, includeOpenFiles: true, includeMappedFiles: true}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pid := range pids {
+			parent, err := sandboxProcessParentID(pid)
+			if err == nil && parent != command.Process.Pid && knownHarnessDaemonInTaskPath(pid, fixture.task.WorktreePath, fakeBinary) {
+				daemonPID = pid
+				break
+			}
+		}
+		if daemonPID > 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if daemonPID <= 1 {
+		pids, _ := processIDsInRoots([]ownedProcessRoot{{path: fixture.task.WorktreePath, includeOpenFiles: true, includeMappedFiles: true}})
+		t.Fatalf("fake Codex harness did not leave a re-parented app-server in the Sandbox: PIDs=%v details=%v", pids, taskOwnedProcessDetails(pids))
+	}
+	t.Cleanup(func() { _ = stopTaskHarnessDaemons(fixture.task.WorktreePath) })
+	if _, err := fixture.service.relaunchTask(ctx, fixture.db, fixture.home, fixture.project, fixture.cfg, fixture.task, "fast"); err != nil {
+		t.Fatalf("relaunch onto pi Profile: %v", err)
+	}
+	if processReferencesRoots(daemonPID, []ownedProcessRoot{{path: fixture.task.WorktreePath, includeOpenFiles: true, includeMappedFiles: true}}) {
+		t.Fatalf("relaunch left detached daemon PID %d in the Sandbox", daemonPID)
+	}
+	fixture.fake.SnapshotValue.Panes = nil
+	t.Chdir(fixture.project.Root)
+	var output bytes.Buffer
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "Discard this Task"}); code != 0 {
+		t.Fatalf("approved discard after relaunch: code=%d output=%s", code, output.String())
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown {
+		t.Fatalf("discard Task state = %#v, %v", task, err)
+	}
+}
+
 func TestRelaunchDoneChangeKeepsStateAndWaitsForLead(t *testing.T) {
 	fixture := newRelaunchFixture(t, store.StateDone)
 	t.Chdir(filepath.Join(filepath.Dir(fixture.home), "repo"))

@@ -1112,7 +1112,11 @@ func requireNoSandboxProcesses(path string, approvedDiscard bool) error {
 	processes := taskOwnedProcessDetails(pids)
 	description := describeTaskProcesses(processes)
 	if approvedDiscard {
-		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes still reference it: "+description, true, "No process was stopped or signalled. Inspect the listed processes, then retry discard")
+		remedies := []string{"No process was stopped or signalled. Inspect the listed processes, then retry discard"}
+		for _, process := range processes {
+			remedies = append(remedies, fmt.Sprintf("If PID %d is confirmed safe to stop, run `kill -TERM -- %d`", process.PID, process.PID))
+		}
+		return axi.Failure("discard_processes_present", "refusing to release a discarded Task Sandbox while processes still reference it: "+description, true, remedies...)
 	}
 	return axi.Failure("sandbox_processes_present", "cannot release the Sandbox while live processes still reference it: "+description, true, "Stop or wait for the listed processes to exit, then retry Teardown. The Sandbox remains held until no process has it as its cwd, open file, or mapped file")
 }
@@ -1356,11 +1360,13 @@ func verifyNoTaskOwnedProcesses(ctx context.Context, db *store.DB, home string, 
 		return err
 	}
 	if len(pids) > 0 {
-		labels := make([]string, len(pids))
-		for index, pid := range pids {
-			labels[index] = strconv.Itoa(pid)
+		processes := taskOwnedProcessDetails(pids)
+		description := describeTaskProcesses(processes)
+		help := []string{description, "No process was stopped or signalled. Inspect ownership before stopping any process, then retry discard"}
+		for _, process := range processes {
+			help = append(help, fmt.Sprintf("If PID %d is confirmed safe to stop, run `kill -TERM -- %d`", process.PID, process.PID))
 		}
-		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths", true, strings.Join(labels, ","), "No process was stopped or signalled. Inspect the Sandbox and scratch processes, then retry discard")
+		return axi.Failure("discard_processes_present", "refusing approved discard while processes remain in Task-owned paths: "+description, true, help...)
 	}
 	return nil
 }
