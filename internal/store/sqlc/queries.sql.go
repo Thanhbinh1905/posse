@@ -68,9 +68,13 @@ func (q *Queries) AcquireIdleSandbox(ctx context.Context, arg AcquireIdleSandbox
 
 const activeWorkerCount = `-- name: ActiveWorkerCount :one
 SELECT COUNT(*) FROM tasks
-WHERE project_id = ? AND (
+WHERE tasks.project_id = ? AND (
   state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
-  OR type = 'change' AND state IN ('done', 'merging')
+  OR type = 'change' AND state IN ('done', 'merging') AND (
+    (pane_id != '' AND agent_absent_since = 0) OR EXISTS (
+      SELECT 1 FROM mounts WHERE mounts.task_id = tasks.id AND mounts.state = 'held'
+    )
+  )
 )
 `
 

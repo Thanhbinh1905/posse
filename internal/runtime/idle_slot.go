@@ -76,7 +76,7 @@ func raiseIdleSlotNotice(ctx context.Context, db *store.DB, projectID int64, idl
 		for index, id := range data.Release {
 			commands[index] = "`posse pr release " + id + " --policy release`"
 		}
-		summary += ". Free a PR slot with " + strings.Join(commands, " or ")
+		summary += ". Releasing a PR slot frees a Worker slot with " + strings.Join(commands, " or ")
 	}
 	if hasPrior && prior.Active {
 		if _, err := db.ExecContext(ctx, `UPDATE notices SET summary=?,data_json=? WHERE id=?`, summary, string(encoded), latestID); err != nil {

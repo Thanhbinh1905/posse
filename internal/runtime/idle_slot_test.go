@@ -112,8 +112,8 @@ func TestIdleSlotNoticeNamesPRReleaseCommand(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT summary FROM notices WHERE kind='idle_pool_slot'`).Scan(&summary); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(summary, "posse pr release t1 --policy release") {
-		t.Fatalf("Notice summary %q omits the PR release command", summary)
+	if !strings.Contains(summary, "Releasing a PR slot frees a Worker slot") || !strings.Contains(summary, "posse pr release t1 --policy release") {
+		t.Fatalf("Notice summary %q omits the Worker slot guidance or PR release command", summary)
 	}
 }
 

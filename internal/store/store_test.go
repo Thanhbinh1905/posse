@@ -1927,7 +1927,7 @@ func TestConcurrentTaskSequenceAllocationSerializesAndBothTasksSucceed(t *testin
 	}
 }
 
-func TestActiveWorkerCountHoldsSlotForDoneAndMergingChangeTasks(t *testing.T) {
+func TestActiveWorkerCountReleasesDoneChangeWithoutSandbox(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -1938,10 +1938,14 @@ func TestActiveWorkerCountHoldsSlotForDoneAndMergingChangeTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var firstID int64
 	for _, state := range []State{StateDone, StateMerging} {
 		id, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Change " + string(state), ShortName: "change-" + string(state)}, func(int) (bool, error) { return false, nil })
 		if err != nil {
 			t.Fatal(err)
+		}
+		if firstID == 0 {
+			firstID = id
 		}
 		if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
 			t.Fatal(err)
@@ -1955,7 +1959,22 @@ func TestActiveWorkerCountHoldsSlotForDoneAndMergingChangeTasks(t *testing.T) {
 			}
 		}
 	}
-	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 2 {
-		t.Fatalf("done and merging Change Tasks must hold slots: count=%d err=%v", count, err)
+	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 0 {
+		t.Fatalf("released done and merging Change Tasks must not hold slots: count=%d err=%v", count, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET pane_id='worker-pane' WHERE id=?`, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 1 {
+		t.Fatalf("done Change with a live Worker must hold a slot: count=%d err=%v", count, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET pane_id='' WHERE id=?`, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcquireSandbox(ctx, project.ID, firstID, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 1 {
+		t.Fatalf("done Change with a held Sandbox must hold a slot: count=%d err=%v", count, err)
 	}
 }
