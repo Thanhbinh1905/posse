@@ -201,17 +201,12 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 			if inspectErr != nil {
 				return RoundResult{}, inspectErr
 			}
-			if inspected.HostResult != nil && inspected.HostResult.Grant == grant && inspected.HostResult.Current && inspected.HostResult.Verdict != "" {
-				head, headErr := worktreeHead(ctx, round.Worktree)
-				if headErr != nil {
-					return RoundResult{}, headErr
-				}
-				if inspected.HostResult.Head == head {
-					if clearErr := ClearPending(round.Pending); clearErr != nil {
-						return RoundResult{}, clearErr
-					}
-					return RoundResult{Outcome: Settled, Grant: inspected.HostResult.Grant, RunID: inspected.RunID, Result: inspected.HostResult}, nil
-				}
+			settled, found, inspectErr := settledInspection(ctx, round, grant, inspected)
+			if inspectErr != nil {
+				return RoundResult{}, inspectErr
+			}
+			if found {
+				return settled, nil
 			}
 			if clearErr := ClearPending(round.Pending); clearErr != nil {
 				return RoundResult{}, clearErr
@@ -296,6 +291,21 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 		}
 		stream, sequence = watched.Stream, watched.Sequence
 	}
+}
+
+func settledInspection(ctx context.Context, round Round, grant string, inspected response) (RoundResult, bool, error) {
+	result := inspected.HostResult
+	if result == nil || result.Grant != grant || !result.Current || result.Verdict == "" {
+		return RoundResult{}, false, nil
+	}
+	head, err := worktreeHead(ctx, round.Worktree)
+	if err != nil {
+		return RoundResult{}, false, err
+	}
+	if result.Head != head {
+		return RoundResult{}, false, nil
+	}
+	return RoundResult{Outcome: Settled, Grant: result.Grant, RunID: inspected.RunID, Result: result}, true, nil
 }
 
 func nextGrantNumber(current *run) int {
