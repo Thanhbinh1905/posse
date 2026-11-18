@@ -1,6 +1,8 @@
 # All Workers open as tabs of their Lead workspace
 
-This amends [ADR 0009](0009-workers-open-as-tabs-of-the-lead-workspace.md) and supersedes [ADR 0012](0012-group-repository-workers-under-lead.md) for new Worker placement.
+*Superseded for repository Workers by [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md).*
+
+It amended [ADR 0009](0009-workers-open-as-tabs-of-the-lead-workspace.md) and superseded [ADR 0012](0012-group-repository-workers-under-lead.md) for new Worker placement.
 
 ## Decision
 

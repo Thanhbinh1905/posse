@@ -383,7 +383,7 @@ func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
 	}
 	tabCreated := make(chan struct{}, 1)
 	fixture.fake.BeforeCall = func(method string) {
-		if method == "tab.create" {
+		if method == "worktree.open" {
 			select {
 			case tabCreated <- struct{}{}:
 			default:
@@ -431,8 +431,8 @@ func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
 		t.Fatalf("concurrent launch exit=%d launch.log=%q err=%v", launchExit, launchLog, err)
 	}
 	started, err := db.TaskByID(ctx, fixture.project.ID, queued.ID)
-	if err != nil || started.State != store.StateWorking || fixture.fake.CallCount("tab.create") != 1 {
-		t.Fatalf("concurrent launches started task=%+v tab.create=%d err=%v", started, fixture.fake.CallCount("tab.create"), err)
+	if err != nil || started.State != store.StateWorking || fixture.fake.CallCount("worktree.open") != 1 {
+		t.Fatalf("concurrent launches started task=%+v worktree.open=%d err=%v", started, fixture.fake.CallCount("worktree.open"), err)
 	}
 	var declines int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM queued_task_declines WHERE task_id=?`, queued.ID).Scan(&declines); err != nil || declines != 0 {
@@ -938,7 +938,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	lead := herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", TabID: "w3:t0", Label: "posse:shop:lead"}
 	fake := herdr.NewFake()
 	fake.SnapshotValue.Panes = []herdr.Pane{lead}
-	fake.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w3:t1","workspace_id":"w3"},"root_pane":{"pane_id":"w3:p2","tab_id":"w3:t1"}}`)
+	fake.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w4"},"tab":{"tab_id":"w4:t1"},"root_pane":{"pane_id":"w4:p2","tab_id":"w4:t1"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
@@ -946,7 +946,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 			if fake.CallCount("agent.start") > 0 {
 				kind = "codex"
 			}
-			fake.SnapshotValue.Panes = []herdr.Pane{lead, {PaneID: "w3:p2", WorkspaceID: "w3", TabID: "w3:t1", Label: "posse:shop:t1", Agent: kind}}
+			fake.SnapshotValue.Panes = []herdr.Pane{lead, {PaneID: "w4:p2", WorkspaceID: "w4", TabID: "w4:t1", Label: "posse:shop:t1", Agent: kind}}
 		}
 	}
 	service := testService(home, fake)
@@ -977,7 +977,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		switch call.Method {
 		case "agent.start":
 			args := call.Params["args"].([]string)
-			started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w3:p2" && len(args) == 16 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && args[14] == "--plugin-dir" && args[15] == filepath.Join(home, "projects", "shop", "claude-skill-uses") && !strings.Contains(strings.Join(args, " "), "relaunch.md")
+			started = call.Params["kind"] == "claude" && call.Params["pane_id"] == "w4:p2" && len(args) == 16 && equalStrings(args[:12], []string{"--settings", claudeNoAttributionSettings, "--yes", "--model", "sonnet", "--effort", "low", "--fast-arg", "--resume", "session-9", "--plugin-dir", skillRoots[0]}) && args[12] == "--plugin-dir" && args[13] == filepath.Join(home, "projects", "shop", "claude-research") && args[14] == "--plugin-dir" && args[15] == filepath.Join(home, "projects", "shop", "claude-skill-uses") && !strings.Contains(strings.Join(args, " "), "relaunch.md")
 		case "agent.prompt":
 			text, _ := call.Params["text"].(string)
 			typedRelaunch = typedRelaunch || strings.Contains(text, "relaunch.md")
@@ -992,8 +992,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		switch call.Method {
 		case "workspace.rename":
 			workspaceRenamed = true
-		case "tab.create":
-			tabCreated = call.Params["label"] == "worker-tree-t1" && call.Params["cwd"] == sandbox && call.Params["workspace_id"] == "w3"
+		case "worktree.open":
+			tabCreated = call.Params["label"] == "worker-tree-t1" && call.Params["path"] == sandbox && call.Params["workspace_id"] == "w3"
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":
@@ -1030,7 +1030,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	}
 	defer observer.Close()
 	updated, err := observer.Task(ctx, project.ID, "t1")
-	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != sandbox || updated.HerdrWorkspaceID != "w3" || updated.PaneID != "w3:p2" || updated.Profile != "fast" || updated.DispatchRule != "relaunch --profile fast" {
+	if err != nil || updated.State != store.StateWorking || updated.WorktreePath != sandbox || updated.HerdrWorkspaceID != "w4" || updated.PaneID != "w4:p2" || updated.Profile != "fast" || updated.DispatchRule != "relaunch --profile fast" {
 		t.Fatalf("relaunch changed Task Sandbox/state incorrectly: %#v, %v", updated, err)
 	}
 	transitions, err := observer.TaskTransitions(ctx, taskID, 10)

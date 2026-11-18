@@ -145,6 +145,7 @@ func TestPosseSpawnNoticeMergeTeardownAndRecovery(t *testing.T) {
 	      case "$line" in *'| turn '*) turn_token=$(printf '%s\n' "$line" | sed -n 's/.*| turn \([^]]*\)].*/\1/p') ;; esac
 	      case "$line" in
 	        *'Queue after the current turn'*)
+	          herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
 	          while [ ! -e "$POSSE_E2E_SIGNAL_GATE/$task_id-queued" ]; do sleep 0.05; done
 	          if [ -n "$turn_token" ]; then
 	            posse signal done 'E2E worker committed the change' --turn "$turn_token" >> "$POSSE_E2E_WORKER_LOG" 2>&1
@@ -490,7 +491,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertWorkerSidebarPresentation(t, client, launched, "Lead:shop")
+	assertWorkerSidebarPresentation(t, client, launched, launched.ShortName+"-t"+strconv.Itoa(launched.Seq))
 	if _, err := client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": launched.PaneID}); err != nil {
 		t.Fatalf("focus the Worker before explicit send: %v", err)
 	}
@@ -1434,7 +1435,7 @@ func TestTempDirectoryUsesTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertLeadSidebarPresentation(t, client, project.HerdrWorkspaceID, project.LeadPaneID, "Lead:shop")
-	assertWorkerSidebarPresentation(t, client, recovered, "Lead:shop")
+	assertWorkerSidebarPresentation(t, client, recovered, recovered.ShortName+"-t"+strconv.Itoa(recovered.Seq))
 	if _, err := db.ProjectServerStartedAt(context.Background(), project.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -1833,11 +1834,11 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 			tab = candidate
 		}
 	}
-	if workspaceLabel != "" && workspace.Label != workspaceLabel || workspace.WorkspaceID != task.HerdrWorkspaceID ||
+	if workspaceLabel != "" && workspace.Label != workspaceLabel || workspace.WorkspaceID != task.HerdrWorkspaceID || !workspace.Worktree.IsLinkedWorktree || workspace.Worktree.CheckoutPath != task.WorktreePath ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
 		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_sandbox"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
-		tab.Label != task.ShortName+"-t"+strconv.Itoa(task.Seq) {
+		tab.WorkspaceID != task.HerdrWorkspaceID || tab.Label == "" {
 		t.Fatalf("Worker tab/sidebar mismatch: task=%#v workspace=%#v tab=%#v pane=%#v", task, workspace, tab, pane)
 	}
 }
@@ -1860,14 +1861,20 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	}
 	lead, found := findLeadInSnapshot(snapshot)
 	workerTabID := tabOf(t, snapshot, task.PaneID)
+	workerChild := false
 	workerTab := false
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == task.WorktreePath {
+			workerChild = true
+		}
+	}
 	for _, candidate := range snapshot.Tabs {
-		if candidate.TabID == workerTabID && candidate.WorkspaceID == lead.WorkspaceID && candidate.Label == task.ShortName+"-t"+strconv.Itoa(task.Seq) {
+		if candidate.TabID == workerTabID && candidate.WorkspaceID == task.HerdrWorkspaceID {
 			workerTab = true
 		}
 	}
-	if !found || task.HerdrWorkspaceID != lead.WorkspaceID || !workerTab {
-		t.Fatalf("Worker is not a tab in the Lead workspace: task=%#v lead=%#v tabs=%#v", task, lead, snapshot.Tabs)
+	if !found || task.HerdrWorkspaceID == lead.WorkspaceID || !workerChild || !workerTab {
+		t.Fatalf("Worker is not a tab in its linked child workspace: task=%#v lead=%#v workspaces=%#v tabs=%#v", task, lead, snapshot.Workspaces, snapshot.Tabs)
 	}
 	if runtime.GOOS == "linux" {
 		raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})
