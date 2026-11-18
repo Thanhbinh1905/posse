@@ -970,6 +970,20 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 		return err
 	}
 	for _, target := range targets {
+		current, err := db.TaskByID(ctx, project.ID, change.ID)
+		if err != nil {
+			return err
+		}
+		if current.State == store.StateTornDown {
+			continue
+		}
+		if intent, intentErr := db.IntentByTask(ctx, change.ID); intentErr == nil {
+			if intent.Command == "teardown" {
+				continue
+			}
+		} else if !store.IsNotFound(intentErr) {
+			return intentErr
+		}
 		exists := false
 		for _, request := range requests {
 			if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,7 +85,41 @@ func (d *Daemon) Review(ctx context.Context, round Round) (RoundResult, error) {
 	}
 	v, err := d.attach(ctx, round)
 	if err != nil {
-		return RoundResult{}, err
+		pending, pendingErr := readPending(round.Pending)
+		if pendingErr != nil {
+			return RoundResult{}, errors.Join(err, pendingErr)
+		}
+		if pending == nil {
+			return RoundResult{}, err
+		}
+		inspected, inspectErr := d.axi(ctx, round.Worktree, []byte(`{"version":2,"op":"inspect"}`))
+		if inspectErr != nil {
+			return RoundResult{}, errors.Join(err, inspectErr)
+		}
+		result := inspected.HostResult
+		if result != nil && result.Grant == pending.Grant {
+			if result.Verdict == "" && terminalReviewStatus(result.Status) {
+				if clearErr := ClearPending(round.Pending); clearErr != nil {
+					return RoundResult{}, clearErr
+				}
+				return RoundResult{Grant: pending.Grant, RunID: inspected.RunID, Result: result}, &TerminalReviewError{Status: result.Status, Reason: result.Reason}
+			}
+			if settled, found, settledErr := settledInspection(ctx, round, pending.Grant, inspected); settledErr != nil {
+				return RoundResult{}, settledErr
+			} else if found {
+				return settled, nil
+			}
+		}
+		if !grantWasUsed(err, inspected, pending.Grant) {
+			return RoundResult{}, err
+		}
+		if inspectErr := inspected.refusal("inspect"); inspectErr != nil {
+			return RoundResult{}, errors.Join(err, inspectErr)
+		}
+		if clearErr := ClearPending(round.Pending); clearErr != nil {
+			return RoundResult{}, clearErr
+		}
+		return d.startReviewWithRecovery(ctx, round, inspected, 1)
 	}
 	pending, err := readPending(round.Pending)
 	if err != nil {
@@ -139,7 +174,7 @@ func (d *Daemon) startReview(ctx context.Context, round Round, v response) (Roun
 }
 
 func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v response, retries int) (RoundResult, error) {
-	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, nextGrantNumber(v.Run))
+	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, nextGrantNumberFromResponse(v))
 	head, err := worktreeHead(ctx, round.Worktree)
 	if err != nil {
 		return RoundResult{}, err
@@ -196,10 +231,14 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 		return RoundResult{}, err
 	}
 	if err := reviewed.refusal("review"); err != nil {
-		if retries > 0 && strings.Contains(err.Error(), "grant already used") {
+		if retries > 0 {
 			inspected, inspectErr := d.axi(ctx, round.Worktree, []byte(`{"version":2,"op":"inspect"}`))
 			if inspectErr != nil {
 				return RoundResult{}, inspectErr
+			}
+			if !grantWasUsed(err, inspected, grant) {
+				_ = ClearPending(round.Pending)
+				return RoundResult{}, err
 			}
 			settled, found, inspectErr := settledInspection(ctx, round, grant, inspected)
 			if inspectErr != nil {
@@ -207,6 +246,15 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 			}
 			if found {
 				return settled, nil
+			}
+			if result := inspected.HostResult; result != nil && result.Grant == grant && result.Verdict == "" && terminalReviewStatus(result.Status) {
+				if clearErr := ClearPending(round.Pending); clearErr != nil {
+					return RoundResult{}, clearErr
+				}
+				return RoundResult{Grant: grant, RunID: inspected.RunID, Result: result}, &TerminalReviewError{Status: result.Status, Reason: result.Reason}
+			}
+			if inspectErr := inspected.refusal("inspect"); inspectErr != nil {
+				return RoundResult{}, inspectErr
 			}
 			if clearErr := ClearPending(round.Pending); clearErr != nil {
 				return RoundResult{}, clearErr
@@ -308,6 +356,28 @@ func settledInspection(ctx context.Context, round Round, grant string, inspected
 	return RoundResult{Outcome: Settled, Grant: result.Grant, RunID: inspected.RunID, Result: result}, true, nil
 }
 
+func grantWasUsed(refusal error, inspected response, grant string) bool {
+	if refusal != nil && strings.Contains(refusal.Error(), "grant already used") {
+		return true
+	}
+	result := inspected.HostResult
+	return result != nil && result.Grant == grant && (result.Verdict != "" || terminalReviewStatus(result.Status))
+}
+
+func nextGrantNumberFromResponse(inspected response) int {
+	next := nextGrantNumber(inspected.Run)
+	if inspected.HostResult != nil {
+		grant := inspected.HostResult.Grant
+		if index := strings.LastIndex(grant, "/r"); index >= 0 {
+			used, err := strconv.Atoi(grant[index+2:])
+			if err == nil && used >= next {
+				next = used + 1
+			}
+		}
+	}
+	return next
+}
+
 func nextGrantNumber(current *run) int {
 	if current == nil {
 		return 1
@@ -318,7 +388,7 @@ func nextGrantNumber(current *run) int {
 
 func terminalReviewStatus(status string) bool {
 	switch status {
-	case "cancelled", "failed", "timeout", "timed-out", "unconfigured", "refused":
+	case "cancelled", "failed", "inconclusive", "timeout", "timed-out", "unconfigured", "refused":
 		return true
 	default:
 		return false

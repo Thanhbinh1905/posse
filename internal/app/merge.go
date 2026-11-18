@@ -730,6 +730,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "Task artifact access", err)
 	}
+	if err := stopTaskGreenhouseReviewOwners(ctx, db, home, project, task); err != nil {
+		return result, s.teardownIncomplete(ctx, db, project, task, "Greenhouse review owner shutdown", err)
+	}
 	var processAuthorization *sandboxProcessAuthorization
 	if !discardable && s.Herdr != nil && sandboxHeld {
 		processAuthorization = newSandboxProcessAuthorization()

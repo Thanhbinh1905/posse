@@ -2,6 +2,7 @@ package greenhouse
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,35 @@ func TestSettledInspectionKeepsPendingRecord(t *testing.T) {
 	}
 }
 
+func TestSpentGrantIsRecognizedWhenSettledResultWasNotIngested(t *testing.T) {
+	inspected := response{
+		Run:        &run{HostGrants: []string{"greenhouse/t143/greenhouse/r1", "greenhouse/t143/greenhouse/r2"}},
+		HostResult: &HostResult{Grant: "greenhouse/t143/greenhouse/r2", Head: "old-head", Verdict: "findings", Status: "settled"},
+	}
+	if !grantWasUsed(nil, inspected, "greenhouse/t143/greenhouse/r2") {
+		t.Fatal("spent r2 was not recognized from Greenhouse state")
+	}
+	if got := nextGrantNumberFromResponse(inspected); got != 3 {
+		t.Fatalf("next grant number = %d, want r3 after unrecorded settled r2", got)
+	}
+	if got := nextGrantNumberFromResponse(response{HostResult: inspected.HostResult}); got != 3 {
+		t.Fatalf("next grant number without run metadata = %d, want r3 from settled r2", got)
+	}
+}
+
+func TestActiveGrantIsNotMistakenForSpent(t *testing.T) {
+	inspected := response{
+		Run:        &run{HostGrants: []string{"greenhouse/t143/greenhouse/r2"}, Status: "running"},
+		HostResult: &HostResult{Grant: "greenhouse/t143/greenhouse/r2", Status: "running", Current: true},
+	}
+	if grantWasUsed(nil, inspected, "greenhouse/t143/greenhouse/r2") {
+		t.Fatal("active grant was mistaken for a spent grant")
+	}
+	if !grantWasUsed(errors.New("grant already used"), response{}, "greenhouse/t143/greenhouse/r2") {
+		t.Fatal("Greenhouse refusal did not identify the spent grant")
+	}
+}
+
 func TestNextGrantNumberIncludesSettledReviewUsage(t *testing.T) {
 	got := nextGrantNumber(&run{HostGrants: []string{"shop/t1/shop/r1"}, ReviewUsed: 2})
 	if got != 3 {
@@ -55,7 +85,7 @@ func TestNextGrantNumberIncludesSettledReviewUsage(t *testing.T) {
 }
 
 func TestTerminalReviewStatus(t *testing.T) {
-	for _, status := range []string{"cancelled", "failed", "unconfigured", "refused"} {
+	for _, status := range []string{"cancelled", "failed", "inconclusive", "unconfigured", "refused"} {
 		if !terminalReviewStatus(status) {
 			t.Errorf("terminalReviewStatus(%q) = false, want true", status)
 		}
