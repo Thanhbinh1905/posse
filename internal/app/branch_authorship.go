@@ -130,12 +130,16 @@ func acquireTaskBranchAuthorLock(ctx context.Context, worktree, branch string) (
 	return acquireFileLockWithin(ctx, path, fileLockWaitBudget)
 }
 
-func lockedTaskBranchAuthorHead(ctx context.Context, worktree, branch string) (string, error) {
+func lockedTaskBranchAuthorHead(ctx context.Context, worktree, branch string) (head string, err error) {
 	lock, err := acquireTaskBranchAuthorLock(ctx, worktree, branch)
 	if err != nil {
 		return "", err
 	}
-	defer lock.Close()
+	defer func() {
+		if closeErr := lock.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	return taskBranchAuthorHead(ctx, worktree, branch)
 }
 
