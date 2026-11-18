@@ -56,12 +56,8 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 			}
 		}
 		for _, task := range tasks {
-			wantRow := "└─ " + task.ShortName + "-t" + strconv.Itoa(task.Seq)
-			if task.Seq == 1 {
-				wantRow = "├─ " + task.ShortName + "-t" + strconv.Itoa(task.Seq)
-			}
-			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != wantRow) {
-				t.Errorf("Worker sidebar row = %q harness=%q, want %q and claude", pane.Tokens["posse_row"], pane.DisplayAgent, wantRow)
+			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != "") {
+				t.Errorf("linked Worker sidebar metadata = %q harness=%q, want native workspace row and claude", pane.Tokens["posse_row"], pane.DisplayAgent)
 			}
 		}
 	}
@@ -75,13 +71,29 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 	want := []string{f.userBefore.Workspace.WorkspaceID + "=notes", f.leadWorkspaceID + "=Lead:shop"}
 	want = append(want, f.userAfter.Workspace.WorkspaceID+"=scratch")
 	for _, task := range tasks {
-		if task.HerdrWorkspaceID != f.leadWorkspaceID {
-			t.Errorf("Worker %s is not in the Lead workspace: %s", task.ShortName, task.HerdrWorkspaceID)
+		if task.HerdrWorkspaceID == f.leadWorkspaceID {
+			t.Errorf("Worker %s shares the Lead workspace instead of using a linked child", task.ShortName)
+		}
+		var childFound bool
+		for _, workspace := range snap.Workspaces {
+			if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == task.WorktreePath {
+				childFound = true
+				break
+			}
+		}
+		if !childFound {
+			t.Errorf("Worker %s is not in its linked Sandbox workspace %s", task.ShortName, task.HerdrWorkspaceID)
+		}
+		want = append(want, task.HerdrWorkspaceID+"="+task.ShortName+"-t"+strconv.Itoa(task.Seq))
+		for _, pane := range snap.Panes {
+			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != "") {
+				t.Errorf("linked Worker sidebar row should use its native workspace label: label=%q harness=%q row=%q", pane.Label, pane.DisplayAgent, pane.Tokens["posse_row"])
+			}
 		}
 	}
 	t.Logf("native workspace order: %v", order)
 	if strings.Join(order, ",") != strings.Join(want, ",") {
-		t.Errorf("Workers are not directly below their Lead or User layout changed: got %v, want %v", order, want)
+		t.Errorf("Worker child workspaces or User workspace layout changed: got %v, want %v", order, want)
 	}
 	f.assertAlive(t, snap, f.leadPaneID, f.userBefore.RootPane.PaneID, f.userAfter.RootPane.PaneID, f.userTab.RootPane.PaneID)
 }

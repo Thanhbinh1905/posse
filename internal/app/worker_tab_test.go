@@ -218,6 +218,7 @@ func TestLeadWorkspaceRequiresTheLeadOrItsLabel(t *testing.T) {
 
 func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
+	adapter.snapshot.Panes[1].CWD = t.TempDir()
 	adapter.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
 	task.ShortName = "first-worker"
 	home := t.TempDir()
@@ -250,6 +251,29 @@ func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 	var cliErr *axi.Error
 	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("tab.create") != 0 || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
 		t.Fatalf("openWorkerTab without the Lead = %v, calls %#v", err, adapter.Calls)
+	}
+}
+
+func TestOpenWorkerTabReusesTheTaskChildWorkspaceForRelaunch(t *testing.T) {
+	project, task, adapter := workerTabSession(t)
+	task.HerdrWorkspaceID = "w2"
+	task.PaneID = "w2:p1"
+	task.PaneLabel = "posse:shop:t1"
+	child := herdr.Workspace{WorkspaceID: "w2", Label: "first-worker-t1"}
+	child.Worktree.CheckoutPath = task.WorktreePath
+	child.Worktree.IsLinkedWorktree = true
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, child)
+	adapter.snapshot.Panes[1].CWD = t.TempDir()
+	adapter.snapshot.Panes[2].CWD = t.TempDir()
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", CWD: task.WorktreePath})
+	adapter.Results["tab.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t2"},"root_pane":{"pane_id":"w2:p2","tab_id":"w2:t2"}}`)
+	home := t.TempDir()
+	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
+	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t2", PaneID: "w2:p2"}) {
+		t.Fatalf("openWorkerTab for relaunch = %#v, %v", opened, err)
+	}
+	if adapter.CallCount("tab.create") != 1 || adapter.CallCount("worktree.open") != 0 {
+		t.Fatalf("relaunch did not reuse the Task child workspace: %#v", adapter.Calls)
 	}
 }
 

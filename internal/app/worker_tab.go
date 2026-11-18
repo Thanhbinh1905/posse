@@ -58,9 +58,15 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 	if !found {
 		return openedTab{}, axi.Failure("lead_missing", "the Lead's Herdr workspace is not open", false, "Run `posse up` to restart the Lead, then retry")
 	}
+	reuseWorkerWorkspace := false
 	if !project.IsWorkspace() {
 		for _, workspace := range snapshot.Workspaces {
 			if workspace.Worktree.CheckoutPath == path || workspace.Root == path {
+				if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && filepath.Clean(workspace.Worktree.CheckoutPath) == filepath.Clean(path) {
+					workspaceID = workspace.WorkspaceID
+					reuseWorkerWorkspace = true
+					continue
+				}
 				for _, pane := range snapshot.Panes {
 					if pane.WorkspaceID == workspace.WorkspaceID {
 						return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + ", pane " + pane.PaneID)
@@ -81,7 +87,7 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 			continue
 		}
 		otherTaskPane := strings.HasPrefix(pane.Label, "posse:"+project.Name+":t") && pane.Label != task.PaneLabel
-		if !project.IsWorkspace() || pane.WorkspaceID != workspaceID || otherTaskPane {
+		if (!project.IsWorkspace() && !reuseWorkerWorkspace) || pane.WorkspaceID != workspaceID || otherTaskPane {
 			return openedTab{}, sandboxOccupied("pane " + pane.PaneID + " label " + pane.Label + " in workspace " + pane.WorkspaceID)
 		}
 	}
@@ -90,7 +96,7 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 		"workspace_id": workspaceID, "cwd": path, "label": workerTabLabel(task), "focus": false,
 		"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
 	}
-	if !project.IsWorkspace() {
+	if !project.IsWorkspace() && !reuseWorkerWorkspace {
 		method = "worktree.open"
 		params = map[string]any{"workspace_id": workspaceID, "path": path, "label": workerTabLabel(task), "focus": false}
 	}
@@ -117,7 +123,7 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 	if result.AlreadyOpen {
 		return openedTab{}, axi.Failure("worker_tab_occupied", "the Worker tab was opened before Posse could label its pane", false, "Inspect the Sandbox's open panes before retrying")
 	}
-	if !project.IsWorkspace() {
+	if !project.IsWorkspace() && !reuseWorkerWorkspace {
 		if result.AlreadyOpen || result.Workspace.WorkspaceID == "" || result.Workspace.WorkspaceID == workspaceID {
 			return openedTab{}, axi.Failure("worker_workspace_occupied", "Herdr did not create a new linked Worker workspace", false, "Inspect the Sandbox's open panes before retrying")
 		}
@@ -133,18 +139,18 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 		metadata["tokens"].(map[string]string)["posse_row"] = treeTabLabel(workerTabLabel(task), true)
 	}
 	if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
-		s.closeUnlabeledWorker(ctx, project, opened)
+		s.closeUnlabeledWorker(ctx, project, task, opened)
 		return openedTab{}, err
 	}
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": opened.PaneID, "label": task.PaneLabel}); err != nil {
-		s.closeUnlabeledWorker(ctx, project, opened)
+		s.closeUnlabeledWorker(ctx, project, task, opened)
 		return openedTab{}, err
 	}
 	return opened, nil
 }
 
-func (s *Service) closeUnlabeledWorker(ctx context.Context, project store.Project, opened openedTab) {
-	if !project.IsWorkspace() && opened.WorkspaceID != "" {
+func (s *Service) closeUnlabeledWorker(ctx context.Context, project store.Project, task store.Task, opened openedTab) {
+	if !project.IsWorkspace() && opened.WorkspaceID != "" && opened.WorkspaceID != task.HerdrWorkspaceID {
 		_, _ = s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": opened.WorkspaceID})
 	} else if opened.TabID != "" {
 		_, _ = s.herdrCall(ctx, "tab.close", map[string]any{"tab_id": opened.TabID})
