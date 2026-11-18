@@ -301,6 +301,14 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 	if _, err := s.waitTaskPanesGone(ctx, project, task); err != nil {
 		return err
 	}
+	observation := task.Observation()
+	observation.AgentAbsentSince = time.Now().UnixMilli()
+	observation.IdleSince = 0
+	observation.AgentStatus = store.AgentStatusNoPane
+	observation.AgentStatusSince = observation.AgentAbsentSince
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
+		return err
+	}
 	s.relabelProjectTabs(ctx, db, project)
 	if _, err := s.verifyDeliveryPreserved(ctx, db, target); err != nil {
 		return prReleaseRefused("preservation became uncertain while stopping the executor: "+err.Error(), true)

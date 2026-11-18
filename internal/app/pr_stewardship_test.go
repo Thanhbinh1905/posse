@@ -500,6 +500,9 @@ func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) 
 	}
 	attachPRFixtureSandbox(t, fixture)
 	removeFixtureTaskPane(fixture)
+	if count, err := fixture.db.ActiveWorkerCount(context.Background(), fixture.project.ID); err != nil || count != 1 {
+		t.Fatalf("done Change with held Sandbox must count before release: count=%d err=%v", count, err)
+	}
 
 	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
 		t.Fatalf("release executor: %d %s %s", code, output, stderr)
@@ -513,6 +516,9 @@ func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) 
 	}
 	if sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID); !store.IsNotFound(err) {
 		t.Fatalf("released Task still owns Sandbox %#v err=%v", sandbox, err)
+	}
+	if count, err := fixture.db.ActiveWorkerCount(context.Background(), fixture.project.ID); err != nil || count != 0 {
+		t.Fatalf("released done Change still counts as a Worker: count=%d err=%v", count, err)
 	}
 	cfg, err := config.Load(fixture.home, fixture.project.Name)
 	if err != nil {
