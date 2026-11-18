@@ -134,6 +134,17 @@ func TestStalledInstructionWithoutPlaceholderStaysDelivered(t *testing.T) {
 	}
 }
 
+func TestWorkerForegroundAcceptsAgentWrappedByRuntime(t *testing.T) {
+	pid := os.Getpid()
+	fake := herdr.NewFake()
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":%d,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"python3","argv":["/usr/bin/python3","/workspace/bin/pi"]}]}}`, pid+1, pid, pid))
+	service := &Service{Herdr: fake}
+
+	if err := service.verifyWorkerForeground(context.Background(), "w2:p1", "pi"); err != nil {
+		t.Fatalf("verify wrapped Pi process: %v", err)
+	}
+}
+
 func TestSendDoesNotDeliverAfterCodexExitsDuringSelfUpdate(t *testing.T) {
 	_, db, project, messageID, fake, service := newMessageSubmitFixture(t, "working")
 	fake.SnapshotValue.Panes[0].Agent = "codex"

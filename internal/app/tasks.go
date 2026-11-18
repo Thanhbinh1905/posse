@@ -2410,19 +2410,21 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 			return snapshotErr
 		}
 		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
-		if !found || pane.Agent == "" {
-			err = axi.Failure("worker_exited", "Worker process is not available in its pane", false)
-		} else {
-			err = s.verifyWorkerForeground(ctx.Context, pane.PaneID, pane.Agent)
-		}
-		if err != nil {
-			var failure *axi.Error
-			if errors.As(err, &failure) && failure.Code == "worker_exited" {
-				if lostErr := recordWorkerLost(ctx.Context, db, task, failure.Message); lostErr != nil {
-					return errors.Join(err, lostErr)
-				}
+		if !completedChangeTask(task) || found && pane.Agent != "" {
+			if !found || pane.Agent == "" {
+				err = axi.Failure("worker_exited", "Worker process is not available in its pane", false)
+			} else {
+				err = s.verifyWorkerForeground(ctx.Context, pane.PaneID, pane.Agent)
 			}
-			return err
+			if err != nil {
+				var failure *axi.Error
+				if errors.As(err, &failure) && failure.Code == "worker_exited" {
+					if lostErr := recordWorkerLost(ctx.Context, db, task, failure.Message); lostErr != nil {
+						return errors.Join(err, lostErr)
+					}
+				}
+				return err
+			}
 		}
 	}
 	messageID, err := db.QueueMessage(ctx.Context, task.ID, body, parsed.Bool("queue"))
