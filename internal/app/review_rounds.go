@@ -125,7 +125,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if taskUsesGreenhouseReviewProvider(change, cfg, "") {
 		var targets []store.ReviewTarget
 		if project.IsWorkspace() {
-			heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, change)
+			heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, project, change)
 			if err != nil {
 				return err
 			}
@@ -133,7 +133,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 				targets = append(targets, store.ReviewTarget{Repository: member.Repository, Commit: member.Head})
 			}
 		} else {
-			head, err := gitOutput(ctx.Context, change.WorktreePath, "rev-parse", "HEAD")
+			head, err := lockedTaskBranchAuthorHead(ctx.Context, project.Root, change.Branch)
 			if err != nil {
 				return err
 			}
@@ -1014,7 +1014,7 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, change.ID, target.Repository, requestHead, reason)
 			return err
 		}
-		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
+		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--head", target.Commit, "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
 		if token := os.Getenv(watchRuntimeTokenEnv); token != "" {
 			watch, err := db.WatchRuntime(ctx, project.ID)
 			if err != nil {

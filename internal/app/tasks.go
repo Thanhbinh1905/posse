@@ -1747,7 +1747,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if err := validateWorkspaceChangeSignal(ctx.Context, db, task); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false, "Commit each changed Member and leave every worktree clean before signalling done")
 		}
-		heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, task)
+		heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, project, task)
 		if err != nil {
 			return err
 		}

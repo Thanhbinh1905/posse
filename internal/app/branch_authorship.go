@@ -130,6 +130,15 @@ func acquireTaskBranchAuthorLock(ctx context.Context, worktree, branch string) (
 	return acquireFileLockWithin(ctx, path, fileLockWaitBudget)
 }
 
+func lockedTaskBranchAuthorHead(ctx context.Context, worktree, branch string) (string, error) {
+	lock, err := acquireTaskBranchAuthorLock(ctx, worktree, branch)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Close()
+	return taskBranchAuthorHead(ctx, worktree, branch)
+}
+
 func taskBranchAuthorHead(ctx context.Context, worktree, branch string) (string, error) {
 	head, err := gitOutput(ctx, worktree, "rev-parse", "refs/heads/"+branch)
 	if err == nil {
