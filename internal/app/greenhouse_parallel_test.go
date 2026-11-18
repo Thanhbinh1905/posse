@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func TestGreenhousePrepublicationNoticesSkippedPendingIntent(t *testing.T) {
@@ -443,6 +445,135 @@ func TestAbandonedParallelReviewResumesItsOriginalHeadBeforeCurrentHead(t *testi
 	if head != newHead || requestedAt != 789 {
 		t.Fatalf("new request = %s at %d, want current head %s at 789", head, requestedAt, newHead)
 	}
+}
+
+func TestWorkspaceGreenhouseRecordsExactHeadEvenWhenHostMarksItNonCurrent(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "review_provider = \"greenhouse\"\n[defaults]\nmerge_mode = \"local\"\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	repos, err := f.db.TaskRepos(ctx, f.task.ID)
+	if err != nil || len(repos) != 1 {
+		t.Fatalf("workspace Task repos = %+v, %v", repos, err)
+	}
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief:     taskplan.Select("brief", "workspace.md", []byte("---\ntype: change\ntitle: Greenhouse workspace\ndone_when: reviewed\nrepos: [worker]\n---\n")),
+		Execution: taskplan.Execution{Mode: "sandbox", Scope: "workspace", Members: []taskplan.Member{{Name: "worker", Path: "worker", Base: "main", Target: "main", Delivery: "local", Review: "full-pipeline", ReviewProvider: store.GreenhouseReviewProvider}}},
+		Launch:    taskplan.Launch{ProfileName: "test", Profile: config.Profile{Kind: "pi"}},
+		Review:    "full-pipeline", ReviewProvider: store.GreenhouseReviewProvider, Delivery: "local",
+		Autonomy:        config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths:           taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "stack", "t1"), Output: filepath.Join(f.home, "projects", "stack", "tasks", "t1")},
+		ValidationLoops: &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"}, ReviewProvider: store.GreenhouseReviewProvider},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `INSERT OR REPLACE INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, f.task.ID, plan.Revision, encoded); err != nil {
+		t.Fatal(err)
+	}
+	f.task.PlanJSON = encoded
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[review_loop]\ngreenhouse_timeout = \"1s\"\n[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(ctx, filepath.Join(f.task.WorktreePath, "worker"), "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	f.service.greenhouseRound = func(_ context.Context, round greenhouse.Round) (greenhouse.RoundResult, error) {
+		calls++
+		grant := fmt.Sprintf("stack/t1/worker/r%d", calls)
+		return greenhouse.RoundResult{
+			Outcome: greenhouse.Settled, Grant: grant, RunID: "workspace-run",
+			Result: &greenhouse.HostResult{Grant: grant, Head: head, Target: round.Target, Verdict: "findings", Current: false,
+				Findings: []greenhouse.Finding{{ID: "finding-1", Priority: "P1", Origin: "correctness", File: "change.txt", Start: 1, End: 1, Explanation: "Finding", Action: "Fix it", Head: head}}},
+		}, nil
+	}
+	binDir := t.TempDir()
+	if err := os.Symlink("/usr/bin/true", filepath.Join(binDir, "greenhouse")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if code := f.run("_greenhouse", "review", "t1", "--repo", "worker"); code != 0 {
+		t.Fatalf("workspace Greenhouse review: %d\n%s", code, f.out.String())
+	}
+	requests, err := f.db.GreenhouseReviewRequests(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(requests) != 1 || requests[0].Outcome != "verdict" || requests[0].RequestedHead != head {
+		t.Fatalf("workspace review calls=%d requests=%+v, want one exact-head Verdict", calls, requests)
+	}
+	verdicts, err := f.db.VerdictsFor(ctx, f.task.ID)
+	if err != nil || len(verdicts) != 1 || verdicts[0].Head != head || verdicts[0].Outcome != "findings" {
+		t.Fatalf("workspace Verdicts=%+v err=%v, want findings for %s", verdicts, err, head)
+	}
+	findings, err := f.db.ProviderFindingsForTask(ctx, f.task.ID)
+	if err != nil || len(findings) != 1 || findings[0].Repository != "worker" || findings[0].HeadSHA != head {
+		t.Fatalf("workspace provider findings=%+v err=%v, want one finding for %s", findings, err, head)
+	}
+	if _, err := f.db.AddSignal(ctx, f.task.ID, "done", "Workspace review requested", map[string]any{"greenhouse_pending_members": []greenhousePendingMember{{Repository: "worker", Head: head}}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseWorkspacePrepublication(ctx, f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.db.ReviewFixInstructionPending(ctx, f.task.ID)
+	if err != nil || !pending {
+		t.Fatalf("workspace findings fix pending=%t err=%v, want queued repair", pending, err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 {
+		t.Fatalf("workspace Greenhouse notices=%+v err=%v, want failure Notice", notices, err)
+	}
+}
+
+func TestWorkspaceGreenhouseMovedPendingHeadRaisesNotice(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	worktree := filepath.Join(f.task.WorktreePath, "worker")
+	pendingHead, err := gitOutput(ctx, worktree, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "later.txt"), []byte("later work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, worktree, "add", "later.txt")
+	gitTest(t, worktree, "commit", "-m", "move member head")
+	if _, err := f.db.AddSignal(ctx, f.task.ID, "done", "Workspace head moved", map[string]any{"greenhouse_pending_members": []greenhousePendingMember{{Repository: "worker", Head: pendingHead}}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseWorkspacePrepublication(ctx, f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(ctx, f.project.ID)
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("moved pending head requests=%+v err=%v, want no review request", requests, err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 {
+		t.Fatalf("moved pending head notices=%+v err=%v, want one Greenhouse failure Notice", notices, err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "greenhouse_review_failed" && strings.Contains(notice.Summary, "posse review start t1") {
+			return
+		}
+	}
+	t.Fatalf("moved pending head Notice has no working next step: %+v", notices)
 }
 
 func TestAbandonedParallelReviewKeepsItsHeadUntilAdapterResume(t *testing.T) {

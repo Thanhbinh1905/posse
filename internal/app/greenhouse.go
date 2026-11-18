@@ -345,7 +345,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		switch result.Outcome {
 		case greenhouse.Settled:
 			crashIntentAt("greenhouse-review", "after", "settled")
-			if result.Result == nil || !result.Result.Current || result.Result.Head != requestHead {
+			if result.Result == nil || result.Result.Head != requestHead {
 				if err := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); err != nil {
 					return err
 				}
@@ -475,6 +475,16 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 			targets = append(targets, store.ReviewTarget{Repository: member.Repository, Commit: member.Head})
 		}
 		if moved {
+			for _, member := range data.Members {
+				currentHead := currentByRepo[member.Repository]
+				if currentHead == member.Head {
+					continue
+				}
+				reason := fmt.Sprintf("pending Member head %s moved to %s; run `posse review start %s` to request Verdicts for the current Member heads", shortSHA(member.Head), shortSHA(currentHead), taskIDString(task.Seq))
+				if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, member.Repository, member.Head, reason); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, targets); err != nil {
