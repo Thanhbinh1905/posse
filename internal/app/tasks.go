@@ -1747,7 +1747,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if err := validateWorkspaceChangeSignal(ctx.Context, db, task); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false, "Commit each changed Member and leave every worktree clean before signalling done")
 		}
-		heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, task)
+		heads, err := greenhouseWorkspacePendingHeads(ctx.Context, db, project, task)
 		if err != nil {
 			return err
 		}
@@ -3294,7 +3294,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		preserved := task
 		preserved.WorktreePath = project.Root
-		if err := requireReleasedTaskBranchHead(ctx, preserved); err != nil {
+		if err := requireReleasedTaskBranchHead(ctx, db, preserved); err != nil {
 			return failure(err)
 		}
 		generation, err = claimTaskBranchAuthor(ctx, db, preserved, launch, true)

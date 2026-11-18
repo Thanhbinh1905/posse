@@ -296,9 +296,28 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	}
 }
 
+func TestPinGreenhouseReviewCheckoutIsScopedByRepository(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	checkouts := make(map[string]string)
+	for _, repository := range []string{"shop", "other"} {
+		member := greenhouseMember{name: repository, root: f.repo, worktree: f.worktree}
+		pinned, err := pinGreenhouseReviewCheckout(context.Background(), f.db, f.home, f.project, f.task, member, f.headSHA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if actual, err := gitOutput(context.Background(), pinned.worktree, "rev-parse", "HEAD"); err != nil || actual != f.headSHA {
+			t.Fatalf("%s checkout head = %q, want %s, err=%v", repository, actual, f.headSHA, err)
+		}
+		checkouts[repository] = pinned.worktree
+	}
+	if checkouts["shop"] == checkouts["other"] {
+		t.Fatalf("repository members share review checkout %q", checkouts["shop"])
+	}
+}
+
 func TestGreenhouseVerdictComputesBaseAndChecksProviderBase(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
-	member := greenhouseMember{name: f.project.Name, worktree: f.task.WorktreePath}
+	member := greenhouseMember{name: f.project.Name, root: f.task.WorktreePath, worktree: f.task.WorktreePath}
 	ctx := context.Background()
 	base, err := greenhouseReviewBase(ctx, member.worktree, f.headSHA, f.headSHA)
 	if err != nil {

@@ -11,16 +11,27 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func requireReleasedTaskBranchHead(ctx context.Context, task store.Task) error {
-	if task.GatedSHA == "" {
+func requireReleasedTaskBranchHead(ctx context.Context, db *store.DB, task store.Task) error {
+	repository, err := gitCommonDir(ctx, task.WorktreePath)
+	if err != nil {
+		return err
+	}
+	claim, err := db.BranchAuthor(ctx, repository, task.Branch)
+	if err != nil {
+		if store.IsNotFound(err) {
+			return store.ErrBranchAuthorHeadChanged
+		}
+		return err
+	}
+	if claim.TaskID != task.ID || claim.HeadSHA == "" {
 		return store.ErrBranchAuthorHeadChanged
 	}
 	head, err := taskBranchAuthorHead(ctx, task.WorktreePath, task.Branch)
-	if err != nil || head != task.GatedSHA {
+	if err != nil || head != claim.HeadSHA {
 		return store.ErrBranchAuthorHeadChanged
 	}
 	remoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
-	if err != nil || remoteHead != task.GatedSHA {
+	if err != nil || remoteHead != claim.HeadSHA {
 		return store.ErrBranchAuthorHeadChanged
 	}
 	return nil
@@ -117,6 +128,19 @@ func acquireTaskBranchAuthorLock(ctx context.Context, worktree, branch string) (
 	scope := sha256.Sum256([]byte(branch))
 	path := filepath.Join(commonDir, fmt.Sprintf("posse-branch-author-%x.lock", scope[:12]))
 	return acquireFileLockWithin(ctx, path, fileLockWaitBudget)
+}
+
+func lockedTaskBranchAuthorHead(ctx context.Context, worktree, branch string) (head string, err error) {
+	lock, err := acquireTaskBranchAuthorLock(ctx, worktree, branch)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if closeErr := lock.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+	return taskBranchAuthorHead(ctx, worktree, branch)
 }
 
 func taskBranchAuthorHead(ctx context.Context, worktree, branch string) (string, error) {

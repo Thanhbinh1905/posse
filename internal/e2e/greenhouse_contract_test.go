@@ -882,12 +882,25 @@ func (c *greenhouseContract) hostGrants(t *testing.T) []any {
 
 func (c *greenhouseContract) greenhouse(t *testing.T, request map[string]any) map[string]any {
 	t.Helper()
+	projectDB, err := store.OpenReadOnly(c.f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := projectDB.ProjectByID(context.Background(), c.f.projectID)
+	projectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(c.f.home, "scratch", project.Name, "t"+strconv.Itoa(c.change.Seq), "greenhouse-review", project.Name, "worktree")
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("pinned Greenhouse review checkout %s: %v", worktree, err)
+	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command(filepath.Join(c.f.root, "bin", "greenhouse"), "axi")
-	command.Dir = c.change.WorktreePath
+	command.Dir = worktree
 	command.Env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
 	command.Stdin = strings.NewReader(string(encoded))
 	output, err := command.Output()

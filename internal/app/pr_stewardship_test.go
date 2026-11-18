@@ -310,6 +310,82 @@ func TestPRExecutorPoliciesAreRecordedSeparatelyFromMergeAndTeardown(t *testing.
 	}
 }
 
+func TestRelaunchAfterPublishedPRReleaseReacquiresSandbox(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	attachPRFixtureSandbox(t, fixture)
+	repository, err := gitCommonDir(ctx, fixture.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ClaimBranchAuthor(ctx, repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", fixture.task.Branch)
+	prURL := "https://github.com/acme/shop/pull/17"
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pr_url=?,profile='worker',launches=1 WHERE id=?`, prURL, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task.PRURL = prURL
+	fixture.task.Profile = "worker"
+	fixture.task.Launches = 1
+	if _, err := fixture.db.EnsureDelivery(ctx, fixture.task.ID, "", prURL, "publish"); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(fixture.home, "config.toml")
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configBody, []byte("\n[profiles.worker]\nkind = \"claude\"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeFixtureTaskPane(fixture)
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true}}`)
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release published PR executor: %d %s %s", code, output, stderr)
+	}
+	otherID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "reuse released Sandbox", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := store.Task{ID: otherID, ProjectID: fixture.project.ID, Seq: 2, Type: "change", Branch: "posse/t2", BaseRef: "main"}
+	reused, err := acquireSandbox(ctx, fixture.db, fixture.project, other, fixture.home, "warm", nil)
+	if err != nil {
+		t.Fatalf("reuse released Sandbox: %v", err)
+	}
+	if reused.Path != fixture.worktree {
+		t.Fatalf("Task t2 acquired %s, want released Sandbox %s", reused.Path, fixture.worktree)
+	}
+	if branch := strings.TrimSpace(gitTest(t, reused.Path, "branch", "--show-current")); branch != "posse/t2" {
+		t.Fatalf("reused Sandbox branch = %s, want posse/t2", branch)
+	}
+	if err := os.WriteFile(filepath.Join(reused.Path, "other-task.txt"), []byte("other Task head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, reused.Path, "add", "other-task.txt")
+	gitTest(t, reused.Path, "commit", "-m", "other Task head")
+	fake.BeforeCall = func(method string) {
+		if method == "agent.start" {
+			fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "working"})
+		}
+	}
+	if code, output, stderr := fixture.run("relaunch", "t1"); code != 0 {
+		t.Fatalf("relaunch after published PR release: %d %s %s", code, output, stderr)
+	}
+	sandbox, err := fixture.db.SandboxByTask(ctx, fixture.task.ID)
+	if err != nil || sandbox.State != "held" || sandbox.TaskID != fixture.task.ID {
+		t.Fatalf("relaunch Sandbox = %#v, err=%v", sandbox, err)
+	}
+	if branch := strings.TrimSpace(gitTest(t, sandbox.Path, "branch", "--show-current")); branch != fixture.task.Branch {
+		t.Fatalf("relaunched Sandbox branch = %s, want %s", branch, fixture.task.Branch)
+	}
+	if head := strings.TrimSpace(gitTest(t, sandbox.Path, "rev-parse", "HEAD")); head != fixture.headSHA {
+		t.Fatalf("relaunched Sandbox head = %s, want published head %s", head, fixture.headSHA)
+	}
+}
+
 func TestRelaunchAfterExecutorReleaseOrSuspendReacquiresBranchAuthor(t *testing.T) {
 	for _, variant := range []string{"release", "release-pruned", "suspend"} {
 		t.Run(variant, func(t *testing.T) {
@@ -489,6 +565,57 @@ func TestRelaunchAfterReleaseRefusesWhenTheHeadClaimOrStoppedWriterCannotBeVerif
 			}
 		})
 	}
+}
+
+func TestReviewStartRefusesReleasedTaskSandbox(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	if _, err := fixture.db.ClaimBranchAuthor(context.Background(), mustGitCommonDir(t, fixture.worktree), fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	removeFixtureTaskPane(fixture)
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release executor: %d %s %s", code, output, stderr)
+	}
+	otherID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "reuse released Sandbox", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := store.Task{ID: otherID, ProjectID: fixture.project.ID, Seq: 2, Type: "change", Branch: "posse/t2", BaseRef: "main"}
+	reused, err := acquireSandbox(context.Background(), fixture.db, fixture.project, other, fixture.home, "warm", nil)
+	if err != nil {
+		t.Fatalf("reuse released Sandbox: %v", err)
+	}
+	if reused.Path != fixture.worktree {
+		t.Fatalf("Task t2 acquired %s, want released Sandbox %s", reused.Path, fixture.worktree)
+	}
+	if err := os.WriteFile(filepath.Join(reused.Path, "other-task.txt"), []byte("other Task head\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, reused.Path, "add", "other-task.txt")
+	gitTest(t, reused.Path, "commit", "-m", "other Task head")
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nmerge_mode = \"pr\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("review", "start", "t1")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "review_sandbox_missing") || !strings.Contains(combined, "Sandbox") {
+		t.Fatalf("review of released Task exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
+func mustGitCommonDir(t *testing.T, path string) string {
+	t.Helper()
+	repository, err := gitCommonDir(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
 }
 
 func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) {
