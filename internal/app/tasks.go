@@ -3294,7 +3294,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		preserved := task
 		preserved.WorktreePath = project.Root
-		if err := requireReleasedTaskBranchHead(ctx, preserved); err != nil {
+		if err := requireReleasedTaskBranchHead(ctx, db, preserved); err != nil {
 			return failure(err)
 		}
 		generation, err = claimTaskBranchAuthor(ctx, db, preserved, launch, true)

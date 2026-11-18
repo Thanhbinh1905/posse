@@ -115,6 +115,13 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 	if err != nil {
 		return err
 	}
+	sandbox, sandboxErr := db.SandboxByTask(ctx.Context, change.ID)
+	if sandboxErr != nil && !store.IsNotFound(sandboxErr) {
+		return sandboxErr
+	}
+	if sandboxErr != nil || sandbox.State != "held" || sandbox.TaskID != change.ID || filepath.Clean(sandbox.Path) != filepath.Clean(change.WorktreePath) {
+		return axi.Failure("review_sandbox_missing", "Change Task does not hold its recorded Sandbox, so Review cannot use its checkout", false, "Relaunch the Change Task to reacquire its Sandbox, then retry `posse review start`")
+	}
 	if taskUsesGreenhouseReviewProvider(change, cfg, "") {
 		var targets []store.ReviewTarget
 		if project.IsWorkspace() {
