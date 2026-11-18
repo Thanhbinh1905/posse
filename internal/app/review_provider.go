@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -78,14 +79,28 @@ func pinGreenhouseReviewCheckout(ctx context.Context, db *store.DB, home string,
 	if err != nil {
 		return greenhouseMember{}, err
 	}
-	parent := filepath.Join(scratch, "greenhouse-review")
+	if member.name == "" || member.name == "." || member.name == ".." || filepath.Base(member.name) != member.name || strings.ContainsAny(member.name, `/\\`) {
+		return greenhouseMember{}, fmt.Errorf("unsafe repository name %q for Greenhouse review checkout", member.name)
+	}
+	reviewRoot := filepath.Join(scratch, "greenhouse-review")
+	if err := os.Mkdir(reviewRoot, 0o700); err != nil && !os.IsExist(err) {
+		return greenhouseMember{}, err
+	}
+	info, err := os.Lstat(reviewRoot)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err == nil {
+			err = fmt.Errorf("greenhouse review checkout root is not a directory: %s", reviewRoot)
+		}
+		return greenhouseMember{}, err
+	}
+	parent := filepath.Join(reviewRoot, member.name)
 	if err := os.Mkdir(parent, 0o700); err != nil && !os.IsExist(err) {
 		return greenhouseMember{}, err
 	}
-	info, err := os.Lstat(parent)
+	info, err = os.Lstat(parent)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		if err == nil {
-			err = fmt.Errorf("greenhouse review checkout parent is not a directory: %s", parent)
+			err = fmt.Errorf("greenhouse review checkout directory is not a directory: %s", parent)
 		}
 		return greenhouseMember{}, err
 	}

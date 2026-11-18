@@ -886,7 +886,7 @@ func (c *greenhouseContract) greenhouse(t *testing.T, request map[string]any) ma
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktree := filepath.Join(c.f.home, "scratch", project.Name, "t"+strconv.Itoa(c.change.Seq), "greenhouse-review", "worktree")
+	worktree := filepath.Join(c.f.home, "scratch", project.Name, "t"+strconv.Itoa(c.change.Seq), "greenhouse-review", project.Name, "worktree")
 	if _, err := os.Stat(worktree); err != nil {
 		t.Fatalf("pinned Greenhouse review checkout %s: %v", worktree, err)
 	}
