@@ -2,12 +2,16 @@ package greenhouse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSettledInspectionKeepsPendingRecord(t *testing.T) {
@@ -150,5 +154,83 @@ printf '%s\n' '{"version":2,"outcome":"error","error":"storage commit in progres
 	}
 	if string(count) != "4" {
 		t.Fatalf("daemon calls = %s, want 4 total attempts", count)
+	}
+}
+
+func TestReviewAdvancesPastSpentGrantWhenAttachFailsAndResultWasNotIngested(t *testing.T) {
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, "worktree")
+	for _, args := range [][]string{{"init", "-q", worktree}, {"-C", worktree, "config", "user.email", "test@example.com"}, {"-C", worktree, "config", "user.name", "Test"}, {"-C", worktree, "commit", "-q", "--allow-empty", "-m", "new head"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	log := filepath.Join(dir, "requests.log")
+	binary := filepath.Join(dir, "greenhouse")
+	script := `#!/bin/sh
+request=$(cat)
+printf '%s\n' "$request" >> ` + log + `
+spent='{"grant":"posse/t143/greenhouse/r2","head":"old-head","status":"settled","verdict":"findings","current":false}'
+case "$request" in
+*'"op":"attach"'*)
+  if grep -q '"op":"review"' ` + log + `; then
+    printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","run":{"host_grants":["posse/t143/greenhouse/r3"]},"host_result":{"grant":"posse/t143/greenhouse/r3","head":"x","status":"settled","verdict":"clean","current":true}}'
+  else
+    printf '%s\n' '{"version":2,"outcome":"refused","error":"attach failed"}'
+  fi ;;
+*'"op":"inspect"'*)
+  printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","run":{"host_grants":["posse/t143/greenhouse/r1","posse/t143/greenhouse/r2"]},"host_result":'"$spent"'}' ;;
+*)
+  printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","rules_ready":true,"run":{"host_grants":["posse/t143/greenhouse/r2"]}}' ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	home := "h"
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	daemon := exec.Command("sleep", "60")
+	daemon.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if err := daemon.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = daemon.Process.Kill(); _ = daemon.Wait() })
+	if err := os.WriteFile(filepath.Join(home, "pid"), []byte(strconv.Itoa(daemon.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(home, "socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	state, err := json.Marshal(DaemonState{PID: daemon.Process.Pid, Binary: binary, Range: Range{Min: 1, Max: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, stateFile), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(dir, "review.pending.json")
+	record, err := json.Marshal(pendingReview{Grant: "posse/t143/greenhouse/r2", Request: json.RawMessage(`{"version":2,"op":"review"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_ID", "")
+	d := &Daemon{Binary: binary, Home: home, InTask: func(int) bool { return false }}
+	result, err := d.Review(context.Background(), Round{
+		Worktree: worktree, Host: Host{Name: "posse", ID: "posse/t143/greenhouse"}, GrantPrefix: "posse/t143/greenhouse",
+		Pending: pending, Wait: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if result.Grant != "posse/t143/greenhouse/r3" || result.Outcome != Settled {
+		t.Fatalf("Review = %+v, want a settled r3 after spent r2", result)
 	}
 }
