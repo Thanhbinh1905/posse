@@ -84,7 +84,7 @@ func pinGreenhouseReviewCheckout(ctx context.Context, db *store.DB, home string,
 	info, err := os.Lstat(parent)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		if err == nil {
-			err = fmt.Errorf("Greenhouse review checkout parent is not a directory: %s", parent)
+			err = fmt.Errorf("greenhouse review checkout parent is not a directory: %s", parent)
 		}
 		return greenhouseMember{}, nil, err
 	}
