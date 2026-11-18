@@ -394,6 +394,39 @@ func TestClaudeLeadReceiverAlertDoesNotBlockGenerationAdoption(t *testing.T) {
 	}
 }
 
+func TestNativeHerdrWorkerResumeRaisesRelaunchNotice(t *testing.T) {
+	ctx := context.Background()
+	home, db, project, fake := adoptionFixture(t)
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := task.Observation()
+	observation.AgentServerStartedAt = "old-generation"
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
+		t.Fatal(err)
+	}
+	fake.SnapshotValue.Panes[1].Agent = "codex"
+	fake.SnapshotValue.Panes[1].AgentStatus = "working"
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, fake)
+	for range 2 {
+		if _, err := service.reconcileProject(ctx, db, project, cfg, false); !errors.Is(err, errRecoveryHeld) {
+			t.Fatalf("reconcile native Herdr Worker resume = %v, want restore hold", err)
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || !strings.Contains(notices[0].Summary, "posse relaunch t1") {
+		t.Fatalf("native resume relaunch notice = %#v, %v", notices, err)
+	}
+	if fake.CallCount("agent.start") != 0 {
+		t.Fatalf("reconcile relaunched a Worker without User authorization: %#v", fake.Calls)
+	}
+}
+
 func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 	ctx := context.Background()
 	home, db, project, fake := adoptionFixture(t)

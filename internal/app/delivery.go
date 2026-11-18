@@ -297,6 +297,9 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		if queuedMessageReason(task, message, pane, snapshot, cfg, allowFocused) != "" {
 			return axi.Failure("message_not_ready", "Worker is not ready for this message", true)
 		}
+		if err := s.verifyWorkerForeground(ctx, paneID, pane.Agent); err != nil {
+			return err
+		}
 		confirmTurn = pane.AgentStatus == "idle" || pane.AgentStatus == "done"
 		// Herdr can keep the previous idle/done status when a modal matches
 		// an unknown detection rule (for example Claude's model picker).
@@ -378,6 +381,9 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 			rollbackErr = db.RollbackMessageClaim(ctx, message.ID, token)
 		}
 		if failure, ok := err.(*axi.Error); ok {
+			if failure.Code == "worker_exited" {
+				return false, "worker_exited", errors.Join(rollbackErr, recordWorkerLost(ctx, db, task, failure.Message))
+			}
 			switch failure.Code {
 			case "pane_focused":
 				return false, "focused", rollbackErr
@@ -398,6 +404,18 @@ func (s *Service) submitClaimedMessage(ctx context.Context, db *store.DB, task s
 		return true, "", err
 	}
 	return true, "", nil
+}
+
+func recordWorkerLost(ctx context.Context, db *store.DB, task store.Task, reason string) error {
+	if task.State == store.StateDone || task.State == store.StateMerging {
+		return db.CreateWorkerExitedNotice(ctx, task, time.Now())
+	}
+	transitioned, err := db.TransitionLostUnlessTeardownIntent(ctx, task.ID, task.State, "cli", reason)
+	if err != nil || !transitioned {
+		return err
+	}
+	_, err = db.CreateNotice(ctx, store.Notice{ProjectID: task.ProjectID, TaskID: task.ID, Kind: "task_lost", Summary: task.Title + " lost its Worker"})
+	return err
 }
 
 var (

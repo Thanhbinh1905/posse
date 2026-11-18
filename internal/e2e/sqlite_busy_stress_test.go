@@ -146,9 +146,6 @@ func createStressWorkers(t *testing.T, f *prLifecycleFixture, workerCount int, b
 		if _, err := client.Call(ctx, "pane.rename", map[string]any{"pane_id": worker.RootPane.PaneID, "label": label}); err != nil {
 			t.Fatalf("label isolated Worker %d pane: %v", seq, err)
 		}
-		if _, err := client.Run(ctx, "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
-			t.Fatalf("mark isolated Worker %d working: %v", seq, err)
-		}
 		branch := branchFor(seq)
 		taskID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{
 			Seq: seq, Type: "change", Title: fmt.Sprintf("Concurrent store stress %d", seq), ShortName: fmt.Sprintf("concurrent-store-stress-%d", seq),
@@ -171,6 +168,12 @@ func createStressWorkers(t *testing.T, f *prLifecycleFixture, workerCount int, b
 		workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", worker.RootPane.PaneID)
 		workerEnv = setEnv(workerEnv, "HERDR_WORKSPACE_ID", f.project.HerdrWorkspaceID)
 		workerEnv = setEnv(workerEnv, "HERDR_TAB_ID", worker.RootPane.TabID)
+		if _, err := client.Run(ctx, "pane", "run", worker.RootPane.PaneID, "exec bash -c 'exec -a claude sleep 3600'"); err != nil {
+			t.Fatalf("start isolated Worker %d process: %v", seq, err)
+		}
+		if _, err := client.Run(ctx, "pane", "report-agent", worker.RootPane.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "working"); err != nil {
+			t.Fatalf("mark isolated Worker %d working: %v", seq, err)
+		}
 		workers = append(workers, stressWorker{taskID: taskID, seq: seq, cwd: sandbox.Path, env: workerEnv})
 	}
 	return workers

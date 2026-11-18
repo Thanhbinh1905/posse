@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func (s *Service) herdrCall(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
@@ -71,6 +73,56 @@ func (s *Service) typeIntoFocused(ctx context.Context, paneID, method string, pa
 
 func (s *Service) typeIntoBefore(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error) error {
 	return s.typeIntoBeforeWithSubmissionGate(ctx, paneID, method, params, allowed, beforeSend, nil, false)
+}
+
+func (s *Service) verifyWorkerForeground(ctx context.Context, paneID, agent string) error {
+	raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": paneID})
+	if err != nil {
+		return axi.Failure("worker_exited", "Worker process is not available in its pane", false, err.Error())
+	}
+	var response struct {
+		ProcessInfo paneProcessInfo `json:"process_info"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return err
+	}
+	info := response.ProcessInfo
+	if info.PaneID != paneID || info.ShellPID <= 1 || info.ForegroundProcessGroup <= 1 {
+		return axi.Failure("worker_exited", "Worker process is not the pane's foreground process", false, "Run `posse relaunch <task>` to restart the Worker")
+	}
+	name, _, found := foregroundProcess(info, info.ForegroundProcessGroup)
+	if !found || !processRunsAgent(name, info.ForegroundProcesses, info.ForegroundProcessGroup, agent) {
+		return axi.Failure("worker_exited", "Worker process is not the pane's foreground process", false, "Run `posse relaunch <task>` to restart the Worker")
+	}
+	if _, _, err := store.ProcessIdentityForPID(info.ForegroundProcessGroup); err != nil {
+		return axi.Failure("worker_exited", "Worker process has exited", false, err.Error())
+	}
+	return nil
+}
+
+func processRunsAgent(name string, processes []paneForegroundProcess, foreground int, agent string) bool {
+	if strings.EqualFold(name, agent) {
+		return true
+	}
+	for _, process := range processes {
+		if process.PID != foreground || len(process.Argv) == 0 {
+			continue
+		}
+		if strings.EqualFold(filepath.Base(process.Argv[0]), agent) {
+			return true
+		}
+		if len(process.Argv) < 2 {
+			continue
+		}
+		interpreter := strings.ToLower(filepath.Base(process.Argv[0]))
+		switch interpreter {
+		case "bash", "node", "perl", "python", "python2", "python3", "ruby", "sh":
+			if strings.EqualFold(filepath.Base(process.Argv[1]), agent) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) typeIntoBeforeWithSubmissionGate(ctx context.Context, paneID, method string, params map[string]any, allowed func(herdr.Snapshot) error, beforeSend func() error, gate func(func() error) error, allowFocused bool) error {

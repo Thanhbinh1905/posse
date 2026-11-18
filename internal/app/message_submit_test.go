@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"testing"
 
@@ -38,6 +40,8 @@ func newMessageSubmitFixture(t *testing.T, status string) (context.Context, *sto
 	}
 	fake := herdr.NewFake()
 	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: "claude", AgentStatus: status}}}
+	pid := os.Getpid()
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":%d,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"claude"}]}}`, pid+1, pid, pid))
 	return ctx, db, project, messageID, fake, testService(home, fake)
 }
 
@@ -127,6 +131,35 @@ func TestStalledInstructionWithoutPlaceholderStaysDelivered(t *testing.T) {
 	}
 	if fake.CallCount("agent.prompt") != 1 || fake.CallCount("agent.send_keys") != 0 {
 		t.Fatalf("calls: prompt=%d send_keys=%d; want 1, 0", fake.CallCount("agent.prompt"), fake.CallCount("agent.send_keys"))
+	}
+}
+
+func TestWorkerForegroundAcceptsAgentWrappedByRuntime(t *testing.T) {
+	pid := os.Getpid()
+	fake := herdr.NewFake()
+	fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":%d,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":"python3","argv":["/usr/bin/python3","/workspace/bin/pi"]}]}}`, pid+1, pid, pid))
+	service := &Service{Herdr: fake}
+
+	if err := service.verifyWorkerForeground(context.Background(), "w2:p1", "pi"); err != nil {
+		t.Fatalf("verify wrapped Pi process: %v", err)
+	}
+}
+
+func TestSendDoesNotDeliverAfterCodexExitsDuringSelfUpdate(t *testing.T) {
+	_, db, project, messageID, fake, service := newMessageSubmitFixture(t, "working")
+	fake.SnapshotValue.Panes[0].Agent = "codex"
+	fake.Results["pane.process_info"] = json.RawMessage(`{"process_info":{"pane_id":"w2:p1","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"zsh"}]}}`)
+
+	_ = service.deliverQueuedMessages(context.Background(), db, project, fake.SnapshotValue)
+	if fake.CallCount("agent.prompt") != 0 {
+		t.Fatalf("instruction was typed into shell-only pane: %#v", fake.Calls)
+	}
+	if status := messageSubmitStatus(t, db, messageID); status == "delivered" || status == "submitting" {
+		t.Fatalf("shell-only instruction status=%s, want not delivered", status)
+	}
+	task, err := db.TaskByID(context.Background(), project.ID, 1)
+	if err != nil || task.State != store.StateLost {
+		t.Fatalf("Codex state after its process exited=%s, %v; want lost", task.State, err)
 	}
 }
 

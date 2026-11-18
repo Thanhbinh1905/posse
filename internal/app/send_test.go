@@ -157,6 +157,8 @@ func TestSendDeliveryPolicy(t *testing.T) {
 				}
 			}
 			fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t1", Agent: tc.kind, AgentStatus: tc.status, Focused: tc.focused}}}
+			pid := os.Getpid()
+			fake.Results["pane.process_info"] = json.RawMessage(fmt.Sprintf(`{"process_info":{"pane_id":"w2:p1","shell_pid":%d,"foreground_process_group_id":%d,"foreground_processes":[{"pid":%d,"name":%q}]}}`, pid+1, pid, pid, tc.kind))
 			t.Chdir(repo)
 			body := "Check the tests"
 			if tc.name == "adversarial body" {

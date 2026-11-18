@@ -48,15 +48,18 @@ type teardownResult struct {
 	RemoteBranchErrors []string
 }
 
+type paneForegroundProcess struct {
+	PID  int      `json:"pid"`
+	Name string   `json:"name"`
+	CWD  string   `json:"cwd"`
+	Argv []string `json:"argv"`
+}
+
 type paneProcessInfo struct {
-	PaneID                 string `json:"pane_id"`
-	ShellPID               int    `json:"shell_pid"`
-	ForegroundProcessGroup int    `json:"foreground_process_group_id"`
-	ForegroundProcesses    []struct {
-		PID  int    `json:"pid"`
-		Name string `json:"name"`
-		CWD  string `json:"cwd"`
-	} `json:"foreground_processes"`
+	PaneID                 string                  `json:"pane_id"`
+	ShellPID               int                     `json:"shell_pid"`
+	ForegroundProcessGroup int                     `json:"foreground_process_group_id"`
+	ForegroundProcesses    []paneForegroundProcess `json:"foreground_processes"`
 }
 
 func autoTeardownMode(cfg config.Config) string {

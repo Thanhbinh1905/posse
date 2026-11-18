@@ -270,7 +270,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		absentSince = 0
 	}
 	serverStartedAt := task.AgentServerStartedAt
-	if agentPresent && snapshot.ServerStartedAt != "" {
+	if agentPresent && snapshot.ServerStartedAt != "" && (serverStartedAt == "" || serverStartedAt == snapshot.ServerStartedAt) {
 		serverStartedAt = snapshot.ServerStartedAt
 	}
 	idleSince := task.IdleSince
