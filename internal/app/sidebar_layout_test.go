@@ -84,3 +84,24 @@ func TestDoctorNoLongerChecksHerdrSidebarLayout(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveSidebarLayoutLeavesTablesExtendingThePosseSnippet(t *testing.T) {
+	for name, original := range map[string]string{
+		"extra key":     sidebarLayoutSnippet + "show_title = true\n",
+		"trailing note": sidebarLayoutSnippet + "# mine\n",
+		"subtable":      sidebarLayoutSnippet + "\n[ui.sidebar.agents.extra]\nx = 1\n",
+		"inline prefix": "# a\n" + strings.Replace(sidebarLayoutSnippet, "rows = [", "rows = [\n  [\"tab\"],", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := removeSidebarLayout(path)
+			data, _ := os.ReadFile(path)
+			if err != nil || result != "custom" || string(data) != original {
+				t.Fatalf("result = %q, %v, config = %q", result, err, data)
+			}
+		})
+	}
+}

@@ -52,8 +52,8 @@ func removeSidebarLayout(path string) (string, error) {
 	}
 	text := string(data)
 	for _, snippet := range []string{sidebarLayoutSnippet, legacySidebarLayoutSnippet} {
-		if strings.Contains(text, snippet) {
-			updated := strings.Replace(text, snippet, "", 1)
+		if index := wholeSnippetIndex(text, snippet); index >= 0 {
+			updated := text[:index] + text[index+len(snippet):]
 			if err := atomicfile.Write(path, []byte(updated), info.Mode().Perm()); err != nil {
 				return "", err
 			}
@@ -70,4 +70,34 @@ func removeSidebarLayout(path string) (string, error) {
 		return "custom", nil
 	}
 	return "", nil
+}
+
+func wholeSnippetIndex(text, snippet string) int {
+	for offset := 0; ; {
+		found := strings.Index(text[offset:], snippet)
+		if found < 0 {
+			return -1
+		}
+		index := offset + found
+		offset = index + 1
+		if index > 0 && text[index-1] != '\n' {
+			continue
+		}
+		rest := text[index+len(snippet):]
+		whole := true
+		for _, line := range strings.Split(rest, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "[") {
+				whole = !strings.HasPrefix(strings.ReplaceAll(trimmed, " ", ""), "[ui.sidebar.agents")
+				break
+			}
+			if trimmed != "" {
+				whole = false
+				break
+			}
+		}
+		if whole {
+			return index
+		}
+	}
 }
