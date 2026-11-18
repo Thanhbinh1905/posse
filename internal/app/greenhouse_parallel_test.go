@@ -296,7 +296,7 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 
 func TestGreenhouseVerdictComputesBaseAndChecksProviderBase(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
-	member := greenhouseMember{name: f.project.Name, worktree: f.task.WorktreePath}
+	member := greenhouseMember{name: f.project.Name, root: f.task.WorktreePath, worktree: f.task.WorktreePath}
 	ctx := context.Background()
 	base, err := greenhouseReviewBase(ctx, member.worktree, f.headSHA, f.headSHA)
 	if err != nil {

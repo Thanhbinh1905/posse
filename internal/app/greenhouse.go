@@ -146,11 +146,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve Greenhouse review head: %w", err)
 	}
-	member, cleanupCheckout, err := pinGreenhouseReviewCheckout(ctx.Context, db, home, project, task, member, requestedHead)
-	if err != nil {
-		return err
-	}
-	defer cleanupCheckout()
 	target, err := greenhouseTarget(ctx.Context, member)
 	if err != nil {
 		if parallelMode {
@@ -267,17 +262,25 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	parallelAttempt := 0
 	for range greenhouseStaleRounds {
 		deadline := time.Now().Add(wait)
-		requestedAt := time.Now().UnixMilli()
-		requestHead, headErr := gitOutput(ctx.Context, member.worktree, "rev-parse", "HEAD")
-		if headErr != nil {
-			return headErr
+		requestHead, requestedAt := requestedHead, requestStartedAt
+		if parallelAttempt > 0 {
+			var headErr error
+			requestHead, headErr = taskBranchAuthorHead(ctx.Context, member.root, task.Branch)
+			if headErr != nil {
+				return headErr
+			}
+			requestedAt = time.Now().UnixMilli()
 		}
 		if parallelLock != nil {
-			requestHead, requestedAt = parallelRequestMetadata(requestHead, requestedAt, parallelAttempt == 0 && hasPending, requestOwner)
 			if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: requestHead, RequestedAt: requestedAt}); err != nil {
 				return err
 			}
 		}
+		reviewMember, err := pinGreenhouseReviewCheckout(ctx.Context, db, home, project, task, member, requestHead)
+		if err != nil {
+			return err
+		}
+		round.Worktree = reviewMember.worktree
 		parallelAttempt++
 		var requestSettledAt int64
 		recordRequest := func(outcome, grant string, settledAt int64) error {
@@ -380,7 +383,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				}
 				continue
 			}
-			recorded, verdict, err := recordGreenhouseVerdict(ctx.Context, db, task, member, roundDir, blockAt, cfg, result)
+			recorded, verdict, err := recordGreenhouseVerdict(ctx.Context, db, task, reviewMember, roundDir, blockAt, cfg, result)
 			if errors.Is(err, store.ErrVerdictHeadMoved) {
 				if recordErr := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 					return recordErr
@@ -718,7 +721,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 		verdict.Blocking = greenhouseBlocking(hr.Findings, blockAt)
 	}
 	recorded, err := db.RecordGreenhouseVerdict(ctx, verdict, func(ctx context.Context) (string, error) {
-		return gitOutput(ctx, member.worktree, "rev-parse", "HEAD")
+		return taskBranchAuthorHead(ctx, member.root, task.Branch)
 	})
 	return recorded, verdict, err
 }

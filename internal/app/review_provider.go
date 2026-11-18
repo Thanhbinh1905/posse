@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,45 +73,65 @@ type greenhousePendingMember struct {
 	Head       string `json:"head"`
 }
 
-func pinGreenhouseReviewCheckout(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, member greenhouseMember, head string) (greenhouseMember, func(), error) {
+func pinGreenhouseReviewCheckout(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, member greenhouseMember, head string) (greenhouseMember, error) {
 	scratch, err := ensureTaskScratchForTask(ctx, db, home, project, task)
 	if err != nil {
-		return greenhouseMember{}, nil, err
+		return greenhouseMember{}, err
 	}
 	parent := filepath.Join(scratch, "greenhouse-review")
 	if err := os.Mkdir(parent, 0o700); err != nil && !os.IsExist(err) {
-		return greenhouseMember{}, nil, err
+		return greenhouseMember{}, err
 	}
 	info, err := os.Lstat(parent)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		if err == nil {
 			err = fmt.Errorf("greenhouse review checkout parent is not a directory: %s", parent)
 		}
-		return greenhouseMember{}, nil, err
+		return greenhouseMember{}, err
 	}
-	container, err := os.MkdirTemp(parent, "checkout-")
-	if err != nil {
-		return greenhouseMember{}, nil, err
-	}
-	checkout := filepath.Join(container, "worktree")
-	if _, err := gitOutput(ctx, member.root, "worktree", "add", "--quiet", "--detach", checkout, head); err != nil {
-		_ = os.RemoveAll(container)
-		return greenhouseMember{}, nil, fmt.Errorf("create pinned Greenhouse review checkout: %w", err)
-	}
-	cleanup := func() {
-		_, _ = gitOutput(context.Background(), member.root, "worktree", "remove", "--force", checkout)
-		_ = os.RemoveAll(container)
+	checkout := filepath.Join(parent, "worktree")
+	info, err = os.Lstat(checkout)
+	if errors.Is(err, os.ErrNotExist) {
+		if _, err := gitOutput(ctx, member.root, "worktree", "add", "--quiet", "--detach", checkout, head); err != nil {
+			return greenhouseMember{}, fmt.Errorf("create pinned Greenhouse review checkout: %w", err)
+		}
+	} else if err != nil {
+		return greenhouseMember{}, err
+	} else {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return greenhouseMember{}, fmt.Errorf("greenhouse review checkout is not a directory: %s", checkout)
+		}
+		checkoutRepository, err := gitCommonDir(ctx, checkout)
+		if err != nil {
+			return greenhouseMember{}, err
+		}
+		memberRepository, err := gitCommonDir(ctx, member.root)
+		if err != nil {
+			return greenhouseMember{}, err
+		}
+		if checkoutRepository != memberRepository {
+			return greenhouseMember{}, fmt.Errorf("greenhouse review checkout belongs to another repository: %s", checkout)
+		}
+		status, err := gitStatusOutput(ctx, checkout, "--porcelain", "--untracked-files=all")
+		if err != nil {
+			return greenhouseMember{}, err
+		}
+		if status != "" {
+			return greenhouseMember{}, fmt.Errorf("greenhouse review checkout is not clean: %s", checkout)
+		}
+		if _, err := gitOutput(ctx, checkout, "checkout", "--quiet", "--detach", head); err != nil {
+			return greenhouseMember{}, fmt.Errorf("pin Greenhouse review checkout: %w", err)
+		}
 	}
 	actual, err := gitOutput(ctx, checkout, "rev-parse", "HEAD")
 	if err != nil || actual != head {
-		cleanup()
 		if err == nil {
 			err = fmt.Errorf("checkout resolved to %s, want %s", actual, head)
 		}
-		return greenhouseMember{}, nil, err
+		return greenhouseMember{}, err
 	}
 	member.worktree = checkout
-	return member, cleanup, nil
+	return member, nil
 }
 
 func greenhouseWorkspacePendingHeads(ctx context.Context, db *store.DB, project store.Project, task store.Task) ([]greenhousePendingMember, error) {
