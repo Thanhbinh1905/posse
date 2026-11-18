@@ -34,6 +34,9 @@ func TestKnowledgeOptInLoadsForLeadAndWorker(t *testing.T) {
 		}
 		return path
 	}
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("[knowledge]\nenabled = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	projectKnowledge := filepath.Join(f.home, "projects", "shop", "knowledge")
 	if err := os.MkdirAll(projectKnowledge, 0o700); err != nil {
 		t.Fatal(err)
@@ -52,7 +55,7 @@ func TestKnowledgeOptInLoadsForLeadAndWorker(t *testing.T) {
 	if code, output := runReviewIdentityCLI(t, f, "config", "set", "knowledge.enabled", "true"); code != 1 || !strings.Contains(output, "user_only") {
 		t.Fatalf("the Lead opted into knowledge without the User: %d %s", code, output)
 	}
-	runPosse(t, f.binary, f.repo, f.env, "config", "set", "knowledge.enabled", "true")
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "knowledge.enabled", "true", "--project", "shop")
 
 	if code, output := runReviewIdentityCLI(t, f, "knowledge", "set", "shards", "--file", fact, "--source", "ref:scripts/e2e-shards.txt"); code != 0 {
 		t.Fatalf("Lead knowledge write: %d %s", code, output)
