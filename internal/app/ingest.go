@@ -540,7 +540,7 @@ func (s *Service) monitorLeadReceiver(ctx context.Context, db *store.DB, project
 	}
 	var pendingActionable []store.Notice
 	for _, notice := range open {
-		if noticeNeedsUser(notice, "ask") && (notice.DeliveredAt == 0 || notice.AckedAt == 0) {
+		if noticeNeedsUser(notice, "ask") && notice.DeliveredAt == 0 {
 			pendingActionable = append(pendingActionable, notice)
 		}
 	}
