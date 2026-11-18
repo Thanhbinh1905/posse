@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Protocol is the only AXI envelope version the adapter speaks. It never
@@ -134,7 +135,39 @@ func (v response) refusal(op string) error {
 
 var errUnavailable = errors.New("greenhouse daemon unavailable")
 
+const (
+	readRefusal    = "storage commit in progress; retry the read request"
+	readRetries    = 3
+	readRetryDelay = 25 * time.Millisecond
+)
+
 func (d *Daemon) axi(ctx context.Context, dir string, request []byte) (response, error) {
+	for attempt := 0; ; attempt++ {
+		v, err := d.axiOnce(ctx, dir, request)
+		if attempt == readRetries || !retryableReadRefusal(request, v) {
+			return v, err
+		}
+		timer := time.NewTimer(readRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return v, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func retryableReadRefusal(request []byte, v response) bool {
+	var envelope struct {
+		Operation string `json:"op"`
+	}
+	if json.Unmarshal(request, &envelope) != nil || (envelope.Operation != "attach" && envelope.Operation != "inspect") {
+		return false
+	}
+	return v.Outcome != "ok" && v.Error == readRefusal
+}
+
+func (d *Daemon) axiOnce(ctx context.Context, dir string, request []byte) (response, error) {
 	command := exec.CommandContext(ctx, d.Binary, "axi")
 	command.Dir = dir
 	command.Env = d.environment()
