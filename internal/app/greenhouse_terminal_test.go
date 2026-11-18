@@ -32,6 +32,15 @@ func TestReviewStartPassesPinnedHeadAfterSandboxOwnershipRace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nmerge_mode = \"pr\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	binDir, err := os.MkdirTemp(os.Getenv("TMPDIR"), "gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(binDir) })
+	if err := os.Symlink("/usr/bin/true", filepath.Join(binDir, "greenhouse")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	head := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "refs/heads/"+f.task.Branch))
 	previous := selfExecCommand
 	selfExecCommand = func(args ...string) (*exec.Cmd, error) {
