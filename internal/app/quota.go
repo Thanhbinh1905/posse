@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,7 @@ var (
 	quotaErrorPrefix  = regexp.MustCompile(`(?i)^(?:api error:\s*|error:\s*|\[\w+\]\s*)?(?:\d{3}\s+)?`)
 	quotaJSONMessage  = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
 	quotaResetTime    = regexp.MustCompile(`"reset_time"\s*:\s*"([^"]+)"`)
+	quotaResetSeconds = regexp.MustCompile(`"reset_seconds"\s*:\s*(\d+)`)
 	quotaEpochSuffix  = regexp.MustCompile(`\|(\d{9,})$`)
 	quotaWhitespaceRE = regexp.MustCompile(`\s+`)
 )
@@ -148,6 +150,10 @@ func matchQuotaMessage(kind, line string) (quotaExhaustion, bool) {
 			found.Resets = "at unix time " + epoch[1]
 		} else if reset := quotaResetTime.FindStringSubmatch(full); reset != nil {
 			found.Resets = reset[1]
+		} else if reset := quotaResetSeconds.FindStringSubmatch(full); reset != nil {
+			if seconds, err := strconv.ParseInt(reset[1], 10, 64); err == nil && seconds > 0 && seconds <= int64((1<<63-1)/int64(time.Second)) {
+				found.Resets = (time.Duration(seconds) * time.Second).String()
+			}
 		} else if reset := quotaResetPattern.FindStringSubmatch(text); reset != nil {
 			found.Resets = strings.TrimSpace(reset[1] + reset[2])
 		}
