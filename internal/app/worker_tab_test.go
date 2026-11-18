@@ -216,31 +216,31 @@ func TestLeadWorkspaceRequiresTheLeadOrItsLabel(t *testing.T) {
 	}
 }
 
-func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
+func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
-	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5"}}`)
+	adapter.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
 	task.ShortName = "first-worker"
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
-	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
+	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t1", PaneID: "w2:p1"}) {
 		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
 	}
 	var methods []string
 	for _, call := range adapter.Calls {
 		methods = append(methods, call.Method)
-		if call.Method == "tab.create" {
-			if call.Params["workspace_id"] != "w1" || call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "first-worker-t1" || call.Params["focus"] != false || call.Params["env"].(map[string]string)[workerHomeEnv] != filepath.Clean(home) {
-				t.Fatalf("tab.create params = %#v", call.Params)
+		if call.Method == "worktree.open" {
+			if call.Params["workspace_id"] != "w1" || call.Params["path"] != task.WorktreePath || call.Params["label"] != "first-worker-t1" || call.Params["focus"] != false {
+				t.Fatalf("worktree.open params = %#v", call.Params)
 			}
 		}
-		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w1:p5" || call.Params["label"] != task.PaneLabel) {
+		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w2:p1" || call.Params["label"] != task.PaneLabel) {
 			t.Fatalf("pane.rename params = %#v", call.Params)
 		}
-		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w1:p5" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "└─ first-worker-t1") {
+		if call.Method == "pane.report_metadata" && (call.Params["pane_id"] != "w2:p1" || call.Params["display_agent"] != "claude" || call.Params["tokens"].(map[string]string)["posse_row"] != "") {
 			t.Fatalf("initial Worker metadata = %#v", call.Params)
 		}
 	}
-	if strings.Join(methods, ",") != "tab.create,pane.report_metadata,pane.rename" {
+	if strings.Join(methods, ",") != "worktree.open,pane.report_metadata,pane.rename" {
 		t.Fatalf("openWorkerTab calls = %v", methods)
 	}
 
@@ -253,7 +253,22 @@ func TestOpenWorkerTabUsesTheLeadWorkspace(t *testing.T) {
 	}
 }
 
-func TestOpenWorkerTabRejectsAnOccupiedLegacySandboxButAllowsAnEmptyWorkspace(t *testing.T) {
+func TestOpenWorkerTabKeepsWorkspaceProjectWorkersInLeadTabs(t *testing.T) {
+	project, task, adapter := workerTabSession(t)
+	project.Kind = store.ProjectKindWorkspace
+	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5"}}`)
+	task.ShortName = "workspace-worker"
+	home := t.TempDir()
+	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
+	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
+		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
+	}
+	if adapter.CallCount("tab.create") != 1 || adapter.CallCount("worktree.open") != 0 {
+		t.Fatalf("Workspace Project used the wrong Herdr operation: %#v", adapter.Calls)
+	}
+}
+
+func TestOpenWorkerTabRejectsAnOccupiedSandboxWorkspace(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
 	legacy := herdr.Workspace{WorkspaceID: "legacy"}
 	legacy.Worktree.CheckoutPath = task.WorktreePath
@@ -266,35 +281,29 @@ func TestOpenWorkerTabRejectsAnOccupiedLegacySandboxButAllowsAnEmptyWorkspace(t 
 	service := testService(t.TempDir(), adapter)
 	_, err := service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
-	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || !strings.Contains(cliErr.Message, "legacy:p1") || adapter.CallCount("tab.create") != 0 {
+	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || !strings.Contains(cliErr.Message, "legacy:p1") || adapter.CallCount("worktree.open") != 0 {
 		t.Fatalf("openWorkerTab with an occupied legacy workspace = %v, calls %#v", err, adapter.Calls)
 	}
 
 	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "foreign", Label: "notes"})
 	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "foreign:p1", WorkspaceID: "foreign", CWD: task.WorktreePath})
 	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
-	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("tab.create") != 0 {
+	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("worktree.open") != 0 {
 		t.Fatalf("openWorkerTab with a foreign Sandbox cwd = %v, calls %#v", err, adapter.Calls)
 	}
 
-	adapter.snapshot.Panes = adapter.snapshot.Panes[:len(adapter.snapshot.Panes)-2]
-	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
-	if err != nil || adapter.CallCount("tab.create") != 1 {
-		t.Fatalf("openWorkerTab with an empty legacy workspace = %v, calls %#v", err, adapter.Calls)
-	}
 }
 
 func TestOpenWorkerTabDoesNotCloseAnUnlabeledPaneAfterMetadataFailure(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
+	adapter.snapshot.Panes[1].CWD = t.TempDir()
 	adapter.Errors["pane.report_metadata"] = errors.New("metadata write failed")
 	_, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
 	if err == nil {
 		t.Fatal("openWorkerTab succeeded after metadata failure")
 	}
-	for _, method := range []string{"pane.close", "tab.close", "workspace.close"} {
-		if adapter.CallCount(method) != 0 {
-			t.Fatalf("failed Worker open issued an unconditional %s RPC: %#v", method, adapter.Calls)
-		}
+	if adapter.CallCount("workspace.close") != 1 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 {
+		t.Fatalf("failed Worker open did not close only its new child: %#v", adapter.Calls)
 	}
 }
 

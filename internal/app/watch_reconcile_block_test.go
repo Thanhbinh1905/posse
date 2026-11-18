@@ -214,7 +214,7 @@ func TestWatchRefillFailingAfterFirstAdmissionRecordsNoReconcileBlock(t *testing
 			t.Fatal(err)
 		}
 	}
-	fixture.fake.ErrorQueue["tab.create"] = []error{nil, &herdr.Error{Code: "internal_error", Message: "tab rejected"}}
+	fixture.fake.ErrorQueue["worktree.open"] = []error{nil, &herdr.Error{Code: "internal_error", Message: "workspace rejected"}}
 
 	project, err := db.ProjectByID(ctx, fixture.project.ID)
 	if err != nil {

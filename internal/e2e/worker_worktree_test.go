@@ -16,7 +16,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestRepositoryWorkersOpenAsLeadTabsAndTeardownIsScoped(t *testing.T) {
+func TestRepositoryWorkersOpenAsLeadChildrenAndTeardownIsScoped(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	first := f.start(t, "t1", "Native first", "native-first")
 	second := f.start(t, "t2", "Native second", "native-second")
@@ -30,26 +30,25 @@ func TestRepositoryWorkersOpenAsLeadTabsAndTeardownIsScoped(t *testing.T) {
 		t.Fatalf("Worker start stole focus: %s", snapshot.FocusedPaneID)
 	}
 	for _, task := range []store.Task{first, second} {
-		if task.HerdrWorkspaceID != lead.WorkspaceID {
-			t.Fatalf("Worker %d opened outside Lead workspace: task=%#v Lead=%#v", task.Seq, task, lead)
+		if task.HerdrWorkspaceID == lead.WorkspaceID {
+			t.Fatalf("Worker %d opened as a Lead tab: task=%#v Lead=%#v", task.Seq, task, lead)
 		}
-		f.assertWorkerTab(t, snapshot, task)
-		for _, workspace := range snapshot.Workspaces {
-			if workspace.Worktree.CheckoutPath == task.WorktreePath {
-				t.Fatalf("Worker %d created a linked workspace: %#v", task.Seq, workspace)
+		var child *herdr.Workspace
+		for i := range snapshot.Workspaces {
+			workspace := &snapshot.Workspaces[i]
+			if workspace.WorkspaceID == task.HerdrWorkspaceID {
+				child = workspace
 			}
 		}
+		if child == nil || !child.Worktree.IsLinkedWorktree || child.Worktree.CheckoutPath != task.WorktreePath {
+			t.Fatalf("Worker %d is not a linked child for its Sandbox: task=%#v workspaces=%#v", task.Seq, task, snapshot.Workspaces)
+		}
+		f.assertWorkerTab(t, snapshot, task)
 	}
 
-	// Verify Teardown remains tab-scoped: the first tab closes, while the Lead
-	// and sibling Worker tab remain untouched.
 	f.fail(t, "t1")
 	f.exitWorker(t, "t1")
-	firstTab := tabOf(t, f.snapshot(t), first.PaneID)
-	if _, err := f.client.Call(context.Background(), "tab.close", map[string]any{"tab_id": firstTab}); err != nil {
-		t.Fatalf("close exited Worker tab: %v", err)
-	}
-	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the tab teardown test")
+	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the child teardown test")
 	if !strings.Contains(output, "torn-down") {
 		t.Fatalf("Teardown failed: %s", output)
 	}
@@ -57,8 +56,34 @@ func TestRepositoryWorkersOpenAsLeadTabsAndTeardownIsScoped(t *testing.T) {
 	t.Logf("Herdr layout after t1 Teardown: %#v", snapshot)
 	f.assertAlive(t, snapshot, f.leadPaneID, second.PaneID)
 	f.assertGone(t, snapshot, first.PaneID)
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == first.HerdrWorkspaceID {
+			t.Fatalf("Teardown left the Worker child open: %#v", workspace)
+		}
+	}
 	if _, found := findLeadInSnapshot(snapshot); !found {
 		t.Fatal("Teardown closed the Lead")
+	}
+	f.waitSessionPersisted(t)
+	beforeRestart := f.task(t, "t2")
+	killServer(t, f.server)
+	f.server = startServer(t, f.client)
+	runPosse(t, f.binary, f.repo, f.env, "up", "--all")
+	f.waitState(t, "t2", store.StateWorking)
+	restored := f.task(t, "t2")
+	if restored.Launches <= beforeRestart.Launches {
+		t.Fatalf("restart did not restore the Worker: before=%#v after=%#v", beforeRestart, restored)
+	}
+	var restoredChild *herdr.Workspace
+	restoredSnapshot := f.snapshot(t)
+	for i := range restoredSnapshot.Workspaces {
+		workspace := &restoredSnapshot.Workspaces[i]
+		if workspace.WorkspaceID == restored.HerdrWorkspaceID {
+			restoredChild = workspace
+		}
+	}
+	if restoredChild == nil || !restoredChild.Worktree.IsLinkedWorktree || restoredChild.Worktree.CheckoutPath != restored.WorktreePath {
+		t.Fatalf("restart did not restore the Worker as a linked child: task=%#v child=%#v", restored, restoredChild)
 	}
 }
 

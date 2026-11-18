@@ -49,8 +49,6 @@ func sandboxOccupied(holder string) error {
 	return axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox: "+holder, false, "Inspect the Sandbox's open panes before retrying")
 }
 
-// openWorkerTab places every Worker Sandbox in an unfocused tab of the Lead's
-// workspace. The pane is labeled before returning so recovery and Teardown can find it.
 func (s *Service) openWorkerTab(ctx context.Context, home string, project store.Project, task store.Task, path, displayAgent string) (openedTab, error) {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
@@ -60,15 +58,21 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 	if !found {
 		return openedTab{}, axi.Failure("lead_missing", "the Lead's Herdr workspace is not open", false, "Run `posse up` to restart the Lead, then retry")
 	}
-	for _, workspace := range snapshot.Workspaces {
-		if workspace.Root == path {
-			return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + " root")
-		}
-		if workspace.Worktree.CheckoutPath == path {
-			for _, pane := range snapshot.Panes {
-				if pane.WorkspaceID == workspace.WorkspaceID {
-					return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + " checkout, pane " + pane.PaneID)
+	if !project.IsWorkspace() {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.Worktree.CheckoutPath == path || workspace.Root == path {
+				for _, pane := range snapshot.Panes {
+					if pane.WorkspaceID == workspace.WorkspaceID {
+						return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + ", pane " + pane.PaneID)
+					}
 				}
+				return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID)
+			}
+		}
+	} else {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.Root == path {
+				return openedTab{}, sandboxOccupied("workspace " + workspace.WorkspaceID + " root")
 			}
 		}
 	}
@@ -77,20 +81,29 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 			continue
 		}
 		otherTaskPane := strings.HasPrefix(pane.Label, "posse:"+project.Name+":t") && pane.Label != task.PaneLabel
-		if pane.WorkspaceID != workspaceID || otherTaskPane {
+		if !project.IsWorkspace() || pane.WorkspaceID != workspaceID || otherTaskPane {
 			return openedTab{}, sandboxOccupied("pane " + pane.PaneID + " label " + pane.Label + " in workspace " + pane.WorkspaceID)
 		}
 	}
-	raw, err := s.herdrCall(ctx, "tab.create", map[string]any{
+	method := "tab.create"
+	params := map[string]any{
 		"workspace_id": workspaceID, "cwd": path, "label": workerTabLabel(task), "focus": false,
 		"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
-	})
+	}
+	if !project.IsWorkspace() {
+		method = "worktree.open"
+		params = map[string]any{"workspace_id": workspaceID, "path": path, "label": workerTabLabel(task), "focus": false}
+	}
+	raw, err := s.herdrCall(ctx, method, params)
 	if err != nil {
 		return openedTab{}, err
 	}
 	var result struct {
 		AlreadyOpen bool `json:"already_open"`
-		Tab         struct {
+		Workspace   struct {
+			WorkspaceID string `json:"workspace_id"`
+		} `json:"workspace"`
+		Tab struct {
 			TabID string `json:"tab_id"`
 		} `json:"tab"`
 		RootPane struct {
@@ -104,20 +117,38 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 	if result.AlreadyOpen {
 		return openedTab{}, axi.Failure("worker_tab_occupied", "the Worker tab was opened before Posse could label its pane", false, "Inspect the Sandbox's open panes before retrying")
 	}
+	if !project.IsWorkspace() {
+		if result.AlreadyOpen || result.Workspace.WorkspaceID == "" || result.Workspace.WorkspaceID == workspaceID {
+			return openedTab{}, axi.Failure("worker_workspace_occupied", "Herdr did not create a new linked Worker workspace", false, "Inspect the Sandbox's open panes before retrying")
+		}
+		workspaceID = result.Workspace.WorkspaceID
+	}
 	opened := openedTab{WorkspaceID: workspaceID, TabID: result.RootPane.TabID, PaneID: result.RootPane.PaneID}
 	if opened.TabID == "" {
 		opened.TabID = result.Tab.TabID
 	}
 	task.PaneID = opened.PaneID
 	metadata := workerDisplayMetadata(task, "", displayAgent)
-	metadata["tokens"].(map[string]string)["posse_row"] = treeTabLabel(workerTabLabel(task), true)
+	if project.IsWorkspace() {
+		metadata["tokens"].(map[string]string)["posse_row"] = treeTabLabel(workerTabLabel(task), true)
+	}
 	if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
+		s.closeUnlabeledWorker(ctx, project, opened)
 		return openedTab{}, err
 	}
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": opened.PaneID, "label": task.PaneLabel}); err != nil {
+		s.closeUnlabeledWorker(ctx, project, opened)
 		return openedTab{}, err
 	}
 	return opened, nil
+}
+
+func (s *Service) closeUnlabeledWorker(ctx context.Context, project store.Project, opened openedTab) {
+	if !project.IsWorkspace() && opened.WorkspaceID != "" {
+		_, _ = s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": opened.WorkspaceID})
+	} else if opened.TabID != "" {
+		_, _ = s.herdrCall(ctx, "tab.close", map[string]any{"tab_id": opened.TabID})
+	}
 }
 
 func findTaskPane(panes []herdr.Pane, task store.Task) (herdr.Pane, bool) {

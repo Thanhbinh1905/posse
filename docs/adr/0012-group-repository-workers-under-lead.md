@@ -1,6 +1,6 @@
 # Group repository Workers as Herdr worktree children of the Lead
 
-*Superseded for new Worker placement by [ADR 0013](0013-all-workers-open-as-lead-tabs.md). The legacy linked-child layout remains supported for existing Tasks until teardown.*
+*Restored for new Repository Worker placement by [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md). Workspace Project Workers remain Lead tabs.*
 
 Repository Projects open a held Pool Sandbox with `worktree.open` from the Lead workspace, making the Lead the group primary and each Worker a linked child. Workspace Projects are not single Git worktrees and retain ADR 0009's tab layout. This amends ADR 0007 layer 1 and ADR 0009. The User chose native grouping without changing their Nix-managed Herdr configuration or adding top-level workspaces.
 

@@ -85,17 +85,17 @@ func TestListHoldsRestartUntilUpAll(t *testing.T) {
 	if !found {
 		t.Fatal("recovered Lead is missing")
 	}
-	if after.HerdrWorkspaceID != lead.WorkspaceID {
-		t.Fatalf("recovered Worker did not migrate into the Lead workspace: task=%#v Lead=%#v", after, lead)
+	if after.HerdrWorkspaceID == lead.WorkspaceID {
+		t.Fatalf("recovered Worker was placed in the Lead workspace: task=%#v Lead=%#v", after, lead)
 	}
-	foundTab := false
-	for _, tab := range recoveredSnapshot.Tabs {
-		if tab.WorkspaceID == lead.WorkspaceID && tab.TabID == restored.TabID && tab.Label == after.ShortName+"-t"+strconv.Itoa(after.Seq) {
-			foundTab = true
+	foundChild := false
+	for _, workspace := range recoveredSnapshot.Workspaces {
+		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == after.WorktreePath {
+			foundChild = true
 		}
 	}
-	if !foundTab {
-		t.Fatalf("recovered Worker tab is missing from the Lead workspace: %#v", recoveredSnapshot.Tabs)
+	if !foundChild {
+		t.Fatalf("recovered Worker lost linked-child grouping: %#v", recoveredSnapshot.Workspaces)
 	}
 	assertLeadSidebarPresentation(t, fixture.client, lead.WorkspaceID, lead.PaneID, "Lead:shop")
 	db, err = store.OpenReadOnly(fixture.home)
@@ -179,8 +179,6 @@ func TestTaskNamesBranchesAndLegacyRecoveryRemainIndependent(t *testing.T) {
 	f.exitWorker(t, "t2")
 }
 
-// TestFocusedWorkerLaunch focuses the new Worker tab before launch delivery and
-// verifies the explicit typed Brief reaches it without waiting for unfocus.
 func TestFocusedWorkerLaunch(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	if err := os.WriteFile(filepath.Join(f.root, "focus-spawn"), []byte(""), 0o600); err != nil {
@@ -207,7 +205,7 @@ func TestFocusedWorkerLaunch(t *testing.T) {
 		}
 		return false
 	}) {
-		t.Fatal("Worker tab never opened")
+		t.Fatal("Worker child never opened")
 	}
 	if _, err := f.client.Call(context.Background(), "pane.focus", map[string]any{"pane_id": paneID}); err != nil {
 		t.Fatal(err)
@@ -235,9 +233,6 @@ func TestFocusedWorkerLaunch(t *testing.T) {
 	}
 }
 
-// TestLegacyWorkerTabsAfterWorktreeUpgrade migrates freshly opened Workers into
-// the former tab layout, then verifies reconcile, relaunch and Teardown still
-// recognize them after the repository layout changes.
 func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture := newWorkerTabsFixture(t)
 	client := fixture.client
@@ -348,9 +343,6 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture.assertWorkerTab(t, snapshot, relaunched)
 	fixture.assertWorkerLabels(t, snapshot, relaunched)
 
-	// Recovery reopens the Worker as a Lead tab after the Herdr restart.
-	// Herdr restores the last periodic save, so a save older than the closed
-	// fixture panes would restore shells inside Sandboxes the Tasks reuse.
 	fixture.waitSessionPersisted(t)
 	killServer(t, fixture.server)
 	fixture.server = startServer(t, client)
@@ -366,7 +358,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 		t.Fatal("Lead pane disappeared after Herdr restart")
 	}
 	if recovered.HerdrWorkspaceID != lead.WorkspaceID {
-		t.Fatalf("restored Worker did not reopen in the Lead workspace: task=%#v Lead=%#v", recovered, lead)
+		t.Fatalf("restored legacy Worker did not reopen in the Lead workspace: task=%#v Lead=%#v", recovered, lead)
 	}
 	workerTab := false
 	for _, tab := range snapshot.Tabs {
@@ -375,7 +367,7 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 		}
 	}
 	if !workerTab {
-		t.Fatalf("restored Worker tab is missing from the Lead workspace: task=%#v tabs=%#v", recovered, snapshot.Tabs)
+		t.Fatalf("restored legacy Worker tab is missing from the Lead workspace: task=%#v tabs=%#v", recovered, snapshot.Tabs)
 	}
 	db, err := store.OpenReadOnly(fixture.home)
 	if err != nil {
@@ -1070,8 +1062,8 @@ func (f *workerTabsFixture) assertWorkerTab(t *testing.T, snapshot herdr.Snapsho
 			pane = candidate
 		}
 	}
-	if pane.PaneID == "" || pane.PaneID != task.PaneID || pane.WorkspaceID != f.leadWorkspaceID || task.HerdrWorkspaceID != f.leadWorkspaceID || pane.CWD != task.WorktreePath {
-		t.Fatalf("Worker %s is not a tab of the Lead workspace %s: task=%#v pane=%#v", task.PaneLabel, f.leadWorkspaceID, task, pane)
+	if pane.PaneID == "" || pane.PaneID != task.PaneID || pane.WorkspaceID != task.HerdrWorkspaceID || pane.CWD != task.WorktreePath {
+		t.Fatalf("Worker %s pane does not match its Task: task=%#v pane=%#v", task.PaneLabel, task, pane)
 	}
 	leadTab := tabOf(t, snapshot, f.leadPaneID)
 	var tabPanes []string
