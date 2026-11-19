@@ -5,9 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 type parallelReviewAction string
@@ -22,6 +25,20 @@ type parallelReviewOwner struct {
 	PID         int    `json:"pid"`
 	Head        string `json:"head"`
 	RequestedAt int64  `json:"requested_at"`
+}
+
+func nextGreenhouseLedgerGrant(requests []store.GreenhouseReviewRequest, taskID int64, repository, prefix string) int {
+	next := 1
+	for _, request := range requests {
+		if request.TaskID != taskID || request.Repository != repository || !strings.HasPrefix(request.Grant, prefix+"/r") {
+			continue
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(request.Grant, prefix+"/r"))
+		if err == nil && number >= next {
+			next = number + 1
+		}
+	}
+	return next
 }
 
 func nextParallelReviewAction(hasVerdict, hasPending bool) parallelReviewAction {
