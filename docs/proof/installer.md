@@ -72,7 +72,6 @@ Without a TTY, with `NO_COLOR` or with `TERM=dumb`, the installer prints one lin
 
 [6/6] Prepare your agents for posse
   ✓  Herdr plugin and agent integrations
-  -  Agents sidebar in Herdr: optional (posse setup --sidebar-layout)
   ✓  SessionStart hook for Claude Code, Codex
        Codex asks once to trust its new hook.
   ✓  Recommended workflow skills

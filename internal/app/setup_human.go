@@ -130,9 +130,17 @@ func humanSetupGroups(plan []map[string]any, applied bool) []string {
 			lines = append(lines, humanManual+"  "+label+": see below")
 		case humanStateChanged:
 			if applied {
-				lines = append(lines, humanDone+"  "+label)
+				line := humanDone + "  " + label
+				if group.note != "" {
+					line += ": " + group.note
+				}
+				lines = append(lines, line)
 			} else {
-				lines = append(lines, humanPending+"  "+label+": will be added")
+				pending := "will be added"
+				if group.note != "" {
+					pending = group.note
+				}
+				lines = append(lines, humanPending+"  "+label+": "+pending)
 			}
 		default:
 			note := group.note
@@ -158,15 +166,17 @@ func humanRowState(row map[string]any, applied bool) (key string, state int, not
 	switch step {
 	case "integration", "plugin", "pi_lead":
 		key = "herdr"
-	case "sidebar_layout":
+	case "sidebar_cleanup":
 		key = "sidebar"
-		switch {
-		case action == "offer":
-			return key, humanStateKept, "optional (posse setup --sidebar-layout)", true
-		case action == "upgrade":
-			return key, humanStateKept, "update available (posse setup --sidebar-layout)", true
-		case action == "manual" && row["error"] == nil:
-			return key, humanStateKept, "your own rows are kept", true
+		switch action {
+		case "remove":
+			return key, humanStateChanged, "will be removed", true
+		case "removed":
+			return key, humanStateChanged, "Posse layout removed", true
+		case "custom":
+			return key, humanStateKept, "custom Agents rows are now unused", true
+		default:
+			return "", 0, "", false
 		}
 	case "session_start_hook":
 		key = "session"
@@ -232,36 +242,12 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 	}
 	kept := func(text string) []string { return []string{humanKept + "  " + text} }
 	switch step {
-	case "sidebar_layout":
+	case "sidebar_cleanup":
 		switch action {
-		case "keep":
-			return kept("Posse Agents sidebar layout already present at " + displayPath(target))
-		case "installed":
-			return []string{humanDone + "  Added Posse Agents sidebar layout to " + displayPath(target)}
-		case "symlink":
-			lines := []string{humanManual + "  " + displayPath(target) + " is managed elsewhere; add this layout through its config manager:"}
-			snippet, _ := row["snippet"].(string)
-			for _, line := range strings.Split(strings.TrimSuffix(snippet, "\n"), "\n") {
-				lines = append(lines, "     "+line)
-			}
-			return lines
-		case "upgrade":
-			lines := []string{humanManual + "  Upgrade Posse Agents sidebar layout in " + displayPath(target) + " (adds dim = false)? Run `posse setup` to confirm:"}
-			return append(lines, sidebarSnippetLines(row)...)
-		case "manual":
-			message := "Herdr Agents rows already configured at " + displayPath(target)
-			if reason, ok := row["error"].(string); ok && reason != "" {
-				message = "Cannot add Herdr Agents layout at " + displayPath(target) + ": " + reason
-			}
-			lines := []string{humanManual + "  " + message + "; reference layout:"}
-			snippet, _ := row["snippet"].(string)
-			for _, line := range strings.Split(strings.TrimSuffix(snippet, "\n"), "\n") {
-				lines = append(lines, "     "+line)
-			}
-			return lines
-		default:
-			lines := []string{humanManual + "  Add Posse Agents sidebar layout to " + displayPath(target) + "? Run `posse setup` to confirm:"}
-			return append(lines, sidebarSnippetLines(row)...)
+		case "removed":
+			return []string{humanDone + "  Removed Posse Agents sidebar layout from " + displayPath(target)}
+		case "custom":
+			return kept("Custom Herdr Agents rows at " + displayPath(target) + " are now unused")
 		}
 	case "integration":
 		switch action {
@@ -381,15 +367,6 @@ func humanSetupRow(row map[string]any, applied bool) []string {
 		}
 	}
 	return change(step+" "+displayPath(target), step+" "+displayPath(target))
-}
-
-func sidebarSnippetLines(row map[string]any) []string {
-	snippet, _ := row["snippet"].(string)
-	lines := make([]string, 0, strings.Count(snippet, "\n"))
-	for _, line := range strings.Split(strings.TrimSuffix(snippet, "\n"), "\n") {
-		lines = append(lines, "     "+line)
-	}
-	return lines
 }
 
 func displayPath(path string) string {

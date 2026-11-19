@@ -1,5 +1,7 @@
 # Lead and repository Worker sidebar proof
 
+The optional Posse Agents layout this proof mentions was removed; see [ADR 0039](../adr/0039-repository-workers-open-as-herdr-worktree-children.md).
+
 The image is rasterized from the ANSI frame of a real Herdr 0.9.1 client attached to the isolated E2E server. The fixture removes inherited `HERDR_*` values and places Herdr configuration and `POSSE_HOME` under its temporary test root. No User session or configuration was changed.
 
 ![Captured Herdr sidebar](lead-worker-sidebar.png)

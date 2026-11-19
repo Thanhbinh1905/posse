@@ -49,6 +49,10 @@ def emit(message):
 if mode == 'quota':
     emit({'role': 'assistant', 'provider': 'fixture', 'model': 'model', 'stopReason': 'error', 'errorMessage': '429: quota exceeded', 'content': []})
     sys.exit(1)
+if mode == 'invalid-output':
+    emit({'role': 'assistant', 'provider': 'fixture', 'model': 'model', 'stopReason': 'stop', 'content': [{'type': 'text', 'text': 'not a review result'}]})
+    print(json.dumps({'type': 'agent_settled', 'aborted': False}))
+    sys.exit(0)
 verdict = {'head': request['Head'], 'verdict': 'clean', 'coverage': request['Paths'], 'findings': []}
 if mode == 'inconclusive':
     verdict['verdict'] = 'inconclusive'

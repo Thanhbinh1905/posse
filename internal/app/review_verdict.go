@@ -383,6 +383,9 @@ func selectedReviewPolicies(ctx context.Context, db *store.DB, project store.Pro
 	if plan != nil {
 		if taskUsesGreenhouseReviewProvider(task, cfg, "") {
 			if !project.IsWorkspace() {
+				if plan.Review == "none" {
+					return []string{"none"}, nil
+				}
 				return []string{store.GreenhouseReviewProvider}, nil
 			}
 			policy = store.GreenhouseReviewProvider
@@ -416,16 +419,20 @@ func selectedReviewPolicies(ctx context.Context, db *store.DB, project store.Pro
 			continue
 		}
 		selected := cfg.MemberReview(repo.Repo)
-		if taskUsesGreenhouseReviewProvider(task, cfg, repo.Repo) {
+		greenhouse := taskUsesGreenhouseReviewProvider(task, cfg, repo.Repo)
+		if greenhouse {
 			selected = store.GreenhouseReviewProvider
 		}
-		if plan != nil && selected != store.GreenhouseReviewProvider {
-			selected = ""
+		if plan != nil {
 			for _, member := range plan.Execution.Members {
-				if member.Name == repo.Repo {
-					selected = member.Review
-					break
+				if member.Name != repo.Repo {
+					continue
 				}
+				selected = member.Review
+				if greenhouse && selected != "none" {
+					selected = store.GreenhouseReviewProvider
+				}
+				break
 			}
 		}
 		policies = append(policies, selected)

@@ -66,6 +66,59 @@ func pollMergedPR(t *testing.T, fixture *prMergeFixture, head, merge string) []s
 	return summaries
 }
 
+func TestGreenhouseReviewNoneMergesOnGreenPRWithoutPolicyViolation(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte(`review_provider = "greenhouse"
+[defaults]
+merge_mode = "pr"
+merge_method = "squash"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installValidationPlanForReview(t, fixture, "none")
+	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.task = task
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "https://github.com/acme/shop/pull/17"
+	if code, output, stderr := fixture.run("publish", "CI-only review policy test"); code != 0 {
+		t.Fatalf("publish: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if code, output, stderr := fixture.run("signal", "done", "CI-only review policy test", "--pr", url); code != 0 {
+		t.Fatalf("done: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	notices := pollOpenPRNotices(t, fixture, fixture.headSHA, 1)
+	if len(notices["merge_ready"]) != 1 {
+		t.Fatalf("green CI did not make a review:none Task merge-ready: %v", notices)
+	}
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	if code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "User approved the CI-only merge"); code != 0 {
+		t.Fatalf("execute CI-only merge: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	merge := mergeOnOrigin(t, fixture, fixture.headSHA, fixture.headSHA, false)
+	if violations := pollMergedPR(t, fixture, fixture.headSHA, merge); len(violations) != 0 {
+		t.Fatalf("review:none merge was reported as a policy violation: %q", violations)
+	}
+}
+
 // t717: a candidate validated against the target tip merges onto that same
 // tip. The merge moves the target, but the merged head had the evidence the
 // pre-merge gate required, so no violation is reported.

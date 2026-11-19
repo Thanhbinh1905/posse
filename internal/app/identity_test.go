@@ -24,7 +24,7 @@ func TestLeadDisplayMetadataShowsHarness(t *testing.T) {
 	} {
 		t.Run(tt.detected+"/"+tt.expected, func(t *testing.T) {
 			metadata := leadDisplayMetadata(store.Project{Name: "shop"}, "w1:p1", tt.detected, tt.expected)
-			if metadata["pane_id"] != "w1:p1" || metadata["title"] != "Lead: shop" || metadata["tokens"].(map[string]string)["posse_row"] != "Lead:shop" {
+			if metadata["pane_id"] != "w1:p1" || metadata["title"] != "Lead: shop" || metadata["tokens"] != nil {
 				t.Fatalf("Lead role changed: %#v", metadata)
 			}
 			if tt.want == "" {
@@ -190,7 +190,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	if err := json.Unmarshal(renders[0].leadDisplay, &lead); err != nil {
 		t.Fatal(err)
 	}
-	if lead["title"] != "Lead: shop" || lead["display_agent"] != "pi" || lead["tokens"].(map[string]any)["posse_row"] != "Lead:shop" {
+	if lead["title"] != "Lead: shop" || lead["display_agent"] != "pi" || lead["tokens"] != nil {
 		t.Fatalf("Lead display metadata = %#v", lead)
 	}
 	if got := leadAgentName("shop", 3); got != "posse-shop-lead-3" {

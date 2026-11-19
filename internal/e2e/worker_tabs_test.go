@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -244,7 +243,6 @@ func TestLegacyWorkerTabsAfterWorktreeUpgrade(t *testing.T) {
 	fixture.assertWorkerTab(t, snapshot, first)
 	fixture.assertWorkerTab(t, snapshot, second)
 	fixture.assertWorkerLabels(t, snapshot, first, second)
-	fixture.assertRenderedSidebar(t, first, second)
 	fixture.assertAlive(t, fixture.snapshot(t), fixture.leadPaneID)
 	if tabOf(t, snapshot, first.PaneID) == tabOf(t, snapshot, second.PaneID) {
 		t.Fatalf("two Workers share tab %s", tabOf(t, snapshot, first.PaneID))
@@ -533,10 +531,6 @@ func newWorkerTabsFixtureWithOptions(t *testing.T, options workerTabsOptions) *w
 			t.Fatal(err)
 		}
 		contents = append([]byte("onboarding = false\n"), contents...)
-		contents = append(contents, []byte(`
-[ui.sidebar.agents]
-rows = [["state_icon", "machine", { token = "workspace", rules = [{ starts_with = "Lead:", hide = true }] }, { token = "$posse_row", bold = true }], ["agent"]]
-`)...)
 		if err := os.WriteFile(herdrConfig, contents, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -742,58 +736,6 @@ esac
 		}
 	})
 	return fixture
-}
-
-// assertRenderedSidebar attaches a real desktop client to the isolated server.
-// The server snapshot alone cannot prove that the client's token layout renders.
-func (f *workerTabsFixture) assertRenderedSidebar(t *testing.T, first, second store.Task) {
-	t.Helper()
-	version, err := exec.Command("herdr", "--version").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(version), "0.9.0") {
-		return
-	} // Sidebar token rules require 0.9.1.
-	if _, err := exec.LookPath("script"); err != nil {
-		t.Skip("script is required to capture an isolated Herdr client")
-	}
-	cmd := exec.Command("script", "-q", "-c", "stty rows 45 cols 160; timeout 4 herdr", "/dev/null")
-	cmd.Env = setEnv(f.env, "HERDR_SOCKET_PATH", herdr.IsolatedTestSocketPath(f.root))
-	cmd.Env = setEnv(cmd.Env, "TERM", "xterm-256color")
-	cmd.Dir = f.repo
-	// An EOF on script's stdin is sent to the active Herdr pane as Ctrl-D.
-	// Keep the pipe's writer open until the client detaches; a file descriptor
-	// avoids an exec.Cmd stdin-copy goroutine that would wait for EOF.
-	input, keepOpen, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer input.Close()
-	defer keepOpen.Close()
-	cmd.Stdin = input
-	output, err := cmd.CombinedOutput()
-	if err != nil && !strings.Contains(err.Error(), "exit status 124") {
-		t.Fatalf("attach isolated Herdr client: %v: %s", err, output)
-	}
-	for _, want := range []string{"Lead:shop", "  " + first.ShortName + "-t" + strconv.Itoa(first.Seq) + "  ", "  " + second.ShortName + "-t" + strconv.Itoa(second.Seq) + "  "} {
-		if !bytes.Contains(output, []byte(want)) {
-			t.Errorf("desktop client missing sidebar or plain tab %q; output tail: %q", want, output[max(0, len(output)-4000):])
-		}
-	}
-	for _, entry := range []struct{ branch, name string }{{"├", first.ShortName}, {"└", second.ShortName}} {
-		pattern := regexp.MustCompile(entry.branch + `\x1b\[[0-9;]+H─\x1b\[[0-9;]+H ` + entry.name)
-		if !pattern.Match(output) {
-			t.Errorf("desktop sidebar did not render %s─ %s as main text", entry.branch, entry.name)
-		}
-	}
-	if t.Failed() {
-		return
-	}
-	logData, _ := os.ReadFile(filepath.Join(f.root, "xdg", "herdr", "herdr-client.log"))
-	if bytes.Contains(logData, []byte("config parse error")) {
-		t.Fatalf("client rejected sidebar config: %s", logData)
-	}
 }
 
 func createLabeledWorkspace(t *testing.T, client *herdr.Client, cwd, label string) workspaceResult {
@@ -1043,11 +985,6 @@ func (f *workerTabsFixture) assertUserLayout(t *testing.T, snapshot herdr.Snapsh
 	if got := labels[tabOf(t, snapshot, f.leadPaneID)]; got != "Lead" {
 		t.Fatalf("Lead tab label = %q, want Lead", got)
 	}
-	for _, pane := range snapshot.Panes {
-		if pane.PaneID == f.leadPaneID && pane.Tokens["posse_row"] != "Lead:shop" {
-			t.Fatalf("Lead Agents row token = %q, want Lead:shop", pane.Tokens["posse_row"])
-		}
-	}
 	if got := labels[f.userTab.RootPane.TabID]; got != "user-shell" {
 		t.Fatalf("User tab label = %q, want user-shell", got)
 	}
@@ -1107,19 +1044,9 @@ func (f *workerTabsFixture) assertWorkerLabels(t *testing.T, snapshot herdr.Snap
 		if !ok {
 			continue
 		}
-		branch := "├─"
-		if count == len(byTab)-1 {
-			branch = "└─"
-		}
 		want := task.ShortName + "-t" + strconv.Itoa(task.Seq)
 		if tab.Label != want {
 			t.Fatalf("Worker tab label = %q, want %q in Herdr order", tab.Label, want)
-		}
-		row := branch + " " + want
-		for _, pane := range snapshot.Panes {
-			if pane.TabID == tab.TabID && pane.Label == task.PaneLabel && pane.Tokens["posse_row"] != row {
-				t.Fatalf("Worker Agents row token = %q, want %q", pane.Tokens["posse_row"], row)
-			}
 		}
 		count++
 	}

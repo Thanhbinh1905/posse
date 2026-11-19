@@ -3,14 +3,153 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestTeardownStopsTaskGreenhouseReviewOwner(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")
+	if err := os.WriteFile(projectConfig, []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse owner teardown", "greenhouse-owner-down")
+	head := c.authorCommit(t)
+	roundDir := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse")
+	if err := os.MkdirAll(roundDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(roundDir, "shop.parallel.lock")
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		t.Fatal(err)
+	}
+	ready := filepath.Join(roundDir, "ready")
+	owner := exec.Command("python3", "-c", "import os,time; open(os.environ['READY'], 'w').close(); time.sleep(30)", "_greenhouse", "review", "t1")
+	owner.Env = append(c.env, "READY="+ready)
+	owner.ExtraFiles = []*os.File{lock}
+	if err := owner.Start(); err != nil {
+		_ = lock.Close()
+		t.Fatal(err)
+	}
+	_ = lock.Close()
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = owner.Process.Kill()
+			_ = owner.Wait()
+		}
+	})
+	if !waitForCondition(5*time.Second, func() bool { _, err := os.Stat(ready); return err == nil }) {
+		t.Fatal("Greenhouse owner fixture did not start")
+	}
+	ownerRecord, err := json.Marshal(struct {
+		PID         int    `json:"pid"`
+		Head        string `json:"head"`
+		RequestedAt int64  `json:"requested_at"`
+	}{owner.Process.Pid, head, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerPath := filepath.Join(roundDir, "shop.parallel-owner.json")
+	if err := os.WriteFile(ownerPath, ownerRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := c.posse(c.env, f.repo, "teardown", "t1", "--discard", "--user-approved", "User approved this Task discard")
+	if err != nil {
+		t.Fatalf("approved teardown: %v\n%s", err, output)
+	}
+	if err := owner.Wait(); err == nil {
+		t.Fatal("Greenhouse owner exited successfully after teardown")
+	}
+	waited = true
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("Greenhouse owner record remains after teardown: %v", err)
+	}
+	if task := f.task(t, "t1"); task.State != store.StateTornDown {
+		t.Fatalf("Task state after teardown = %q, want torn-down", task.State)
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "1000"); err != nil {
+		t.Fatalf("Watch after teardown: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(ownerPath); !os.IsNotExist(err) {
+		t.Fatalf("Watch recreated the review owner for a torn-down Task: %v", err)
+	}
+}
+
+func TestGreenhouseParallelInconclusiveRunEndsOwnerAndAdvancesGrant(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("review_provider = \"greenhouse\"\nreview_parallel = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse inconclusive request", "greenhouse-inconclus")
+	c.authorCommit(t)
+	c.setMode(t, "invalid-output")
+	args := []string{"_greenhouse", "review", "t1", "--reviewer-backend", "pi", "--reviewer-model", "fixture/model", "--timeout", "5000", "--json"}
+	output, err := c.posse(c.env, f.repo, args...)
+	if err == nil || !strings.Contains(output, "greenhouse_failed") {
+		t.Fatalf("inconclusive review = err %v, output %s; want terminal failure", err, output)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := db.GreenhouseReviewRequests(context.Background(), f.projectID)
+	_ = db.Close()
+	if err != nil || len(requests) != 1 || requests[0].Outcome != "failed" || requests[0].Grant != "shop/t1/shop/r1" {
+		t.Fatalf("terminal review requests = %+v, %v; want failed r1", requests, err)
+	}
+	if got := c.notices(t, "greenhouse_review_failed"); got != 1 {
+		t.Fatalf("greenhouse_review_failed Notices = %d, want 1", got)
+	}
+	pending := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse", "shop.pending.json")
+	if _, err := os.Stat(pending); !os.IsNotExist(err) {
+		t.Fatalf("terminal pending record still exists: %v", err)
+	}
+	c.setMode(t, "clean")
+	output, err = c.posse(c.env, f.repo, "review", "start", "t1")
+	if err != nil || !strings.Contains(output, "Greenhouse Verdict requested") {
+		t.Fatalf("fresh review start: %v\n%s", err, output)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requests, err = db.GreenhouseReviewRequests(context.Background(), f.projectID)
+		_ = db.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(requests) == 2 && requests[1].Outcome == "verdict" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(requests) != 2 || requests[1].Outcome != "verdict" || requests[1].Grant != "shop/t1/shop/r2" {
+		t.Fatalf("fresh review requests = %+v; want a settled r2 request", requests)
+	}
+}
 
 func TestGreenhouseParallelTimeoutAndRecoveryCountOneRequest(t *testing.T) {
 	f := newWorkerTabsFixture(t)
