@@ -3376,7 +3376,7 @@ func (db *DB) LiveTasks(ctx context.Context, projectID int64) ([]Task, error) {
 	}
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, taskFromLiveDB(row))
+		tasks = append(tasks, db.taskFromLiveDB(row))
 	}
 	return tasks, nil
 }
@@ -3393,8 +3393,8 @@ func (db *DB) StallTasks(ctx context.Context, projectID int64) ([]Task, error) {
 	return tasks, nil
 }
 
-func taskFromLiveDB(row dbgen.LiveTasksRow) Task {
-	return Task{
+func (db *DB) taskFromLiveDB(row dbgen.LiveTasksRow) Task {
+	task := Task{
 		ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: nullableInt64(row.ReviewsTaskID),
 		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule,
 		MergeMode: row.MergeMode, AutonomyReview: row.AutonomyReview, AutonomyMerge: row.AutonomyMerge, Branch: row.Branch, BaseRef: row.BaseRef,
@@ -3407,6 +3407,8 @@ func taskFromLiveDB(row dbgen.LiveTasksRow) Task {
 		ReportManifestJSON: row.ReportManifestJson, ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath,
 		ContainmentMarker: row.ContainmentMarker, PaneShellIdentity: row.PaneShellIdentity,
 	}
+	db.attachPlanLoader(&task)
+	return task
 }
 
 func nullableInt64(value sql.NullInt64) int64 {
