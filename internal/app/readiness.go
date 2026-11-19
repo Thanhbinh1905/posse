@@ -217,9 +217,9 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 		target.OriginHost = remote
 		modes[index] = memberMergeMode(cfg, "", remote)
 		if target.Name != "" {
-			modes[index] = savedMemberMergeMode(cfg, target.Name, remote)
+			modes[index] = workspaceMemberMergeMode(cfg, target.Name, remote)
 		}
-		if modes[index] != "pr" {
+		if modes[index] != "pr" && modes[index] != "greenhouse" {
 			continue
 		}
 		probes.Add(1)
@@ -240,7 +240,7 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 		if target.Name != "" {
 			suffix = " for Member " + target.Name
 		}
-		if mode == "pr" {
+		if mode == "pr" || mode == "greenhouse" {
 			forgeCheck := forgeChecks[index]
 			auth := doctorCheck{Name: "forge auth" + suffix, Status: "ok", Detail: "authenticated", GapCode: "forge_auth", Key: "defaults.forge", Member: target.Name}
 			if target.Name != "" {

@@ -120,14 +120,14 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		if task.AutonomyMerge != "auto" && strings.TrimSpace(parsed.Flags["user-approved"]) == "" {
 			mergeKind := "local merge"
-			if task.MergeMode == "pr" {
+			if deliveredByPullRequest(task.MergeMode) {
 				mergeKind = "pull request merge"
 			}
 			return axi.Failure("merge_approval_required", mergeKind+" needs User approval", false, "Pass `--user-approved \"<User's words>\"` after the User approves")
 		}
 	}
 	var prMergeIntent *store.Intent
-	if parsed.Bool("execute") && !project.IsWorkspace() && task.MergeMode == "pr" {
+	if parsed.Bool("execute") && !project.IsWorkspace() && deliveredByPullRequest(task.MergeMode) {
 		var prIntent store.Intent
 		intentErr := retryBusy(ctx.Context, commandContentionAttempts, commandContentionDelay, func() error {
 			var err error
@@ -170,7 +170,7 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if err := pendingCandidateFailure(ctx.Context, db, task); err != nil {
 		return err
 	}
-	if !project.IsWorkspace() && task.MergeMode == "pr" {
+	if !project.IsWorkspace() && deliveredByPullRequest(task.MergeMode) {
 		// Pull request evidence binds to the gated forge head, not the Sandbox tip.
 		return s.preparePullRequestMerge(ctx, db, project, cfg, task, parsed.Bool("execute"), strings.TrimSpace(parsed.Flags["user-approved"]), prMergeIntent)
 	}

@@ -725,7 +725,7 @@ func defaultMap() map[string]any {
 		"knowledge":       map[string]any{"enabled": true, "budget_bytes": DefaultKnowledgeBudgetBytes},
 		"review_provider": "builtin",
 		"defaults": map[string]any{
-			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "pr",
+			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "greenhouse",
 			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
 			"delete_branch_on_merge": true,
 		},

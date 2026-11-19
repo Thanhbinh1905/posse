@@ -437,7 +437,7 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 }
 
 const resolvedDecisionPredicate = `
-		(d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode='pr' AND NOT EXISTS(
+		(d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode IN ('pr','greenhouse') AND NOT EXISTS(
 			SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url
 			AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url)
 			AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS'

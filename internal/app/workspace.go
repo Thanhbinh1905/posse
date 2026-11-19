@@ -194,19 +194,23 @@ func projectMergeMode(ctx context.Context, project store.Project, cfg config.Con
 		return "local"
 	}
 	if project.IsWorkspace() {
+		if cfg.Defaults.MergeMode == "greenhouse" {
+			return "pr"
+		}
 		return cfg.Defaults.MergeMode
 	}
 	return memberMergeMode(cfg, "", originHost(ctx, project.Root))
 }
 
-func savedMemberMergeMode(cfg config.Config, name, remote string) string {
-	if remote == "" {
-		if repository, ok := cfg.Repositories[name]; ok && repository.MergeMode != "" {
-			return repository.MergeMode
-		}
-		return cfg.Defaults.MergeMode
+func workspaceDeliveryMode(mode string) string {
+	if mode == "greenhouse" {
+		return "pr"
 	}
-	return memberMergeMode(cfg, name, remote)
+	return mode
+}
+
+func workspaceMemberMergeMode(cfg config.Config, name, remote string) string {
+	return workspaceDeliveryMode(memberMergeMode(cfg, name, remote))
 }
 
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
@@ -326,7 +330,7 @@ func detectionObject(detected detectedProject, cfg config.Config) axi.Object {
 		}
 		repos = append(repos, axi.Object{
 			{Key: "name", Value: repo.Name}, {Key: "default_branch", Value: repo.DefaultBranch},
-			{Key: "remote", Value: remote}, {Key: "merge_mode", Value: memberMergeMode(cfg, repo.Name, repo.Remote)},
+			{Key: "remote", Value: remote}, {Key: "merge_mode", Value: workspaceMemberMergeMode(cfg, repo.Name, repo.Remote)},
 		})
 	}
 	object := axi.Object{
