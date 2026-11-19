@@ -708,7 +708,9 @@ func flushDeferredProjectObservation(ctx context.Context) {
 func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, project store.Project, options projectPreparationOptions) (config.Config, error) {
 	if _, err := os.Stat(project.Root); err != nil {
 		_ = db.UpdateProjectStatus(ctx, project.ID, "missing")
-		_ = s.regenerateProjects(ctx, db)
+		if !options.watchObservation {
+			_ = s.regenerateProjects(ctx, db)
+		}
 		return config.Config{}, axi.Failure("project_missing", fmt.Sprintf("Project %s path no longer exists: %s", project.Name, project.Root), false, "Run `posse project move "+project.Name+" <new-root>`")
 	}
 	home, err := s.homePath()
@@ -826,8 +828,10 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 						return cfg, herdrError(err)
 					}
 				}
-				if err := s.regenerateProjects(ctx, db); err != nil {
-					return cfg, err
+				if !options.watchObservation {
+					if err := s.regenerateProjects(ctx, db); err != nil {
+						return cfg, err
+					}
 				}
 			}
 		}
@@ -871,8 +875,10 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 		if err := s.deliverNotices(ctx, db, fresh); err != nil && !isHerdrUnavailable(err) {
 			return cfg, herdrError(err)
 		}
-		if err := s.regenerateProjects(ctx, db); err != nil {
-			return cfg, err
+		if !options.watchObservation {
+			if err := s.regenerateProjects(ctx, db); err != nil {
+				return cfg, err
+			}
 		}
 	}
 	if options.watchObservation {

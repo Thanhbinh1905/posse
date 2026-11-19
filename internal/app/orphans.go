@@ -24,7 +24,7 @@ func (s *Service) reconcileTaskPanes(ctx context.Context, db *store.DB, project 
 		if err != nil {
 			continue
 		}
-		task, err := db.Task(ctx, project.ID, taskIDString(sequence))
+		task, err := db.TaskStateBySeq(ctx, project.ID, sequence)
 		if store.IsNotFound(err) {
 			if err := createNoticeOnce(ctx, db, store.Notice{ProjectID: project.ID, Kind: "orphan_pane", Summary: "Unknown Task pane needs inspection", DataJSON: marshalJSON(map[string]any{"pane_label": pane.Label})}); err != nil {
 				return err
@@ -36,6 +36,10 @@ func (s *Service) reconcileTaskPanes(ctx context.Context, db *store.DB, project 
 		}
 		if task.State != store.StateTornDown {
 			continue
+		}
+		task, err = db.TaskByID(ctx, project.ID, task.ID)
+		if err != nil {
+			return err
 		}
 		if _, err := s.verifyTaskPanesGone(ctx, project, task); err != nil {
 			if incompleteErr := s.recordTeardownIncomplete(ctx, db, project, task, err); incompleteErr != nil {
@@ -79,10 +83,10 @@ func (s *Service) pruneOrphanPanes(ctx *axi.Context, db *store.DB, project store
 		if err != nil {
 			continue
 		}
-		if _, err := db.Task(ctx.Context, project.ID, taskIDString(sequence)); err == nil {
-			continue
-		} else if !store.IsNotFound(err) {
+		if exists, err := db.TaskExistsBySeq(ctx.Context, project.ID, sequence); err != nil {
 			return nil, err
+		} else if exists {
+			continue
 		}
 		if !ownsUnknownPane(snapshot, pane, project.Name, sequence, sandboxes) {
 			continue

@@ -31,6 +31,159 @@ func admittedStorePlan(t *testing.T, home string) taskplan.Plan {
 	return plan
 }
 
+func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := admittedStorePlan(t, home).Bind("t1")
+	plan.Inputs = append(plan.Inputs, taskplan.Select("review-round-file", "review/cumulative.patch", make([]byte, 30<<20)))
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admittedDigest := plan.SHA256()
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", MergeMode: "local", State: StateSpawning, PlanJSON: encoded})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := db.LiveTasks(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d live Tasks, want 1", len(tasks))
+	}
+	if len(tasks[0].PlanJSON) != 0 {
+		t.Fatalf("LiveTasks returned %d bytes of plan data, want none", len(tasks[0].PlanJSON))
+	}
+	stored, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var currentJSON, revisionJSON string
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, taskID).Scan(&currentJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, taskID).Scan(&revisionJSON); err != nil {
+		t.Fatal(err)
+	}
+	if len(currentJSON) > 1<<20 || !strings.Contains(currentJSON, `"admitted_sha256"`) || !strings.Contains(currentJSON, `"path":"blobs/sha256/`) || strings.Contains(currentJSON, `"bytes":"`+strings.Repeat("A", 128)) {
+		t.Fatalf("large input was not stored as a content-addressed reference: %d bytes", len(currentJSON))
+	}
+	if currentJSON != revisionJSON {
+		t.Fatal("current plan and initial plan revision differ")
+	}
+	loaded, err := stored.AdmittedPlan()
+	if err != nil || loaded == nil {
+		t.Fatalf("load externalized plan: %v", err)
+	}
+	if got := loaded.SHA256(); got != admittedDigest {
+		t.Fatalf("admitted plan digest changed: got %s, want %s", got, admittedDigest)
+	}
+	if got := len(loaded.Inputs[len(loaded.Inputs)-1].Bytes); got != 30<<20 {
+		t.Fatalf("loaded input size=%d, want %d", got, 30<<20)
+	}
+	cached, err := stored.AdmittedPlan()
+	if err != nil || cached == loaded || &cached.Inputs[len(cached.Inputs)-1].Bytes[0] == &loaded.Inputs[len(loaded.Inputs)-1].Bytes[0] {
+		t.Fatalf("plan revision was not served from the DB cache: same=%v err=%v", cached == loaded, err)
+	}
+	rebuiltDB, err := OpenAt(filepath.Join(home, "rebuilt.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rebuiltDB.Close()
+	if count, err := rebuiltDB.RebuildFromSnapshots(ctx, home); err != nil || count != 1 {
+		t.Fatalf("rebuild from content-addressed snapshots: count=%d err=%v", count, err)
+	}
+	rebuilt, err := rebuiltDB.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuiltPlan, err := rebuilt.AdmittedPlan()
+	if err != nil || rebuiltPlan.SHA256() != admittedDigest || len(rebuiltPlan.Inputs[len(rebuiltPlan.Inputs)-1].Bytes) != 30<<20 {
+		t.Fatalf("snapshot rebuild changed the externalized plan: plan=%v err=%v", rebuiltPlan != nil, err)
+	}
+}
+
+func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := admittedStorePlan(t, home).Bind("t1")
+	initial, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", MergeMode: "local", State: StateSpawning, PlanJSON: initial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Inputs = append(plan.Inputs, taskplan.Select("review-round-file", "review/delta.patch", make([]byte, 1<<20)))
+	inline, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := plan.SHA256()
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE project_id=?`, inline, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=(SELECT id FROM tasks WHERE project_id=?)`, inline, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE task_plan_input_migration SET completed=0 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	db.planCacheMu.Lock()
+	db.planCache = nil
+	db.planCacheMu.Unlock()
+	if err := db.migrateTaskPlanInputs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrateTaskPlanInputs(ctx); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	stored, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := stored.AdmittedPlan()
+	if err != nil || loaded == nil || loaded.SHA256() != digest || len(loaded.Inputs[len(loaded.Inputs)-1].Bytes) != 1<<20 {
+		gotDigest, gotSize := "", 0
+		if loaded != nil {
+			gotDigest = loaded.SHA256()
+			gotSize = len(loaded.Inputs[len(loaded.Inputs)-1].Bytes)
+		}
+		t.Fatalf("migrated plan lost its frozen input or digest: got digest=%s size=%d, want digest=%s size=%d, err=%v", gotDigest, gotSize, digest, 1<<20, err)
+	}
+	var current, revision string
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, stored.ID).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, stored.ID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if current != revision || strings.Contains(current, `"bytes":"`+strings.Repeat("A", 128)) || !strings.Contains(current, `"path":"blobs/sha256/`) {
+		t.Fatal("migration did not externalize both current and revision plan inputs")
+	}
+}
+
 func TestTaskCreationAtomicallyStoresAdmittedPlanAndRevision(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

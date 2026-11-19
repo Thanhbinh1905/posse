@@ -757,6 +757,8 @@ type Task struct {
 	PaneShellIdentity    string
 	AgentStatus          string
 	AgentStatusSince     int64
+	WorkflowRunID        string
+	PlanRevision         int64
 }
 
 type TaskAdoption struct {
@@ -787,6 +789,11 @@ type TaskLaunchIdentity struct {
 	ConfiguredModel string
 	ModelKnown      int64
 	PlanRevision    int64
+}
+
+type TaskPlanInputMigration struct {
+	ID        int64
+	Completed int64
 }
 
 type TaskPlanRevision struct {

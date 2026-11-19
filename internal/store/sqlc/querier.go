@@ -45,11 +45,12 @@ type Querier interface {
 	LastNoticeDelivery(ctx context.Context, projectID int64) (int64, error)
 	LastNoticeNotification(ctx context.Context, projectID int64) (int64, error)
 	LeadStartClaim(ctx context.Context, projectID int64) (LeadStartClaimRow, error)
-	LiveTasks(ctx context.Context, projectID int64) ([]Task, error)
+	LiveTasks(ctx context.Context, projectID int64) ([]LiveTasksRow, error)
 	MarkMessageDelivered(ctx context.Context, arg MarkMessageDeliveredParams) error
 	MarkNoticeDelivered(ctx context.Context, arg MarkNoticeDeliveredParams) error
 	MarkProjectDown(ctx context.Context, arg MarkProjectDownParams) error
 	MarkResourceLeaseForRecovery(ctx context.Context, arg MarkResourceLeaseForRecoveryParams) (sql.Result, error)
+	MergedTaskCandidates(ctx context.Context, projectID int64) ([]MergedTaskCandidatesRow, error)
 	MoveProject(ctx context.Context, arg MoveProjectParams) error
 	NextSandboxNumber(ctx context.Context, projectID int64) (int64, error)
 	NextTaskSeq(ctx context.Context, projectID int64) (int64, error)
@@ -57,8 +58,10 @@ type Querier interface {
 	OldestQueuedMessage(ctx context.Context, taskID int64) (OldestQueuedMessageRow, error)
 	OpenNoticeCount(ctx context.Context, projectID int64) (int64, error)
 	OpenNotices(ctx context.Context, projectID int64) ([]OpenNoticesRow, error)
+	OpenTaskSummaries(ctx context.Context, projectID int64) ([]OpenTaskSummariesRow, error)
 	PRBodyMarkerByTaskRepo(ctx context.Context, arg PRBodyMarkerByTaskRepoParams) (PRBodyMarkerByTaskRepoRow, error)
 	PRBodyMarkersByTask(ctx context.Context, taskID int64) ([]PRBodyMarkersByTaskRow, error)
+	PendingGroupRecoveryTaskIDs(ctx context.Context, arg PendingGroupRecoveryTaskIDsParams) ([]int64, error)
 	ProjectByID(ctx context.Context, id int64) (Project, error)
 	ProjectByLeadPane(ctx context.Context, leadPaneID string) (Project, error)
 	ProjectByName(ctx context.Context, name string) (Project, error)
@@ -66,6 +69,8 @@ type Querier interface {
 	Projects(ctx context.Context) ([]Project, error)
 	PruneEvents(ctx context.Context, receivedAt int64) error
 	QueueMessage(ctx context.Context, arg QueueMessageParams) (sql.Result, error)
+	QueuedMessageTaskIDs(ctx context.Context, projectID int64) ([]int64, error)
+	QueuedTaskIDs(ctx context.Context, projectID int64) ([]int64, error)
 	ReclaimLeadStartClaim(ctx context.Context, arg ReclaimLeadStartClaimParams) (sql.Result, error)
 	RecordNoticeNotification(ctx context.Context, arg RecordNoticeNotificationParams) error
 	ReleaseLeadStart(ctx context.Context, arg ReleaseLeadStartParams) error
@@ -85,17 +90,20 @@ type Querier interface {
 	SetTaskGatedSHA(ctx context.Context, arg SetTaskGatedSHAParams) error
 	SetTaskPRTitle(ctx context.Context, arg SetTaskPRTitleParams) (sql.Result, error)
 	SetTaskPaneShellIdentity(ctx context.Context, arg SetTaskPaneShellIdentityParams) error
-	StallTasks(ctx context.Context, projectID int64) ([]Task, error)
+	SpawningLaunchTasks(ctx context.Context, projectID int64) ([]SpawningLaunchTasksRow, error)
+	StallTasks(ctx context.Context, projectID int64) ([]StallTasksRow, error)
 	Task(ctx context.Context, arg TaskParams) (Task, error)
 	TaskByID(ctx context.Context, arg TaskByIDParams) (Task, error)
 	TaskByPane(ctx context.Context, paneID string) (Task, error)
 	TaskByWorktree(ctx context.Context, worktreePath string) (Task, error)
+	TaskExistsBySeq(ctx context.Context, arg TaskExistsBySeqParams) (bool, error)
 	TaskGatedSHA(ctx context.Context, id int64) (string, error)
 	TaskSignals(ctx context.Context, arg TaskSignalsParams) ([]Signal, error)
+	TaskStateBySeq(ctx context.Context, arg TaskStateBySeqParams) (TaskStateBySeqRow, error)
 	TaskTransitions(ctx context.Context, arg TaskTransitionsParams) ([]Transition, error)
 	Tasks(ctx context.Context, projectID int64) ([]Task, error)
 	TasksInState(ctx context.Context, arg TasksInStateParams) ([]Task, error)
-	TasksWithPaneLabels(ctx context.Context, arg TasksWithPaneLabelsParams) ([]Task, error)
+	TasksWithPaneLabels(ctx context.Context, arg TasksWithPaneLabelsParams) ([]TasksWithPaneLabelsRow, error)
 	TouchProjectForTask(ctx context.Context, arg TouchProjectForTaskParams) error
 	UndeliveredNotices(ctx context.Context, projectID int64) ([]UndeliveredNoticesRow, error)
 	UpdateProgress(ctx context.Context, arg UpdateProgressParams) error
