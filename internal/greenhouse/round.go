@@ -27,10 +27,11 @@ type Round struct {
 	Worktree string
 	Host     Host
 	// GrantPrefix is "<project>/t<seq>/<member>"; round n uses GrantPrefix/r<n>.
-	GrantPrefix string
-	Intent      string
-	Target      string
-	Settings    Settings
+	GrantPrefix        string
+	MinimumGrantNumber int
+	Intent             string
+	Target             string
+	Settings           Settings
 	// Pending is the write-ahead record of the review request in flight, so a
 	// restarted Posse replays the same request instead of spending a new grant.
 	Pending string
@@ -174,7 +175,11 @@ func (d *Daemon) startReview(ctx context.Context, round Round, v response) (Roun
 }
 
 func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v response, retries int) (RoundResult, error) {
-	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, nextGrantNumberFromResponse(v))
+	nextGrant := nextGrantNumberFromResponse(v)
+	if round.MinimumGrantNumber > nextGrant {
+		nextGrant = round.MinimumGrantNumber
+	}
+	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, nextGrant)
 	head, err := worktreeHead(ctx, round.Worktree)
 	if err != nil {
 		return RoundResult{}, err
