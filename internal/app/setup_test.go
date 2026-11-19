@@ -471,7 +471,7 @@ func TestDoctorIsCompactAndOnlyChecksConfiguredAgentKinds(t *testing.T) {
 	if len(compact.Checks) == 0 || compact.AgentManifests != nil {
 		t.Fatalf("default doctor output is not compact: %s", output)
 	}
-	var sawAvailable, sawLayout bool
+	var sawAvailable bool
 	for _, row := range compact.Checks {
 		if len(row) != 3 || row["check"] == "" || !oneOfString(row["status"], "ok", "info", "warn", "fail") {
 			t.Fatalf("doctor check row does not match check,status,detail: %#v", row)
@@ -479,15 +479,15 @@ func TestDoctorIsCompactAndOnlyChecksConfiguredAgentKinds(t *testing.T) {
 		if strings.HasPrefix(row["check"], "agent integration cursor") || strings.HasPrefix(row["check"], "agent integration opencode") {
 			t.Fatalf("doctor reported unconfigured agent integration as missing: %#v", row)
 		}
-		if row["check"] == "Herdr Agents sidebar layout" && row["status"] == "warn" {
-			sawLayout = true
+		if row["check"] == "Herdr Agents sidebar layout" {
+			t.Fatalf("doctor still checks the removed sidebar layout: %#v", row)
 		}
 		if row["check"] == "other agent kinds" && row["status"] == "ok" && strings.Contains(row["detail"], "cursor") && strings.Contains(row["detail"], "opencode") {
 			sawAvailable = true
 		}
 	}
-	if !sawAvailable || !sawLayout {
-		t.Fatalf("doctor did not report available kinds and optional sidebar layout: %s", output)
+	if !sawAvailable {
+		t.Fatalf("doctor did not report available kinds: %s", output)
 	}
 	for _, row := range compact.Help {
 		if row["check"] == "" || row["action"] == "" {
@@ -870,7 +870,7 @@ func TestFreshSetupWritesTheRecommendedSkillsWithoutAsking(t *testing.T) {
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("preview wrote config: %v", err)
 	}
-	if out, code := runHumanSetup(t, service, "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "✓  Recommended workflow skills\n") {
+	if out, code := runHumanSetup(t, service); code != 0 || !strings.Contains(out, "✓  Recommended workflow skills\n") {
 		t.Fatalf("fresh setup = %d %s", code, out)
 	}
 	configured, err := config.ConfiguredSkills(configPath)
@@ -898,20 +898,20 @@ func TestFreshSetupWritesTheRecommendedSkillsWithoutAsking(t *testing.T) {
 func TestFreshSetupHonorsNoRecommendedSkills(t *testing.T) {
 	service, _, _ := humanSetupFixture(t)
 	configPath := filepath.Join(service.Home, "config.toml")
-	if out, code := runHumanSetup(t, service, "--no-recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "posse skills add") {
+	if out, code := runHumanSetup(t, service, "--no-recommended-skills"); code != 0 || !strings.Contains(out, "posse skills add") {
 		t.Fatalf("declined setup = %d %s", code, out)
 	}
 	if configured, _ := config.ConfiguredSkills(configPath); len(configured["lead"]) != 0 {
 		t.Fatalf("skills written despite --no-recommended-skills: %v", configured)
 	}
 	// A later setup keeps that choice instead of adding the block.
-	if out, code := runHumanSetup(t, service, "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "-  Recommended workflow skills: not in config; add them with `posse skills add`\n") {
+	if out, code := runHumanSetup(t, service); code != 0 || !strings.Contains(out, "-  Recommended workflow skills: not in config; add them with `posse skills add`\n") {
 		t.Fatalf("later setup = %d %s", code, out)
 	}
 	if configured, _ := config.ConfiguredSkills(configPath); len(configured["lead"]) != 0 {
 		t.Fatalf("later setup added skills to an existing config: %v", configured)
 	}
-	if out, code := runHumanSetup(t, service, "--recommended-skills", "--no-sidebar-layout"); code != 0 || !strings.Contains(out, "✓  Recommended workflow skills\n") {
+	if out, code := runHumanSetup(t, service, "--recommended-skills"); code != 0 || !strings.Contains(out, "✓  Recommended workflow skills\n") {
 		t.Fatalf("confirmed setup = %d %s", code, out)
 	}
 	configured, err := config.ConfiguredSkills(configPath)
@@ -930,7 +930,7 @@ func TestSetupKeepsACustomSkillSelection(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(custom), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, code := runHumanSetup(t, service, "--no-sidebar-layout")
+	out, code := runHumanSetup(t, service)
 	if code != 0 || !strings.Contains(out, "-  Recommended workflow skills: ") || !strings.Contains(out, "recommended skills are not in config") {
 		t.Fatalf("setup with a custom list = %d %s", code, out)
 	}

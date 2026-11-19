@@ -2,11 +2,13 @@
 
 *Superseded for repository Workers by [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md).*
 
+*Sidebar layout superseded by sub-workspace placement ([#1047](https://github.com/Thanhbinh1905/posse/issues/1047), PR #1068, [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md)): Posse no longer writes `[ui.sidebar.agents]` or sets `posse_row`; `posse setup` removes its earlier snippet.*
+
 It amended [ADR 0009](0009-workers-open-as-tabs-of-the-lead-workspace.md) and superseded [ADR 0012](0012-group-repository-workers-under-lead.md) for new Worker placement.
 
 ## Decision
 
-Every new Worker, in Repository and Workspace Projects, opens with `tab.create` as an unfocused tab in its Lead's Herdr workspace. Its tab label is the Worker name, its pane receives `POSSE_WORKER_HOME`, and its `posse_row` token uses the existing tree label convention. The Remuda Mount, Git worktree lock, Task identity, pane ownership and tab-scoped Teardown remain unchanged. Posse no longer calls `worktree.open` or `workspace.move_block` to place Workers.
+Every new Worker, in Repository and Workspace Projects, opens with `tab.create` as an unfocused tab in its Lead's Herdr workspace. Its tab label is the Worker name and its pane receives `POSSE_WORKER_HOME`. The Remuda Mount, Git worktree lock, Task identity, pane ownership and tab-scoped Teardown remain unchanged. Posse no longer calls `worktree.open` or `workspace.move_block` to place Workers.
 
 The Lead workspace is the Project orchestrator. This leaves room for a future top-level orchestrator without assuming that Project Leads are the only orchestrators in a Herdr session.
 

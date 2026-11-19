@@ -135,9 +135,6 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 	}
 	task.PaneID = opened.PaneID
 	metadata := workerDisplayMetadata(task, "", displayAgent)
-	if project.IsWorkspace() {
-		metadata["tokens"].(map[string]string)["posse_row"] = treeTabLabel(workerTabLabel(task), true)
-	}
 	if _, err := s.herdrCall(ctx, "pane.report_metadata", metadata); err != nil {
 		s.closeUnlabeledWorker(ctx, project, task, opened)
 		return openedTab{}, err
