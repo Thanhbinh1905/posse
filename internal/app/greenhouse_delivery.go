@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -77,7 +76,7 @@ func inspectGreenhouseDelivery(ctx context.Context, worktree, runID, branch, hea
 	command := exec.CommandContext(ctx, "greenhouse", "axi")
 	command.Dir = worktree
 	command.Stdin = bytes.NewReader(request)
-	command.Env = environmentWithout(os.Environ(), "GREENHOUSE_HOME")
+	command.Env = os.Environ()
 	output, err := command.Output()
 	if err != nil {
 		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse AXI inspect failed: %w", err)
@@ -154,15 +153,4 @@ func verifyGreenhouseDeliveryPR(ctx context.Context, project store.Project, cfg 
 		return fmt.Errorf("greenhouse PR does not match the Task branch and target: %w", err)
 	}
 	return nil
-}
-
-func environmentWithout(env []string, key string) []string {
-	prefix := key + "="
-	filtered := make([]string, 0, len(env))
-	for _, value := range env {
-		if !strings.HasPrefix(value, prefix) {
-			filtered = append(filtered, value)
-		}
-	}
-	return filtered
 }

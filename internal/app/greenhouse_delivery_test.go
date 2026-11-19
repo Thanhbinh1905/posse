@@ -30,16 +30,17 @@ func TestGreenhouseDeliveryRequiresCurrentPassedPipeline(t *testing.T) {
 	}
 }
 
-func TestInspectGreenhouseDeliveryUsesRunIDAndDefaultHome(t *testing.T) {
+func TestInspectGreenhouseDeliveryUsesRunIDAndConfiguredHome(t *testing.T) {
 	dir := t.TempDir()
+	home := filepath.Join(dir, "greenhouse-home")
 	output := `{"outcome":"ok","run_id":"run-1","run":{"id":"run-1","submitted":{"branch":"posse/t1","head":"abc"},"candidate":"abc","status":"ci-ready","pipeline":{"status":"ci-ready"}},"delivery":{"pushed_head":"abc","pr_url":"https://github.com/acme/shop/pull/1","pr_number":1,"current":true,"checks":[{"name":"test","status":"completed","conclusion":"success","head":"abc"}]}}`
-	script := "#!/bin/sh\n[ -z \"$GREENHOUSE_HOME\" ] || exit 3\nrequest=$(cat)\ncase \"$request\" in *'\"run_id\":\"run-1\"'*) ;; *) exit 4 ;; esac\nprintf '%s\\n' '" + output + "'\n"
+	script := "#!/bin/sh\n[ \"$GREENHOUSE_HOME\" = \"" + home + "\" ] || exit 3\nrequest=$(cat)\ncase \"$request\" in *'\"run_id\":\"run-1\"'*) ;; *) exit 4 ;; esac\nprintf '%s\\n' '" + output + "'\n"
 	binary := filepath.Join(dir, "greenhouse")
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	t.Setenv("GREENHOUSE_HOME", filepath.Join(dir, "unexpected-home"))
+	t.Setenv("GREENHOUSE_HOME", home)
 	if _, err := inspectGreenhouseDelivery(context.Background(), dir, "run-1", "posse/t1", "abc"); err != nil {
 		t.Fatalf("inspect Greenhouse delivery: %v", err)
 	}

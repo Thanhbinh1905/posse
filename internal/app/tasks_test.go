@@ -755,6 +755,31 @@ func TestStartRejectsTaskBoundBranchCollisionBeforeTaskCreation(t *testing.T) {
 	}
 }
 
+func TestStartRejectsGreenhouseRepositoryHazardBeforeAllocatingResources(t *testing.T) {
+	f := newStartFixture(t)
+	if _, err := config.SetFile(config.ConfigPath(f.home, f.project.Name), "defaults.merge_mode", "greenhouse", true); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "remote", "add", "origin", "https://github.com/acme/shop.git")
+	gitTest(t, f.repo, "config", "--local", "commit.gpgsign", "true")
+	code, output := f.start(t)
+	if code != 1 || !strings.Contains(output, "greenhouse_repository_unsupported") || !strings.Contains(output, "merge_mode = pr") {
+		t.Fatalf("unsafe Greenhouse repository was not refused with the alternative: code=%d %s", code, output)
+	}
+	if len(f.fake.Calls) != 0 {
+		t.Fatalf("admission called Herdr before refusal: %#v", f.fake.Calls)
+	}
+	if tasks, err := store.Open(f.home); err != nil {
+		t.Fatal(err)
+	} else {
+		defer tasks.Close()
+		rows, err := tasks.Tasks(context.Background(), f.project.ID, true)
+		if err != nil || len(rows) != 0 {
+			t.Fatalf("refusal allocated Task: %#v %v", rows, err)
+		}
+	}
+}
+
 func TestStartRejectsNoMistakesBriefBeforeAllocatingResources(t *testing.T) {
 	for field, replacement := range map[string]string{"merge_mode": "pr", "review": "full-pipeline"} {
 		t.Run(field, func(t *testing.T) {

@@ -313,6 +313,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if adoption != nil && mode != "pr" {
 		return axi.Failure("adoption_refused", "adopt requires PR delivery", false)
 	}
+	if brief.Type == "change" && mode == "greenhouse" && !project.IsWorkspace() {
+		if err := requireGreenhouseRepositorySafe(project.Root); err != nil {
+			return axi.Failure("greenhouse_repository_unsupported", "repository is not safe for Greenhouse pipeline commits: "+err.Error(), false, "Use `merge_mode = pr` for this repository")
+		}
+	}
 	if !project.IsWorkspace() && brief.Type == "change" && mode != "local" && originHost(ctx.Context, project.Root) == "" {
 		return axi.Failure("remote_missing", "Project "+project.Name+" has no origin remote to open a pull request against", false,
 			"Add one with `git remote add origin <url>` and push "+project.DefaultBranch+", or remove `merge_mode: pr` from the Brief to Merge locally")
