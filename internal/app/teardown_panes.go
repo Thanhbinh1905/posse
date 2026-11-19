@@ -987,7 +987,19 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 	}
 	plan.tabs = taskTabs(snapshot, project, task)
 	childID := ""
-	if !project.IsWorkspace() && !project.IsDirectory() {
+	if project.IsWorkspace() {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID {
+				continue
+			}
+			for _, pane := range snapshot.Panes {
+				if pane.WorkspaceID == workspace.WorkspaceID && pane.Label == task.PaneLabel && ownsTaskPane(snapshot, project, task, plan.tabs, pane) {
+					childID = workspace.WorkspaceID
+					plan.workspaces[childID] = true
+				}
+			}
+		}
+	} else if !project.IsDirectory() {
 		for _, workspace := range snapshot.Workspaces {
 			if workspace.Worktree.CheckoutPath != "" && workspace.Worktree.CheckoutPath == task.WorktreePath {
 				for _, pane := range snapshot.Panes {
@@ -1089,6 +1101,33 @@ func (s *Service) verifyTaskPanesClosed(ctx context.Context, project store.Proje
 	}
 	result.Closed = uniqueSorted(result.Closed)
 	result.Foreign = uniqueSorted(result.Foreign)
+	if project.IsWorkspace() {
+		for workspaceID := range plan.workspaces {
+			workspaceExists := false
+			for _, workspace := range snapshot.Workspaces {
+				if workspace.WorkspaceID == workspaceID {
+					workspaceExists = true
+					break
+				}
+			}
+			if !workspaceExists {
+				continue
+			}
+			hasPanes := false
+			for _, pane := range snapshot.Panes {
+				if pane.WorkspaceID == workspaceID {
+					hasPanes = true
+					break
+				}
+			}
+			if hasPanes {
+				continue
+			}
+			if _, err := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": workspaceID}); err != nil && !missingPaneError(err) {
+				return result, err
+			}
+		}
+	}
 	if plan.returnFocusToLead {
 		if lead, found := findAppPane(snapshot.Panes, project.LeadPaneID, project.LeadLabel); found {
 			_, _ = s.herdrCall(ctx, "pane.focus", map[string]any{"pane_id": lead.PaneID})
