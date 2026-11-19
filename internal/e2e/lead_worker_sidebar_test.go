@@ -62,7 +62,6 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 		order = append(order, workspace.WorkspaceID+"="+workspace.Label)
 	}
 	want := []string{f.userBefore.Workspace.WorkspaceID + "=notes", f.leadWorkspaceID + "=Lead:shop"}
-	want = append(want, f.userAfter.Workspace.WorkspaceID+"=scratch")
 	for _, task := range tasks {
 		if task.HerdrWorkspaceID == f.leadWorkspaceID {
 			t.Errorf("Worker %s shares the Lead workspace instead of using a linked child", task.ShortName)
@@ -85,8 +84,9 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 		}
 	}
 	t.Logf("native workspace order: %v", order)
+	want = append(want, f.userAfter.Workspace.WorkspaceID+"=scratch")
 	if strings.Join(order, ",") != strings.Join(want, ",") {
-		t.Errorf("Worker child workspaces or User workspace layout changed: got %v, want %v", order, want)
+		t.Errorf("Worker placement or User workspace layout changed: got %v, want %v", order, want)
 	}
 	f.assertAlive(t, snap, f.leadPaneID, f.userBefore.RootPane.PaneID, f.userAfter.RootPane.PaneID, f.userTab.RootPane.PaneID)
 }

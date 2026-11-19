@@ -210,6 +210,9 @@ func workspaceGreenhouseFullPipelinePlan(task store.Task, cfg config.Config) boo
 }
 
 func workspaceGreenhouseFullPipeline(ctx context.Context, db *store.DB, task store.Task, cfg config.Config) (bool, error) {
+	if task.Type != "change" {
+		return false, nil
+	}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
 		return false, admittedPlanFailure(err)

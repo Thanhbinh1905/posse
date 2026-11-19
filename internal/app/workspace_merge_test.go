@@ -143,6 +143,41 @@ func (f *workspaceMergeFixture) state() store.State {
 
 const localWorkspaceConfig = "[defaults]\nmerge_mode = \"local\"\nauto_teardown = \"never\"\n"
 
+func TestGreenhouseWorkspaceResearchDoneDoesNotRequireMemberCommits(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	gitTest(t, filepath.Join(f.task.WorktreePath, "worker"), "reset", "--hard", "main")
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateWorking, "lead", "research ready"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET type='research' WHERE id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	updatedTask, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil || updatedTask.Type != "research" {
+		t.Fatalf("task type = %q, err = %v", updatedTask.Type, err)
+	}
+	report := filepath.Join(f.task.WorktreePath, "report.md")
+	if err := os.WriteFile(report, []byte("Research findings.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_WORKER_HOME", f.home)
+	t.Chdir(f.task.WorktreePath)
+	if code := f.run("signal", "done", "Research complete", "--report", report); code != 0 {
+		t.Fatalf("research done: %d %s", code, f.out.String())
+	}
+
+	change := newWorkspaceMergeFixture(t, "review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	gitTest(t, filepath.Join(change.task.WorktreePath, "worker"), "reset", "--hard", "main")
+	if err := change.db.Transition(ctx, change.task.ID, store.StateDone, store.StateWorking, "lead", "change ready"); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(change.task.WorktreePath)
+	if code := change.run("signal", "done", "Change complete"); code == 0 || !strings.Contains(change.out.String(), "no member has commits") {
+		t.Fatalf("workspace Change without commits was accepted: %d %s", code, change.out.String())
+	}
+}
+
 func TestWorkspacePRPollAndDiscardSkipMemberlessResearch(t *testing.T) {
 	f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
 	ctx := context.Background()
