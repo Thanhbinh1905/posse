@@ -12,14 +12,20 @@ import (
 )
 
 func TestPlaceWorkerWorkspaceAfterExactLeadAndExistingWorkerBlock(t *testing.T) {
+	home, db, project, tasks := newWorkerOrderDB(t, []store.Task{
+		{Seq: 1, Type: "change", Title: "First", WorktreePath: "/repo/first", HerdrWorkspaceID: "worker-a1"},
+		{Seq: 2, Type: "change", Title: "Second", WorktreePath: "/repo/second", HerdrWorkspaceID: "worker-a2"},
+		{Seq: 3, Type: "change", Title: "Current", WorktreePath: "/repo/new"},
+	})
+	defer db.Close()
 	adapter := herdr.NewFake()
 	adapter.SnapshotValue = herdr.Snapshot{Workspaces: []herdr.Workspace{
-		{WorkspaceID: "lead-a"}, {WorkspaceID: "worker-a1"}, {WorkspaceID: "lead-b"},
-		{WorkspaceID: "worker-b1"}, {WorkspaceID: "notes"}, {WorkspaceID: "worker-a2"}, {WorkspaceID: "new"},
+		{WorkspaceID: "lead-a"}, {WorkspaceID: "worker-a1"}, {WorkspaceID: "worker-a2"},
+		{WorkspaceID: "lead-b"}, {WorkspaceID: "worker-b1"}, {WorkspaceID: "notes"}, {WorkspaceID: "new"},
 	}}
-	adapter.Results["workspace.move"] = json.RawMessage(`{"type":"workspace_list","workspaces":[{"workspace_id":"lead-a"},{"workspace_id":"worker-a1"},{"workspace_id":"new"},{"workspace_id":"lead-b"},{"workspace_id":"worker-b1"},{"workspace_id":"notes"},{"workspace_id":"worker-a2"}]}`)
-	service := testService(t.TempDir(), adapter)
-	service.placeWorkerWorkspace(context.Background(), t.TempDir(), "lead-a", "new", []string{"worker-a1", "worker-a2"})
+	adapter.Results["workspace.move"] = json.RawMessage(`{"type":"workspace_list","workspaces":[{"workspace_id":"lead-a"},{"workspace_id":"worker-a1"},{"workspace_id":"worker-a2"},{"workspace_id":"new"},{"workspace_id":"lead-b"},{"workspace_id":"worker-b1"},{"workspace_id":"notes"}]}`)
+	service := testService(home, adapter)
+	service.placeWorkerWorkspace(context.Background(), db, home, project.ID, tasks[2].ID, "lead-a", "new")
 	if adapter.CallCount("workspace.move") != 1 {
 		t.Fatalf("workspace.move calls = %d", adapter.CallCount("workspace.move"))
 	}
@@ -29,9 +35,32 @@ func TestPlaceWorkerWorkspaceAfterExactLeadAndExistingWorkerBlock(t *testing.T) 
 			move = call
 		}
 	}
-	if move.Params["workspace_id"] != "new" || move.Params["insert_index"] != 2 {
+	if move.Params["workspace_id"] != "new" || move.Params["insert_index"] != 3 {
 		t.Fatalf("workspace.move params = %#v", move.Params)
 	}
+}
+
+func newWorkerOrderDB(t *testing.T, tasks []store.Task) (string, *store.DB, store.Project, []store.Task) {
+	t.Helper()
+	home := t.TempDir()
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(context.Background(), "shop", "/repo", "main")
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for i := range tasks {
+		id, err := db.CreateTask(context.Background(), project.ID, tasks[i])
+		if err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		tasks[i].ID = id
+	}
+	return home, db, project, tasks
 }
 
 func TestOpenWorkerTabContinuesWhenWorkspaceMoveFails(t *testing.T) {
@@ -67,6 +96,32 @@ func TestOpenWorkerTabContinuesWhenWorkspaceMoveFails(t *testing.T) {
 	if adapter.CallCount("workspace.move") != 1 {
 		t.Fatalf("workspace.move calls = %d", adapter.CallCount("workspace.move"))
 	}
+}
+
+func TestPlaceWorkerWorkspaceIncludesAnUnrecordedConcurrentWorker(t *testing.T) {
+	home, db, project, tasks := newWorkerOrderDB(t, []store.Task{
+		{Seq: 1, Type: "change", Title: "First", WorktreePath: "/repo/first"},
+		{Seq: 2, Type: "change", Title: "Second", WorktreePath: "/repo/second"},
+	})
+	defer db.Close()
+	adapter := herdr.NewFake()
+	adapter.SnapshotValue = herdr.Snapshot{Workspaces: []herdr.Workspace{
+		{WorkspaceID: "lead"}, {WorkspaceID: "first-worker"}, {WorkspaceID: "notes"}, {WorkspaceID: "second-worker"},
+	}}
+	adapter.SnapshotValue.Workspaces[1].Worktree.IsLinkedWorktree = true
+	adapter.SnapshotValue.Workspaces[1].Worktree.CheckoutPath = tasks[0].WorktreePath
+	adapter.Results["workspace.move"] = json.RawMessage(`{"type":"workspace_list","workspaces":[{"workspace_id":"lead"},{"workspace_id":"first-worker"},{"workspace_id":"second-worker"},{"workspace_id":"notes"}]}`)
+	service := testService(home, adapter)
+	service.placeWorkerWorkspace(context.Background(), db, home, project.ID, tasks[1].ID, "lead", "second-worker")
+	for _, call := range adapter.Calls {
+		if call.Method == "workspace.move" {
+			if call.Params["insert_index"] != 2 {
+				t.Fatalf("second concurrent Worker inserted at %v, want after the first Worker at index 2", call.Params["insert_index"])
+			}
+			return
+		}
+	}
+	t.Fatal("workspace.move was not called")
 }
 
 func TestWorkerWorkspaceOrderLockIsSessionScoped(t *testing.T) {

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"path/filepath"
 	"strings"
 
@@ -134,18 +133,7 @@ func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, 
 		return openedTab{}, err
 	}
 	if db != nil && !project.IsWorkspace() {
-		tasks, err := db.Tasks(ctx, project.ID, true)
-		if err != nil {
-			log.Printf("posse: could not order Worker workspace %s: read Project Tasks: %v", opened.WorkspaceID, err)
-		} else {
-			owned := make([]string, 0, len(tasks))
-			for _, sibling := range tasks {
-				if sibling.ID != task.ID && sibling.HerdrWorkspaceID != "" {
-					owned = append(owned, sibling.HerdrWorkspaceID)
-				}
-			}
-			s.placeWorkerWorkspace(ctx, home, project.HerdrWorkspaceID, opened.WorkspaceID, owned)
-		}
+		s.placeWorkerWorkspace(ctx, db, home, project.ID, task.ID, project.HerdrWorkspaceID, opened.WorkspaceID)
 	}
 	return opened, nil
 }

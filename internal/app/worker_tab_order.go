@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func workerWorkspaceOrderLockPath(home, sessionSocket string) string {
@@ -17,7 +18,7 @@ func workerWorkspaceOrderLockPath(home, sessionSocket string) string {
 	return filepath.Join(home, "state", "herdr-workspace-order-"+key+".lock")
 }
 
-func (s *Service) placeWorkerWorkspace(ctx context.Context, home, leadID, workerID string, ownedWorkerIDs []string) {
+func (s *Service) placeWorkerWorkspace(ctx context.Context, db *store.DB, home string, projectID, taskID int64, leadID, workerID string) {
 	if leadID == "" || workerID == "" {
 		log.Printf("posse: could not order Worker workspace %q: Lead or Worker workspace id is empty", workerID)
 		return
@@ -39,6 +40,11 @@ func (s *Service) placeWorkerWorkspace(ctx context.Context, home, leadID, worker
 		log.Printf("posse: could not order Worker workspace %s: read session snapshot: %v", workerID, err)
 		return
 	}
+	tasks, err := db.Tasks(ctx, projectID, true)
+	if err != nil {
+		log.Printf("posse: could not order Worker workspace %s: read Project Tasks: %v", workerID, err)
+		return
+	}
 	ids := make([]string, len(snapshot.Workspaces))
 	positions := make(map[string]int, len(snapshot.Workspaces))
 	for i, workspace := range snapshot.Workspaces {
@@ -57,13 +63,27 @@ func (s *Service) placeWorkerWorkspace(ctx context.Context, home, leadID, worker
 		log.Printf("posse: could not order Worker workspace %s: exact Lead workspace %s or Worker workspace is absent", workerID, leadID)
 		return
 	}
-	owned := make(map[string]bool, len(ownedWorkerIDs)+1)
-	for _, id := range ownedWorkerIDs {
-		if id != "" {
-			owned[id] = true
+	owned := map[string]bool{workerID: true}
+	workspacesByPath := make(map[string][]string)
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath != "" {
+			path := filepath.Clean(workspace.Worktree.CheckoutPath)
+			workspacesByPath[path] = append(workspacesByPath[path], workspace.WorkspaceID)
 		}
 	}
-	owned[workerID] = true
+	for _, task := range tasks {
+		if task.ID == taskID {
+			continue
+		}
+		if task.HerdrWorkspaceID != "" {
+			owned[task.HerdrWorkspaceID] = true
+		}
+		if task.WorktreePath != "" {
+			for _, id := range workspacesByPath[filepath.Clean(task.WorktreePath)] {
+				owned[id] = true
+			}
+		}
+	}
 	blockEnd := leadIndex + 1
 	for blockEnd < len(ids) && owned[ids[blockEnd]] {
 		blockEnd++

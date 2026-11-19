@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,16 +42,8 @@ func TestWorkerWorkspaceOrderGroupsTwoProjectsAndRelaunchesOnRealHerdr(t *testin
 		t.Fatal("second Project Lead did not start")
 	}
 
-	start := func(repo string, env []string, taskID, name string) store.Task {
+	waitTask := func(repo, taskID, name, output string) store.Task {
 		t.Helper()
-		brief := filepath.Join(f.root, name+".md")
-		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: "+name+"\ndone_when: the E2E verifies workspace placement\n---\nWait.\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		output := runPosse(t, f.binary, repo, env, "start", "--brief", brief, "--name", name)
-		if !strings.Contains(output, "task:") {
-			t.Fatalf("start %s: %s", name, output)
-		}
 		var project store.Project
 		var task store.Task
 		if !waitForCondition(20*time.Second, func() bool {
@@ -70,10 +63,63 @@ func TestWorkerWorkspaceOrderGroupsTwoProjectsAndRelaunchesOnRealHerdr(t *testin
 		}
 		return task
 	}
+	start := func(repo string, env []string, taskID, name string) store.Task {
+		t.Helper()
+		brief := filepath.Join(f.root, name+".md")
+		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: "+name+"\ndone_when: the E2E verifies workspace placement\n---\nWait.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output := runPosse(t, f.binary, repo, env, "start", "--brief", brief, "--name", name)
+		if !strings.Contains(output, "task:") {
+			t.Fatalf("start %s: %s", name, output)
+		}
+		return waitTask(repo, taskID, name, output)
+	}
 	shopFirst := start(f.repo, f.leadEnv, "t1", "shop-first")
 	greenhouseFirst := start(secondRepo, secondLeadEnv, "t1", "greenhouse-first")
 	shopSecond := start(f.repo, f.leadEnv, "t2", "shop-second")
 	greenhouseSecond := start(secondRepo, secondLeadEnv, "t2", "greenhouse-second")
+
+	type launch struct {
+		repo, taskID, name string
+		env                []string
+	}
+	jobs := []launch{
+		{repo: f.repo, env: f.leadEnv, taskID: "t3", name: "shop-third"},
+		{repo: secondRepo, env: secondLeadEnv, taskID: "t3", name: "greenhouse-third"},
+	}
+	commands := make([]*exec.Cmd, len(jobs))
+	for i, job := range jobs {
+		brief := filepath.Join(f.root, job.name+".md")
+		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: "+job.name+"\ndone_when: the E2E verifies workspace placement\n---\nWait.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		commands[i] = exec.Command(f.binary, "start", "--brief", brief, "--name", job.name)
+		commands[i].Dir = job.repo
+		commands[i].Env = taskAuthorGenerationEnv(job.env)
+	}
+	begin := make(chan struct{})
+	outputs := make([][]byte, len(jobs))
+	errs := make([]error, len(jobs))
+	done := make(chan int, len(jobs))
+	for i, command := range commands {
+		go func(index int, command *exec.Cmd) {
+			<-begin
+			outputs[index], errs[index] = command.CombinedOutput()
+			done <- index
+		}(i, command)
+	}
+	close(begin)
+	for range jobs {
+		<-done
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent start %s: %v\n%s", jobs[i].name, err, outputs[i])
+		}
+	}
+	shopThird := waitTask(f.repo, "t3", "shop-third", string(outputs[0]))
+	greenhouseThird := waitTask(secondRepo, "t3", "greenhouse-third", string(outputs[1]))
 
 	assertBlocks := func(snapshot herdr.Snapshot) {
 		t.Helper()
@@ -99,8 +145,8 @@ func TestWorkerWorkspaceOrderGroupsTwoProjectsAndRelaunchesOnRealHerdr(t *testin
 				}
 			}
 		}
-		assertBlock(f.leadWorkspaceID, shopFirst.HerdrWorkspaceID, shopSecond.HerdrWorkspaceID)
-		assertBlock(secondLead.Workspace.WorkspaceID, greenhouseFirst.HerdrWorkspaceID, greenhouseSecond.HerdrWorkspaceID)
+		assertBlock(f.leadWorkspaceID, shopFirst.HerdrWorkspaceID, shopSecond.HerdrWorkspaceID, shopThird.HerdrWorkspaceID)
+		assertBlock(secondLead.Workspace.WorkspaceID, greenhouseFirst.HerdrWorkspaceID, greenhouseSecond.HerdrWorkspaceID, greenhouseThird.HerdrWorkspaceID)
 	}
 	assertBlocks(f.snapshot(t))
 
