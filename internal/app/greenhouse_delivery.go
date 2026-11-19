@@ -103,9 +103,6 @@ func inspectGreenhouseDelivery(ctx context.Context, worktree, runID, branch, hea
 	if err != nil {
 		return greenhouseDeliveryResult{}, err
 	}
-	if !validGreenhouseObjectID(head) || !validGreenhouseObjectID(delivery.Run.Submitted.Head) {
-		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse run has an invalid submitted or candidate object ID")
-	}
 	if _, err := gitOutput(ctx, worktree, "merge-base", "--is-ancestor", delivery.Run.Submitted.Head, head); err != nil {
 		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse candidate %s does not descend from submitted head %s", head, delivery.Run.Submitted.Head)
 	}
