@@ -56,7 +56,7 @@ func stopTaskGreenhouseReviewOwners(ctx context.Context, db *store.DB, home stri
 				return err
 			}
 			if inFlight {
-				return fmt.Errorf("Greenhouse review lock for Task %s is held by an unverified owner", taskIDString(task.Seq))
+				return fmt.Errorf("greenhouse review lock for Task %s is held by an unverified owner", taskIDString(task.Seq))
 			}
 			current, err := readParallelReviewOwner(ownerPath)
 			if err != nil {
@@ -81,7 +81,7 @@ func stopTaskGreenhouseReviewOwners(ctx context.Context, db *store.DB, home stri
 		}
 		argv := strings.Split(string(args), "\x00")
 		if !greenhouseOwnerArgument(argv, "_greenhouse") || !greenhouseOwnerArgument(argv, "review") || !greenhouseOwnerArgument(argv, taskIDString(task.Seq)) {
-			return fmt.Errorf("Greenhouse owner PID %d does not match Task %s review command", owner.PID, taskIDString(task.Seq))
+			return fmt.Errorf("greenhouse owner PID %d does not match Task %s review command", owner.PID, taskIDString(task.Seq))
 		}
 		handle, err := openSandboxProcessHandle(owner.PID)
 		if err != nil {
@@ -124,7 +124,7 @@ func stopTaskGreenhouseReviewOwners(ctx context.Context, db *store.DB, home stri
 				if aliveErr != nil {
 					return aliveErr
 				}
-				return fmt.Errorf("Greenhouse review owner PID %d survived Teardown", owner.PID)
+				return fmt.Errorf("greenhouse review owner PID %d survived teardown", owner.PID)
 			}
 		}
 		_ = handle.Close()
