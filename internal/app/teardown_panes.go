@@ -77,7 +77,7 @@ func (s *Service) autoTeardownMergedTasks(ctx context.Context, db *store.DB, pro
 	if s.Herdr == nil {
 		return nil
 	}
-	tasks, err := db.TasksInState(ctx, project.ID, store.StateMerged)
+	tasks, err := db.MergedTaskCandidates(ctx, project.ID)
 	if err != nil {
 		return err
 	}

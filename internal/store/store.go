@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -28,8 +30,11 @@ var migrationFiles embed.FS
 
 type DB struct {
 	*sql.DB
-	Path    string
-	queries *dbgen.Queries
+	Path           string
+	queries        *dbgen.Queries
+	planCacheMu    sync.Mutex
+	planCache      map[taskPlanCacheKey]cachedTaskPlan
+	planCacheBytes int64
 }
 
 var ErrNotFound = sql.ErrNoRows
@@ -228,7 +233,19 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 		return err
 	}
 	if db.schemaCurrent(ctx, sources) {
-		return nil
+		completed, err := db.taskPlanInputMigrationComplete(ctx)
+		if err != nil {
+			return err
+		}
+		if completed {
+			return nil
+		}
+		lock, err := awaitMigrationLock(ctx, db.Path)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		return db.migrateTaskPlanInputs(ctx)
 	}
 	lock, err := awaitMigrationLock(ctx, db.Path)
 	if err != nil {
@@ -298,7 +315,10 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 					log.Printf("posse: applied missing migrations: %s", strings.Join(applied, ", "))
 				}
 			}
-			return db.recordChecksums(ctx, sources)
+			if err := db.recordChecksums(ctx, sources); err != nil {
+				return err
+			}
+			return db.migrateTaskPlanInputs(ctx)
 		} else {
 			lastErr = err
 			if !strings.Contains(strings.ToLower(err.Error()), "locked") && !strings.Contains(strings.ToLower(err.Error()), "busy") {
@@ -819,7 +839,7 @@ func oneOfState(value State, candidates ...State) bool {
 }
 
 func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64, error) {
-	planJSON, err := bindTaskPlan(task, task.Seq, "")
+	planJSON, err := db.bindTaskPlan(task, task.Seq, "")
 	if err != nil {
 		return 0, err
 	}
@@ -845,7 +865,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, MergedRef: task.MergedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
-		ReportKind: task.ReportKind, PaneShellIdentity: task.PaneShellIdentity,
+		ReportKind: task.ReportKind, PaneShellIdentity: task.PaneShellIdentity, WorkflowRunID: storedWorkflowRunID(planJSON), PlanRevision: int64(storedPlanRevision(planJSON)),
 	})
 	if err != nil {
 		return 0, err
@@ -905,7 +925,11 @@ type TaskLaunchIdentity struct {
 }
 
 type Task struct {
-	Adoption *TaskAdoptionRequest `toml:"-"`
+	Adoption                 *TaskAdoptionRequest                      `toml:"-"`
+	planLoader               func(string, int) (*taskplan.Plan, error) `toml:"-"`
+	planJSONFingerprint      [32]byte                                  `toml:"-"`
+	planJSONFingerprintValid bool                                      `toml:"-"`
+	PlanRevision             int                                       `toml:"-"`
 
 	ID             int64  `toml:"id"`
 	ProjectID      int64  `toml:"project_id"`
@@ -1110,11 +1134,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 			if err != nil {
 				return 0, 0, err
 			}
-		} else if err := validateWorkflowTaskAdmissionTx(ctx, tx.Tx, projectID, task.Type, admitted.Workflow); err != nil {
+		} else if err := db.validateWorkflowTaskAdmissionTx(ctx, tx.Tx, projectID, task.Type, admitted.Workflow); err != nil {
 			return 0, 0, err
 		}
 	}
-	planJSON, err := bindTaskPlan(task, seq, workflowRunID)
+	planJSON, err := db.bindTaskPlan(task, seq, workflowRunID)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1130,11 +1154,11 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 	if task.State == StateQueued && task.Branch != "" {
 		return 0, 0, fmt.Errorf("queued Task cannot have a branch")
 	}
-	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json,report_kind)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?) RETURNING id`,
+	err = tx.QueryRowContext(ctx, `INSERT INTO tasks(project_id,seq,type,reviews_task_id,title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,pane_label,created_at,updated_at,plan_json,report_kind,workflow_run_id,plan_revision)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, string(task.State), task.Profile, task.DispatchRule,
 		task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
-		projectName, seq, now, now, planJSON, task.ReportKind).Scan(&id)
+		projectName, seq, now, now, planJSON, task.ReportKind, storedWorkflowRunID(planJSON), storedPlanRevision(planJSON)).Scan(&id)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1584,7 +1608,7 @@ func (db *DB) NextTaskLaunchWithIdentity(ctx context.Context, taskID int64, prof
 	if modelKnown && strings.TrimSpace(configuredModel) == "" {
 		modelKnown = false
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) SELECT id,?,?,?,?,CASE WHEN plan_json='' THEN 0 ELSE json_extract(plan_json,'$.revision') END FROM tasks WHERE id=?`, launches, profile, configuredModel, modelKnown, taskID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_identities(task_id,launch_number,profile_name,configured_model,model_known,plan_revision) SELECT id,?,?,?,?,plan_revision FROM tasks WHERE id=?`, launches, profile, configuredModel, modelKnown, taskID); err != nil {
 		return 0, err
 	}
 	if err := setTaskTurnTokenTx(ctx, tx, taskID, fmt.Sprintf("launch:%d", launches), now); err != nil {
@@ -3211,22 +3235,34 @@ func (db *DB) Task(ctx context.Context, projectID int64, identifier string) (Tas
 			return db.Task(ctx, projectID, ids[0])
 		}
 	}
-	return taskFromDB(row), err
+	return db.taskFromDB(row), err
+}
+
+func (db *DB) TaskStateBySeq(ctx context.Context, projectID int64, seq int) (Task, error) {
+	row, err := db.queries.TaskStateBySeq(ctx, dbgen.TaskStateBySeqParams{ProjectID: projectID, Seq: int64(seq)})
+	if err != nil {
+		return Task{}, err
+	}
+	return Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), State: State(row.State)}, nil
+}
+
+func (db *DB) TaskExistsBySeq(ctx context.Context, projectID int64, seq int) (bool, error) {
+	return db.queries.TaskExistsBySeq(ctx, dbgen.TaskExistsBySeqParams{ProjectID: projectID, Seq: int64(seq)})
 }
 
 func (db *DB) TaskByID(ctx context.Context, projectID, id int64) (Task, error) {
 	row, err := db.queries.TaskByID(ctx, dbgen.TaskByIDParams{ProjectID: projectID, ID: id})
-	return taskFromDB(row), err
+	return db.taskFromDB(row), err
 }
 
 func (db *DB) TaskByPane(ctx context.Context, paneID string) (Task, error) {
 	row, err := db.queries.TaskByPane(ctx, paneID)
-	return taskFromDB(row), err
+	return db.taskFromDB(row), err
 }
 
 func (db *DB) TaskByWorktree(ctx context.Context, path string) (Task, error) {
 	row, err := db.queries.TaskByWorktree(ctx, path)
-	return taskFromDB(row), err
+	return db.taskFromDB(row), err
 }
 
 func (db *DB) Tasks(ctx context.Context, projectID int64, includeFinished bool) ([]Task, error) {
@@ -3242,7 +3278,7 @@ func (db *DB) Tasks(ctx context.Context, projectID int64, includeFinished bool) 
 	}
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, taskFromDB(row))
+		tasks = append(tasks, db.taskFromDB(row))
 	}
 	return tasks, nil
 }
@@ -3256,7 +3292,7 @@ func (db *DB) TasksInState(ctx context.Context, projectID int64, state State) ([
 	}
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, taskFromDB(row))
+		tasks = append(tasks, db.taskFromDB(row))
 	}
 	return tasks, nil
 }
@@ -3278,9 +3314,59 @@ func (db *DB) TasksWithPaneLabels(ctx context.Context, projectID int64, labels [
 	}
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, taskFromDB(row))
+		tasks = append(tasks, Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, Title: row.Title, ShortName: row.ShortName, State: State(row.State), WorktreePath: row.WorktreePath, PaneID: row.PaneID, PaneLabel: row.PaneLabel, AgentSessionKind: row.AgentSessionKind})
 	}
 	return tasks, nil
+}
+
+func (db *DB) SpawningLaunchTasks(ctx context.Context, projectID int64) ([]Task, error) {
+	rows, err := db.queries.SpawningLaunchTasks(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		task := Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule, PaneID: row.PaneID, PaneLabel: row.PaneLabel, PlanRevision: int(row.PlanRevision)}
+		db.attachPlanLoader(&task)
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
+}
+
+func (db *DB) OpenTaskSummaries(ctx context.Context, projectID int64) ([]Task, error) {
+	rows, err := db.queries.OpenTaskSummaries(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		tasks = append(tasks, Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Title: row.Title, ShortName: row.ShortName, State: State(row.State)})
+	}
+	return tasks, nil
+}
+
+func (db *DB) MergedTaskCandidates(ctx context.Context, projectID int64) ([]Task, error) {
+	rows, err := db.queries.MergedTaskCandidates(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(rows))
+	for _, row := range rows {
+		tasks = append(tasks, Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Title: row.Title, State: State(row.State), MergeMode: row.MergeMode, PRURL: row.PrUrl})
+	}
+	return tasks, nil
+}
+
+func (db *DB) QueuedMessageTaskIDs(ctx context.Context, projectID int64) ([]int64, error) {
+	return db.queries.QueuedMessageTaskIDs(ctx, projectID)
+}
+
+func (db *DB) QueuedTaskIDs(ctx context.Context, projectID int64) ([]int64, error) {
+	return db.queries.QueuedTaskIDs(ctx, projectID)
+}
+
+func (db *DB) PendingGroupRecoveryTaskIDs(ctx context.Context, projectID int64, now int64) ([]int64, error) {
+	return db.queries.PendingGroupRecoveryTaskIDs(ctx, dbgen.PendingGroupRecoveryTaskIDsParams{ProjectID: projectID, NextAttemptAt: now})
 }
 
 func (db *DB) LiveTasks(ctx context.Context, projectID int64) ([]Task, error) {
@@ -3290,7 +3376,7 @@ func (db *DB) LiveTasks(ctx context.Context, projectID int64) ([]Task, error) {
 	}
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, taskFromDB(row))
+		tasks = append(tasks, taskFromLiveDB(row))
 	}
 	return tasks, nil
 }
@@ -3302,12 +3388,35 @@ func (db *DB) StallTasks(ctx context.Context, projectID int64) ([]Task, error) {
 	}
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, taskFromDB(row))
+		tasks = append(tasks, Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Title: row.Title, State: State(row.State), PaneID: row.PaneID, PaneLabel: row.PaneLabel, WorktreePath: row.WorktreePath, LastOutputHash: row.LastOutputHash, LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt})
 	}
 	return tasks, nil
 }
 
-func taskFromDB(row dbgen.Task) Task {
+func taskFromLiveDB(row dbgen.LiveTasksRow) Task {
+	return Task{
+		ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: nullableInt64(row.ReviewsTaskID),
+		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule,
+		MergeMode: row.MergeMode, AutonomyReview: row.AutonomyReview, AutonomyMerge: row.AutonomyMerge, Branch: row.Branch, BaseRef: row.BaseRef,
+		TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, SandboxID: nullableInt64(row.SandboxID), Launches: int(row.Launches), GatedSHA: row.GatedSha,
+		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel, AgentName: row.AgentName, AgentSession: row.AgentSession,
+		AgentSessionKind: row.AgentSessionKind, AgentAbsentSince: row.AgentAbsentSince, IdleSince: row.IdleSince, AgentStatus: row.AgentStatus,
+		AgentStatusSince: row.AgentStatusSince, AgentServerStartedAt: row.AgentServerStartedAt, PRURL: row.PrUrl, MergedRef: row.MergedRef,
+		LastOutputHash: row.LastOutputHash, LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, PlanRevision: int(row.PlanRevision), ReportKind: row.ReportKind, ReportDigest: row.ReportDigest,
+		ReportManifestJSON: row.ReportManifestJson, ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath,
+		ContainmentMarker: row.ContainmentMarker, PaneShellIdentity: row.PaneShellIdentity,
+	}
+}
+
+func nullableInt64(value sql.NullInt64) int64 {
+	if value.Valid {
+		return value.Int64
+	}
+	return 0
+}
+
+func (db *DB) taskFromDB(row dbgen.Task) Task {
 	reviewsTaskID := int64(0)
 	if row.ReviewsTaskID.Valid {
 		reviewsTaskID = row.ReviewsTaskID.Int64
@@ -3316,8 +3425,8 @@ func taskFromDB(row dbgen.Task) Task {
 	if row.SandboxID.Valid {
 		sandboxID = row.SandboxID.Int64
 	}
-	return Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: reviewsTaskID,
-		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule, PlanJSON: row.PlanJson,
+	task := Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), Type: row.Type, ReviewsTaskID: reviewsTaskID,
+		Title: row.Title, PRTitle: row.PrTitle, ShortName: row.ShortName, State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule, PlanJSON: row.PlanJson, PlanRevision: int(row.PlanRevision),
 		MergeMode: row.MergeMode, AutonomyReview: row.AutonomyReview, AutonomyMerge: row.AutonomyMerge,
 		Branch: row.Branch, BaseRef: row.BaseRef, TargetBranch: row.TargetBranch, WorktreePath: row.WorktreePath, SandboxID: sandboxID, Launches: int(row.Launches), GatedSHA: row.GatedSha,
 		HerdrWorkspaceID: row.HerdrWorkspaceID, PaneID: row.PaneID, PaneLabel: row.PaneLabel,
@@ -3327,6 +3436,21 @@ func taskFromDB(row dbgen.Task) Task {
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
 		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker,
 		PaneShellIdentity: row.PaneShellIdentity}
+	db.attachPlanLoader(&task)
+	return task
+}
+
+func (db *DB) attachPlanLoader(task *Task) {
+	if task.PlanJSON == "" && task.PlanRevision < 1 {
+		return
+	}
+	if task.PlanJSON != "" {
+		task.planJSONFingerprint = sha256.Sum256([]byte(task.PlanJSON))
+		task.planJSONFingerprintValid = true
+	}
+	task.planLoader = func(data string, revision int) (*taskplan.Plan, error) {
+		return db.loadAdmittedPlan(task.ID, data, revision)
+	}
 }
 
 func (db *DB) UpdateTaskPaneShellIdentity(ctx context.Context, taskID int64, identity string) error {

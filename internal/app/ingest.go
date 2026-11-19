@@ -257,7 +257,7 @@ func (s *Service) ingestProjects(ctx context.Context, db *store.DB, event plugin
 			if err != nil {
 				return nil, false, err
 			}
-			tasks, err := db.Tasks(ctx, project.ID, true)
+			tasks, err := db.SpawningLaunchTasks(ctx, project.ID)
 			if err != nil {
 				return nil, false, err
 			}
@@ -694,32 +694,36 @@ func (s *Service) deliverQueuedMessagesWithConfig(ctx context.Context, db *store
 	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
 		return err
 	}
-	tasks, err := db.Tasks(ctx, project.ID, false)
+	taskIDs, err := db.QueuedMessageTaskIDs(ctx, project.ID)
 	if err != nil {
 		return err
 	}
-	for _, task := range tasks {
-		if (task.State == store.StateDone && task.Type != "change") || task.State == store.StateFailed || task.State == store.StateLost {
-			continue
-		}
-		active, err := db.HasDeliveryInProgress(ctx, task.ID, currentTime()-deliveryClaimTimeout.Milliseconds())
+	for _, taskID := range taskIDs {
+		active, err := db.HasDeliveryInProgress(ctx, taskID, currentTime()-deliveryClaimTimeout.Milliseconds())
 		if err != nil {
 			return err
 		}
 		if active {
 			continue
 		}
-		if relaunching, err := relaunchInProgress(ctx, db, task.ID); err != nil {
+		if relaunching, err := relaunchInProgress(ctx, db, taskID); err != nil {
 			return err
 		} else if relaunching {
 			continue
 		}
-		message, err := db.OldestQueuedMessage(ctx, task.ID)
+		message, err := db.OldestQueuedMessage(ctx, taskID)
 		if err == store.ErrNotFound {
 			continue
 		}
 		if err != nil {
 			return err
+		}
+		task, err := db.TaskByID(ctx, project.ID, taskID)
+		if err != nil {
+			return err
+		}
+		if (task.State == store.StateDone && task.Type != "change") || task.State == store.StateFailed || task.State == store.StateLost {
+			continue
 		}
 		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
 		if !found {
