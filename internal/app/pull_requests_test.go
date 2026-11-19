@@ -375,6 +375,81 @@ func TestPRMergeIgnoresLegacyFailingGateAndOpensPR(t *testing.T) {
 	}
 }
 
+func TestGreenhouseMergeRefusesStaleTarget(t *testing.T) {
+	fixture := newPRMergeFixture(t, "greenhouse", store.StateDone)
+	ctx := context.Background()
+	url := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.AddSignal(ctx, fixture.task.ID, "done", "Greenhouse pipeline passed", map[string]any{
+		"greenhouse_run_id": "run-1", "greenhouse_pending_head": fixture.headSHA, "pr_url": url,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	fixture.requireCurrentTarget(t)
+	targetTip := fixture.advanceTarget(t, false, true)
+
+	code, output, stderr := fixture.run("merge", "t1")
+	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) {
+		t.Fatalf("stale Greenhouse PR did not refuse before merge: exit=%d output=%s error=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateDone || task.GatedSHA != "" {
+		t.Fatalf("stale Greenhouse PR acquired merge evidence: task=%#v err=%v", task, err)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil || strings.Contains(string(log), "pr merge") {
+		t.Fatalf("stale Greenhouse PR reached forge merge: %q, %v", log, err)
+	}
+}
+
+func TestGreenhouseMergeUsesPullRequestLifecycle(t *testing.T) {
+	fixture := newPRMergeFixture(t, "greenhouse", store.StateDone)
+	ctx := context.Background()
+	url := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.AddSignal(ctx, fixture.task.ID, "done", "Greenhouse pipeline passed", map[string]any{
+		"greenhouse_run_id": "run-1", "greenhouse_pending_head": fixture.headSHA, "pr_url": url,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "Greenhouse PR ready"); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	fixture.setGHHead(t, fixture.headSHA)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	observation := store.PRObservation{
+		ProjectID: fixture.project.ID, TaskID: fixture.task.ID, PRURL: url,
+		HeadSHA: fixture.headSHA, State: "OPEN", Checks: marshalJSON(checkSnapshot{State: "SUCCESS"}),
+		Review: "APPROVED", Mergeable: "MERGEABLE",
+	}
+	if _, err := fixture.db.RecordPRObservation(ctx, observation, store.PRObservationEffect{}, fixture.task); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "User approved the Greenhouse PR")
+	if code != 0 {
+		t.Fatalf("Greenhouse PR merge exit=%d output=%s error=%s", code, output, stderr)
+	}
+	log, err := os.ReadFile(fixture.ghLog)
+	if err != nil || !strings.Contains(string(log), "pr merge") || !strings.Contains(string(log), "--match-head-commit "+fixture.headSHA) {
+		t.Fatalf("Greenhouse Task did not use forge merge pinned to gated head: %q, %v", log, err)
+	}
+	if intent, err := fixture.db.IntentByTask(ctx, fixture.task.ID); err == nil {
+		t.Fatalf("Greenhouse PR merge left its merge intent active: %+v", intent)
+	} else if !store.IsNotFound(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestPRMergeUsesPRTitleInsteadOfItsSingleCommitMessage(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	if err := fixture.db.SetTaskPRTitle(context.Background(), fixture.task.ID, "fix: E2E PR title"); err != nil {

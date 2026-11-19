@@ -152,7 +152,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 		// Legacy completions without a Worker-reported PR may reopen a
 		// closed PR at Merge. Worker-reported URLs must never be silently
 		// replaced by a PR that the Worker did not validate.
-		if task.MergeMode == "pr" && task.PRURL != "" {
+		if deliveredByPullRequest(task.MergeMode) && task.PRURL != "" {
 			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
 			if previousErr != nil && !store.IsNotFound(previousErr) {
 				return previousErr

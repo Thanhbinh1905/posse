@@ -284,12 +284,8 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 	return err
 }
 
-// requirePRTargetFresh enforces ADR 0019's current-target rule when
-// defaults.require_current_target is on. When it is off, a behind PR may
-// merge; the forge's mergeability, required by requireGreenObservation,
-// still refuses a conflicting head.
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member, mergeMode, headSHA string) error {
-	if mergeMode != "pr" || !cfg.Defaults.RequireCurrentTarget {
+	if !deliveredByPullRequest(mergeMode) || !cfg.Defaults.RequireCurrentTarget {
 		return nil
 	}
 	targetBranch := taskTargetBranch(project, task)
