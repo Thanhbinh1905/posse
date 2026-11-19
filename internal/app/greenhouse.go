@@ -198,11 +198,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return false
 	}}
 	hostID := project.Name + "/" + taskIDString(task.Seq) + "/" + member.name
-	requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
-	if err != nil {
-		return err
-	}
-	minimumGrant := nextGreenhouseLedgerGrant(requests, task.ID, member.name, hostID)
 	if err := os.MkdirAll(roundDir, 0o700); err != nil {
 		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
 			return recordErr
@@ -210,7 +205,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	round := greenhouse.Round{
-		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID, MinimumGrantNumber: minimumGrant,
+		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID, MinimumGrantNumber: 1,
 		Intent: greenhouseIntent(task, plan), Target: target,
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
@@ -246,6 +241,12 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			}
 			return err
 		}
+		requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
+		if err != nil {
+			_ = releaseParallelReviewLock(parallelLock)
+			return err
+		}
+		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, hostID)
 		ownerHead, ownerStarted := parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
 		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: ownerHead, RequestedAt: ownerStarted}); err != nil {
 			_ = releaseParallelReviewLock(parallelLock)
