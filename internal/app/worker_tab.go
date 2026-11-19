@@ -19,27 +19,20 @@ type openedTab struct {
 
 func leadWorkspaceLabel(project store.Project) string { return "Lead:" + project.Name }
 
-// Recorded ids are accepted only when the Lead pane or workspace label still
-// identifies the workspace. Herdr can reuse ids after restart.
 func leadWorkspace(snapshot herdr.Snapshot, project store.Project) (string, bool) {
-	if project.LeadLabel != "" {
-		for _, pane := range snapshot.Panes {
-			if pane.Label == project.LeadLabel {
-				return pane.WorkspaceID, true
-			}
-		}
-	}
 	if project.HerdrWorkspaceID == "" {
 		return "", false
 	}
 	for _, pane := range snapshot.Panes {
-		if pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID && (pane.Label == "" || pane.Label == project.LeadLabel) {
-			return pane.WorkspaceID, true
+		if pane.WorkspaceID == project.HerdrWorkspaceID {
+			return project.HerdrWorkspaceID, true
 		}
 	}
-	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID == project.HerdrWorkspaceID && workspace.Label == leadWorkspaceLabel(project) {
-			return workspace.WorkspaceID, true
+	if project.LeadPaneID == "" {
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == project.HerdrWorkspaceID {
+				return project.HerdrWorkspaceID, true
+			}
 		}
 	}
 	return "", false
@@ -49,7 +42,7 @@ func sandboxOccupied(holder string) error {
 	return axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox: "+holder, false, "Inspect the Sandbox's open panes before retrying")
 }
 
-func (s *Service) openWorkerTab(ctx context.Context, home string, project store.Project, task store.Task, path, displayAgent string) (openedTab, error) {
+func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, path, displayAgent string) (openedTab, error) {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return openedTab{}, err
@@ -143,6 +136,9 @@ func (s *Service) openWorkerTab(ctx context.Context, home string, project store.
 		s.closeUnlabeledWorker(ctx, project, task, opened)
 		return openedTab{}, err
 	}
+	if db != nil && !project.IsWorkspace() {
+		s.placeWorkerWorkspace(ctx, db, home, project.ID, task.ID, project.HerdrWorkspaceID, opened.WorkspaceID)
+	}
 	return opened, nil
 }
 
@@ -183,8 +179,8 @@ func (s *Service) paneKeepsDetectedAgent(ctx context.Context, paneID string) boo
 // replaceWorkerPane moves a Task whose stopped agent left a detected record
 // into a fresh pane. The old pane is closed only while its shell is still the
 // foreground.
-func (s *Service) replaceWorkerPane(ctx context.Context, home string, project store.Project, task store.Task, old herdr.Pane, kind string) (herdr.Pane, error) {
-	opened, err := s.openWorkerTab(ctx, home, project, task, task.WorktreePath, kind)
+func (s *Service) replaceWorkerPane(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, old herdr.Pane, kind string) (herdr.Pane, error) {
+	opened, err := s.openWorkerTab(ctx, db, home, project, task, task.WorktreePath, kind)
 	if err != nil {
 		return herdr.Pane{}, err
 	}
