@@ -289,18 +289,46 @@ func TestOpenWorkerTabReusesTheTaskChildWorkspaceForRelaunch(t *testing.T) {
 	}
 }
 
-func TestOpenWorkerTabKeepsWorkspaceProjectWorkersInLeadTabs(t *testing.T) {
+func TestOpenWorkerTabOpensWorkspaceProjectWorkerInSubworkspace(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
 	project.Kind = store.ProjectKindWorkspace
-	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5"}}`)
+	adapter.snapshot.Panes[1].CWD = t.TempDir()
+	adapter.snapshot.Panes[2].CWD = t.TempDir()
+	adapter.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
 	task.ShortName = "workspace-worker"
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
-	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
+	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t1", PaneID: "w2:p1"}) {
 		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
 	}
-	if adapter.CallCount("tab.create") != 1 || adapter.CallCount("worktree.open") != 0 {
+	if adapter.CallCount("workspace.create") != 1 || adapter.CallCount("tab.create") != 0 || adapter.CallCount("worktree.open") != 0 {
 		t.Fatalf("Workspace Project used the wrong Herdr operation: %#v", adapter.Calls)
+	}
+	for _, call := range adapter.Calls {
+		if call.Method == "workspace.create" && (call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "workspace-worker-t1" || call.Params["focus"] != false || call.Params["no_focus"] != true || !reflect.DeepEqual(call.Params["env"], map[string]string{workerHomeEnv: filepath.Clean(home)})) {
+			t.Fatalf("workspace.create params = %#v", call.Params)
+		}
+	}
+}
+
+func TestOpenWorkerTabReusesWorkspaceProjectSubworkspaceForRelaunch(t *testing.T) {
+	project, task, adapter := workerTabSession(t)
+	project.Kind = store.ProjectKindWorkspace
+	task.HerdrWorkspaceID = "w2"
+	task.PaneID = "w2:p1"
+	task.PaneLabel = "posse:shop:t1"
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "w2", Root: task.WorktreePath})
+	adapter.snapshot.Panes[1].CWD = t.TempDir()
+	adapter.snapshot.Panes[2].CWD = t.TempDir()
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", CWD: task.WorktreePath})
+	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w2:t2"},"root_pane":{"pane_id":"w2:p2","tab_id":"w2:t2"}}`)
+	home := t.TempDir()
+	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
+	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t2", PaneID: "w2:p2"}) {
+		t.Fatalf("openWorkerTab for Workspace Project relaunch = %#v, %v", opened, err)
+	}
+	if adapter.CallCount("tab.create") != 1 || adapter.CallCount("workspace.create") != 0 {
+		t.Fatalf("relaunch did not reuse the Task sub-workspace: %#v", adapter.Calls)
 	}
 }
 

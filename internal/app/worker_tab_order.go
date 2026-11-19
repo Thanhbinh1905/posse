@@ -65,10 +65,30 @@ func (s *Service) placeWorkerWorkspace(ctx context.Context, db *store.DB, home s
 	}
 	owned := map[string]bool{workerID: true}
 	workspacesByPath := make(map[string][]string)
+	addWorkspacePath := func(path, workspaceID string) {
+		path = filepath.Clean(path)
+		for _, existing := range workspacesByPath[path] {
+			if existing == workspaceID {
+				return
+			}
+		}
+		workspacesByPath[path] = append(workspacesByPath[path], workspaceID)
+	}
 	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID != "" && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath != "" {
-			path := filepath.Clean(workspace.Worktree.CheckoutPath)
-			workspacesByPath[path] = append(workspacesByPath[path], workspace.WorkspaceID)
+		if workspace.WorkspaceID == "" {
+			continue
+		}
+		path := workspace.Root
+		if workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath != "" {
+			path = workspace.Worktree.CheckoutPath
+		}
+		if path != "" {
+			addWorkspacePath(path, workspace.WorkspaceID)
+		}
+		for _, pane := range snapshot.Panes {
+			if pane.WorkspaceID == workspace.WorkspaceID && pane.CWD != "" {
+				addWorkspacePath(pane.CWD, workspace.WorkspaceID)
+			}
 		}
 	}
 	for _, task := range tasks {
