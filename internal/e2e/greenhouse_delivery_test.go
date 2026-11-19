@@ -57,7 +57,6 @@ func TestGreenhouseFullPipelineDeliveryGatesRepairedHead(t *testing.T) {
 	var mu sync.Mutex
 	prBranch := ""
 	prHead := ""
-	checksGreen := true
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		mu.Lock()
@@ -89,11 +88,7 @@ func TestGreenhouseFullPipelineDeliveryGatesRepairedHead(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"number": 17, "head": map[string]string{"sha": prHead}})
 		case strings.HasSuffix(r.URL.Path, "/check-runs"):
 			sha := strings.Split(r.URL.Path, "/")
-			conclusion := "success"
-			if !checksGreen {
-				conclusion = "failure"
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "check_runs": []map[string]string{{"name": "fixture-ci", "status": "completed", "conclusion": conclusion, "head_sha": sha[len(sha)-2]}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "check_runs": []map[string]string{{"name": "fixture-ci", "status": "completed", "conclusion": "success", "head_sha": sha[len(sha)-2]}}})
 		default:
 			t.Errorf("unexpected forge request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
