@@ -91,6 +91,56 @@ func TestTeardownStopsTaskGreenhouseReviewOwner(t *testing.T) {
 	}
 }
 
+func TestGreenhouseNewHeadAdvancesPastEveryLedgerGrant(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("review_provider = \"greenhouse\"\nreview_parallel = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse ledger grant recovery", "greenhouse-ledger-retry")
+	headA := c.authorCommit(t)
+	task := f.task(t, "t1")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := store.GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: headA, Provider: store.GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 200, Outcome: "failed", Grant: "shop/t1/shop/r2"}
+	if err := db.RecordGreenhouseReviewRequest(context.Background(), failed); err != nil {
+		t.Fatal(err)
+	}
+	pass := store.Verdict{TaskID: task.ID, Repository: "shop", Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: headA, Target: headA, ReviewBase: headA, Outcome: "clean", Mode: "parallel"}
+	if recorded, err := db.RecordGreenhouseVerdict(context.Background(), pass, func(context.Context) (string, error) { return headA, nil }); err != nil || !recorded {
+		t.Fatalf("record earlier passing Verdict = %v, %v", recorded, err)
+	}
+	if err := db.RecordGreenhouseReviewRequest(context.Background(), store.GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: headA, Provider: store.GreenhouseReviewProvider, RequestedAt: 90, SettledAt: 150, Outcome: "verdict", Grant: pass.Grant}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	headB := c.authorCommit(t)
+	result := c.review(t)
+	if result["outcome"] != "settled" || result["head"] != headB || result["verdict"] != "clean" || result["recorded"] != true {
+		t.Fatalf("new-head review result = %v; want a recorded clean Verdict for %s", result, headB)
+	}
+	if result["grant"] != "shop/t1/shop/r3" {
+		t.Fatalf("new-head review grant = %v; want r3 after ledger grants r1 and r2", result["grant"])
+	}
+	requestsDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := requestsDB.GreenhouseReviewRequests(context.Background(), task.ProjectID)
+	_ = requestsDB.Close()
+	if err != nil || len(requests) != 3 || requests[0].Grant != "shop/t1/shop/r1" || requests[1].Grant != "shop/t1/shop/r2" || requests[2].Grant != "shop/t1/shop/r3" || requests[2].Outcome != "verdict" {
+		t.Fatalf("Greenhouse request ledger = %+v, %v; want failed r2, passing r1 and new-head Verdict r3", requests, err)
+	}
+}
+
 func TestGreenhouseParallelInconclusiveRunEndsOwnerAndAdvancesGrant(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")
