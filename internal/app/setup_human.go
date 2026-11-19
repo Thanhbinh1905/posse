@@ -136,7 +136,11 @@ func humanSetupGroups(plan []map[string]any, applied bool) []string {
 				}
 				lines = append(lines, line)
 			} else {
-				lines = append(lines, humanPending+"  "+label+": will be added")
+				pending := "will be added"
+				if group.note != "" {
+					pending = group.note
+				}
+				lines = append(lines, humanPending+"  "+label+": "+pending)
 			}
 		default:
 			note := group.note
@@ -165,6 +169,8 @@ func humanRowState(row map[string]any, applied bool) (key string, state int, not
 	case "sidebar_cleanup":
 		key = "sidebar"
 		switch action {
+		case "remove":
+			return key, humanStateChanged, "will be removed", true
 		case "removed":
 			return key, humanStateChanged, "Posse layout removed", true
 		case "custom":

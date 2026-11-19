@@ -8,7 +8,7 @@ It amended [ADR 0009](0009-workers-open-as-tabs-of-the-lead-workspace.md) and su
 
 ## Decision
 
-Every new Worker, in Repository and Workspace Projects, opens with `tab.create` as an unfocused tab in its Lead's Herdr workspace. Its tab label is the Worker name, its pane receives `POSSE_WORKER_HOME`, and its `posse_row` token uses the existing tree label convention. The Remuda Mount, Git worktree lock, Task identity, pane ownership and tab-scoped Teardown remain unchanged. Posse no longer calls `worktree.open` or `workspace.move_block` to place Workers.
+Every new Worker, in Repository and Workspace Projects, opens with `tab.create` as an unfocused tab in its Lead's Herdr workspace. Its tab label is the Worker name and its pane receives `POSSE_WORKER_HOME`. The Remuda Mount, Git worktree lock, Task identity, pane ownership and tab-scoped Teardown remain unchanged. Posse no longer calls `worktree.open` or `workspace.move_block` to place Workers.
 
 The Lead workspace is the Project orchestrator. This leaves room for a future top-level orchestrator without assuming that Project Leads are the only orchestrators in a Herdr session.
 

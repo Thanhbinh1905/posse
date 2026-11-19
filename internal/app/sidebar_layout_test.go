@@ -97,11 +97,45 @@ func TestRemoveSidebarLayoutLeavesTablesExtendingThePosseSnippet(t *testing.T) {
 			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			result, err := removeSidebarLayout(path)
+			result, err := removeSidebarLayout(path, true)
 			data, _ := os.ReadFile(path)
 			if err != nil || result != "custom" || string(data) != original {
 				t.Fatalf("result = %q, %v, config = %q", result, err, data)
 			}
 		})
+	}
+}
+
+func TestSetupCheckReportsPendingSidebarRemovalAndCustomNote(t *testing.T) {
+	service, _, userHome := humanSetupFixture(t)
+	configHome := filepath.Join(userHome, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	path := filepath.Join(configHome, "herdr", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(sidebarLayoutSnippet), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"setup", "--check", "--exit-code", "--binary", "/usr/bin/true"}
+	code, output := runCLI(t, service, args...)
+	if code != setupPendingExitCode || !strings.Contains(output, "sidebar_cleanup") || !strings.Contains(output, "remove") {
+		t.Fatalf("check with Posse snippet = %d %s", code, output)
+	}
+	if data, _ := os.ReadFile(path); string(data) != sidebarLayoutSnippet {
+		t.Fatalf("check rewrote the config: %q", data)
+	}
+	human, humanCode := runHumanSetup(t, service, "--check", "--exit-code")
+	if humanCode != setupPendingExitCode || !strings.Contains(human, "will be removed") {
+		t.Fatalf("human check = %d %s", humanCode, human)
+	}
+
+	custom := "[ui.sidebar.agents]\nrows = [[\"tab\"]]\n"
+	if err := os.WriteFile(path, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, output = runCLI(t, service, "setup", "--binary", "/usr/bin/true")
+	if !strings.Contains(output, sidebarCustomNote) {
+		t.Fatalf("structured setup omitted the custom-rows note: %s", output)
 	}
 }

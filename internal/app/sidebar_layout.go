@@ -9,6 +9,8 @@ import (
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 )
 
+const sidebarCustomNote = "custom [ui.sidebar.agents] kept; Posse no longer uses it"
+
 func herdrConfigPath() (string, error) {
 	root := os.Getenv("XDG_CONFIG_HOME")
 	if root == "" {
@@ -35,7 +37,7 @@ rows = [
 ]
 `
 
-func removeSidebarLayout(path string) (string, error) {
+func removeSidebarLayout(path string, write bool) (string, error) {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return "", nil
@@ -53,6 +55,9 @@ func removeSidebarLayout(path string) (string, error) {
 	text := string(data)
 	for _, snippet := range []string{sidebarLayoutSnippet, legacySidebarLayoutSnippet} {
 		if index := wholeSnippetIndex(text, snippet); index >= 0 {
+			if !write {
+				return "remove", nil
+			}
 			updated := text[:index] + text[index+len(snippet):]
 			if err := atomicfile.Write(path, []byte(updated), info.Mode().Perm()); err != nil {
 				return "", err

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -161,10 +162,13 @@ func (s *Service) setup(ctx *axi.Context, args []string) error {
 		path, pathErr := herdrConfigPath()
 		if pathErr == nil {
 			var result string
-			result, pathErr = removeSidebarLayout(path)
+			result, pathErr = removeSidebarLayout(path, true)
 			for _, row := range run.plan {
 				if row["step"] == "sidebar_cleanup" {
-					row["action"] = result
+					row["action"] = cmp.Or(result, "none")
+					if result == "custom" {
+						row["note"] = sidebarCustomNote
+					}
 				}
 			}
 			if result == "removed" {
@@ -242,7 +246,16 @@ func (s *Service) runSetup(ctx context.Context, home, manifestPath string, manif
 	if pathErr != nil {
 		return run, pathErr
 	}
-	run.plan = append(run.plan, map[string]any{"step": "sidebar_cleanup", "target": path, "action": "none"})
+	cleanup := map[string]any{"step": "sidebar_cleanup", "target": path, "action": "none"}
+	switch state, stateErr := removeSidebarLayout(path, false); {
+	case stateErr != nil:
+		cleanup["action"], cleanup["error"] = "manual", stateErr.Error()
+	case state == "remove":
+		cleanup["action"] = "remove"
+	case state == "custom":
+		cleanup["action"], cleanup["note"] = "custom", sidebarCustomNote
+	}
+	run.plan = append(run.plan, cleanup)
 	if skillsRow, ok := recommendedSkillsOfferRow(home, run.plan, noRecommendedSkills); ok {
 		run.plan = append(run.plan, skillsRow)
 	}
