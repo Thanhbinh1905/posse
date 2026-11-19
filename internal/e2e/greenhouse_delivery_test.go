@@ -245,12 +245,16 @@ esac
 	mergeEnv := setEnv(f.leadEnv, "POSSE_TEST_ROOT", f.root)
 	mergeEnv = setEnv(mergeEnv, "POSSE_TEST_REMOTE", remote)
 	mergeEnv = setEnv(mergeEnv, "PATH", filepath.Dir(pi)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	turn := greenhouseTaskTurn(t, f, task.ID)
+	if output, err := runBinaryAllowFailure(f.binary, task.WorktreePath, workerEnv, "signal", "done", "Greenhouse run passed", "--greenhouse-run", runID, "--turn", turn); err == nil || !strings.Contains(output, "git push origin HEAD:refs/heads/<task-branch>") {
+		t.Fatalf("missing Task branch did not explain the required handback push: err=%v output=%s", err, output)
+	}
 	gitTest(t, greenhouseEnv, task.WorktreePath, "push", "origin", branch)
 	if pushed := strings.TrimSpace(gitTest(t, f.env, remote, "--git-dir", remote, "rev-parse", "refs/heads/"+branch)); pushed != actualHead {
 		t.Fatalf("published Task branch head=%s, want repaired candidate %s", pushed, actualHead)
 	}
 
-	turn := greenhouseTaskTurn(t, f, task.ID)
+	turn = greenhouseTaskTurn(t, f, task.ID)
 	if output, err := runBinaryAllowFailure(f.binary, task.WorktreePath, workerEnv, "signal", "done", "Greenhouse run passed", "--greenhouse-run", "forged-run-id", "--turn", turn); err == nil {
 		t.Fatalf("Posse accepted a forged Greenhouse run ID: %s", output)
 	}
