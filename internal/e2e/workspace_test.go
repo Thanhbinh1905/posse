@@ -279,12 +279,25 @@ esac
 			workerPane = pane
 		}
 	}
-	if workerPane.PaneID == "" || workerPane.WorkspaceID != leadPane.Workspace.WorkspaceID || task.HerdrWorkspaceID != leadPane.Workspace.WorkspaceID {
-		t.Fatalf("two-member Workspace Worker did not open as a Lead tab: pane=%#v task=%#v lead=%#v", workerPane, task, leadPane)
+	workerWorkspaceID := task.HerdrWorkspaceID
+	if workerPane.PaneID == "" || workerPane.WorkspaceID != workerWorkspaceID || workerWorkspaceID == leadPane.Workspace.WorkspaceID || workerPane.CWD != task.WorktreePath {
+		t.Fatalf("two-member Workspace Worker did not open in its Sandbox-rooted sub-workspace: pane=%#v task=%#v lead=%#v", workerPane, task, leadPane)
+	}
+	leadWorkspaceIndex, workerWorkspaceIndex := -1, -1
+	for index, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == leadPane.Workspace.WorkspaceID {
+			leadWorkspaceIndex = index
+		}
+		if workspace.WorkspaceID == workerWorkspaceID {
+			workerWorkspaceIndex = index
+		}
+	}
+	if leadWorkspaceIndex < 0 || workerWorkspaceIndex != leadWorkspaceIndex+1 {
+		t.Fatalf("Workspace Worker sub-workspace is not immediately after its Lead: workspaces=%#v lead=%q worker=%q", snapshot.Workspaces, leadPane.Workspace.WorkspaceID, workerWorkspaceID)
 	}
 	workerTabFound := false
 	for _, tab := range snapshot.Tabs {
-		if tab.TabID == workerPane.TabID && tab.WorkspaceID == leadPane.Workspace.WorkspaceID && tab.Label == task.ShortName+"-t"+strconv.Itoa(task.Seq) {
+		if tab.TabID == workerPane.TabID && tab.WorkspaceID == workerWorkspaceID && tab.Label == task.ShortName+"-t"+strconv.Itoa(task.Seq) {
 			workerTabFound = true
 		}
 	}
@@ -330,6 +343,15 @@ esac
 	}
 	if output := runPosse(t, posseBinary, workspace, leadEnv, "merge", "t1", "--execute", "--user-approved", "merge both"); !strings.Contains(output, "state: merged") || !strings.Contains(output, "teardown: torn-down") {
 		t.Fatalf("merge --execute: %s", output)
+	}
+	snapshot, err = client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == workerWorkspaceID {
+			t.Fatalf("Workspace Worker teardown left its sub-workspace open: %#v", workspace)
+		}
 	}
 	for _, member := range []string{"backend", "worker"} {
 		subject := gitTest(t, env, filepath.Join(workspace, member), "log", "-1", "--format=%s", "refs/heads/master")
