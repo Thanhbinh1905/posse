@@ -28,6 +28,23 @@ func request(taskType string) taskplan.Request {
 	return r
 }
 
+func TestGreenhouseDeliveryCanBeFrozenInAPlan(t *testing.T) {
+	r := request("change")
+	r.Delivery = "greenhouse"
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatalf("resolve Greenhouse delivery: %v", err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(encoded)
+	if err != nil || decoded.Delivery != "greenhouse" {
+		t.Fatalf("Greenhouse delivery did not survive plan round-trip: %#v, %v", decoded, err)
+	}
+}
+
 func TestReviewProvidersAreFrozenPerPlanMember(t *testing.T) {
 	r := request("change")
 	r.ReviewProvider = "greenhouse"

@@ -16,7 +16,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 8
+const Version = 9
+
+const planVersionGreenhouseDelivery = 9
 
 // planVersionRuntimeWorkflow marks the first plan version that binds a frozen
 // workflow to its run and stage identity.
@@ -237,11 +239,25 @@ type Request struct {
 	TaskBudgetTokens    int64
 }
 
+func workspaceDeliveryMode(mode string) string {
+	if mode == "greenhouse" {
+		return "pr"
+	}
+	return mode
+}
+
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
 func Resolve(r Request) (Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(r.Brief.Bytes))
 	if err != nil {
 		return Plan{}, err
+	}
+	if r.Execution.Scope == "workspace" {
+		r.Delivery = workspaceDeliveryMode(r.Delivery)
+		brief.MergeMode = workspaceDeliveryMode(brief.MergeMode)
+		for i := range r.Execution.Members {
+			r.Execution.Members[i].Delivery = workspaceDeliveryMode(r.Execution.Members[i].Delivery)
+		}
 	}
 	var validationLoops *ValidationLoops
 	if brief.Type == "change" && r.ValidationLoops != nil {
@@ -415,7 +431,7 @@ func (p Plan) Validate() error {
 		return invalid("unsupported review provider")
 	}
 	storedNoMistakes := p.Version < planVersionWithoutNoMistakes && p.Delivery == config.NoMistakes
-	if p.Delivery != "local" && p.Delivery != "pr" && !storedNoMistakes {
+	if p.Delivery != "local" && p.Delivery != "pr" && !(p.Version >= planVersionGreenhouseDelivery && p.Delivery == "greenhouse") && !storedNoMistakes {
 		return invalid("unsupported delivery")
 	}
 	if p.Execution.Scope == "workspace" && storedNoMistakes {

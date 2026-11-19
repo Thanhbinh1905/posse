@@ -89,7 +89,7 @@ func (s *Service) taskAddMember(ctx *axi.Context, args []string) error {
 	root := filepath.Join(project.Root, repo.Path)
 	remote := originHost(ctx.Context, root)
 	member := taskMember{repoTarget: repoTarget{Name: repo.Name, Root: root, DefaultBranch: repo.DefaultBranch}, Path: repo.Path}
-	member.MergeMode = memberMergeMode(cfg, repo.Name, remote)
+	member.MergeMode = workspaceMemberMergeMode(cfg, repo.Name, remote)
 	brief, err := admittedChangeBrief(plan)
 	if err != nil {
 		return err

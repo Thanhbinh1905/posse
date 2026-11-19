@@ -2254,6 +2254,14 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 				return "", err
 			}
 		}
+		if values, ok := data.(map[string]any); ok {
+			runID, _ := values["greenhouse_run_id"].(string)
+			if head, hasHead := values["greenhouse_pending_head"].(string); runID != "" && hasHead && head != "" {
+				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=? AND state='done'`, head, task.ID); err != nil {
+					return "", err
+				}
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err

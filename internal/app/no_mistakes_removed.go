@@ -39,5 +39,5 @@ func noMistakesRemoved(task store.Task) error {
 // request. Tasks admitted under the removed no-mistakes mode published one too,
 // so cleanup of their branches and Sandboxes follows pull request rules.
 func deliveredByPullRequest(mode string) bool {
-	return mode == "pr" || mode == config.NoMistakes
+	return mode == "greenhouse" || mode == "pr" || mode == config.NoMistakes
 }

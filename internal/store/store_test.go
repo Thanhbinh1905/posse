@@ -1539,6 +1539,52 @@ func TestUnmergedTeardownRequiresRecordedUserApproval(t *testing.T) {
 	}
 }
 
+func TestGreenhouseRunSignalAtomicallyRecordsPRAndGatedHead(t *testing.T) {
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	project, err := db.CreateProject(ctx, "shop", "/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Greenhouse", MergeMode: "greenhouse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, id, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := map[string]any{"greenhouse_run_id": "run-1", "greenhouse_pending_head": "abc", "pr_url": "https://github.com/acme/shop/pull/1"}
+	if state, err := db.RecordWorkerSignal(ctx, task, "done", "Pipeline passed", data, "task_done"); err != nil || state != StateDone {
+		t.Fatalf("done Signal = %q, %v", state, err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.GatedSHA != "abc" || updated.PRURL != "https://github.com/acme/shop/pull/1" {
+		t.Fatalf("Greenhouse delivery record = gated %q PR %q, err=%v", updated.GatedSHA, updated.PRURL, err)
+	}
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: id, Origin: "merge-ready:test", Kind: "merge_ready", Question: "Merge this PR?", Options: []string{"merge", "wait"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,head_sha,state,checks,review,mergeable,merge_commit,observed_at,confirmed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, project.ID, id, updated.PRURL, updated.GatedSHA, "OPEN", `{"state":"FAILURE"}`, "APPROVED", "MERGEABLE", "", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ObsoleteResolvedDecisions(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn, err := db.Decision(ctx, project.ID, decision.ID)
+	if err != nil || withdrawn.ObsoleteAt == 0 {
+		t.Fatalf("red Greenhouse PR left merge Decision active: %#v, %v", withdrawn, err)
+	}
+}
+
 func TestSignalFromStalledReturnsToWorkingBeforeApplyingTheSignal(t *testing.T) {
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
 	if err != nil {
