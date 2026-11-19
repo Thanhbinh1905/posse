@@ -171,6 +171,7 @@ func TestNoticeNeedsUserUsesLowkeyReportingKinds(t *testing.T) {
 		{kind: "pr_merged", wantUserAction: true},
 		{kind: "merge_ready", mergeAutonomy: "ask", wantUserAction: true},
 		{kind: "merge_ready", mergeAutonomy: "auto", wantUserAction: false},
+		{kind: "merge_readiness_withdrawn", wantUserAction: true},
 		{kind: "pr_opened", wantUserAction: false},
 		{kind: "quota_fallback", wantUserAction: false},
 		{kind: "pr_watch_failing", dataJSON: `{"consecutive_failures":1}`, wantUserAction: false},

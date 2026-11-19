@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -281,6 +282,12 @@ func requireSelectedReviewAt(ctx context.Context, db *store.DB, project store.Pr
 // forge merge. After it, mergeCommit names the merge, and full-pipeline
 // evidence is checked against the target tip that merge landed on.
 func requireSelectedReviewForMerge(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, mergeCommit string) error {
+	if task.MergeMode == "greenhouse" {
+		if err := requireGreenhouseDeliverySignal(ctx, db, task); err != nil {
+			return err
+		}
+		return requireNoBlockingReviewFinding(ctx, db, task)
+	}
 	policies, err := selectedReviewPolicies(ctx, db, project, cfg, task)
 	if err != nil {
 		return err
@@ -319,6 +326,30 @@ func requireSelectedReviewForMerge(ctx context.Context, db *store.DB, project st
 		}
 	}
 	return requireNoBlockingReviewFinding(ctx, db, task)
+}
+
+func requireGreenhouseDeliverySignal(ctx context.Context, db *store.DB, task store.Task) error {
+	if task.GatedSHA == "" || task.PRURL == "" {
+		return axi.Failure("greenhouse_run_missing", "Greenhouse delivery has no verified run bound to its gated PR head", false)
+	}
+	signals, err := db.TaskSignals(ctx, task.ID, 20)
+	if err != nil {
+		return err
+	}
+	for _, signal := range signals {
+		if signal.Verb != "done" {
+			continue
+		}
+		var data map[string]any
+		if json.Unmarshal([]byte(signal.DataJSON), &data) == nil {
+			runID, _ := data["greenhouse_run_id"].(string)
+			if runID != "" && data["greenhouse_pending_head"] == task.GatedSHA && data["pr_url"] == task.PRURL {
+				return nil
+			}
+		}
+		break
+	}
+	return axi.Failure("greenhouse_run_missing", "the latest done Signal does not bind a verified Greenhouse run to the gated PR head", false)
 }
 
 // requireNoBlockingReviewFinding applies under every review policy: a known

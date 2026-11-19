@@ -1556,7 +1556,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			filtered = append(filtered, args[i])
 		}
 	}
-	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "head": {}, "verdict": {}, "turn": {}, "no-change": {boolean: true}})
+	parsed, err := parseArgs("signal", filtered, map[string]flagSpec{"report": {}, "findings": {}, "resolutions": {}, "pr": {}, "head": {}, "greenhouse-run": {}, "verdict": {}, "turn": {}, "no-change": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -1700,6 +1700,10 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		return axi.Failure("in_place_removed", "in-place execution was removed; legacy Tasks are readable and can be torn down", false)
 	}
 	greenhouseFullPipeline := greenhouseSelected && fullPipelineSelected(task, "")
+	greenhouseDelivery := task.Type == "change" && task.MergeMode == "greenhouse" && !project.IsWorkspace()
+	if parsed.Flags["greenhouse-run"] != "" && (verb != "done" || !greenhouseDelivery) {
+		return axi.Failure("signal_invalid", "--greenhouse-run is only valid on a Greenhouse delivery done Signal", false)
+	}
 	greenhouseWorkspaceFullPipeline := false
 	greenhouseWorkspacePrepublication := false
 	if project.IsWorkspace() {
@@ -1709,10 +1713,35 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 		greenhouseFullPipeline = false
 	}
-	if parsed.Flags["head"] != "" && (verb != "done" || !greenhouseFullPipeline) {
+	if parsed.Flags["head"] != "" && (verb != "done" || !greenhouseFullPipeline || greenhouseDelivery) {
 		return axi.Failure("signal_invalid", "--head is only valid on a Greenhouse full-pipeline done Signal", false)
 	}
-	if greenhouseFullPipeline && verb == "done" {
+	if greenhouseDelivery && verb == "done" {
+		if parsed.Flags["greenhouse-run"] == "" {
+			return axi.Failure("signal_invalid", "Greenhouse delivery done Signals require --greenhouse-run <id>", false)
+		}
+		head, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		remoteHead, err := remoteBranchHead(ctx.Context, task.WorktreePath, "refs/heads/"+task.Branch)
+		if err != nil {
+			return err
+		}
+		if remoteHead != head {
+			return axi.Failure("signal_invalid", "Greenhouse delivery requires the Task branch on origin to match its current head", false, "Publish the current exact head before signalling done")
+		}
+		delivery, err := inspectGreenhouseDelivery(ctx.Context, task.WorktreePath, parsed.Flags["greenhouse-run"], task.Branch, head)
+		if err != nil {
+			return axi.Failure("greenhouse_run_invalid", err.Error(), false)
+		}
+		if err := verifyGreenhouseDeliveryPR(ctx.Context, project, cfg, task, delivery, head); err != nil {
+			return axi.Failure("greenhouse_run_invalid", err.Error(), false)
+		}
+		data["greenhouse_run_id"] = parsed.Flags["greenhouse-run"]
+		data["greenhouse_pending_head"] = head
+		data["pr_url"] = delivery.Delivery.PRURL
+	} else if greenhouseFullPipeline && verb == "done" {
 		head, err := gitOutput(ctx.Context, task.WorktreePath, "rev-parse", "HEAD")
 		if err != nil {
 			return err
@@ -1821,7 +1850,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			}
 		} else if task.Type == "change" {
 			privateCandidate := false
-			if !project.IsWorkspace() && fullPipelineSelected(task, "") && !greenhouseSelected {
+			if !project.IsWorkspace() && fullPipelineSelected(task, "") && !greenhouseSelected && !greenhouseDelivery {
 				candidate, candidateErr := db.LatestValidationCandidate(ctx.Context, task.ID, "")
 				if candidateErr == nil && candidate.State == store.ValidationCandidateActive {
 					if err := s.ensureCandidateCheckout(ctx.Context, db, home, task, candidate); err != nil {
@@ -1861,7 +1890,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 					return axi.Failure("signal_invalid", err.Error(), false, help)
 				}
 			}
-			if !project.IsWorkspace() && !greenhouseFullPipeline {
+			if !project.IsWorkspace() && !greenhouseFullPipeline && !greenhouseDelivery {
 				if _, err := s.checkedValidationContinuity(ctx.Context, db, project, task); err != nil {
 					return err
 				}
@@ -2062,7 +2091,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		}
 	}
 	noticeKind := map[string]string{"needs-decision": "needs_decision", "failed": "task_failed", "done": "task_done"}[verb]
-	if verb == "done" && task.Type == "change" && greenhouseFullPipeline {
+	if verb == "done" && task.Type == "change" && greenhouseDelivery {
+		data["next_action"] = "Greenhouse run verified for the gated PR head; Posse will watch forge checks and merge readiness"
+	} else if verb == "done" && task.Type == "change" && greenhouseFullPipeline {
 		if _, pending := data["greenhouse_pending_head"]; pending {
 			data["next_action"] = "Greenhouse review requested automatically for the exact Task head; wait for Posse to queue publication"
 		}

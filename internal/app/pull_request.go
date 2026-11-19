@@ -2012,14 +2012,24 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			}
 			addNotice("pr_conflict", summary, map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
+		previousWasReady := hasPrevious && task.GatedSHA != "" && previous.HeadSHA == task.GatedSHA && previousChecks.State == "SUCCESS" && previous.Review != "CHANGES_REQUESTED" && previous.Review != "REVIEW_REQUIRED" && previous.Mergeable == "MERGEABLE"
+		withdrawReadiness := func(reason string) {
+			if previousWasReady {
+				addNotice("merge_readiness_withdrawn", task.Title+": merge readiness withdrawn because "+reason, map[string]any{"url": current.PRURL, "gated_head": task.GatedSHA, "pr_head": current.HeadSHA})
+			}
+		}
 		// A head pushed after the gate, outside `posse publish`, is never merge-ready.
 		if task.GatedSHA != "" && current.HeadSHA != task.GatedSHA {
+			withdrawReadiness("the PR head moved after the gated head")
 			if newHead {
 				addNotice("head_discontinuity", headDiscontinuityPRSummary(project, task, current), map[string]any{"url": current.PRURL, "gated_head": task.GatedSHA, "pr_head": current.HeadSHA})
 			}
 			break
 		}
 		ready := checks.State == "SUCCESS" && current.Review != "CHANGES_REQUESTED" && current.Review != "REVIEW_REQUIRED" && current.Mergeable == "MERGEABLE"
+		if !ready {
+			withdrawReadiness("the PR is no longer green and mergeable")
+		}
 		if ready && !checks.MergeRequested && (task.State == store.StateDone || task.State == store.StateMerging) {
 			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge head "+shortSHA(current.HeadSHA), map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}

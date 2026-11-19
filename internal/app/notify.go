@@ -104,7 +104,7 @@ func noticeNeedsUser(notice store.Notice, mergeAutonomy string) bool {
 	case "needs_decision", "message_delivery_uncertain", "notice_delivery_uncertain", "notice_delivery_delayed", "lead_receiver_missing",
 		"task_failed", "task_lost", "quota_exhausted", "pr_closed",
 		"pr_merged_ungated", "review_policy_violation", "head_discontinuity",
-		"task_done", "pr_merged":
+		"task_done", "pr_merged", "merge_readiness_withdrawn":
 		return true
 	case "pr_watch_failing":
 		var data struct {

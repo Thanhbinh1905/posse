@@ -1633,6 +1633,50 @@ func withValidationBlock(body, head string) string {
 	return strings.TrimRight(body, "\n") + "\n\n" + block + "\n"
 }
 
+func TestGreenhouseMergeReadinessRequiresExactGatedHeadAndGreenCI(t *testing.T) {
+	project := store.Project{ID: 4, Name: "shop"}
+	task := store.Task{ID: 9, Seq: 1, Title: "Delivery", State: store.StateDone, MergeMode: "greenhouse", GatedSHA: "gated"}
+	for name, current := range map[string]store.PRObservation{
+		"green gated head": {PRURL: "https://github.com/acme/shop/pull/1", HeadSHA: "gated", State: "OPEN", Checks: `{"state":"SUCCESS"}`, Review: "APPROVED", Mergeable: "MERGEABLE"},
+		"red gated head":   {PRURL: "https://github.com/acme/shop/pull/1", HeadSHA: "gated", State: "OPEN", Checks: `{"state":"FAILURE"}`, Review: "APPROVED", Mergeable: "MERGEABLE"},
+		"green moved head": {PRURL: "https://github.com/acme/shop/pull/1", HeadSHA: "next", State: "OPEN", Checks: `{"state":"SUCCESS"}`, Review: "APPROVED", Mergeable: "MERGEABLE"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			effect := prObservationEffect(project, task, current, nil, store.PRObservation{}, false)
+			ready := false
+			for _, notice := range effect.Notices {
+				ready = ready || notice.Kind == "merge_ready"
+			}
+			if ready != (name == "green gated head") {
+				t.Fatalf("merge_ready = %v for observation %+v", ready, current)
+			}
+		})
+	}
+}
+
+func TestMergeReadinessWithdrawnWhenGatedPRTurnsRedOrMoves(t *testing.T) {
+	project := store.Project{ID: 4, Name: "shop"}
+	task := store.Task{ID: 9, Seq: 1, Title: "Delivery", State: store.StateDone, MergeMode: "greenhouse", GatedSHA: "gated"}
+	previous := store.PRObservation{HeadSHA: "gated", Checks: `{"state":"SUCCESS"}`, Review: "APPROVED", Mergeable: "MERGEABLE"}
+	for name, current := range map[string]store.PRObservation{
+		"red":   {PRURL: "https://github.com/acme/shop/pull/1", HeadSHA: "gated", State: "OPEN", Checks: `{"state":"FAILURE"}`, Review: "APPROVED", Mergeable: "MERGEABLE"},
+		"moved": {PRURL: "https://github.com/acme/shop/pull/1", HeadSHA: "next", State: "OPEN", Checks: `{"state":"SUCCESS"}`, Review: "APPROVED", Mergeable: "MERGEABLE"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			effect := prObservationEffect(project, task, current, nil, previous, true)
+			count := 0
+			for _, notice := range effect.Notices {
+				if notice.Kind == "merge_readiness_withdrawn" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("merge readiness withdrawal notices = %d, notices=%+v", count, effect.Notices)
+			}
+		})
+	}
+}
+
 func TestPullRequestHeadMismatchHintMatchesCaller(t *testing.T) {
 	publish := strings.Join(pullRequestHeadMismatch(store.Intent{Command: "publish"}, "aaa", "bbb").(*axi.Error).Help, " ")
 	if !strings.Contains(publish, "re-run `posse publish`") || strings.Contains(publish, "posse merge") {
