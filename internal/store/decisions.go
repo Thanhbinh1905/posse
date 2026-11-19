@@ -186,6 +186,25 @@ WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0 AND or
 	return db.PersistProject(ctx, projectID)
 }
 
+// ObsoletePendingMergeReadyDecisions retires unanswered merge-ready choices
+// after review invalidates the Task's readiness.
+func (db *DB) ObsoletePendingMergeReadyDecisions(ctx context.Context, taskID int64, reason string) error {
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=?
+		WHERE task_id=? AND kind='merge_ready' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), reason, taskID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
+}
+
 // ObsoletePendingPRDecision retires a stale observation without changing a
 // User's answer or affecting a different Member's PR.
 func (db *DB) ObsoletePendingPRDecision(ctx context.Context, taskID int64, origin, reason string) error {
