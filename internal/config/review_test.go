@@ -51,6 +51,18 @@ func TestCandidateFileConfigSupportsProjectAndWorkspaceMemberLists(t *testing.T)
 	}
 }
 
+func TestMergeModeDefaultsToGreenhouseAndAcceptsEveryDeliveryMode(t *testing.T) {
+	cfg, err := Load(t.TempDir(), "shop")
+	if err != nil || cfg.Defaults.MergeMode != "greenhouse" {
+		t.Fatalf("default merge mode = %q, err=%v", cfg.Defaults.MergeMode, err)
+	}
+	for _, mode := range []string{"greenhouse", "pr", "local"} {
+		if err := ValidateMergeMode(mode); err != nil {
+			t.Errorf("ValidateMergeMode(%q): %v", mode, err)
+		}
+	}
+}
+
 func TestFullPipelineReviewCanBeSelectedWithoutImplicitDefault(t *testing.T) {
 	home := t.TempDir()
 	if _, err := SetFile(ConfigPath(home, "shop"), "defaults.review", "full-pipeline", true); err != nil {

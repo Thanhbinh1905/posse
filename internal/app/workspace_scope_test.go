@@ -13,6 +13,40 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func TestWorkspaceGreenhouseBriefUsesPRDeliveryForMembers(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, localWorkspaceConfig, []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	briefData := []byte("---\ntype: change\ntitle: Greenhouse workspace\ndone_when: member is changed\nrepos: [worker]\nmerge_mode: greenhouse\n---\nChange the worker.\n")
+	brief, err := dispatch.ParseBriefText(string(briefData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	members, delivery, err := f.service.planTaskMembersWithChoice(ctx, f.db, f.project, f.config(), brief, nil, true)
+	if err != nil {
+		t.Fatalf("plan Greenhouse workspace members: %v", err)
+	}
+	if delivery != "pr" || len(members) != 1 || members[0].MergeMode != "pr" {
+		t.Fatalf("workspace Greenhouse delivery = %q and members = %+v, want PR delivery", delivery, members)
+	}
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief: taskplan.Select("brief", "brief.md", briefData),
+		Execution: taskplan.Execution{Mode: "sandbox", Scope: "workspace", Members: []taskplan.Member{{
+			Name: members[0].Name, Path: members[0].Path, Base: members[0].BaseRef,
+			Target: members[0].DefaultBranch, Delivery: "greenhouse",
+		}}},
+		Launch: taskplan.Launch{ProfileName: "test", Profile: config.Profile{Kind: "pi"}},
+		Review: "none", ReviewProvider: "builtin", Delivery: "greenhouse",
+		Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths:    taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "stack", "t1"), Output: filepath.Join(f.home, "projects", "stack", "tasks", "t1")},
+	})
+	if err != nil {
+		t.Fatalf("resolve Greenhouse workspace plan: %v", err)
+	}
+	if plan.Delivery != "pr" || plan.Execution.Members[0].Delivery != "pr" {
+		t.Fatalf("workspace plan delivery = %q, Member delivery = %q, want PR", plan.Delivery, plan.Execution.Members[0].Delivery)
+	}
+}
+
 func TestWorkspaceRootContextIsInvalidForRepositoryProjects(t *testing.T) {
 	service := &Service{}
 	_, _, err := service.planTaskMembers(context.Background(), nil, store.Project{}, config.Config{}, dispatch.Brief{Type: "research", RootContext: "read-only"}, nil)
