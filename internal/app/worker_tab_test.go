@@ -199,20 +199,32 @@ func TestStaleRecordedIdsDoNotClaimAnotherPane(t *testing.T) {
 	}
 }
 
-func TestLeadWorkspaceRequiresTheLeadOrItsLabel(t *testing.T) {
+func TestLeadWorkspaceRequiresTheExactRecordedWorkspaceID(t *testing.T) {
 	project := store.Project{Name: "shop", HerdrWorkspaceID: "w1", LeadPaneID: "w1:p1", LeadLabel: "posse:shop:lead"}
-	moved := herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w4:p1", WorkspaceID: "w4", Label: "posse:shop:lead"}}}
-	if got, found := leadWorkspace(moved, project); !found || got != "w4" {
-		t.Fatalf("Lead workspace after the Lead pane moved = %q %v", got, found)
+	moved := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w4"}}, Panes: []herdr.Pane{{PaneID: "w4:p1", WorkspaceID: "w4", Label: "posse:shop:lead"}}}
+	if got, found := leadWorkspace(moved, project); found {
+		t.Fatalf("a workspace matched by Lead label was accepted: %q", got)
 	}
-	// After a restart w1 names a User workspace whose pane now has id w1:p1.
 	reused := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}, Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "user-notes"}}}
-	if got, found := leadWorkspace(reused, project); found {
-		t.Fatalf("a reused workspace id was adopted as the Lead's: %q", got)
+	if got, found := leadWorkspace(reused, project); !found || got != "w1" {
+		t.Fatalf("exact Lead workspace was rejected based on labels: %q %v", got, found)
 	}
-	recreated := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "Lead:shop"}}}
-	if got, found := leadWorkspace(recreated, project); !found || got != "w1" {
-		t.Fatalf("the recovered Lead workspace was not accepted: %q %v", got, found)
+	stalePane := herdr.Snapshot{Workspaces: reused.Workspaces, Panes: []herdr.Pane{{PaneID: "w1:p2", WorkspaceID: "w1", Label: "current-pane"}}}
+	if got, found := leadWorkspace(stalePane, project); !found || got != "w1" {
+		t.Fatalf("exact Lead workspace was rejected because its recorded pane changed: %q %v", got, found)
+	}
+	withoutLeadPane := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}}
+	if got, found := leadWorkspace(withoutLeadPane, project); found {
+		t.Fatalf("recorded workspace was accepted without its recorded Lead pane: %q", got)
+	}
+	recoveringProject := project
+	recoveringProject.LeadPaneID = ""
+	if got, found := leadWorkspace(withoutLeadPane, recoveringProject); !found || got != "w1" {
+		t.Fatalf("exact recorded workspace was rejected during pane recovery: %q %v", got, found)
+	}
+	recreated := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w2", Label: "Lead:shop"}}}
+	if got, found := leadWorkspace(recreated, project); found {
+		t.Fatalf("a different workspace was adopted by its Lead label: %q", got)
 	}
 }
 
@@ -222,7 +234,7 @@ func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 	adapter.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
 	task.ShortName = "first-worker"
 	home := t.TempDir()
-	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
+	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t1", PaneID: "w2:p1"}) {
 		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
 	}
@@ -247,7 +259,7 @@ func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 
 	// Without the Lead, posse refuses rather than open a second workspace.
 	adapter = &changingSnapshotAdapter{Fake: herdr.NewFake(), snapshot: herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}}}
-	_, err = testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
+	_, err = testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
 	if !errors.As(err, &cliErr) || cliErr.Code != "lead_missing" || adapter.CallCount("tab.create") != 0 || adapter.CallCount("worktree.open") != 0 || adapter.CallCount("workspace.create") != 0 {
 		t.Fatalf("openWorkerTab without the Lead = %v, calls %#v", err, adapter.Calls)
@@ -268,7 +280,7 @@ func TestOpenWorkerTabReusesTheTaskChildWorkspaceForRelaunch(t *testing.T) {
 	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", CWD: task.WorktreePath})
 	adapter.Results["tab.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t2"},"root_pane":{"pane_id":"w2:p2","tab_id":"w2:t2"}}`)
 	home := t.TempDir()
-	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
+	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t2", PaneID: "w2:p2"}) {
 		t.Fatalf("openWorkerTab for relaunch = %#v, %v", opened, err)
 	}
@@ -283,7 +295,7 @@ func TestOpenWorkerTabKeepsWorkspaceProjectWorkersInLeadTabs(t *testing.T) {
 	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w1:t5"},"root_pane":{"pane_id":"w1:p5","tab_id":"w1:t5"}}`)
 	task.ShortName = "workspace-worker"
 	home := t.TempDir()
-	opened, err := testService(home, adapter).openWorkerTab(context.Background(), home, project, task, task.WorktreePath, "claude")
+	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened != (openedTab{WorkspaceID: "w1", TabID: "w1:t5", PaneID: "w1:p5"}) {
 		t.Fatalf("openWorkerTab = %#v, %v", opened, err)
 	}
@@ -303,7 +315,7 @@ func TestOpenWorkerTabRejectsAnOccupiedSandboxWorkspace(t *testing.T) {
 	})
 
 	service := testService(t.TempDir(), adapter)
-	_, err := service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	_, err := service.openWorkerTab(context.Background(), nil, t.TempDir(), project, task, task.WorktreePath, "claude")
 	var cliErr *axi.Error
 	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || !strings.Contains(cliErr.Message, "legacy:p1") || adapter.CallCount("worktree.open") != 0 {
 		t.Fatalf("openWorkerTab with an occupied legacy workspace = %v, calls %#v", err, adapter.Calls)
@@ -311,7 +323,7 @@ func TestOpenWorkerTabRejectsAnOccupiedSandboxWorkspace(t *testing.T) {
 
 	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "foreign", Label: "notes"})
 	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "foreign:p1", WorkspaceID: "foreign", CWD: task.WorktreePath})
-	_, err = service.openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	_, err = service.openWorkerTab(context.Background(), nil, t.TempDir(), project, task, task.WorktreePath, "claude")
 	if !errors.As(err, &cliErr) || cliErr.Code != "worker_workspace_occupied" || adapter.CallCount("worktree.open") != 0 {
 		t.Fatalf("openWorkerTab with a foreign Sandbox cwd = %v, calls %#v", err, adapter.Calls)
 	}
@@ -322,7 +334,7 @@ func TestOpenWorkerTabDoesNotCloseAnUnlabeledPaneAfterMetadataFailure(t *testing
 	project, task, adapter := workerTabSession(t)
 	adapter.snapshot.Panes[1].CWD = t.TempDir()
 	adapter.Errors["pane.report_metadata"] = errors.New("metadata write failed")
-	_, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), t.TempDir(), project, task, task.WorktreePath, "claude")
+	_, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), nil, t.TempDir(), project, task, task.WorktreePath, "claude")
 	if err == nil {
 		t.Fatal("openWorkerTab succeeded after metadata failure")
 	}
