@@ -742,6 +742,9 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		}
 	}
 	reason := fmt.Sprintf("Greenhouse found %d blocking finding(s) for head %s. Findings: %s", verdict.Blocking, shortSHA(verdict.Head), verdict.FindingsPath)
+	if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+		return err
+	}
 	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
 		return err
 	}
