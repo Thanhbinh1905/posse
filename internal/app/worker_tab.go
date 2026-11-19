@@ -98,7 +98,10 @@ func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, 
 	}
 	if project.IsWorkspace() && !reuseWorkerWorkspace {
 		method = "workspace.create"
-		params = map[string]any{"cwd": path, "label": workerTabLabel(task), "focus": false, "no_focus": true}
+		params = map[string]any{
+			"cwd": path, "label": workerTabLabel(task), "focus": false, "no_focus": true,
+			"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
+		}
 	} else if !project.IsWorkspace() && !reuseWorkerWorkspace {
 		method = "worktree.open"
 		params = map[string]any{"workspace_id": workspaceID, "path": path, "label": workerTabLabel(task), "focus": false}
