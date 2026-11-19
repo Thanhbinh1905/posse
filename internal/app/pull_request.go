@@ -201,7 +201,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 			if err != nil {
 				return err
 			}
-			if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, gatedSHA); err != nil {
+			if err := validateTaskPullRequest(ctx, db, project, task, forge, task.PRURL, gatedSHA); err != nil {
 				return err
 			}
 		}
@@ -248,7 +248,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 			return err
 		}
 		if workerPR {
-			if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, gatedSHA); err != nil {
+			if err := validateTaskPullRequest(ctx, db, project, task, forge, task.PRURL, gatedSHA); err != nil {
 				return err
 			}
 		} else {

@@ -109,10 +109,12 @@ case "$1 $2" in
     branch=$(cat "$POSSE_TEST_ROOT/greenhouse-pr-branch")
     head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
     state=OPEN
+    merge_commit=
     if [ -f "$POSSE_TEST_ROOT/greenhouse-pr-moved" ]; then head=$(cat "$POSSE_TEST_ROOT/greenhouse-pr-moved"); fi
+    if [ -f "$POSSE_TEST_ROOT/greenhouse-pr-merged" ]; then state=MERGED; merge_commit=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse refs/heads/main); fi
     conclusion=SUCCESS
     if [ -f "$POSSE_TEST_ROOT/greenhouse-checks-red" ]; then conclusion=FAILURE; fi
-    printf '{"state":"%s","headRefName":"%s","headRefOid":"%s","baseRefName":"main","url":"https://github.com/acme/shop/pull/17","number":17,"headRepository":{"nameWithOwner":"acme/shop"},"baseRepository":{"nameWithOwner":"acme/shop"},"statusCheckRollup":[{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"%s"}]}\n' "$state" "$branch" "$head" "$conclusion" ;;
+    printf '{"state":"%s","headRefName":"%s","headRefOid":"%s","baseRefName":"main","url":"https://github.com/acme/shop/pull/17","number":17,"headRepository":{"nameWithOwner":"acme/shop"},"baseRepository":{"nameWithOwner":"acme/shop"},"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","mergeCommit":{"oid":"%s"},"statusCheckRollup":[{"__typename":"CheckRun","name":"fixture-ci","status":"COMPLETED","conclusion":"%s"}]}\n' "$state" "$branch" "$head" "$merge_commit" "$conclusion" ;;
   "pr merge")
     printf '%s\n' "$*" > "$POSSE_TEST_ROOT/greenhouse-merge-args"
     expected=$(printf '%s\n' "$*" | sed -n 's/.*--match-head-commit \([0-9a-f]*\).*/\1/p')
@@ -120,10 +122,21 @@ case "$1 $2" in
     actual=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
     [ "$expected" = "$actual" ] || { printf 'PR head moved\n' >&2; exit 1; }
     git --git-dir="$POSSE_TEST_REMOTE" update-ref refs/heads/main "$expected"
+    : > "$POSSE_TEST_ROOT/greenhouse-pr-merged"
     printf 'Merged\n' ;;
   "pr list") printf '[]\n' ;;
   "auth status") exit 0 ;;
-  "api graphql") printf '{"data":{}}\n' ;;
+  "api graphql")
+    branch=$(cat "$POSSE_TEST_ROOT/greenhouse-pr-branch")
+    head=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse "refs/heads/$branch")
+    state=OPEN
+    conclusion=SUCCESS
+    rollup=SUCCESS
+    merge_commit=
+    if [ -f "$POSSE_TEST_ROOT/greenhouse-pr-moved" ]; then head=$(cat "$POSSE_TEST_ROOT/greenhouse-pr-moved"); fi
+    if [ -f "$POSSE_TEST_ROOT/greenhouse-checks-red" ]; then conclusion=FAILURE; rollup=FAILURE; fi
+    if [ -f "$POSSE_TEST_ROOT/greenhouse-pr-merged" ]; then state=MERGED; merge_commit=$(git --git-dir="$POSSE_TEST_REMOTE" rev-parse refs/heads/main); fi
+    printf '{"data":{"repo1":{"pr1":{"url":"https://github.com/acme/shop/pull/17","state":"%s","headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","mergeCommit":{"oid":"%s"},"statusCheckRollup":{"state":"%s","contexts":{"nodes":[{"__typename":"CheckRun","databaseId":17,"name":"fixture-ci","status":"COMPLETED","conclusion":"%s","detailsUrl":"https://github.com/acme/shop/actions/runs/17","checkSuite":{"workflowRun":{"databaseId":17}}}]}}}}}}\n' "$state" "$head" "$merge_commit" "$rollup" "$conclusion" ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
 esac
 `
@@ -153,6 +166,7 @@ esac
 	}
 	gitTest(t, greenhouseEnv, task.WorktreePath, "add", "change.txt")
 	gitTest(t, greenhouseEnv, task.WorktreePath, "commit", "-m", "add change for Greenhouse review")
+	submittedHead := strings.TrimSpace(gitTest(t, greenhouseEnv, task.WorktreePath, "rev-parse", "HEAD"))
 
 	ghBin := filepath.Join(f.root, "bin", "greenhouse")
 	if err := os.Symlink(greenhouseBinary, ghBin); err != nil {
@@ -191,8 +205,9 @@ esac
 	runID := pipelineResult["run_id"].(string)
 	inspected := greenhouseAXI(t, ghBin, task.WorktreePath, greenhouseEnv, map[string]any{"version": 2, "op": "inspect", "run_id": runID})
 	run := inspected["run"].(map[string]any)
-	if run["status"] != "ci-ready" || run["pipeline"].(map[string]any)["outcome"] != "repaired-pass" {
-		t.Fatalf("Greenhouse run did not repair, rereview and reach ci-ready: %v", run)
+	submitted := run["submitted"].(map[string]any)
+	if run["status"] != "ci-ready" || run["pipeline"].(map[string]any)["outcome"] != "repaired-pass" || submitted["head"] != submittedHead || run["candidate"] == submittedHead {
+		t.Fatalf("Greenhouse did not deliver a repaired candidate descended from submitted head %s: %v", submittedHead, run)
 	}
 	delivery := inspected["delivery"].(map[string]any)
 	if delivery["current"] != true || delivery["pushed_head"] != run["candidate"] || delivery["pr_url"] != "https://github.com/acme/shop/pull/17" {
@@ -256,26 +271,52 @@ esac
 	if output, err := runBinaryAllowFailure(f.binary, task.WorktreePath, workerEnv, "signal", "done", "Greenhouse run passed", "--greenhouse-run", runID, "--turn", turn); err != nil {
 		t.Fatalf("Posse rejected the real Greenhouse run at repaired head %s: %v", actualHead, output)
 	}
-	if done := f.task(t, "t1"); done.State != store.StateDone || done.GatedSHA != actualHead || done.PRURL != "https://github.com/acme/shop/pull/17" {
+	done := f.task(t, "t1")
+	if done.State != store.StateDone || done.GatedSHA != actualHead || done.PRURL != "https://github.com/acme/shop/pull/17" {
 		t.Fatalf("verified done Signal did not gate the exact Greenhouse delivery: %+v", done)
+	}
+	watchOutput := runPosse(t, f.binary, f.repo, mergeEnv, "pr", "inspect", "t1")
+	watchDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, observationErr := watchDB.LatestPRObservation(context.Background(), task.ID)
+	watchDB.Close()
+	var checks struct {
+		State string `json:"state"`
+	}
+	checksErr := json.Unmarshal([]byte(observation.Checks), &checks)
+	if observationErr != nil || checksErr != nil || observation.PRURL != done.PRURL || observation.HeadSHA != done.GatedSHA || checks.State != "SUCCESS" || observation.Review == "REVIEW_REQUIRED" || observation.Review == "CHANGES_REQUESTED" || observation.Mergeable != "MERGEABLE" {
+		t.Fatalf("Greenhouse PR was not observed ready at repaired head: output=%s observation=%+v checks=%+v errors=%v/%v", watchOutput, observation, checks, observationErr, checksErr)
 	}
 
 	if err := os.WriteFile(filepath.Join(f.root, "greenhouse-pr-moved"), []byte(strings.Repeat("f", 40)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := runBinaryAllowFailure(f.binary, f.repo, mergeEnv, "merge", "t1", "--execute", "--user-approved", "Merge the reviewed and green PR"); err == nil {
-		t.Fatalf("Posse allowed merge after the PR head moved: %s", output)
+	if output, err := runBinaryAllowFailure(f.binary, f.repo, mergeEnv, "merge", "t1", "--execute", "--user-approved", "Merge the reviewed and green PR"); err == nil || !strings.Contains(output, "PR is not open with checks at gated head") {
+		t.Fatalf("Posse did not reject the moved PR head: err=%v output=%s", err, output)
 	}
 	_ = os.Remove(filepath.Join(f.root, "greenhouse-pr-moved"))
 	if err := os.WriteFile(filepath.Join(f.root, "greenhouse-checks-red"), []byte("red\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := runBinaryAllowFailure(f.binary, f.repo, mergeEnv, "merge", "t1", "--execute", "--user-approved", "Merge the reviewed and green PR"); err == nil {
-		t.Fatalf("Posse allowed merge with failing PR checks: %s", output)
+	if output, err := runBinaryAllowFailure(f.binary, f.repo, mergeEnv, "merge", "t1", "--execute", "--user-approved", "Merge the reviewed and green PR"); err == nil || !strings.Contains(output, "PR has a non-success check run") {
+		t.Fatalf("Posse did not reject failing PR checks: err=%v output=%s", err, output)
 	}
 	_ = os.Remove(filepath.Join(f.root, "greenhouse-checks-red"))
-	if output := runPosse(t, f.binary, f.repo, mergeEnv, "merge", "t1", "--execute", "--user-approved", "Merge the reviewed and green PR"); !strings.Contains(output, "merged") && !strings.Contains(output, "Merged") {
-		t.Fatalf("exact green head did not pass merge gating: %s", output)
+	output, mergeErr := runBinaryAllowFailure(f.binary, f.repo, mergeEnv, "merge", "t1", "--execute", "--user-approved", "Merge the reviewed and green PR")
+	if mergeErr != nil || !strings.Contains(output, "merging") && !strings.Contains(output, "merged") {
+		current := f.task(t, "t1")
+		stateDB, openErr := store.OpenReadOnly(f.home)
+		if openErr != nil {
+			t.Fatalf("exact green head merge failed: %s (%v); reopen state: %v", output, mergeErr, openErr)
+		}
+		latest, latestErr := stateDB.LatestPRObservation(context.Background(), task.ID)
+		stateDB.Close()
+		t.Fatalf("exact green head merge failed: %s (%v); task=%+v observation=%+v observation_error=%v", output, mergeErr, current, latest, latestErr)
+	}
+	if mergeArgs, err := os.ReadFile(filepath.Join(f.root, "greenhouse-merge-args")); err != nil || !strings.Contains(string(mergeArgs), "--match-head-commit "+actualHead) {
+		t.Fatalf("forge merge was not pinned to the gated repaired head: %q, %v", mergeArgs, err)
 	}
 	if merged := gitTest(t, f.env, remote, "--git-dir", remote, "rev-parse", "refs/heads/main"); strings.TrimSpace(merged) != actualHead {
 		t.Fatalf("bare remote main=%s after merge, want gated head %s", strings.TrimSpace(merged), actualHead)

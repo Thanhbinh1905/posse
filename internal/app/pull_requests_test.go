@@ -388,6 +388,7 @@ func TestGreenhouseMergeRefusesStaleTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, fixture.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	fixture.pushGreenhouseCandidate(t)
 	fixture.requireCurrentTarget(t)
 	targetTip := fixture.advanceTarget(t, false, true)
 
@@ -424,6 +425,7 @@ func TestGreenhouseMergeUsesPullRequestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitTest(t, fixture.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	fixture.pushGreenhouseCandidate(t)
 	fixture.setGHHead(t, fixture.headSHA)
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
 	observation := store.PRObservation{
@@ -1274,6 +1276,13 @@ type prMergeFixture struct {
 	errOut    bytes.Buffer
 }
 
+func (fixture *prMergeFixture) pushGreenhouseCandidate(t *testing.T) {
+	t.Helper()
+	t.Setenv("POSSE_TEST_GH_GREENHOUSE", "1")
+	t.Setenv("POSSE_TEST_GH_HEAD_BRANCH", "greenhouse/run-1")
+	gitTest(t, fixture.worktree, "push", "origin", "posse/t1:refs/heads/greenhouse/run-1")
+}
+
 func freezeCILoop(t *testing.T, fixture *prMergeFixture, maxFixRounds, rerunCancelled int) {
 	freezeCILoopWithReview(t, fixture, maxFixRounds, rerunCancelled, "none")
 }
@@ -1578,7 +1587,11 @@ case "$1 $2" in
          repository="{\"nameWithOwner\":\"$source\"}"
          # gh 2.46 omits nameWithOwner and names the owner separately.
          if [ -n "${POSSE_TEST_GH_LEGACY_REPOSITORY:-}" ]; then repository="{\"name\":\"${source#*/}\"},\"headRepositoryOwner\":{\"login\":\"${source%%/*}\"}"; fi
-         printf '{"url":"%s","state":"%s","headRefOid":"%s","title":"fix: E2E PR title","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$repository" ;;
+         if [ "${POSSE_TEST_GH_GREENHOUSE:-}" = "1" ]; then
+           printf '{"url":"%s","state":"%s","headRefOid":"%s","title":"fix: E2E PR title","headRefName":"%s","baseRefName":"%s","headRepository":{"nameWithOwner":"%s"},"number":17,"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$source"
+         else
+           printf '{"url":"%s","state":"%s","headRefOid":"%s","title":"fix: E2E PR title","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$repository"
+         fi ;;
     esac ;;
   "pr merge") printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;

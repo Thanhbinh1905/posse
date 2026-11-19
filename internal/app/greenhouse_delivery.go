@@ -3,11 +3,14 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
+	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -24,13 +27,13 @@ type greenhouseDeliveryResult struct {
 		Candidate string `json:"candidate"`
 		Pipeline  struct {
 			Status string `json:"status"`
+			Ref    string `json:"ref"`
 		} `json:"pipeline"`
 	} `json:"run"`
 	Delivery struct {
 		PushedHead string `json:"pushed_head"`
 		PRURL      string `json:"pr_url"`
 		PRNumber   int    `json:"pr_number"`
-		Current    bool   `json:"current"`
 		Checks     []struct {
 			Name       string  `json:"name"`
 			Status     string  `json:"status"`
@@ -49,14 +52,17 @@ func parseGreenhouseDelivery(output []byte, runID, branch, head string) (greenho
 		return result, fmt.Errorf("greenhouse AXI returned a different run than %s", runID)
 	}
 	submittedBranch := result.Run.Submitted.Branch
-	if (submittedBranch != branch && submittedBranch != "refs/heads/"+branch) || result.Run.Submitted.Head != head || result.Run.Candidate != head {
-		return result, fmt.Errorf("greenhouse run does not bind submitted and candidate heads to Task branch %s at %s", branch, head)
+	if (submittedBranch != branch && submittedBranch != "refs/heads/"+branch) || !validGreenhouseObjectID(result.Run.Submitted.Head) || !validGreenhouseObjectID(result.Run.Candidate) || result.Run.Candidate != head {
+		return result, fmt.Errorf("greenhouse run does not bind its submitted Task branch and candidate to Task branch %s at %s", branch, head)
+	}
+	if result.Run.Pipeline.Ref != greenhouseCandidateRef(runID) {
+		return result, fmt.Errorf("greenhouse run %s has an unexpected candidate branch %q", runID, result.Run.Pipeline.Ref)
 	}
 	if result.Run.Status != "ci-ready" || result.Run.Pipeline.Status != "ci-ready" {
 		return result, fmt.Errorf("greenhouse run %s has not reached ci-ready", runID)
 	}
-	if !result.Delivery.Current || result.Delivery.PushedHead != head || result.Delivery.PRURL == "" || result.Delivery.PRNumber <= 0 {
-		return result, fmt.Errorf("greenhouse delivery is not current at Task head %s", head)
+	if result.Delivery.PushedHead != head || result.Delivery.PRURL == "" || result.Delivery.PRNumber <= 0 {
+		return result, fmt.Errorf("greenhouse delivery does not identify the current Task head %s", head)
 	}
 	if len(result.Delivery.Checks) == 0 {
 		return result, fmt.Errorf("greenhouse run %s has no required CI checks", runID)
@@ -71,6 +77,18 @@ func parseGreenhouseDelivery(output []byte, runID, branch, head string) (greenho
 	return result, nil
 }
 
+func validGreenhouseObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func greenhouseCandidateRef(runID string) string {
+	return "refs/heads/greenhouse/" + runID
+}
+
 func inspectGreenhouseDelivery(ctx context.Context, worktree, runID, branch, head string) (greenhouseDeliveryResult, error) {
 	request, _ := json.Marshal(map[string]any{"version": 1, "op": "inspect", "run_id": runID})
 	command := exec.CommandContext(ctx, "greenhouse", "axi")
@@ -81,13 +99,28 @@ func inspectGreenhouseDelivery(ctx context.Context, worktree, runID, branch, hea
 	if err != nil {
 		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse AXI inspect failed: %w", err)
 	}
-	return parseGreenhouseDelivery(output, runID, branch, head)
+	delivery, err := parseGreenhouseDelivery(output, runID, branch, head)
+	if err != nil {
+		return greenhouseDeliveryResult{}, err
+	}
+	if !validGreenhouseObjectID(head) || !validGreenhouseObjectID(delivery.Run.Submitted.Head) {
+		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse run has an invalid submitted or candidate object ID")
+	}
+	if _, err := gitOutput(ctx, worktree, "merge-base", "--is-ancestor", delivery.Run.Submitted.Head, head); err != nil {
+		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse candidate %s does not descend from submitted head %s", head, delivery.Run.Submitted.Head)
+	}
+	return delivery, nil
 }
 
-func validateGreenhousePullRequest(output []byte, head, expectedURL string, expectedNumber int) error {
+func validateGreenhousePullRequest(output []byte, head, expectedURL string, expectedNumber int, expectedBranch, expectedTarget, expectedRepository string) error {
 	var pull struct {
-		State  string            `json:"state"`
-		Head   string            `json:"headRefOid"`
+		State      string `json:"state"`
+		Head       string `json:"headRefOid"`
+		Branch     string `json:"headRefName"`
+		Target     string `json:"baseRefName"`
+		Repository struct {
+			Name string `json:"nameWithOwner"`
+		} `json:"headRepository"`
 		URL    string            `json:"url"`
 		Number int               `json:"number"`
 		Checks []json.RawMessage `json:"statusCheckRollup"`
@@ -95,8 +128,8 @@ func validateGreenhousePullRequest(output []byte, head, expectedURL string, expe
 	if err := json.Unmarshal(output, &pull); err != nil {
 		return fmt.Errorf("decode Greenhouse PR observation: %w", err)
 	}
-	if pull.State != "OPEN" || pull.Head != head || pull.URL != expectedURL || pull.Number != expectedNumber || len(pull.Checks) == 0 {
-		return fmt.Errorf("PR is not open with checks at gated head %s", head)
+	if pull.State != "OPEN" || pull.Head != head || pull.Branch != expectedBranch || pull.Target != expectedTarget || !strings.EqualFold(pull.Repository.Name, expectedRepository) || pull.URL != expectedURL || pull.Number != expectedNumber || len(pull.Checks) == 0 {
+		return fmt.Errorf("PR is not open with checks at gated head %s on the expected Greenhouse branch and target (state=%q head=%q branch=%q target=%q repository=%q URL=%q number=%d checks=%d)", head, pull.State, pull.Head, pull.Branch, pull.Target, pull.Repository.Name, pull.URL, pull.Number, len(pull.Checks))
 	}
 	for _, encoded := range pull.Checks {
 		var check struct {
@@ -125,32 +158,88 @@ func verifyGreenhouseDeliveryPR(ctx context.Context, project store.Project, cfg 
 	if err != nil {
 		return err
 	}
+	return verifyGreenhousePRAtHead(ctx, project, task, forge, delivery.RunID, delivery.Delivery.PRURL, delivery.Delivery.PRNumber, head)
+}
+
+func verifyGreenhousePRAtHead(ctx context.Context, project store.Project, task store.Task, forge repositoryForge, runID, prURL string, prNumber int, head string) error {
+	candidateRef := greenhouseCandidateRef(runID)
+	candidateRemoteHead, err := remoteBranchHead(ctx, task.WorktreePath, candidateRef)
+	if err != nil {
+		return fmt.Errorf("could not verify the pushed Greenhouse candidate branch: %w", err)
+	}
+	if candidateRemoteHead != head {
+		return fmt.Errorf("pushed Greenhouse candidate branch %s is not at Task head %s", candidateRef, head)
+	}
+	taskRemoteHead, err := remoteBranchHead(ctx, task.WorktreePath, "refs/heads/"+task.Branch)
+	if err != nil {
+		return fmt.Errorf("could not verify the pushed Task branch: %w", err)
+	}
+	if taskRemoteHead != head {
+		return fmt.Errorf("pushed Task branch %s is not at gated head %s", task.Branch, head)
+	}
+	branch := strings.TrimPrefix(candidateRef, "refs/heads/")
 	if forge.Kind == "gitlab" {
-		number, err := forgeReference(delivery.Delivery.PRURL, forge)
-		if err != nil || number != delivery.Delivery.PRNumber {
+		number, err := forgeReference(prURL, forge)
+		if err != nil || number != prNumber {
 			return fmt.Errorf("greenhouse merge request does not match the Project forge")
 		}
 		mr, err := gitlabMR(ctx, forge, number)
 		if err != nil {
 			return fmt.Errorf("forge could not verify Greenhouse merge request: %w", err)
 		}
-		if mr.WebURL != delivery.Delivery.PRURL || mr.State != "opened" || mr.SHA != head || mr.HeadPipeline == nil || mr.HeadPipeline.Status != "success" {
+		if mr.WebURL != prURL || mr.State != "opened" || mr.SHA != head || mr.SourceBranch != branch || mr.TargetBranch != taskTargetBranch(project, task) || mr.SourceProjectID == 0 || mr.SourceProjectID != mr.TargetProjectID || mr.HeadPipeline == nil || mr.HeadPipeline.Status != "success" {
 			return fmt.Errorf("greenhouse merge request is not open with a successful pipeline at gated head %s", head)
 		}
-	} else {
-		command := exec.CommandContext(ctx, "gh", "pr", "view", delivery.Delivery.PRURL, "--json", "state,headRefOid,url,number,statusCheckRollup")
-		command.Dir = task.WorktreePath
-		output, err := command.Output()
-		if err != nil {
-			return fmt.Errorf("forge could not verify Greenhouse PR: %w", err)
-		}
-		if err := validateGreenhousePullRequest(output, head, delivery.Delivery.PRURL, delivery.Delivery.PRNumber); err != nil {
-			return err
-		}
+		return nil
 	}
-	task.PRURL = delivery.Delivery.PRURL
-	if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, head); err != nil {
-		return fmt.Errorf("greenhouse PR does not match the Task branch and target: %w", err)
+	command := exec.CommandContext(ctx, "gh", "pr", "view", prURL, "--json", "state,headRefOid,headRefName,baseRefName,headRepository,url,number,statusCheckRollup")
+	command.Dir = task.WorktreePath
+	output, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("forge could not verify Greenhouse PR: %w", err)
+	}
+	if err := validateGreenhousePullRequest(output, head, prURL, prNumber, branch, taskTargetBranch(project, task), forge.Path); err != nil {
+		return err
 	}
 	return nil
+}
+
+func greenhouseRunIDForHead(ctx context.Context, db *store.DB, task store.Task, prURL, head string) (string, error) {
+	signals, err := db.TaskSignals(ctx, task.ID, 20)
+	if err != nil {
+		return "", err
+	}
+	for _, signal := range signals {
+		if signal.Verb != "done" {
+			continue
+		}
+		var data struct {
+			RunID       string `json:"greenhouse_run_id"`
+			PendingHead string `json:"greenhouse_pending_head"`
+			PRURL       string `json:"pr_url"`
+		}
+		if json.Unmarshal([]byte(signal.DataJSON), &data) != nil {
+			break
+		}
+		if data.RunID != "" && data.PendingHead == head && data.PRURL == prURL {
+			return data.RunID, nil
+		}
+		break
+	}
+	return "", axi.Failure("greenhouse_run_missing", "the latest done Signal does not bind a Greenhouse run to this PR head", false)
+}
+
+func validateTaskPullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, forge repositoryForge, prURL, head string) error {
+	if task.MergeMode != "greenhouse" {
+		return validateWorkerPullRequest(ctx, project, task, forge, prURL, head)
+	}
+	runID, err := greenhouseRunIDForHead(ctx, db, task, prURL, head)
+	if err != nil {
+		return err
+	}
+	number, err := forgeReference(prURL, forge)
+	if err != nil {
+		return err
+	}
+	return verifyGreenhousePRAtHead(ctx, project, task, forge, runID, prURL, number, head)
 }
