@@ -1388,7 +1388,7 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	}
 	if task.Type == "change" {
 		if greenhouseDelivery {
-			work += "\n\nGreenhouse delivery: after committing the change, start the pipeline with `greenhouse axi pipeline --intent '<change and Done when>' --target " + taskTargetBranch(project, task) + " --wait 8m`. Continue a running pipeline with `greenhouse axi watch --stream <stream> --after <sequence> --wait 1m`; use its snapshot as authoritative. When a decision parks, inspect it with `greenhouse axi inspect`, send the findings word for word in a `posse signal needs-decision` to the Lead, and answer the gate with the Lead's reply using `greenhouse axi decide`. Do not commit while the run is active. Follow every repair and re-review until the run reaches `ci-ready`. If Greenhouse fails or needs recovery, signal stuck with its reason; do not work around the failed run. Before signaling done, verify `greenhouse axi inspect --run <run-id>` reports `ci-ready` and current delivery. Then run `posse signal done \"<summary>\" --greenhouse-run <run-id> --turn <token>`. Do not use `posse publish`, `--head`, private candidates or `posse validate`."
+			work += "\n\nGreenhouse delivery: after committing the change, start the pipeline with `greenhouse axi pipeline --intent '<change and Done when>' --target " + taskTargetBranch(project, task) + " --wait 8m`. Continue a running pipeline with `greenhouse axi watch --stream <stream> --after <sequence> --wait 1m`; use its snapshot as authoritative. When a decision parks, inspect it with `greenhouse axi inspect`, send the findings word for word in a `posse signal needs-decision` to the Lead, and answer the gate with the Lead's reply using `greenhouse axi decide`. Do not commit while the run is active. Follow every repair and re-review until the run reaches `ci-ready`. If Greenhouse fails or needs recovery, run `posse signal failed` with its reason; do not work around the failed run. Before signaling done, verify `greenhouse axi inspect --run <run-id>` reports `ci-ready` and current delivery. Then run `posse signal done \"<summary>\" --greenhouse-run <run-id> --turn <token>`. Do not use `posse publish`, `--head`, private candidates or `posse validate`."
 		} else if greenhouseSingle {
 			work += "\n\nGreenhouse full-pipeline: do not publish first. Commit the change, then run `posse signal done \"<summary>\" --head <current-commit-sha> --turn <token>`. Posse reviews this exact Task branch head through Greenhouse outside the Task Sandbox. If it passes, Posse queues an instruction to publish that unchanged head; if the head moves, signal done again for the new head. No private candidate or `posse validate` stages are used."
 		} else if greenhouseWorkspace {
@@ -2214,7 +2214,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(ctx.Context, runtime.ReconcileBudget)
 	defer cancelMaintenance()
-	if verb == "done" && task.Type == "change" && !noChange && !greenhouseSelected {
+	if verb == "done" && task.Type == "change" && !noChange && !greenhouseSelected && !greenhouseDelivery {
 		if err := s.checkReviewCapAfterDone(maintenanceCtx, db, home, project, task); err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Signal recorded; Review cap reconciliation deferred: %v\n", normalizeCommandError(store.WithoutBusy(err)))
 		} else {

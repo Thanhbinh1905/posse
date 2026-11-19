@@ -807,7 +807,7 @@ func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 
 func TestWorkerProtocolUsesGreenhouseForGreenhouseDelivery(t *testing.T) {
 	protocol := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 1, Type: "change", MergeMode: "greenhouse"}, dispatch.Brief{Type: "change", DoneWhen: "the PR is green"}, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "launch:1")
-	for _, want := range []string{"greenhouse axi pipeline --intent", "greenhouse axi inspect", "--greenhouse-run <run-id>", "Follow every repair and re-review until the run reaches `ci-ready`", "findings word for word"} {
+	for _, want := range []string{"greenhouse axi pipeline --intent", "greenhouse axi inspect", "--greenhouse-run <run-id>", "Follow every repair and re-review until the run reaches `ci-ready`", "findings word for word", "posse signal failed"} {
 		if !strings.Contains(protocol, want) {
 			t.Errorf("Greenhouse Worker protocol lacks %q: %s", want, protocol)
 		}
