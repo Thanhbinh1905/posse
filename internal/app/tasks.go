@@ -683,7 +683,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 	var opened openedTab
 	err = s.runIntentStep(ctx.Context, db, intent, "pane.open", func() error {
 		var callErr error
-		opened, callErr = s.openWorkerTab(ctx.Context, home, project, task, sandbox.Path, kind)
+		opened, callErr = s.openWorkerTab(ctx.Context, db, home, project, task, sandbox.Path, kind)
 		return callErr
 	})
 	if err != nil {
@@ -3366,7 +3366,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		var opened openedTab
 		if err := track("pane.open", func() error {
 			var callErr error
-			opened, callErr = s.openWorkerTab(ctx, home, project, task, task.WorktreePath, kind)
+			opened, callErr = s.openWorkerTab(ctx, db, home, project, task, task.WorktreePath, kind)
 			return callErr
 		}); err != nil {
 			return failure(err)
@@ -3381,7 +3381,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
 			if err := track("pane.replace", func() error {
-				fresh, replaceErr := s.replaceWorkerPane(ctx, home, project, task, pane, kind)
+				fresh, replaceErr := s.replaceWorkerPane(ctx, db, home, project, task, pane, kind)
 				pane = fresh
 				return replaceErr
 			}); err != nil {
