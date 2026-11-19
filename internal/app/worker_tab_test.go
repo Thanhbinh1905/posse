@@ -207,23 +207,24 @@ func TestLeadWorkspaceRequiresTheExactRecordedWorkspaceID(t *testing.T) {
 	}
 	reused := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}, Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "user-notes"}}}
 	if got, found := leadWorkspace(reused, project); !found || got != "w1" {
-		t.Fatalf("exact Lead pane and workspace ids were rejected based on labels: %q %v", got, found)
+		t.Fatalf("exact Lead workspace was rejected based on labels: %q %v", got, found)
+	}
+	stalePane := herdr.Snapshot{Workspaces: reused.Workspaces, Panes: []herdr.Pane{{PaneID: "w1:p2", WorkspaceID: "w1", Label: "current-pane"}}}
+	if got, found := leadWorkspace(stalePane, project); !found || got != "w1" {
+		t.Fatalf("exact Lead workspace was rejected because its recorded pane changed: %q %v", got, found)
 	}
 	withoutLeadPane := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "notes"}}}
 	if got, found := leadWorkspace(withoutLeadPane, project); found {
-		t.Fatalf("reused workspace without the exact Lead pane was accepted: %q", got)
+		t.Fatalf("recorded workspace was accepted without its recorded Lead pane: %q", got)
 	}
-	recovering := project
-	recovering.LeadPaneID = ""
-	if got, found := leadWorkspace(withoutLeadPane, recovering); !found || got != "w1" {
-		t.Fatalf("exact recorded workspace was rejected while its Lead pane is not yet recorded: %q %v", got, found)
+	recoveringProject := project
+	recoveringProject.LeadPaneID = ""
+	if got, found := leadWorkspace(withoutLeadPane, recoveringProject); !found || got != "w1" {
+		t.Fatalf("exact recorded workspace was rejected during pane recovery: %q %v", got, found)
 	}
 	recreated := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w2", Label: "Lead:shop"}}}
 	if got, found := leadWorkspace(recreated, project); found {
 		t.Fatalf("a different workspace was adopted by its Lead label: %q", got)
-	}
-	if got, found := leadWorkspace(recreated, recovering); found {
-		t.Fatalf("a workspace matching only the Lead label was accepted: %q", got)
 	}
 }
 

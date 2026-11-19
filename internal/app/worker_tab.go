@@ -24,7 +24,7 @@ func leadWorkspace(snapshot herdr.Snapshot, project store.Project) (string, bool
 		return "", false
 	}
 	for _, pane := range snapshot.Panes {
-		if project.LeadPaneID != "" && pane.PaneID == project.LeadPaneID && pane.WorkspaceID == project.HerdrWorkspaceID {
+		if pane.WorkspaceID == project.HerdrWorkspaceID {
 			return project.HerdrWorkspaceID, true
 		}
 	}
