@@ -713,6 +713,25 @@ func (p Plan) Validate() error {
 		return invalid("unsupported autonomy grant")
 	}
 	for _, input := range p.Inputs {
+		if input.Path != "" {
+			if input.Role == "brief" || len(input.Bytes) != 0 || len(input.SHA256) != sha256.Size*2 {
+				return invalid("invalid selected input path: " + input.Source)
+			}
+			if decoded, err := hex.DecodeString(input.SHA256); err != nil || hex.EncodeToString(decoded) != input.SHA256 {
+				return invalid("invalid selected input digest: " + input.Source)
+			}
+			expectedPath := filepath.ToSlash(filepath.Join("blobs", "sha256", input.SHA256[:2], input.SHA256))
+			if input.Path != expectedPath {
+				return invalid("invalid selected input path: " + input.Source)
+			}
+			if len(p.AdmittedSHA256) != sha256.Size*2 {
+				return invalid("externalized plan is missing its admitted digest")
+			}
+			if decoded, err := hex.DecodeString(p.AdmittedSHA256); err != nil || hex.EncodeToString(decoded) != p.AdmittedSHA256 {
+				return invalid("externalized plan has an invalid admitted digest")
+			}
+			continue
+		}
 		selected := Select(input.Role, input.Source, input.Bytes)
 		if input.SHA256 != selected.SHA256 {
 			return invalid("selected input digest mismatch: " + input.Source)

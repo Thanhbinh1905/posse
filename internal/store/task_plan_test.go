@@ -255,6 +255,44 @@ func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
 	}
 }
 
+func TestTaskCreationAcceptsLargeExternalizedPlanInputs(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := admittedStorePlan(t, home)
+	plan.Inputs = append(plan.Inputs, taskplan.Select("review-round-file", "review/large.patch", make([]byte, 1<<20)))
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := plan.Bind("t1").SHA256()
+	taskID, _, err := db.CreateTaskWithSequenceAndIntent(ctx, project.ID, project.Name, Task{Type: "change", Title: "Large input", ShortName: "large-input", PlanJSON: encoded}, "start", 12345, func(int) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("create Task with large externalized input: %v", err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := task.AdmittedPlan()
+	if err != nil || admitted == nil || admitted.SHA256() != digest || len(admitted.Inputs[len(admitted.Inputs)-1].Bytes) != 1<<20 {
+		gotDigest, gotSize := "", 0
+		if admitted != nil {
+			gotDigest = admitted.SHA256()
+			gotSize = len(admitted.Inputs[len(admitted.Inputs)-1].Bytes)
+		}
+		t.Fatalf("created Task lost its externalized input: digest=%s size=%d want digest=%s size=%d err=%v", gotDigest, gotSize, digest, 1<<20, err)
+	}
+}
+
 func TestTaskCreationAtomicallyStoresAdmittedPlanAndRevision(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

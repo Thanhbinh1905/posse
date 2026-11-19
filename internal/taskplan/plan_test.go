@@ -297,6 +297,30 @@ func TestBindingTouchesOnlyTheDeclaredTaskComponent(t *testing.T) {
 	}
 }
 
+func TestDecodeAcceptsContentAddressedInputReferences(t *testing.T) {
+	plan, err := taskplan.Resolve(request("change"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Inputs = append(plan.Inputs, taskplan.Select("review-round-file", "review/round.patch", bytes.Repeat([]byte{0x5a}, 1<<20)))
+	digest := plan.SHA256()
+	input := &plan.Inputs[len(plan.Inputs)-1]
+	input.Path = "blobs/sha256/" + input.SHA256[:2] + "/" + input.SHA256
+	input.Bytes = nil
+	plan.AdmittedSHA256 = digest
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(string(encoded))
+	if err != nil {
+		t.Fatalf("decode externalized plan: %v", err)
+	}
+	if decoded.SHA256() != digest || decoded.Inputs[len(decoded.Inputs)-1].Path == "" {
+		t.Fatalf("externalized plan reference or admitted digest changed: %#v", decoded.Inputs[len(decoded.Inputs)-1])
+	}
+}
+
 func TestSelectedBytesHaveStableDigestAndDetectMutation(t *testing.T) {
 	input := taskplan.Select("selected", "source", []byte("abc"))
 	if input.SHA256 != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
