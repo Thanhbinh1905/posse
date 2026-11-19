@@ -47,25 +47,25 @@ func parseGreenhouseDelivery(output []byte, runID, branch, head string) (greenho
 		return result, fmt.Errorf("decode Greenhouse AXI inspect: %w", err)
 	}
 	if result.RunID != runID || result.Run.ID != runID {
-		return result, fmt.Errorf("Greenhouse AXI returned a different run than %s", runID)
+		return result, fmt.Errorf("greenhouse AXI returned a different run than %s", runID)
 	}
 	submittedBranch := result.Run.Submitted.Branch
 	if (submittedBranch != branch && submittedBranch != "refs/heads/"+branch) || result.Run.Submitted.Head != head || result.Run.Candidate != head {
-		return result, fmt.Errorf("Greenhouse run does not bind submitted and candidate heads to Task branch %s at %s", branch, head)
+		return result, fmt.Errorf("greenhouse run does not bind submitted and candidate heads to Task branch %s at %s", branch, head)
 	}
 	if result.Run.Status != "ci-ready" || result.Run.Pipeline.Status != "ci-ready" {
-		return result, fmt.Errorf("Greenhouse run %s has not reached ci-ready", runID)
+		return result, fmt.Errorf("greenhouse run %s has not reached ci-ready", runID)
 	}
 	if !result.Delivery.Current || result.Delivery.PushedHead != head || result.Delivery.PRURL == "" || result.Delivery.PRNumber <= 0 {
-		return result, fmt.Errorf("Greenhouse delivery is not current at Task head %s", head)
+		return result, fmt.Errorf("greenhouse delivery is not current at Task head %s", head)
 	}
 	if len(result.Delivery.Checks) == 0 {
-		return result, fmt.Errorf("Greenhouse run %s has no required CI checks", runID)
+		return result, fmt.Errorf("greenhouse run %s has no required CI checks", runID)
 	}
 	seen := make(map[string]bool, len(result.Delivery.Checks))
 	for _, check := range result.Delivery.Checks {
 		if check.Name == "" || seen[check.Name] || check.Status != "completed" || check.Conclusion == nil || *check.Conclusion != "success" || check.Head != head {
-			return result, fmt.Errorf("Greenhouse CI check %q is not successful at Task head %s", check.Name, head)
+			return result, fmt.Errorf("greenhouse CI check %q is not successful at Task head %s", check.Name, head)
 		}
 		seen[check.Name] = true
 	}
@@ -80,7 +80,7 @@ func inspectGreenhouseDelivery(ctx context.Context, worktree, runID, branch, hea
 	command.Env = environmentWithout(os.Environ(), "GREENHOUSE_HOME")
 	output, err := command.Output()
 	if err != nil {
-		return greenhouseDeliveryResult{}, fmt.Errorf("Greenhouse AXI inspect failed: %w", err)
+		return greenhouseDeliveryResult{}, fmt.Errorf("greenhouse AXI inspect failed: %w", err)
 	}
 	return parseGreenhouseDelivery(output, runID, branch, head)
 }
@@ -129,14 +129,14 @@ func verifyGreenhouseDeliveryPR(ctx context.Context, project store.Project, cfg 
 	if forge.Kind == "gitlab" {
 		number, err := forgeReference(delivery.Delivery.PRURL, forge)
 		if err != nil || number != delivery.Delivery.PRNumber {
-			return fmt.Errorf("Greenhouse merge request does not match the Project forge")
+			return fmt.Errorf("greenhouse merge request does not match the Project forge")
 		}
 		mr, err := gitlabMR(ctx, forge, number)
 		if err != nil {
 			return fmt.Errorf("forge could not verify Greenhouse merge request: %w", err)
 		}
 		if mr.WebURL != delivery.Delivery.PRURL || mr.State != "opened" || mr.SHA != head || mr.HeadPipeline == nil || mr.HeadPipeline.Status != "success" {
-			return fmt.Errorf("Greenhouse merge request is not open with a successful pipeline at gated head %s", head)
+			return fmt.Errorf("greenhouse merge request is not open with a successful pipeline at gated head %s", head)
 		}
 	} else {
 		command := exec.CommandContext(ctx, "gh", "pr", "view", delivery.Delivery.PRURL, "--json", "state,headRefOid,url,number,statusCheckRollup")
@@ -151,7 +151,7 @@ func verifyGreenhouseDeliveryPR(ctx context.Context, project store.Project, cfg 
 	}
 	task.PRURL = delivery.Delivery.PRURL
 	if err := validateWorkerPullRequest(ctx, project, task, forge, task.PRURL, head); err != nil {
-		return fmt.Errorf("Greenhouse PR does not match the Task branch and target: %w", err)
+		return fmt.Errorf("greenhouse PR does not match the Task branch and target: %w", err)
 	}
 	return nil
 }

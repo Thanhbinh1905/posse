@@ -210,16 +210,6 @@ func workspaceMemberMergeMode(cfg config.Config, name, remote string) string {
 	return mode
 }
 
-func savedMemberMergeMode(cfg config.Config, name, remote string) string {
-	if remote == "" {
-		if repository, ok := cfg.Repositories[name]; ok && repository.MergeMode != "" {
-			return repository.MergeMode
-		}
-		return cfg.Defaults.MergeMode
-	}
-	return memberMergeMode(cfg, name, remote)
-}
-
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
 func projectTargets(ctx context.Context, db *store.DB, project store.Project) ([]repoTarget, error) {
 	if project.IsDirectory() {
