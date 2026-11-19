@@ -202,12 +202,15 @@ func projectMergeMode(ctx context.Context, project store.Project, cfg config.Con
 	return memberMergeMode(cfg, "", originHost(ctx, project.Root))
 }
 
-func workspaceMemberMergeMode(cfg config.Config, name, remote string) string {
-	mode := memberMergeMode(cfg, name, remote)
+func workspaceDeliveryMode(mode string) string {
 	if mode == "greenhouse" {
 		return "pr"
 	}
 	return mode
+}
+
+func workspaceMemberMergeMode(cfg config.Config, name, remote string) string {
+	return workspaceDeliveryMode(memberMergeMode(cfg, name, remote))
 }
 
 // projectTargets lists the repositories of a Project: the Project itself, or its active members.
