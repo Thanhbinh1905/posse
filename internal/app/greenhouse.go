@@ -33,8 +33,8 @@ type greenhouseMember struct {
 }
 
 // greenhouseReview requests one Greenhouse Verdict for the exact head of a
-// Change Task Member and records it as a parallel-mode Verdict. A Project Lead
-// or its verified Watch may request it; no gate reads Greenhouse Verdicts yet.
+// Change Task Member and records the result. A Project Lead or its verified
+// Watch may request it.
 func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "head": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}, "watch-project-id": {}, "watch-token": {}, "watch-started-at": {}, "watch-pid": {}})
 	if err != nil {
@@ -418,6 +418,11 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err := recordRequest("verdict", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
 			}
+			if recorded && verdict.Outcome == "findings" && verdict.Blocking > 0 {
+				if err := s.handleGreenhouseBlockingVerdict(ctx.Context, db, project, task, verdict); err != nil {
+					return err
+				}
+			}
 			if err := greenhouse.ClearPending(round.Pending); err != nil {
 				return err
 			}
@@ -692,6 +697,68 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store.DB, project store.Project, task store.Task, verdict store.Verdict) error {
+	if verdict.FindingsPath == "" || verdict.Head == "" {
+		return nil
+	}
+	current, err := db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return err
+	}
+	if current.State != store.StateDone && current.State != store.StateMerging {
+		return nil
+	}
+	if project.IsWorkspace() {
+		heads, err := greenhouseWorkspacePendingHeads(ctx, db, project, current)
+		if err != nil {
+			return err
+		}
+		currentHead := ""
+		for _, member := range heads {
+			if member.Repository == verdict.Repository {
+				currentHead = member.Head
+				break
+			}
+		}
+		if currentHead != verdict.Head {
+			return nil
+		}
+	} else {
+		head, err := taskBranchAuthorHead(ctx, project.Root, current.Branch)
+		if err != nil {
+			return err
+		}
+		if head != verdict.Head {
+			return nil
+		}
+	}
+	if current.State == store.StateMerging {
+		if err := db.Transition(ctx, current.ID, store.StateMerging, store.StateDone, "cli", "Greenhouse found blocking Review findings at "+shortSHA(verdict.Head)); err != nil {
+			return err
+		}
+	}
+	reason := fmt.Sprintf("Greenhouse found %d blocking finding(s) for head %s. Findings: %s", verdict.Blocking, shortSHA(verdict.Head), verdict.FindingsPath)
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
+		return err
+	}
+	if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, current.ID, verdict.Repository, verdict.Head, reason); err != nil {
+		return err
+	}
+	pending, err := db.ReviewFixInstructionPending(ctx, current.ID)
+	if err != nil {
+		return err
+	}
+	if !pending {
+		if _, err := s.queueReviewFix(ctx, db, project, current, nil, false); err != nil {
+			return err
+		}
+	}
+	if err := s.deliverNotices(ctx, db, project); err != nil && !isHerdrUnavailable(err) {
+		return err
 	}
 	return nil
 }
