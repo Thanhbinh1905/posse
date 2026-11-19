@@ -1127,6 +1127,16 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			}
 			continue
 		}
+		if fenced, err := greenhouseReviewFenced(ctx, db, project, change); err != nil || fenced {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			_ = os.Remove(ownerPath)
+			_ = releaseParallelReviewLock(lock)
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		_ = lock.Close()
 		go func() { _ = command.Wait() }()
 	}
