@@ -2,6 +2,8 @@
 
 *Restored for new Repository Worker placement by [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md). Workspace Project Workers remain Lead tabs.*
 
+*Sidebar layout superseded by sub-workspace placement ([#1047](https://github.com/Thanhbinh1905/posse/issues/1047), PR #1068, [ADR 0039](0039-repository-workers-open-as-herdr-worktree-children.md)): Posse no longer writes `[ui.sidebar.agents]` or sets `posse_row`; `posse setup` removes its earlier snippet.*
+
 Repository Projects open a held Pool Sandbox with `worktree.open` from the Lead workspace, making the Lead the group primary and each Worker a linked child. Workspace Projects are not single Git worktrees and retain ADR 0009's tab layout. This amends ADR 0007 layer 1 and ADR 0009. The User chose native grouping without changing their Nix-managed Herdr configuration or adding top-level workspaces.
 
 ## Isolated Herdr 0.9.0 spike
@@ -12,7 +14,7 @@ In `TestExistingMountWorktreeOpenAndLockSpike`, an existing Sandbox opened by `w
 
 On isolated Herdr 0.9.1, `worktree.open` creates native children in Spaces but appends their workspaces after unrelated workspaces. The grouped Agents panel is flat and follows workspace order; it does not render the worktree tree. Posse uses `workspace.move_block` to place identified repository Worker workspaces directly after their Lead, retaining Worker order and the relative order of all other workspaces. Ownership requires the Task's pane label, linked checkout path and the Lead's repository key. Reconciliation restores placement after launch, relaunch, Teardown and recovery. Already adjacent Workers cause no move; move failures are logged without blocking the command. No pane moves or User workspace/tab renames are needed, and Teardown ownership is unchanged.
 
-Lead titles remain `Lead: <project>` and `posse_row` remains `Lead:<project>`. Only `display_agent` shows the resolved harness before startup and the detected harness afterward, including recovery and existing sessions. Repository Workers leave `posse_row` empty because their native workspace label supplies the name; repeating it truncates both names in the optional Posse layout. Workspace Project tab rows keep their tree tokens.
+Lead titles remain `Lead: <project>`. Only `display_agent` shows the resolved harness before startup and the detected harness afterward, including recovery and existing sessions. Posse sets no `posse_row` token; each Repository Worker's native workspace label supplies its name.
 
 This provides adjacency, not nested Agents rows. Priority sorting or a custom agent view can override workspace order, and other agents in the Lead's own workspace remain before its repository Workers. Posse does not change those User choices. [Captured isolated client sidebar](../proof/lead-worker-sidebar.png) shows both the native Spaces tree and flat, adjacent Agents rows.
 

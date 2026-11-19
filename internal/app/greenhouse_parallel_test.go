@@ -17,6 +17,30 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func TestGreenhouseReviewDoesNotStartDuringOrAfterTeardown(t *testing.T) {
+	for _, tornDown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "teardown in progress", true: "already torn down"}[tornDown], func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateDone)
+			if tornDown {
+				if err := f.db.TransitionWithApproval(context.Background(), f.task.ID, store.StateDone, store.StateTornDown, "user", "discarded", "discard", "approved"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := f.db.StartIntent(context.Background(), f.project.ID, f.task.ID, "teardown", "started", `{}`, os.Getpid()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			roundDir := filepath.Join(f.home, "projects", f.project.Name, "tasks", taskIDString(f.task.Seq), "greenhouse")
+			if err := f.service.startParallelGreenhouseReviews(context.Background(), f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(parallelReviewOwnerPath(roundDir, f.project.Name)); !os.IsNotExist(err) {
+				t.Fatalf("review owner started during teardown: %v", err)
+			}
+		})
+	}
+}
+
 func TestGreenhousePrepublicationNoticesSkippedPendingIntent(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string

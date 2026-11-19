@@ -281,7 +281,7 @@ func projectLeadPane(snapshot herdr.Snapshot, project store.Project) (string, bo
 
 func attachedLeadMetadata(project store.Project, paneID, kind string) map[string]any {
 	metadata := leadDisplayMetadata(project, paneID, kind, kind)
-	metadata["tokens"] = map[string]string{"posse_row": leadWorkspaceLabel(project), "posse_attached": "true"}
+	metadata["tokens"] = map[string]string{"posse_attached": "true"}
 	return metadata
 }
 

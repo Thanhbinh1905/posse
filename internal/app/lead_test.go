@@ -732,7 +732,7 @@ func assertLeadMetadataCall(t *testing.T, fake *herdr.Fake, paneID, harness stri
 		if call.Method != "pane.report_metadata" || call.Params["pane_id"] != paneID || call.Params["title"] != "Lead: shop" {
 			continue
 		}
-		if call.Params["display_agent"] == harness && call.Params["tokens"].(map[string]string)["posse_row"] == "Lead:shop" {
+		if call.Params["display_agent"] == harness && call.Params["tokens"] == nil {
 			return
 		}
 	}

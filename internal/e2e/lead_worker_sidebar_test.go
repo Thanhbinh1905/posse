@@ -33,13 +33,6 @@ func TestLeadHarnessAndRepositoryWorkerSidebar(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, task := range []store.Task{first, second} {
-		if _, err := f.client.Call(context.Background(), "pane.report_metadata", map[string]any{
-			"pane_id": task.PaneID, "source": "posse", "tokens": map[string]string{"posse_row": task.ShortName},
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
 	runPosse(t, f.binary, f.repo, f.leadEnv, "list")
 	assertLeadWorkerSidebarSnapshot(t, f, first, second)
 }
@@ -51,13 +44,13 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 	for _, pane := range snap.Panes {
 		if pane.PaneID == f.leadPaneID {
 			leadFound = true
-			if pane.DisplayAgent != "claude" || pane.Title != "Lead: shop" || pane.Tokens["posse_row"] != "Lead:shop" || pane.Label != "posse:shop:lead" {
-				t.Errorf("Lead sidebar metadata: harness=%q title=%q row=%q label=%q; want claude, Lead: shop, Lead:shop, posse:shop:lead", pane.DisplayAgent, pane.Title, pane.Tokens["posse_row"], pane.Label)
+			if pane.DisplayAgent != "claude" || pane.Title != "Lead: shop" || pane.Label != "posse:shop:lead" {
+				t.Errorf("Lead sidebar metadata: harness=%q title=%q label=%q; want claude, Lead: shop, posse:shop:lead", pane.DisplayAgent, pane.Title, pane.Label)
 			}
 		}
 		for _, task := range tasks {
-			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != "") {
-				t.Errorf("linked Worker sidebar metadata = %q harness=%q, want native workspace row and claude", pane.Tokens["posse_row"], pane.DisplayAgent)
+			if pane.PaneID == task.PaneID && pane.DisplayAgent != "claude" {
+				t.Errorf("linked Worker harness = %q, want claude", pane.DisplayAgent)
 			}
 		}
 	}
@@ -86,8 +79,8 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 		}
 		want = append(want, task.HerdrWorkspaceID+"="+task.ShortName+"-t"+strconv.Itoa(task.Seq))
 		for _, pane := range snap.Panes {
-			if pane.PaneID == task.PaneID && (pane.DisplayAgent != "claude" || pane.Tokens["posse_row"] != "") {
-				t.Errorf("linked Worker sidebar row should use its native workspace label: label=%q harness=%q row=%q", pane.Label, pane.DisplayAgent, pane.Tokens["posse_row"])
+			if pane.PaneID == task.PaneID && pane.DisplayAgent != "claude" {
+				t.Errorf("linked Worker harness = %q, want claude (label=%q)", pane.DisplayAgent, pane.Label)
 			}
 		}
 	}
