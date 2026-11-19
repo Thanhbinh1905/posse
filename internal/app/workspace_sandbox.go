@@ -103,7 +103,7 @@ func (s *Service) planTaskMembersWithChoice(ctx context.Context, db *store.DB, p
 		}
 		member := taskMember{repoTarget: repoTarget{Name: repo.Name, Root: filepath.Join(project.Root, repo.Path), DefaultBranch: repo.DefaultBranch}, Path: repo.Path}
 		remote := originHost(ctx, member.Root)
-		member.MergeMode = memberMergeMode(cfg, repo.Name, remote)
+		member.MergeMode = workspaceMemberMergeMode(cfg, repo.Name, remote)
 		if brief.MergeMode != "" {
 			if !userChoice && mergeRank[brief.MergeMode] < mergeRank[member.MergeMode] {
 				return nil, "", axi.Failure("brief_invalid", fmt.Sprintf("merge_mode %s would loosen member %s from %s", brief.MergeMode, name, member.MergeMode), false, "Remove merge_mode or tighten it")

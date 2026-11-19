@@ -48,8 +48,8 @@ func ValidateMergeMode(value string) error {
 	if value == NoMistakes {
 		return &MigrationError{Value: value, Replacement: "pr"}
 	}
-	if value != "local" && value != "pr" {
-		return fmt.Errorf("must be local or pr")
+	if value != "local" && value != "pr" && value != "greenhouse" {
+		return fmt.Errorf("must be greenhouse, pr or local")
 	}
 	return nil
 }

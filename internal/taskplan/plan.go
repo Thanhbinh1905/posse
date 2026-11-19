@@ -16,7 +16,9 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 8
+const Version = 9
+
+const planVersionGreenhouseDelivery = 9
 
 // planVersionRuntimeWorkflow marks the first plan version that binds a frozen
 // workflow to its run and stage identity.
@@ -415,7 +417,7 @@ func (p Plan) Validate() error {
 		return invalid("unsupported review provider")
 	}
 	storedNoMistakes := p.Version < planVersionWithoutNoMistakes && p.Delivery == config.NoMistakes
-	if p.Delivery != "local" && p.Delivery != "pr" && !storedNoMistakes {
+	if p.Delivery != "local" && p.Delivery != "pr" && !(p.Version >= planVersionGreenhouseDelivery && p.Delivery == "greenhouse") && !storedNoMistakes {
 		return invalid("unsupported delivery")
 	}
 	if p.Execution.Scope == "workspace" && storedNoMistakes {

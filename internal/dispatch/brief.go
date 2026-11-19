@@ -754,6 +754,8 @@ func mergeRank(value string) int {
 		return 0
 	case "pr":
 		return 1
+	case "greenhouse":
+		return 2
 	default:
 		return -1
 	}

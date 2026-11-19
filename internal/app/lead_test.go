@@ -805,6 +805,18 @@ func TestWorkerProtocolScopesPRPublishing(t *testing.T) {
 	}
 }
 
+func TestWorkerProtocolUsesGreenhouseForGreenhouseDelivery(t *testing.T) {
+	protocol := workerProtocol("/home/user/.posse", store.Project{Name: "shop"}, store.Task{Seq: 1, Type: "change", MergeMode: "greenhouse"}, dispatch.Brief{Type: "change", DoneWhen: "the PR is green"}, "/tmp/launch.md", "/home/user/.posse/scratch/shop/t1", "none", "launch:1")
+	for _, want := range []string{"greenhouse axi pipeline --intent", "greenhouse axi inspect", "--greenhouse-run <run-id>", "Follow every repair and re-review until the run reaches `ci-ready`", "findings word for word"} {
+		if !strings.Contains(protocol, want) {
+			t.Errorf("Greenhouse Worker protocol lacks %q: %s", want, protocol)
+		}
+	}
+	if strings.Contains(protocol, "Posse reviews this exact Task branch head") || strings.Contains(protocol, "--head <current-commit-sha>") {
+		t.Fatalf("Greenhouse delivery uses Posse publication or the old host-review flow: %s", protocol)
+	}
+}
+
 func TestWorkerProtocolCarriesScopeRule(t *testing.T) {
 	brief := dispatch.Brief{Type: "change", DoneWhen: "tests pass"}
 	rule := "Scope: this Task's changes hold only what Done when needs, and every hunk traces to a Done when item."

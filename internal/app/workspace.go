@@ -194,9 +194,20 @@ func projectMergeMode(ctx context.Context, project store.Project, cfg config.Con
 		return "local"
 	}
 	if project.IsWorkspace() {
+		if cfg.Defaults.MergeMode == "greenhouse" {
+			return "pr"
+		}
 		return cfg.Defaults.MergeMode
 	}
 	return memberMergeMode(cfg, "", originHost(ctx, project.Root))
+}
+
+func workspaceMemberMergeMode(cfg config.Config, name, remote string) string {
+	mode := memberMergeMode(cfg, name, remote)
+	if mode == "greenhouse" {
+		return "pr"
+	}
+	return mode
 }
 
 func savedMemberMergeMode(cfg config.Config, name, remote string) string {
@@ -326,7 +337,7 @@ func detectionObject(detected detectedProject, cfg config.Config) axi.Object {
 		}
 		repos = append(repos, axi.Object{
 			{Key: "name", Value: repo.Name}, {Key: "default_branch", Value: repo.DefaultBranch},
-			{Key: "remote", Value: remote}, {Key: "merge_mode", Value: memberMergeMode(cfg, repo.Name, repo.Remote)},
+			{Key: "remote", Value: remote}, {Key: "merge_mode", Value: workspaceMemberMergeMode(cfg, repo.Name, repo.Remote)},
 		})
 	}
 	object := axi.Object{

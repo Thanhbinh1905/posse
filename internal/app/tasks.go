@@ -1369,9 +1369,12 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 	merge := task.MergeMode
 	cfg, _ := config.Load(home, project.Name)
 	greenhouseSingle := !project.IsWorkspace() && greenhouseFullPipelineTaskWithConfig(task, cfg, "")
+	greenhouseDelivery := merge == "greenhouse" && task.Type == "change" && !project.IsWorkspace()
 	greenhouseWorkspace := project.IsWorkspace() && workspaceGreenhouseFullPipelinePlan(task, cfg)
 	work := "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Never git push or open a PR."
-	if merge == "pr" && task.Type == "change" && !project.IsWorkspace() {
+	if greenhouseDelivery {
+		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch, then drive Greenhouse's full pipeline to completion. Do not push or open a PR yourself."
+	} else if merge == "pr" && task.Type == "change" && !project.IsWorkspace() {
 		work = "Work only inside this Worker's Task worktree. Read anything, write nothing outside it. Commit changes on this branch. Run `posse publish \"<summary>\" [--verify \"<command> -> <result>\"] [--proof \"<markdown>\"] [--risk \"<markdown>\"]` to push only this Task branch and open or reuse its PR, then report its URL. Supply verification commands and results, screenshots/images for UI proof or test/log evidence otherwise, and risk plus rollback details. Never push directly or force-push outside `posse publish --rewrite --user-approved \"<User's words>\"`; never delete branches, change the default branch, or merge."
 	} else if project.IsWorkspace() && task.Type == "change" {
 		if greenhouseWorkspace {
@@ -1384,7 +1387,9 @@ func workerProtocol(home string, project store.Project, task store.Task, brief d
 		work += " When the User asks you to amend, squash or force-push this published Task branch, use `posse publish --rewrite --user-approved \"<User's words>\"` with the User's exact quote. Never rewrite published history without that quote or force-push outside this command."
 	}
 	if task.Type == "change" {
-		if greenhouseSingle {
+		if greenhouseDelivery {
+			work += "\n\nGreenhouse delivery: after committing the change, start the pipeline with `greenhouse axi pipeline --intent '<change and Done when>' --target " + taskTargetBranch(project, task) + " --wait 8m`. Continue a running pipeline with `greenhouse axi watch --stream <stream> --after <sequence> --wait 1m`; use its snapshot as authoritative. When a decision parks, inspect it with `greenhouse axi inspect`, send the findings word for word in a `posse signal needs-decision` to the Lead, and answer the gate with the Lead's reply using `greenhouse axi decide`. Do not commit while the run is active. Follow every repair and re-review until the run reaches `ci-ready`. If Greenhouse fails or needs recovery, signal stuck with its reason; do not work around the failed run. Before signaling done, verify `greenhouse axi inspect --run <run-id>` reports `ci-ready` and current delivery. Then run `posse signal done \"<summary>\" --greenhouse-run <run-id> --turn <token>`. Do not use `posse publish`, `--head`, private candidates or `posse validate`."
+		} else if greenhouseSingle {
 			work += "\n\nGreenhouse full-pipeline: do not publish first. Commit the change, then run `posse signal done \"<summary>\" --head <current-commit-sha> --turn <token>`. Posse reviews this exact Task branch head through Greenhouse outside the Task Sandbox. If it passes, Posse queues an instruction to publish that unchanged head; if the head moves, signal done again for the new head. No private candidate or `posse validate` stages are used."
 		} else if greenhouseWorkspace {
 			work += "\n\nGreenhouse full-pipeline Workspace: run `posse signal done \"<summary>\" --turn <token>` after committing every changed Member. Posse requests one Greenhouse Verdict for each exact Member head. If a Verdict queues findings, apply the Review fix and signal done again with the required `--resolutions <file>`. Publish only the exact heads Posse names after every Member Verdict passes. Do not use `--head`, private candidates, or `posse validate` stages."
