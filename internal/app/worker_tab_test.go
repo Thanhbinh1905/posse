@@ -213,9 +213,17 @@ func TestLeadWorkspaceRequiresTheExactRecordedWorkspaceID(t *testing.T) {
 	if got, found := leadWorkspace(withoutLeadPane, project); found {
 		t.Fatalf("reused workspace without the exact Lead pane was accepted: %q", got)
 	}
+	recovering := project
+	recovering.LeadPaneID = ""
+	if got, found := leadWorkspace(withoutLeadPane, recovering); !found || got != "w1" {
+		t.Fatalf("exact recorded workspace was rejected while its Lead pane is not yet recorded: %q %v", got, found)
+	}
 	recreated := herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "w2", Label: "Lead:shop"}}}
 	if got, found := leadWorkspace(recreated, project); found {
 		t.Fatalf("a different workspace was adopted by its Lead label: %q", got)
+	}
+	if got, found := leadWorkspace(recreated, recovering); found {
+		t.Fatalf("a workspace matching only the Lead label was accepted: %q", got)
 	}
 }
 
