@@ -49,28 +49,49 @@ func storedWorkflowRunID(data string) string {
 }
 
 func (db *DB) externalizePlanJSON(data string) (string, error) {
-	var stored struct {
-		Inputs []struct {
-			Path string `json:"path"`
-		} `json:"inputs"`
-	}
+	var stored taskplan.Plan
 	if err := json.Unmarshal([]byte(data), &stored); err != nil {
 		return "", err
 	}
-	for _, input := range stored.Inputs {
-		if input.Path != "" {
-			return data, nil
+	existingBlobs := make([]bool, len(stored.Inputs))
+	hasExistingBlobs := false
+	needsExternalization := false
+	for i := range stored.Inputs {
+		if stored.Inputs[i].Path == "" {
+			needsExternalization = needsExternalization || len(stored.Inputs[i].Bytes) > planInputBlobThreshold
+			continue
 		}
+		existingBlobs[i] = true
+		hasExistingBlobs = true
+		inputBytes, err := db.readPlanBlob(stored.Inputs[i])
+		if err != nil {
+			return "", err
+		}
+		stored.Inputs[i].Bytes = inputBytes
+		stored.Inputs[i].Path = ""
 	}
-	plan, err := taskplan.Decode(data)
+	var plan taskplan.Plan
+	var err error
+	if hasExistingBlobs {
+		hydratedJSON, marshalErr := json.Marshal(stored)
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		plan, err = taskplan.Decode(string(hydratedJSON))
+	} else {
+		plan, err = taskplan.Decode(data)
+	}
 	if err != nil {
 		return "", err
 	}
+	if !needsExternalization {
+		return data, nil
+	}
+	plan.AdmittedSHA256 = ""
 	digest := plan.SHA256()
-	changed := false
 	for i := range plan.Inputs {
 		input := &plan.Inputs[i]
-		if len(input.Bytes) <= planInputBlobThreshold {
+		if len(input.Bytes) <= planInputBlobThreshold && !existingBlobs[i] {
 			continue
 		}
 		path, err := db.writePlanBlob(input.SHA256, input.Bytes)
@@ -79,10 +100,6 @@ func (db *DB) externalizePlanJSON(data string) (string, error) {
 		}
 		input.Path = path
 		input.Bytes = nil
-		changed = true
-	}
-	if !changed {
-		return data, nil
 	}
 	plan.AdmittedSHA256 = digest
 	planInputsJSON, err := json.Marshal(plan)
@@ -163,6 +180,9 @@ func (db *DB) readPlanBlob(input taskplan.Input) ([]byte, error) {
 func clonePlan(plan *taskplan.Plan) *taskplan.Plan {
 	copy := *plan
 	copy.Inputs = append([]taskplan.Input(nil), plan.Inputs...)
+	for i := range copy.Inputs {
+		copy.Inputs[i].Bytes = append([]byte(nil), plan.Inputs[i].Bytes...)
+	}
 	copy.Dependencies = append(copy.Dependencies[:0:0], plan.Dependencies...)
 	copy.Grants = append(copy.Grants[:0:0], plan.Grants...)
 	copy.Preferences = append(copy.Preferences[:0:0], plan.Preferences...)

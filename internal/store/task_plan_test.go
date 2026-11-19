@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -65,6 +67,13 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	if len(tasks[0].PlanJSON) != 0 {
 		t.Fatalf("LiveTasks returned %d bytes of plan data, want none", len(tasks[0].PlanJSON))
 	}
+	livePlan, err := tasks[0].AdmittedPlan()
+	if err != nil || livePlan == nil {
+		t.Fatalf("load admitted plan from LiveTasks result: plan=%v err=%v", livePlan != nil, err)
+	}
+	if got := len(livePlan.Inputs[len(livePlan.Inputs)-1].Bytes); got != 30<<20 {
+		t.Fatalf("LiveTasks admitted input size=%d, want %d", got, 30<<20)
+	}
 	stored, err := db.TaskByID(ctx, project.ID, taskID)
 	if err != nil {
 		t.Fatal(err)
@@ -111,6 +120,68 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	rebuiltPlan, err := rebuilt.AdmittedPlan()
 	if err != nil || rebuiltPlan.SHA256() != admittedDigest || len(rebuiltPlan.Inputs[len(rebuiltPlan.Inputs)-1].Bytes) != 30<<20 {
 		t.Fatalf("snapshot rebuild changed the externalized plan: plan=%v err=%v", rebuiltPlan != nil, err)
+	}
+}
+
+func TestPlanInputExternalizationRepairsMixedInlineAndBlobInputs(t *testing.T) {
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	plan := admittedStorePlan(t, home).Bind("t1")
+	plan.Inputs = append(plan.Inputs,
+		taskplan.Select("review-round-file", "review/one.patch", make([]byte, 1<<20)),
+		taskplan.Select("review-round-file", "review/two.patch", bytes.Repeat([]byte{0x5a}, 1<<20)),
+	)
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalized, err := db.externalizePlanJSON(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mixed taskplan.Plan
+	if err := json.Unmarshal([]byte(externalized), &mixed); err != nil {
+		t.Fatal(err)
+	}
+	second := &mixed.Inputs[len(mixed.Inputs)-1]
+	second.Bytes, err = db.readPlanBlob(*second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Path = ""
+	mixedJSON, err := json.Marshal(mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.externalizePlanJSON(string(mixedJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := db.externalizePlanJSON(got)
+	if err != nil || repeated != got {
+		t.Fatalf("repeat externalization changed output: equal=%v err=%v", repeated == got, err)
+	}
+	var repaired taskplan.Plan
+	if err := json.Unmarshal([]byte(got), &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if len(repaired.Inputs) != len(mixed.Inputs) {
+		t.Fatalf("got %d inputs, want %d", len(repaired.Inputs), len(mixed.Inputs))
+	}
+	for i, input := range repaired.Inputs[2:] {
+		if input.Path == "" || len(input.Bytes) != 0 {
+			t.Fatalf("input %d was not externalized: path=%q bytes=%d", i+2, input.Path, len(input.Bytes))
+		}
+	}
+	loaded, err := db.loadAdmittedPlan(123, got)
+	if err != nil || loaded.SHA256() != plan.SHA256() {
+		t.Fatalf("repaired plan changed its digest: got=%v err=%v", loaded, err)
 	}
 }
 
