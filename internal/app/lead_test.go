@@ -338,6 +338,9 @@ func TestUpClearsReplacedDeadLeadLabelAndIncrementsLaunchName(t *testing.T) {
 	if _, err := db.NextLeadLaunch(ctx, project.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.UpdateProjectStatus(ctx, project.ID, "parked"); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -374,6 +377,15 @@ func TestUpClearsReplacedDeadLeadLabelAndIncrementsLaunchName(t *testing.T) {
 	}
 	if !clearedDuplicateLabel || !callerPaneSelected || fake.CallCount("tab.create") != 0 {
 		t.Fatalf("replacement did not use the caller pane and clear duplicate labels: %#v", fake.Calls)
+	}
+	db, err = store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err = db.ProjectByID(ctx, project.ID)
+	if err != nil || project.IsParked() || project.Status != "active" {
+		t.Fatalf("Project after posse up = %+v, %v; want active", project, err)
 	}
 }
 

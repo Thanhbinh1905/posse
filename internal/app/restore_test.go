@@ -133,6 +133,30 @@ func TestHerdrRestartDoesNotRelaunchLead(t *testing.T) {
 	}
 }
 
+func TestUpAllSkipsParkedProjectAndNamesItsReason(t *testing.T) {
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	if err := db.UpdateProjectStatus(ctx, project.ID, "parked"); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	service := testService(home, fake)
+	output := &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	t.Setenv("HERDR_PANE_ID", "")
+	if code := cli.Run([]string{"up", "--all"}); code != 0 || !strings.Contains(output.String(), "parked_projects") || !strings.Contains(output.String(), "Lead is missing and no Worker is active") {
+		t.Fatalf("up --all = %d: %s", code, output)
+	}
+	if fake.CallCount("agent.start") != 0 {
+		t.Fatalf("up --all restored parked Project: %#v", fake.Calls)
+	}
+	project, err := db.ProjectByID(ctx, project.ID)
+	if err != nil || !project.IsParked() {
+		t.Fatalf("Project after up --all = %+v, %v; want parked", project, err)
+	}
+}
+
 func TestUpAllRestoresRecordedClaudeLeadOverLeadKind(t *testing.T) {
 	ctx := context.Background()
 	home, db, project := restoreFixture(t)

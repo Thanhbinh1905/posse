@@ -288,7 +288,7 @@ func watchRuntimeProcessHealthy(home string, projectID int64, state store.WatchR
 }
 
 func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home string, project store.Project) error {
-	if project.IsDown() || project.HerdrWorkspaceID == "" || os.Getenv(watchRuntimeTokenEnv) != "" {
+	if project.IsDown() || project.IsParked() || project.HerdrWorkspaceID == "" || os.Getenv(watchRuntimeTokenEnv) != "" {
 		return nil
 	}
 	binary, err := os.Executable()
@@ -316,7 +316,7 @@ func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home str
 	if err != nil {
 		return err
 	}
-	if fresh.IsDown() || fresh.HerdrWorkspaceID == "" {
+	if fresh.IsDown() || fresh.IsParked() || fresh.HerdrWorkspaceID == "" {
 		return nil
 	}
 	project = fresh
@@ -789,7 +789,7 @@ func (s *Service) superviseWatchRuntimes(ctx *axi.Context, command string, args 
 		}
 	}
 	for _, project := range selected {
-		if project.IsDown() || project.HerdrWorkspaceID == "" {
+		if project.IsDown() || project.IsParked() || project.HerdrWorkspaceID == "" {
 			continue
 		}
 		if err := s.ensureWatchRuntime(ctx.Context, db, home, project); err != nil {
@@ -1057,6 +1057,15 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 	return s.runWatchLoop(ctx, db, project, timeout, stopSignals, &watch)
 }
 
+func stopParkedWatchSystemd(ctx *axi.Context, home string, project store.Project, watch *store.WatchRuntime) {
+	if watch == nil || !systemdWatchUnitLoaded(ctx.Context, home, project.ID) {
+		return
+	}
+	if err := stopSystemdWatchNoBlock(ctx.Context, home, project.ID); err != nil {
+		fmt.Fprintf(ctx.ErrOut, "Stop parked Project Watch for %s: %v\n", project.Name, err)
+	}
+}
+
 func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal, watch *store.WatchRuntime) error {
 	loopCtx := ctx.Context
 	if watch != nil {
@@ -1115,11 +1124,28 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		if err != nil {
 			return err
 		}
-		if fresh.IsDown() || fresh.Root != project.Root {
+		if fresh.IsDown() || fresh.IsParked() || fresh.Root != project.Root {
+			if fresh.IsParked() {
+				stopParkedWatchSystemd(ctx, home, project, watch)
+			}
 			return nil
+		}
+		workspaceMissing := fresh.HerdrWorkspaceID != ""
+		snapshot, snapshotErr := s.snapshot(loopCtx)
+		if snapshotErr == nil {
+			for _, workspace := range snapshot.Workspaces {
+				if workspace.WorkspaceID == fresh.HerdrWorkspaceID {
+					workspaceMissing = false
+					break
+				}
+			}
 		}
 		_, blocked, err := s.prepareProjectWatchObservation(loopCtx, db, fresh)
 		trackWatchReconcileBlock(ctx, db, fresh, blocked)
+		if observed, readErr := db.ProjectByID(loopCtx, project.ID); readErr == nil && observed.IsParked() {
+			stopParkedWatchSystemd(ctx, home, project, watch)
+			return nil
+		}
 		if err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) && !isHerdrUnavailable(err) {
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}
@@ -1127,11 +1153,13 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "maintenance", err)
 		}
 		if lastLeadReceiverCheck.IsZero() || time.Since(lastLeadReceiverCheck) >= time.Minute {
-			if err := s.monitorLeadReceiver(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
-				fmt.Fprintf(ctx.ErrOut, "Lead receiver check failed for %s: %v\n", project.Name, err)
-			}
-			if err := s.deliverNotices(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
-				fmt.Fprintf(ctx.ErrOut, "Notice alert delivery failed for %s: %v\n", project.Name, err)
+			if !workspaceMissing {
+				if err := s.monitorLeadReceiver(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
+					fmt.Fprintf(ctx.ErrOut, "Lead receiver check failed for %s: %v\n", project.Name, err)
+				}
+				if err := s.deliverNotices(loopCtx, db, fresh); err != nil && !isHerdrUnavailable(err) {
+					fmt.Fprintf(ctx.ErrOut, "Notice alert delivery failed for %s: %v\n", project.Name, err)
+				}
 			}
 			lastLeadReceiverCheck = time.Now()
 		}
