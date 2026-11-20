@@ -16,7 +16,7 @@ import (
 )
 
 // workspaceCapChange is a full-pipeline workspace Change Task t1 over the api
-// and web Members that has spent the default cap of three rounds.
+// and web Members at the cap after one blocking-finding repair.
 type workspaceCapChange struct {
 	f         *prLifecycleFixture
 	ws        fullPipelineWorkspace
@@ -130,14 +130,15 @@ func unsafeMemberPattern(key, member, excerpt string) string {
 	return `{"key":"` + key + `","title":"Unsafe ` + member + ` operation","rule":"Operations must be validated","root_cause":"The value is used without validation","fix_guidance":"Validate every operation","severity":"P1","origin":"introduced","instances":[{"repository":"` + member + `","path":"change.txt","line":1,"symbol":"operation","excerpt":"` + excerpt + `","description":"Unvalidated operation"}]}`
 }
 
-// startWorkspaceCapChange replays the clouddbv1 t27 sequence: Review Round 1
-// requests changes in both Members, repair round 1 fixes them in the private
-// candidates, and Review Round 2 requests changes for a new pattern P-3, which
-// spends 3 of the default 3 shared Review/repair rounds.
+// startWorkspaceCapChange records one blocking repair and then a fresh
+// blocking finding at a one-round cap.
 func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
 	t.Helper()
 	f := reviewIdentityFixture(t)
 	ws := newFullPipelineWorkspace(t, f)
+	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "config", "set", "review_loop.max_rounds", "1", "--user-approved", "Use a one-round cap for this E2E scenario"); code != 0 {
+		t.Fatalf("set one-round cap: code=%d %s", code, output)
+	}
 	brief := filepath.Join(f.root, "workspace-cap.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace cap\ndone_when: checked\nrepos: [api, web]\n---\nChange both Members safely.\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -165,7 +166,7 @@ func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
 			t.Fatalf("submit %s private candidate: code=%d %s", repo.Repo, code, output)
 		}
 	}
-	if code, output := h.lead(t, "review", "t1"); code != 0 || !strings.Contains(output, "max_rounds: 3") || !strings.Contains(output, "Review fix rounds share max_rounds") {
+	if code, output := h.lead(t, "review", "t1"); code != 0 || !strings.Contains(output, "max_rounds: 1") || !strings.Contains(output, "blocking findings") {
 		t.Fatalf("review status does not explain the shared cap before round 1: code=%d %s", code, output)
 	}
 	h.recordRound(t, "t2", "changes_requested", unsafeMemberPattern("unsafe-api", "api", "unsafe api operation")+","+unsafeMemberPattern("unsafe-web", "web", "unsafe web operation"), "")
