@@ -487,6 +487,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-stress-unit-
+          POSSE_STRESS_UNIT_BUDGET: 600
         run: scripts/stress-changed-tests.sh --run unit "$BASE_SHA"
       - name: Clean test temporary roots and caches
         if: ${{ always() }}
