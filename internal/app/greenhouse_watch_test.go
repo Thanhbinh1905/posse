@@ -80,6 +80,29 @@ func TestGreenhouseWatchStageUsesObservedElapsedTime(t *testing.T) {
 	}
 }
 
+func TestGreenhouseWatchSkipsDoneSignalsWithoutRunID(t *testing.T) {
+	db, project, _ := newWatchTestProject(t)
+	defer db.Close()
+	ctx := context.Background()
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Pipeline", MergeMode: "greenhouse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddSignal(ctx, taskID, "done", "older pipeline", map[string]string{"greenhouse_run_id": "run-older"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddSignal(ctx, taskID, "done", "newer signal without run", map[string]string{"greenhouse_run_id": ""}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := greenhouseRunIDFromSignals(ctx, db, task); got != "run-older" {
+		t.Fatalf("Greenhouse run ID = %q, want run-older", got)
+	}
+}
+
 func TestGreenhouseWatchReusesDoneSignalRunID(t *testing.T) {
 	db, project, _ := newWatchTestProject(t)
 	defer db.Close()
@@ -171,12 +194,15 @@ func TestGreenhouseWatchPersistsRunAndReportsSidebarAndPane(t *testing.T) {
 	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SaveGreenhouseTaskWatch(ctx, store.GreenhouseTaskWatch{TaskID: taskID, RunID: "run-1", Status: "running", Stage: "review", RunObservedAt: 1795136400000, StageObservedAt: 1795136400000, RunStartedAt: 1795136400000, StageStartedAt: 1795136460000, UpdatedAt: 1795136460000}); err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	inspect := filepath.Join(bin, "greenhouse")
-	if err := os.WriteFile(inspect, []byte("#!/bin/sh\nprintf '%s\\n' '{\"outcome\":\"ok\",\"run_id\":\"run-1\",\"run\":{\"id\":\"run-1\",\"status\":\"running\",\"stage\":\"pipeline\",\"pipeline\":{\"active\":{\"stage\":\"lint\"}}}}'\n"), 0o700); err != nil {
+	if err := os.WriteFile(inspect, []byte("#!/bin/sh\nprintf '%s\\n' '{\"outcome\":\"ok\",\"run_id\":\"run-1\",\"run\":{\"id\":\"run-1\",\"status\":\"running\",\"stage\":\"pipeline\",\"started_at\":\"2026-11-20T01:00:00Z\",\"stage_started_at\":\"2026-11-20T01:01:00Z\",\"pipeline\":{\"active\":{\"stage\":\"lint\"}}}}'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -188,7 +214,7 @@ func TestGreenhouseWatchPersistsRunAndReportsSidebarAndPane(t *testing.T) {
 		t.Fatal(err)
 	}
 	watch, err := db.GreenhouseTaskWatch(ctx, taskID)
-	if err != nil || watch.RunID != "run-1" || watch.Stage != "lint" || watch.Status != "running" || watch.PaneID != "w2:p2" || watch.RunObservedAt == 0 || watch.StageObservedAt == 0 || watch.RunStartedAt != 0 || watch.StageStartedAt != 0 {
+	if err != nil || watch.RunID != "run-1" || watch.Stage != "lint" || watch.Status != "running" || watch.PaneID != "w2:p2" || watch.RunObservedAt == 0 || watch.StageObservedAt == 0 || watch.RunStartedAt != greenhouseTimestampMillis("2026-11-20T01:00:00Z") || watch.StageStartedAt != greenhouseTimestampMillis("2026-11-20T01:01:00Z") {
 		t.Fatalf("persisted Greenhouse watch = %+v, %v", watch, err)
 	}
 	task, err := db.TaskByID(ctx, project.ID, taskID)

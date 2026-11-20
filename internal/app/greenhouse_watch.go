@@ -144,10 +144,9 @@ func greenhouseRunIDFromSignals(ctx context.Context, db *store.DB, task store.Ta
 		var data struct {
 			RunID string `json:"greenhouse_run_id"`
 		}
-		if json.Unmarshal([]byte(signal.DataJSON), &data) == nil {
+		if json.Unmarshal([]byte(signal.DataJSON), &data) == nil && data.RunID != "" {
 			return data.RunID
 		}
-		return ""
 	}
 	return ""
 }
@@ -225,7 +224,10 @@ func (s *Service) observeGreenhouseTasks(ctx context.Context, db *store.DB, proj
 		if stageFinished > 0 {
 			watch.StageFinishedAt = stageFinished
 		} else if stage != watch.Stage {
-			watch.StageStartedAt, watch.StageFinishedAt = 0, 0
+			watch.StageFinishedAt = 0
+			if stageStarted == 0 {
+				watch.StageStartedAt = 0
+			}
 		}
 		watch.Status, watch.Stage, watch.UpdatedAt = status, stage, now
 		if err := db.SaveGreenhouseTaskWatch(ctx, watch); err != nil {
