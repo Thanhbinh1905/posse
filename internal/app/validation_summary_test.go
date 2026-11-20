@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,42 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestValidationSummaryListsAcceptedFindingsForItsExactHead(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	defer f.db.Close()
+	ctx := context.Background()
+	oldHead, head := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	for _, disposition := range []struct{ head, quote string }{{oldHead, "accepted old"}, {head, "accepted current"}} {
+		if _, err := f.db.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,user_quote,at) VALUES(?,?,?,?)`, f.task.ID, disposition.head, disposition.quote, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, finding := range []struct{ head, title, repository string }{
+		{oldHead, "Old accepted finding", f.project.Name},
+		{head, "Current accepted finding", f.project.Name},
+		{head, "Other repository finding", "other-repository"},
+	} {
+		result, err := f.db.ExecContext(ctx, `INSERT INTO review_patterns(ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(?,?,? ,?,'rule','cause','guidance',1)`, f.task.ID, index+1, fmt.Sprintf("P-%d", index+1), finding.title)
+		if err != nil {
+			t.Fatal(err)
+		}
+		patternID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,?,?,?,1,?,'internal/input.go','parseInput','excerpt',1,?,'P1','introduced',1,'accepted')`, f.task.ID, index+1, patternID, strings.Repeat(fmt.Sprintf("%x", index+1), 64), finding.repository, finding.head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary, err := validationSummaryFor(ctx, f.db, f.task, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(summary.Accepted, "\n"), "Current accepted finding") || strings.Contains(strings.Join(summary.Accepted, "\n"), "Old accepted finding") || strings.Contains(strings.Join(summary.Accepted, "\n"), "Other repository finding") {
+		t.Fatalf("accepted findings do not match summary head %s: %+v", summary.Head, summary.Accepted)
+	}
+}
 
 func TestReplaceValidationBlockTouchesOnlyOwnedBlock(t *testing.T) {
 	forged := managedPublishBody("Human note\n"+validationBlockStart+"\nkeep\n"+validationBlockEnd, "forged-token")

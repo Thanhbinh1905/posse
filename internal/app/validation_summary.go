@@ -40,7 +40,7 @@ type validationSummary struct {
 	CI            string
 }
 
-func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task) (validationSummary, error) {
+func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task, repository string) (validationSummary, error) {
 	summary := validationSummary{Head: task.GatedSHA, Review: "unknown", Findings: map[string]int{}, CI: "unknown"}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
@@ -104,14 +104,23 @@ func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task) (v
 		}
 		if quote != "" {
 			summary.Accepted = append(summary.Accepted, "User quote: \""+quote+"\"")
-			findings, err := db.ReviewFindingsForTask(ctx, task.ID)
+			rows, err := db.QueryContext(ctx, `SELECT f.severity,COALESCE(parent.title,p.title),f.path
+FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into
+WHERE f.ship_task_id=? AND f.head_sha=? AND f.state='accepted' AND (?='' OR f.repository=?)
+ORDER BY COALESCE(parent.seq,p.seq),f.seq`, task.ID, summary.Head, repository, repository)
 			if err != nil {
 				return summary, err
 			}
-			for _, finding := range findings {
-				if finding.State == "accepted" {
-					summary.Accepted = append(summary.Accepted, fmt.Sprintf("Accepted finding %s: %s (%s)", finding.Severity, finding.Title, finding.Path))
+			defer rows.Close()
+			for rows.Next() {
+				var severity, title, path string
+				if err := rows.Scan(&severity, &title, &path); err != nil {
+					return summary, err
 				}
+				summary.Accepted = append(summary.Accepted, fmt.Sprintf("Accepted finding %s: %s (%s)", severity, title, path))
+			}
+			if err := rows.Err(); err != nil {
+				return summary, err
 			}
 		}
 	}
@@ -253,7 +262,7 @@ func (s *Service) refreshPRValidationBlock(ctx context.Context, db *store.DB, pr
 	if marker.PRURL != prURL {
 		return nil
 	}
-	summary, err := validationSummaryFor(ctx, db, task)
+	summary, err := validationSummaryFor(ctx, db, task, member)
 	if err != nil {
 		return err
 	}
