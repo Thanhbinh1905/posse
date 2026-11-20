@@ -241,7 +241,16 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 		memberLabel = "Workspace member " + member + ": "
 	}
 	var instruction string
-	if fullPipelineSelected(task, member) {
+	if greenhouseFullPipelineTask(task) {
+		target := "origin/" + freshness.Branch
+		if freshness.Local {
+			target = freshness.Branch
+		}
+		instruction = fmt.Sprintf(
+			"%sGreenhouse-reviewed head %s is missing current target commit %s from %s. Run `posse signal working \"Refreshing the target\"`, merge %s into the Task branch and resolve conflicts, then request review for the new head with `posse signal done \"<summary>\" --head <sha>` without --pr. After Greenhouse passes, publish the exact head with `posse publish \"<summary>\"` and report done with the PR URL.",
+			memberLabel, headSHA, freshness.Tip, target, target,
+		)
+	} else if fullPipelineSelected(task, member) {
 		target := "origin/" + freshness.Branch
 		mergeTarget := "origin/" + freshness.Branch
 		if freshness.Local {

@@ -247,6 +247,10 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 		if !freshness.Fresh {
+			if greenhouseFullPipeline && repoFilter == "" {
+				return axi.Failure("pr_branch_behind", fmt.Sprintf("Task head %s does not contain current target commit %s from origin/%s", sha, freshness.Tip, freshness.Branch), false,
+					"Run `posse signal working \"Refreshing the target\"`, merge origin/"+freshness.Branch+" into the Task branch and resolve conflicts, then request review for the new head with `posse signal done \"<summary>\" --head <sha>`; do not pass --pr before Greenhouse passes")
+			}
 			return prBranchBehindFailure(task.Seq, sha, freshness, targetSync{})
 		}
 	}
@@ -300,7 +304,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	if greenhouseFullPipelineTaskWithConfig(task, cfg, repoFilter) {
 		if err := requireGreenhouseGatePass(out.Context, db, project, cfg, task, sha, repoFilter); err != nil {
-			return axi.Failure("publish_refused", "full-pipeline requires a passing Greenhouse Verdict for this head before push", false, err.Error())
+			return axi.Failure("publish_refused", "full-pipeline requires a passing Greenhouse Verdict for this head before push", false, err.Error(), "Run `posse signal working \"Requesting Greenhouse review\"`, then `posse signal done \"<summary>\" --head "+sha+"` without --pr")
 		}
 	}
 	if err := db.RecordPublishPrePushHead(out.Context, task.ID, parsed.Flags["repo"], previousRemoteHead); err != nil {

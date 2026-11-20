@@ -26,6 +26,85 @@ func hasPendingDecision(decisions []store.Decision, id int64) bool {
 	return false
 }
 
+func TestGreenhouseStaleHeadInstructionRequestsReviewWithoutPR(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: strings.Repeat("a", 40)}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || len(instructions) != 1 || !strings.Contains(instructions[0].Body, "posse signal done \"<summary>\" --head <sha>") || !strings.Contains(instructions[0].Body, "without --pr") || !strings.Contains(instructions[0].Body, "posse publish") {
+		t.Fatalf("stale Greenhouse instruction = %+v, %v", instructions, err)
+	}
+}
+
+func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "Review requested", map[string]string{"greenhouse_pending_head": f.headSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateDone, "worker", "Review requested"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateDone, store.StateWorking, "worker", "Publish was refused"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "needs-decision", "Waiting for direction", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateNeedsDecision, "worker", "Waiting for direction"); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record Gate pass: recorded=%v err=%v", recorded, err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(context.Background(), f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
+	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "Greenhouse passed Task head") || !strings.Contains(messages[0].Body, "posse publish") {
+		t.Fatalf("publication message = %+v, %v", messages, err)
+	}
+}
+
 func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
