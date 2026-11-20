@@ -77,7 +77,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			}
 			request.Kind = "review_cap"
 			request.Origin = reviewCapOrigin(task, binding.Head)
-			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%d of %d Review/repair rounds used). Choose how to proceed.", taskIDString(task.Seq), binding.label(), used, max)
+			request.Question = fmt.Sprintf("Review and repair cap reached for %s at %s (%s). %s. Choose how to proceed.", taskIDString(task.Seq), binding.label(), reviewCapUsageDescription(task, used, max), reviewCapRule(task, max))
 			request.Options = []string{"accept-head", "final-fix", "rethink", "discard"}
 			if grant, err := db.ReviewCapGrant(ctx, task.ID); err == nil {
 				var sameDecision bool
