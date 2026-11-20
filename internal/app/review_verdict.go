@@ -220,7 +220,14 @@ func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.
 			return err
 		}
 		if !passed {
-			return axi.Failure("greenhouse_verdict_required", "Task "+taskIDString(task.Seq)+" has no current passing Greenhouse Verdict for "+target.Repository+" at "+shortSHA(target.Commit), false, "Wait for the Greenhouse Verdict for this exact head before Merge")
+			evidence, err := db.ReviewEvidenceFor(ctx, task.ID, []store.ReviewTarget{target})
+			if err != nil {
+				return err
+			}
+			if evidence.Disposition {
+				continue
+			}
+			return axi.Failure("greenhouse_verdict_required", "Task "+taskIDString(task.Seq)+" has no current passing Greenhouse Verdict or exact-head acceptance for "+target.Repository+" at "+shortSHA(target.Commit), false, "Wait for the Greenhouse Verdict or apply the exact-head review-cap acceptance before publication or Merge")
 		}
 	}
 	return nil
