@@ -464,9 +464,6 @@ func TestStagingFullPipelineWorkspaceMembersBindStagingTargets(t *testing.T) {
 	audit("Merge")
 }
 
-// TestStagingFullPipelineReviewCarryAndCapDecision proves Review carry on
-// staging and that queueing a blocking-finding repair spends the cap and raises
-// one User-only Decision bound to the current candidate. Nothing is published.
 func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
@@ -534,8 +531,6 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	}
 	audit("carry")
 
-	// The blocking-finding repair request, not a third review verdict, spends
-	// this one-round cap.
 	for round := 2; round <= 2; round++ {
 		name := fmt.Sprintf("round-%d.txt", round)
 		commitCandidateFile(t, f, change.WorktreePath, name, "unsafe operation\n")

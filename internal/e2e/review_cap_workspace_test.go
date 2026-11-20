@@ -15,8 +15,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-// workspaceCapChange is a full-pipeline workspace Change Task t1 over the api
-// and web Members at the cap after one blocking-finding repair.
 type workspaceCapChange struct {
 	f         *prLifecycleFixture
 	ws        fullPipelineWorkspace
@@ -130,8 +128,6 @@ func unsafeMemberPattern(key, member, excerpt string) string {
 	return `{"key":"` + key + `","title":"Unsafe ` + member + ` operation","rule":"Operations must be validated","root_cause":"The value is used without validation","fix_guidance":"Validate every operation","severity":"P1","origin":"introduced","instances":[{"repository":"` + member + `","path":"change.txt","line":1,"symbol":"operation","excerpt":"` + excerpt + `","description":"Unvalidated operation"}]}`
 }
 
-// startWorkspaceCapChange records one blocking repair and then a fresh
-// blocking finding at a one-round cap.
 func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
 	t.Helper()
 	f := reviewIdentityFixture(t)
