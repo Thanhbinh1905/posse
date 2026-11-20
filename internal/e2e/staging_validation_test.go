@@ -534,8 +534,6 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	round := 2
 	name := fmt.Sprintf("round-%d.txt", round)
 	commitCandidateFile(t, f, change.WorktreePath, name, "unsafe operation\n")
-	// The first publish reports the author movement and preserves the stale
-	// candidate; the next submits a fresh one.
 	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "Staging candidate"); code == 0 || !strings.Contains(output, "candidate_author_moved") {
 		t.Fatalf("round %d author movement was not reported: %d %s", round, code, output)
 	}
