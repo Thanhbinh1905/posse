@@ -802,6 +802,45 @@ func TestWorkerPublishesPRToFrozenNonDefaultTarget(t *testing.T) {
 	}
 }
 
+func TestGreenhouseStaleRefreshNamesReviewCommand(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `INSERT OR REPLACE INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, f.task.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(context.Background(), f.task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("signal", "done", "Request Greenhouse review", "--head", head); code != 0 {
+		t.Fatalf("request Greenhouse review: %d %s %s", code, output, stderr)
+	}
+	gitTest(t, f.repo, "commit", "--allow-empty", "-m", "advance target")
+	gitTest(t, f.repo, "push", "origin", "main")
+	if code, output, _ := f.run("publish", "--refresh", "Greenhouse review"); code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, "posse signal done") || !strings.Contains(output, "--head <sha>") || !strings.Contains(output, "do not pass --pr") {
+		t.Fatalf("stale-target refresh did not name the review request command: %d %s", code, output)
+	}
+}
+
 func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\n"), 0o600); err != nil {
@@ -831,6 +870,9 @@ func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	if code, output, _ := f.run("signal", "done", "Greenhouse prepublication test", "--pr", "https://github.com/acme/shop/pull/17"); code == 0 || !strings.Contains(output, "signal_invalid") || !strings.Contains(output, "posse signal done") || !strings.Contains(output, "--head") || !strings.Contains(output, "omit --pr") {
+		t.Fatalf("unpublished Greenhouse head refusal omitted its next command: %d %s", code, output)
+	}
 	if code, output, stderr := f.run("signal", "done", "Greenhouse prepublication test", "--head", head); code != 0 {
 		t.Fatalf("prepublication done: %d %s %s", code, output, stderr)
 	}
@@ -838,8 +880,8 @@ func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing
 	if err != nil || task.State != store.StateDone || task.PRURL != "" {
 		t.Fatalf("prepublication Signal state = %+v, %v", task, err)
 	}
-	if code, output, _ := f.run("publish", "Greenhouse prepublication test"); code == 0 || !strings.Contains(output, "full-pipeline requires a passing Greenhouse Verdict") {
-		t.Fatalf("publish without Verdict was not refused: %d %s", code, output)
+	if code, output, _ := f.run("publish", "Greenhouse prepublication test"); code == 0 || !strings.Contains(output, "full-pipeline requires a passing Greenhouse Verdict") || !strings.Contains(output, "without --pr") {
+		t.Fatalf("publish without Verdict did not name the review request command: %d %s", code, output)
 	}
 	findings := store.Verdict{TaskID: task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: head, Target: head, ReviewBase: head, Outcome: "findings", Blocking: 1, Mode: "gate"}
 	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), findings, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {

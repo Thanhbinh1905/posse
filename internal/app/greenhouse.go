@@ -606,12 +606,39 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 	if err != nil {
 		return err
 	}
+	waiting, err := db.TasksInState(ctx, project.ID, store.StateNeedsDecision)
+	if err != nil {
+		return err
+	}
+	tasks = append(tasks, waiting...)
 	for _, task := range tasks {
 		signals, err := db.TaskSignals(ctx, task.ID, 1)
 		if err != nil {
 			return err
 		}
 		usesGreenhouse := taskUsesGreenhouseReviewProvider(task, cfg, "") && fullPipelineSelected(task, "")
+		if len(signals) > 0 && signals[0].Verb == "needs-decision" && usesGreenhouse {
+			head, err := taskBranchAuthorHead(ctx, project.Root, task.Branch)
+			if err != nil {
+				return err
+			}
+			verdicts, err := db.VerdictsFor(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			for index := len(verdicts) - 1; index >= 0; index-- {
+				verdict := verdicts[index]
+				if verdict.Repository != project.Name || verdict.Provider != store.GreenhouseReviewProvider || verdict.Mode != "gate" || !verdict.Qualifies(head) {
+					continue
+				}
+				body := fmt.Sprintf("Greenhouse passed Task head %s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", shortSHA(head), task.Title)
+				if _, _, err := db.QueueMessageOnceAfter(ctx, task.ID, body, true, signals[0].At-1); err != nil {
+					return err
+				}
+				break
+			}
+			continue
+		}
 		if len(signals) == 0 || signals[0].Verb != "done" {
 			if usesGreenhouse {
 				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, "the completed Task has no latest done Signal to anchor an exact-head Greenhouse review"); err != nil {
