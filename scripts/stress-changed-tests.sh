@@ -105,17 +105,52 @@ run_kind() {
     printf '%s\n' "$planned" | grep '^::warning::' || true
     planned=$(printf '%s\n' "$planned" | grep -v '^::warning::' || true)
   else
-    planned=$(printf '%s\n' "$tests" | awk -v count="$count" '{ print $2, $3, $4, count }')
+    run_unit_stress "$tests"
+    return
   fi
   printf '%s\n' "$planned" | awk 'NF == 4 { print $1, $2, $4 }' | LC_ALL=C sort -u |
     while read -r tags pkg runs; do
       pattern=$(printf '%s\n' "$planned" | awk -v tags="$tags" -v pkg="$pkg" -v runs="$runs" '$1 == tags && $2 == pkg && $4 == runs { if (n++) printf "|"; printf "%s", $3 }')
       flags="-count=$runs -timeout=$timeout -v"
-      [ "$kind" = unit ] && flags="-race $flags"
-      [ "$tags" != - ] && flags="-tags=$tags $flags"
+      [ "$tags" = - ] || flags="-tags=$tags $flags"
       printf 'Stressing %s: %s\n' "$pkg" "$pattern"
       # shellcheck disable=SC2086 # flags hold no spaces inside a word
       go test $flags "./$pkg" -run "^($pattern)\$" || exit 1
+    done
+}
+
+run_unit_stress() {
+  tests=$1
+  unit_budget=${POSSE_STRESS_UNIT_BUDGET:-600}
+  started=$(date +%s)
+  printf '%s\n' "$tests" | awk '{ print $2, $3 }' | LC_ALL=C sort -u |
+    while read -r tags pkg; do
+      pattern=$(printf '%s\n' "$tests" | awk -v tags="$tags" -v pkg="$pkg" '$2 == tags && $3 == pkg { if (n++) printf "|"; printf "%s", $4 }')
+      run=1
+      while [ "$run" -le "$count" ]; do
+        elapsed=$(($(date +%s) - started))
+        if [ "$elapsed" -ge "$unit_budget" ]; then
+          printf 'Stress budget exhausted after %d seconds; %s reached %d of %d repetitions.\n' "$elapsed" "$pkg" "$((run - 1))" "$count"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            printf 'Stress budget exhausted after %d seconds; changed unit tests did not complete all %d repetitions.\n' "$elapsed" "$count" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+        fi
+        remaining=$((unit_budget - elapsed))
+        run_timeout=${timeout}
+        case "$timeout" in *m) configured_minutes=${timeout%m}; configured_seconds=$((configured_minutes * 60)) ;; *s) configured_seconds=${timeout%s} ;; *) configured_seconds=$unit_budget ;; esac
+        [ "$configured_seconds" -le "$remaining" ] || run_timeout="${remaining}s"
+        flags="-race -count=1 -timeout=$run_timeout -v"
+        [ "$tags" = - ] || flags="-tags=$tags $flags"
+        printf 'Stress run %d/%d for %s: %s\n' "$run" "$count" "$pkg" "$pattern"
+        # shellcheck disable=SC2086 # flags hold no spaces inside a word
+        if [ "$pkg" = internal/app ]; then
+          systemd-run --user --scope -p TasksMax=400 -p MemoryMax=6G go test $flags "./$pkg" -run "^($pattern)\$" || exit 1
+        else
+          go test $flags "./$pkg" -run "^($pattern)\$" || exit 1
+        fi
+        run=$((run + 1))
+      done
     done
 }
 
@@ -225,30 +260,38 @@ func TestStable(t *testing.T) {
 }
 EOF
   git commit -q -am stable
-  if ! POSSE_STRESS_COUNT=10 "$script" --run unit "$base" >/dev/null 2>&1; then
+  if ! POSSE_STRESS_UNIT_BUDGET=600 POSSE_STRESS_COUNT=10 "$script" --run unit "$base" >/dev/null 2>&1; then
     echo "self-check failed: a stable new test failed the stress run" >&2
     return 1
   fi
 
   git checkout -q -b flaky "$base"
+  sed -i 's/^import "testing"$/import ("os"; "strconv"; "testing")/' unit/a_test.go
   cat >> unit/a_test.go <<'EOF'
 
-var runs int
-
 func TestFlaky(t *testing.T) {
+	path := "flaky-runs"
+	data, _ := os.ReadFile(path)
+	runs := 0
+	if len(data) > 0 {
+		runs, _ = strconv.Atoi(string(data))
+	}
 	runs++
+	_ = os.WriteFile(path, []byte(strconv.Itoa(runs)), 0600)
 	if runs == 7 {
 		t.Fatal("deliberately flaky")
 	}
 }
 EOF
   git commit -q -am flaky
-  if POSSE_STRESS_COUNT=10 "$script" --run unit "$base" >/dev/null 2>&1; then
+  if POSSE_STRESS_UNIT_BUDGET=600 POSSE_STRESS_COUNT=10 "$script" --run unit "$base" >/dev/null 2>&1; then
     echo "self-check failed: a deliberately flaky new test passed the stress run" >&2
     return 1
   fi
-  if ! POSSE_STRESS_COUNT=5 "$script" --run unit "$base" >/dev/null 2>&1; then
+  rm -f unit/flaky-runs
+  if ! POSSE_STRESS_UNIT_BUDGET=600 POSSE_STRESS_COUNT=5 "$script" --run unit "$base" >"$scratch/flaky-short.log" 2>&1; then
     echo "self-check failed: the flaky test failed below its failing run" >&2
+    cat "$scratch/flaky-short.log" >&2
     return 1
   fi
   if "$script" --list no-such-ref >/dev/null 2>&1; then
@@ -279,7 +322,40 @@ e2e e2e pkg TestB'
     echo "self-check failed: a pull request without an e2e test change ran e2e tests" >&2
     return 1
   fi
-  printf 'Stress listing self-check passed.\n'
+  mkdir -p "$scratch/bin"
+  cat > "$scratch/bin/go" <<'EOF'
+#!/bin/sh
+sleep 1
+exit 0
+EOF
+  chmod +x "$scratch/bin/go"
+  git checkout -q -b budget "$base"
+  cat >> unit/a_test.go <<'EOF'
+
+func TestBudget(t *testing.T) {
+\tt.Log("budget")
+}
+EOF
+  git commit -q -am budget
+  budget_output=$(PATH="$scratch/bin:$PATH" GITHUB_STEP_SUMMARY="$scratch/summary" POSSE_STRESS_COUNT=10 POSSE_STRESS_UNIT_BUDGET=1 "$script" --run unit "$base" 2>&1)
+  case "$budget_output" in
+    *'Stress budget exhausted'*) ;;
+    *) echo "self-check failed: budget exhaustion was not reported distinctly: $budget_output" >&2; return 1 ;;
+  esac
+  if ! grep -q 'did not complete all 10 repetitions' "$scratch/summary"; then
+    echo "self-check failed: budget exhaustion was absent from the job summary" >&2
+    return 1
+  fi
+  cat > "$scratch/bin/go" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+  chmod +x "$scratch/bin/go"
+  if PATH="$scratch/bin:$PATH" POSSE_STRESS_COUNT=10 "$script" --run unit "$base" >/dev/null 2>&1; then
+    echo "self-check failed: a failing test passed the stress run" >&2
+    return 1
+  fi
+  printf 'Stress listing and budget self-check passed.\n'
 }
 
 case "${1:-}" in
