@@ -628,7 +628,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			}
 			for index := len(verdicts) - 1; index >= 0; index-- {
 				verdict := verdicts[index]
-				if verdict.Repository != project.Name || verdict.Mode != "gate" || !verdict.Qualifies(head) {
+				if verdict.Repository != project.Name || verdict.Provider != store.GreenhouseReviewProvider || verdict.Mode != "gate" || !verdict.Qualifies(head) {
 					continue
 				}
 				body := fmt.Sprintf("Greenhouse passed Task head %s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", shortSHA(head), task.Title)

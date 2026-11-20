@@ -88,9 +88,8 @@ func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
-	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
-		t.Fatalf("record Gate pass: recorded=%v err=%v", recorded, err)
+	if _, err := f.db.ExecContext(context.Background(), `INSERT INTO verdicts(task_id,repo,provider,protocol,head_sha,target_sha,review_base_sha,verdict,blocking,mode,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, f.task.ID, f.project.Name, store.BuiltinReviewProvider, "builtin-v1", f.headSHA, f.headSHA, f.headSHA, "clean", 0, "gate", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
 	}
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
@@ -100,6 +99,21 @@ func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
+	if err != nil || len(messages) != 0 {
+		t.Fatalf("builtin Verdict queued publication: %+v, %v", messages, err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record Gate pass: recorded=%v err=%v", recorded, err)
+	}
+	cfg, err = config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(context.Background(), f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	messages, err = f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
 	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "Greenhouse passed Task head") || !strings.Contains(messages[0].Body, "posse publish") {
 		t.Fatalf("publication message = %+v, %v", messages, err)
 	}
