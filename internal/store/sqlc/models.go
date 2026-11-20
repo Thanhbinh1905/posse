@@ -169,6 +169,20 @@ type GreenhouseReviewRequest struct {
 	GrantID       sql.NullString
 }
 
+type GreenhouseTaskWatch struct {
+	TaskID          int64
+	RunID           string
+	Status          string
+	Stage           string
+	RunObservedAt   int64
+	StageObservedAt int64
+	RunStartedAt    int64
+	StageStartedAt  int64
+	StageFinishedAt int64
+	UpdatedAt       int64
+	PaneID          string
+}
+
 type Intent struct {
 	ID               int64
 	ProjectID        int64
