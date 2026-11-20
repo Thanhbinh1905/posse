@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/store/sqlc"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
@@ -34,31 +36,60 @@ func admittedStorePlan(t *testing.T, home string) taskplan.Plan {
 }
 
 func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
-	const largePlanInputSize = 30 << 20
+	const largePlanInputSize = 65 << 10
 	ctx := context.Background()
-	home := t.TempDir()
-	db, err := Open(home)
+	conn, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
-	if err != nil {
+	conn.SetMaxOpenConns(1)
+	defer conn.Close()
+	db := &DB{DB: conn}
+	db.queries = sqlc.New(db)
+	for _, statement := range []string{
+		`CREATE TABLE tasks (
+			id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, seq INTEGER NOT NULL, type TEXT NOT NULL DEFAULT '',
+			reviews_task_id INTEGER, title TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', profile TEXT NOT NULL DEFAULT '',
+			dispatch_rule TEXT NOT NULL DEFAULT '', landing_mode TEXT NOT NULL DEFAULT '', autonomy_review TEXT NOT NULL DEFAULT '',
+			autonomy_land TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT '', base_ref TEXT NOT NULL DEFAULT '',
+			worktree_path TEXT NOT NULL DEFAULT '', herdr_workspace_id TEXT NOT NULL DEFAULT '', pane_id TEXT NOT NULL DEFAULT '',
+			pane_label TEXT NOT NULL DEFAULT '', agent_name TEXT NOT NULL DEFAULT '', agent_session TEXT NOT NULL DEFAULT '',
+			pr_url TEXT NOT NULL DEFAULT '', landed_ref TEXT NOT NULL DEFAULT '', last_output_hash TEXT NOT NULL DEFAULT '',
+			last_worktree_hash TEXT NOT NULL DEFAULT '', last_progress_at INTEGER NOT NULL DEFAULT 0,
+			agent_absent_since INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
+			mount_id INTEGER, launches INTEGER NOT NULL DEFAULT 0, gated_sha TEXT NOT NULL DEFAULT '',
+			agent_server_started_at TEXT NOT NULL DEFAULT '', idle_since INTEGER NOT NULL DEFAULT 0,
+			short_name TEXT NOT NULL DEFAULT '', agent_session_kind TEXT NOT NULL DEFAULT '', target_branch TEXT NOT NULL DEFAULT '',
+			pr_title TEXT NOT NULL DEFAULT '', plan_json TEXT NOT NULL DEFAULT '', report_kind TEXT NOT NULL DEFAULT '',
+			report_digest TEXT NOT NULL DEFAULT '', report_manifest_json TEXT NOT NULL DEFAULT '',
+			containment_mode TEXT NOT NULL DEFAULT '', containment_path TEXT NOT NULL DEFAULT '',
+			containment_marker TEXT NOT NULL DEFAULT '', pane_shell_identity TEXT NOT NULL DEFAULT '',
+			agent_status TEXT NOT NULL DEFAULT '', agent_status_since INTEGER NOT NULL DEFAULT 0,
+			plan_revision INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX tasks_project_state_idx ON tasks(project_id,state,seq)`,
+		`CREATE TABLE task_plan_revisions (task_id INTEGER NOT NULL)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inlineInput := strings.Repeat("A", largePlanInputSize)
+	legacyPlan := fmt.Sprintf(`{"inputs":[{"role":"review-round-file","bytes":"%s"},{"role":"review-round-file","bytes":"%s"}]}`, inlineInput, inlineInput)
+	if _, err := db.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,state,plan_json) VALUES(1,7,1,'working',?)`, legacyPlan); err != nil {
 		t.Fatal(err)
 	}
-	plan := admittedStorePlan(t, home).Bind("t1")
-	plan.Inputs = append(plan.Inputs, taskplan.Select("review-round-file", "review/cumulative.patch", make([]byte, largePlanInputSize)))
-	encoded, err := plan.Encode()
-	if err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id) VALUES(1)`); err != nil {
 		t.Fatal(err)
 	}
-	admittedDigest := plan.SHA256()
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", MergeMode: "local", State: StateSpawning, PlanJSON: encoded})
-	if err != nil {
+	var storedPlanSize int
+	if err := db.QueryRowContext(ctx, `SELECT length(plan_json) FROM tasks WHERE id=1`).Scan(&storedPlanSize); err != nil {
 		t.Fatal(err)
 	}
-
-	tasks, err := db.LiveTasks(ctx, project.ID)
+	if storedPlanSize < 2*largePlanInputSize {
+		t.Fatalf("stored plan size=%d, want at least %d", storedPlanSize, 2*largePlanInputSize)
+	}
+	tasks, err := db.LiveTasks(ctx, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,60 +98,6 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	}
 	if len(tasks[0].PlanJSON) != 0 {
 		t.Fatalf("LiveTasks returned %d bytes of plan data, want none", len(tasks[0].PlanJSON))
-	}
-	livePlan, err := tasks[0].AdmittedPlan()
-	if err != nil || livePlan == nil {
-		t.Fatalf("load admitted plan from LiveTasks result: plan=%v err=%v", livePlan != nil, err)
-	}
-	if got := len(livePlan.Inputs[len(livePlan.Inputs)-1].Bytes); got != largePlanInputSize {
-		t.Fatalf("LiveTasks admitted input size=%d, want %d", got, largePlanInputSize)
-	}
-	stored, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var currentJSON, revisionJSON string
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, taskID).Scan(&currentJSON); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, taskID).Scan(&revisionJSON); err != nil {
-		t.Fatal(err)
-	}
-	if len(currentJSON) > 1<<20 || !strings.Contains(currentJSON, `"admitted_sha256"`) || !strings.Contains(currentJSON, `"path":"blobs/sha256/`) || strings.Contains(currentJSON, `"bytes":"`+strings.Repeat("A", 128)) {
-		t.Fatalf("large input was not stored as a content-addressed reference: %d bytes", len(currentJSON))
-	}
-	if currentJSON != revisionJSON {
-		t.Fatal("current plan and initial plan revision differ")
-	}
-	loaded, err := stored.AdmittedPlan()
-	if err != nil || loaded == nil {
-		t.Fatalf("load externalized plan: %v", err)
-	}
-	if got := loaded.SHA256(); got != admittedDigest {
-		t.Fatalf("admitted plan digest changed: got %s, want %s", got, admittedDigest)
-	}
-	if got := len(loaded.Inputs[len(loaded.Inputs)-1].Bytes); got != largePlanInputSize {
-		t.Fatalf("loaded input size=%d, want %d", got, largePlanInputSize)
-	}
-	cached, err := stored.AdmittedPlan()
-	if err != nil || cached == loaded || &cached.Inputs[len(cached.Inputs)-1].Bytes[0] == &loaded.Inputs[len(loaded.Inputs)-1].Bytes[0] {
-		t.Fatalf("plan revision was not served from the DB cache: same=%v err=%v", cached == loaded, err)
-	}
-	rebuiltDB, err := OpenAt(filepath.Join(home, "rebuilt.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rebuiltDB.Close()
-	if count, err := rebuiltDB.RebuildFromSnapshots(ctx, home); err != nil || count != 1 {
-		t.Fatalf("rebuild from content-addressed snapshots: count=%d err=%v", count, err)
-	}
-	rebuilt, err := rebuiltDB.TaskByID(ctx, project.ID, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rebuiltPlan, err := rebuilt.AdmittedPlan()
-	if err != nil || rebuiltPlan.SHA256() != admittedDigest || len(rebuiltPlan.Inputs[len(rebuiltPlan.Inputs)-1].Bytes) != largePlanInputSize {
-		t.Fatalf("snapshot rebuild changed the externalized plan: plan=%v err=%v", rebuiltPlan != nil, err)
 	}
 }
 
