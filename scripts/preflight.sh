@@ -40,9 +40,7 @@ if git rev-parse --verify --quiet "$base" >/dev/null; then
     name=${1##*/}
     printf '%s\n' "${name%%_*}"
   }
-  git ls-tree -r --name-only "$base" "$migrations_dir/" | while read -r path; do
-    printf '%s %s\n' "$(version_of "$path")" "$path"
-  done >"${TMPDIR:?TMPDIR must point to the Task scratch directory}/preflight-main-migrations.$$"
+  main_migrations=$(git ls-tree -r --name-only "$base" "$migrations_dir/")
   for path in "$migrations_dir"/*.sql; do
     git cat-file -e "$base:$path" 2>/dev/null && continue
     version=$(version_of "$path")
@@ -67,12 +65,11 @@ if git rev-parse --verify --quiet "$base" >/dev/null; then
       fail "$path has an invalid goose timestamp version"
       continue
     fi
-    other=$(awk -v v="$version" '$1 == v { print $2 }' "${TMPDIR:?TMPDIR must point to the Task scratch directory}/preflight-main-migrations.$$")
+    other=$(printf '%s\n' "$main_migrations" | awk -F/ -v v="$version" '{ name = $NF; sub(/_.*/, "", name); if (name == v) print $0 }')
     if [ -n "$other" ]; then
       fail "$path reuses timestamp version $version of $other on $base; create a new timestamped migration"
     fi
   done
-  rm -f "${TMPDIR:?TMPDIR must point to the Task scratch directory}/preflight-main-migrations.$$"
 else
   fail "$base not found; cannot check migration numbers"
 fi
