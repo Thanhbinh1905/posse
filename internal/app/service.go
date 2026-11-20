@@ -787,7 +787,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					// its Notices. Only the label identifies that Lead while
 					// the recorded pane may be stale.
 					if lead, found := herdr.FindPane(result.Snapshot.Panes, "", project.LeadLabel); found && project.LeadLabel != "" && paneAgentRunning(lead) {
-						if err := s.deliverNoticesWithSnapshot(ctx, db, project, result.Snapshot); err != nil && !isHerdrUnavailable(err) {
+						if err := s.deliverNoticesWithSnapshot(ctx, db, project, &result.Snapshot); err != nil && !isHerdrUnavailable(err) {
 							return cfg, herdrError(err)
 						}
 					}

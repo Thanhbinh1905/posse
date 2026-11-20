@@ -207,7 +207,7 @@ func (s *Service) ingestEvent(ctx context.Context) error {
 		}
 		leadIdle := paneID != "" && paneID == project.LeadPaneID && (status == "idle" || status == "done")
 		if leadIdle || focusEvent || len(result.Notices) > 0 || messageNoticeRaised {
-			if err := s.deliverNoticesWithSnapshot(ctx, db, project, result.Snapshot); err != nil {
+			if err := s.deliverNoticesWithSnapshot(ctx, db, project, &result.Snapshot); err != nil {
 				if focusEvent {
 					failures = append(failures, err)
 					continue
@@ -291,32 +291,40 @@ func (s *Service) ingestProjects(ctx context.Context, db *store.DB, event plugin
 }
 
 func (s *Service) deliverNotices(ctx context.Context, db *store.DB, project store.Project) error {
-	return s.deliverNoticesWithSnapshot(ctx, db, project, herdr.Snapshot{})
+	return s.deliverNoticesWithSnapshot(ctx, db, project, nil)
 }
 
-func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
+func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, project store.Project, suppliedSnapshot *herdr.Snapshot) error {
 	if project.IsParked() {
 		return nil
 	}
+	if suppliedSnapshot == nil {
+		var err error
+		snapshot, err := s.snapshot(ctx)
+		if err != nil {
+			return err
+		}
+		suppliedSnapshot = &snapshot
+	}
+	snapshot := *suppliedSnapshot
 	if project.HerdrWorkspaceID != "" {
-		if len(snapshot.Workspaces) == 0 {
-			var err error
-			snapshot, err = s.snapshot(ctx)
-			if err != nil {
-				return err
+		workspaceFound := false
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == project.HerdrWorkspaceID {
+				workspaceFound = true
+				break
 			}
 		}
-		if len(snapshot.Workspaces) > 0 {
-			workspaceFound := false
-			for _, workspace := range snapshot.Workspaces {
-				if workspace.WorkspaceID == project.HerdrWorkspaceID {
+		if !workspaceFound {
+			for _, pane := range snapshot.Panes {
+				if pane.WorkspaceID == project.HerdrWorkspaceID {
 					workspaceFound = true
 					break
 				}
 			}
-			if !workspaceFound {
-				return nil
-			}
+		}
+		if !workspaceFound {
+			return nil
 		}
 	}
 	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {

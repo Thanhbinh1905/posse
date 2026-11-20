@@ -54,11 +54,57 @@ func TestNoticeDeliverySkipsMissingHerdrWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.fake.SnapshotValue = herdr.Snapshot{Workspaces: []herdr.Workspace{{WorkspaceID: "replacement"}}}
-	if err := fixture.service.deliverNoticesWithSnapshot(ctx, db, project, fixture.fake.SnapshotValue); err != nil {
+	if err := fixture.service.deliverNoticesWithSnapshot(ctx, db, project, &fixture.fake.SnapshotValue); err != nil {
 		t.Fatalf("deliver Notice to missing workspace: %v", err)
 	}
 	if fixture.fake.CallCount("notification.show") != 0 || fixture.fake.CallCount("workspace.report_metadata") != 0 {
 		t.Fatalf("Notice delivery attempted calls to missing workspace: %#v", fixture.fake.Calls)
+	}
+}
+
+func TestNoticeDeliverySkipsSuccessfullyFetchedEmptyWorkspaceSnapshot(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.ProjectByID(ctx, fixture.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "Saved work is ready"}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.fake.SnapshotValue = herdr.Snapshot{}
+	for _, test := range []struct {
+		name  string
+		known bool
+		wants int
+	}{
+		{name: "fetch omitted snapshot", wants: 1},
+		{name: "use supplied empty snapshot", known: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			beforeSnapshots := fixture.fake.CallCount("session.snapshot")
+			var err error
+			if test.known {
+				empty := herdr.Snapshot{}
+				err = fixture.service.deliverNoticesWithSnapshot(ctx, db, project, &empty)
+			} else {
+				err = fixture.service.deliverNotices(ctx, db, project)
+			}
+			if err != nil {
+				t.Fatalf("deliver Notice with empty Herdr snapshot: %v", err)
+			}
+			if got := fixture.fake.CallCount("session.snapshot") - beforeSnapshots; got != test.wants {
+				t.Fatalf("session.snapshot calls = %d, want %d", got, test.wants)
+			}
+			if fixture.fake.CallCount("notification.show") != 0 || fixture.fake.CallCount("workspace.report_metadata") != 0 {
+				t.Fatalf("Notice delivery attempted calls with no recorded workspace: %#v", fixture.fake.Calls)
+			}
+		})
 	}
 }
 
