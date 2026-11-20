@@ -2,7 +2,9 @@
 
 When the User asks to publish or update a Posse release, follow [the release skill](.agents/skills/posse-release/SKILL.md). A release request authorizes its commit, tag, push, and publication steps; do not ask for approval again.
 
-Before `posse publish`, run `scripts/preflight.sh`. It runs the E2E shard self-test, `go generate` with a clean diff, and a migration-number check against `origin/main`. Fix every failure first; each one has broken main after a merge.
+Create new Goose migrations with timestamp versions (`YYYYMMDDHHMMSS`, using `goose create` without `-s`); leave existing `000NN` migration files unchanged. Out-of-order application is enabled for branches that merge in a different order.
+
+Before `posse publish`, run `scripts/preflight.sh`. It runs the E2E shard self-test, `go generate` with a clean diff, and checks new migration timestamp versions against `origin/main`. Fix every failure first; each one has broken main after a merge.
 
 ## Agent skills
 

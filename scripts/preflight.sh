@@ -2,8 +2,8 @@
 set -eu
 
 # Runs the deterministic checks that have broken main after a merge: the E2E
-# shard assignment self-test, go generate leaving no diff, and a migration
-# number that origin/main already uses. Run it before posse publish.
+# shard assignment self-test, go generate leaving no diff, and timestamp versions
+# for new migrations. Run it before posse publish.
 cd "$(git rev-parse --show-toplevel)"
 
 migrations_dir=internal/store/migrations
@@ -32,7 +32,7 @@ if ! git diff --exit-code; then
   fail "go generate changed files; commit the regenerated output"
 fi
 
-step "migration numbers against origin/main"
+step "new migration timestamp versions"
 git fetch --quiet origin main || printf 'preflight: could not fetch origin/main; using the local ref\n' >&2
 base=origin/main
 if git rev-parse --verify --quiet "$base" >/dev/null; then
@@ -40,18 +40,36 @@ if git rev-parse --verify --quiet "$base" >/dev/null; then
     name=${1##*/}
     printf '%s\n' "${name%%_*}"
   }
-  git ls-tree --name-only "$base" "$migrations_dir/" | while read -r path; do
-    printf '%s %s\n' "$(version_of "$path")" "$path"
-  done >"${TMPDIR:-/tmp}/preflight-main-migrations.$$"
+  main_migrations=$(git ls-tree -r --name-only "$base" "$migrations_dir/")
   for path in "$migrations_dir"/*.sql; do
     git cat-file -e "$base:$path" 2>/dev/null && continue
     version=$(version_of "$path")
-    other=$(awk -v v="$version" '$1 == v { print $2 }' "${TMPDIR:-/tmp}/preflight-main-migrations.$$")
+    if ! printf '%s\n' "$version" | grep -Eq '^[0-9]{14}$'; then
+      fail "$path is a new migration; use a 14-digit goose timestamp version (goose create without -s)"
+      continue
+    fi
+    if ! awk -v version="$version" 'BEGIN {
+      year = substr(version, 1, 4) + 0
+      month = substr(version, 5, 2) + 0
+      day = substr(version, 7, 2) + 0
+      hour = substr(version, 9, 2) + 0
+      minute = substr(version, 11, 2) + 0
+      second = substr(version, 13, 2) + 0
+      days[1] = 31; days[2] = 28; days[3] = 31; days[4] = 30
+      days[5] = 31; days[6] = 30; days[7] = 31; days[8] = 31
+      days[9] = 30; days[10] = 31; days[11] = 30; days[12] = 31
+      if (year % 400 == 0 || year % 4 == 0 && year % 100 != 0) days[2] = 29
+      valid = year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month] && hour <= 23 && minute <= 59 && second <= 59
+      exit !valid
+    }'; then
+      fail "$path has an invalid goose timestamp version"
+      continue
+    fi
+    other=$(printf '%s\n' "$main_migrations" | awk -F/ -v v="$version" '{ name = $NF; sub(/_.*/, "", name); if (name == v) print $0 }')
     if [ -n "$other" ]; then
-      fail "$path reuses version $version of $other on $base; renumber it above the latest on $base"
+      fail "$path reuses timestamp version $version of $other on $base; create a new timestamped migration"
     fi
   done
-  rm -f "${TMPDIR:-/tmp}/preflight-main-migrations.$$"
 else
   fail "$base not found; cannot check migration numbers"
 fi
