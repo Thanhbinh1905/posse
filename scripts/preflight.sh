@@ -50,8 +50,20 @@ if git rev-parse --verify --quiet "$base" >/dev/null; then
       fail "$path is a new migration; use a 14-digit goose timestamp version (goose create without -s)"
       continue
     fi
-    parsed=$(date -u -d "$(printf '%s\n' "$version" | awk '{ print substr($0, 1, 8) " " substr($0, 9, 2) ":" substr($0, 11, 2) ":" substr($0, 13, 2) }')" +%Y%m%d%H%M%S 2>/dev/null || true)
-    if [ "$parsed" != "$version" ]; then
+    if ! awk -v version="$version" 'BEGIN {
+      year = substr(version, 1, 4) + 0
+      month = substr(version, 5, 2) + 0
+      day = substr(version, 7, 2) + 0
+      hour = substr(version, 9, 2) + 0
+      minute = substr(version, 11, 2) + 0
+      second = substr(version, 13, 2) + 0
+      days[1] = 31; days[2] = 28; days[3] = 31; days[4] = 30
+      days[5] = 31; days[6] = 30; days[7] = 31; days[8] = 31
+      days[9] = 30; days[10] = 31; days[11] = 30; days[12] = 31
+      if (year % 400 == 0 || year % 4 == 0 && year % 100 != 0) days[2] = 29
+      valid = year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month] && hour <= 23 && minute <= 59 && second <= 59
+      exit !valid
+    }'; then
       fail "$path has an invalid goose timestamp version"
       continue
     fi
