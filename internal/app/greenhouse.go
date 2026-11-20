@@ -669,11 +669,10 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 						return err
 					}
 					if !passed {
-						evidence, err := db.ReviewEvidenceFor(ctx, task.ID, []store.ReviewTarget{{Repository: project.Name, Commit: head}})
+						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, head)
 						if err != nil {
 							return err
 						}
-						passed = evidence.Disposition
 					}
 					if verified && passed {
 						continue

@@ -185,6 +185,15 @@ func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candida
 
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
 // given, otherwise the current Task branch tips.
+func greenhouseAcceptHeadDisposition(ctx context.Context, db *store.DB, task store.Task, head string) (bool, error) {
+	var accepted bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM review_dispositions rd JOIN decisions d ON d.id=rd.decision_id
+WHERE rd.ship_task_id=? AND rd.head_sha=? AND d.task_id=? AND d.kind='review_cap' AND d.answer='accept-head' AND d.answered_at>0 AND d.obsolete_at=0
+)`, task.ID, head, task.ID).Scan(&accepted)
+	return accepted, err
+}
+
 func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, repository string) error {
 	var targets []store.ReviewTarget
 	var err error
@@ -220,11 +229,11 @@ func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.
 			return err
 		}
 		if !passed {
-			evidence, err := db.ReviewEvidenceFor(ctx, task.ID, []store.ReviewTarget{target})
+			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, task, target.Commit)
 			if err != nil {
 				return err
 			}
-			if evidence.Disposition {
+			if accepted {
 				continue
 			}
 			return axi.Failure("greenhouse_verdict_required", "Task "+taskIDString(task.Seq)+" has no current passing Greenhouse Verdict or exact-head acceptance for "+target.Repository+" at "+shortSHA(target.Commit), false, "Wait for the Greenhouse Verdict or apply the exact-head review-cap acceptance before publication or Merge")

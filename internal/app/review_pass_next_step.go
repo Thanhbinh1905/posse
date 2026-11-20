@@ -126,8 +126,8 @@ func queueSettledReviewStep(ctx context.Context, db *store.DB, project store.Pro
 			if err != nil {
 				return err
 			}
-			evidence, err := db.ReviewEvidenceFor(ctx, change.ID, []store.ReviewTarget{{Repository: project.Name, Commit: head}})
-			if err != nil || !evidence.Disposition {
+			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, change, head)
+			if err != nil || !accepted {
 				return err
 			}
 			signals, err := db.TaskSignals(ctx, change.ID, 1)
