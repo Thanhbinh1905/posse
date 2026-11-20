@@ -26,6 +26,9 @@ func (s *Service) repairWatch(ctx *axi.Context, db *store.DB, home string, proje
 	if project.IsDown() {
 		return axi.Failure("project_down", "the Project is stopped; Watch repair will not restart it", false, "Run `posse up` only when you intend to restart the Lead and recover Workers")
 	}
+	if project.IsParked() {
+		return axi.Failure("project_parked", "the Project is parked; Watch repair will not resume it", false, "Run `posse up` in the Project folder to resume it")
+	}
 	if project.HerdrWorkspaceID == "" {
 		return axi.Failure("lead_workspace_missing", "the Project has no active Lead workspace to supervise", false, "Run `posse up` from the Project folder to start its Lead")
 	}
@@ -102,6 +105,9 @@ func (s *Service) watchRuntimeHealth(ctx context.Context, db *store.DB, home str
 	if err != nil {
 		return doctorCheck{}, err
 	}
+	if project.IsParked() {
+		return doctorCheck{Name: "Project Watch " + project.Name, Status: "ok", Detail: "Project is parked; no watch", Action: ""}, nil
+	}
 	if project.IsDown() {
 		return doctorCheck{Name: "Project Watch " + project.Name, Status: "ok", Detail: "Project is down; no watch", Action: ""}, nil
 	}
@@ -154,7 +160,7 @@ func (s *Service) watchRuntimeHealth(ctx context.Context, db *store.DB, home str
 func (s *Service) watchRuntimeRow(ctx context.Context, db *store.DB, home string, project store.Project) map[string]any {
 	status := "missing"
 	state, err := db.WatchRuntime(ctx, project.ID)
-	if project.IsDown() {
+	if project.IsParked() || project.IsDown() {
 		status = "stopped"
 	} else if project.HerdrWorkspaceID == "" {
 		status = "not_started"

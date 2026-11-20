@@ -24,6 +24,7 @@ var startSystemdWatchUnit = startSystemdWatch
 func startSystemdWatch(context.Context, string, store.Project, string, string, int64, string) error {
 	return nil
 }
-func stopSystemdWatch(context.Context, string, int64) error      { return nil }
-func systemdWatchUnitLoaded(context.Context, string, int64) bool { return false }
-func systemdWatchUnitActive(context.Context, string, int64) bool { return false }
+func stopSystemdWatch(context.Context, string, int64) error        { return nil }
+func stopSystemdWatchNoBlock(context.Context, string, int64) error { return nil }
+func systemdWatchUnitLoaded(context.Context, string, int64) bool   { return false }
+func systemdWatchUnitActive(context.Context, string, int64) bool   { return false }

@@ -724,6 +724,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 	if err != nil {
 		return config.Config{}, configError(err)
 	}
+	if project.IsParked() {
+		return cfg, nil
+	}
 	if _, err := s.raiseExpiredMessageDeliveryNotices(ctx, db, project); err != nil {
 		return cfg, err
 	}
@@ -784,7 +787,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 					// its Notices. Only the label identifies that Lead while
 					// the recorded pane may be stale.
 					if lead, found := herdr.FindPane(result.Snapshot.Panes, "", project.LeadLabel); found && project.LeadLabel != "" && paneAgentRunning(lead) {
-						if err := s.deliverNoticesWithSnapshot(ctx, db, project, result.Snapshot); err != nil && !isHerdrUnavailable(err) {
+						if err := s.deliverNoticesWithSnapshot(ctx, db, project, &result.Snapshot); err != nil && !isHerdrUnavailable(err) {
 							return cfg, herdrError(err)
 						}
 					}
@@ -829,6 +832,22 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				if options.deliverMessages {
 					if err := s.deliverQueuedMessagesWithConfig(ctx, db, fresh, result.Snapshot, cfg); err != nil && !isHerdrUnavailable(err) {
 						return cfg, herdrError(err)
+					}
+				}
+				if options.watchObservation {
+					lead, found := findAppPane(result.Snapshot.Panes, fresh.LeadPaneID, fresh.LeadLabel)
+					if !found || lead.Agent == "" {
+						observed, err := db.ProjectByID(ctx, project.ID)
+						if err != nil {
+							return cfg, err
+						}
+						parked, err := parkProjectIfIdle(ctx, db, observed, time.Now())
+						if err != nil {
+							return cfg, err
+						}
+						if parked {
+							return cfg, nil
+						}
 					}
 				}
 				if !options.watchObservation {
