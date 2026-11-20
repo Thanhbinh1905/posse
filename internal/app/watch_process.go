@@ -20,9 +20,11 @@ import (
 )
 
 type watchExecutableIdentity struct {
-	Path   string
-	Device uint64
-	Inode  uint64
+	Path       string
+	Device     uint64
+	Inode      uint64
+	Size       int64
+	ModifiedAt int64
 }
 
 type watchProcess struct {
@@ -554,9 +556,9 @@ func watchStopReason(home string, pid int) string {
 		_ = os.Remove(filepath.Dir(marker))
 		return "update"
 	}
-	installed, installedOK := currentWatchExecutable(home)
+	spawned, spawnedOK := currentWatchExecutable()
 	running, runningOK := inspectWatchExecutable(pid)
-	if installedOK && runningOK && (installed.Device != running.Device || installed.Inode != running.Inode) {
+	if spawnedOK && runningOK && watchExecutableChanged(spawned, running) {
 		return "update"
 	}
 	return "signal"

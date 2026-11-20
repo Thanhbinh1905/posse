@@ -9,20 +9,23 @@ import (
 // WatchRuntime is the durable identity and liveness record for a Project's
 // detached PR/CI watch.
 type WatchRuntime struct {
-	PID              int
-	Token            string
-	StartedAt        int64
-	HeartbeatAt      int64
-	ExecutablePath   string
-	ExecutableDevice uint64
-	ExecutableInode  uint64
+	PID                  int
+	Token                string
+	StartedAt            int64
+	HeartbeatAt          int64
+	ExecutablePath       string
+	ExecutableDevice     uint64
+	ExecutableInode      uint64
+	ExecutableSize       int64
+	ExecutableModifiedAt int64
+	ExecutableVersion    string
 }
 
 func (db *DB) WatchRuntime(ctx context.Context, projectID int64) (WatchRuntime, error) {
 	var watch WatchRuntime
 	var device, inode int64
-	err := db.QueryRowContext(ctx, `SELECT pid,token,started_at,heartbeat_at,executable_path,executable_device,executable_inode FROM project_lookout_pollers WHERE project_id=?`, projectID).
-		Scan(&watch.PID, &watch.Token, &watch.StartedAt, &watch.HeartbeatAt, &watch.ExecutablePath, &device, &inode)
+	err := db.QueryRowContext(ctx, `SELECT pid,token,started_at,heartbeat_at,executable_path,executable_device,executable_inode,executable_size,executable_modified_at,executable_version FROM project_lookout_pollers WHERE project_id=?`, projectID).
+		Scan(&watch.PID, &watch.Token, &watch.StartedAt, &watch.HeartbeatAt, &watch.ExecutablePath, &device, &inode, &watch.ExecutableSize, &watch.ExecutableModifiedAt, &watch.ExecutableVersion)
 	if IsNotFound(err) {
 		return WatchRuntime{}, nil
 	}
@@ -31,9 +34,9 @@ func (db *DB) WatchRuntime(ctx context.Context, projectID int64) (WatchRuntime, 
 }
 
 func (db *DB) SetWatchRuntime(ctx context.Context, projectID int64, watch WatchRuntime) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO project_lookout_pollers(project_id,pid,token,started_at,heartbeat_at,executable_path,executable_device,executable_inode,failure_notice_raised) VALUES(?,?,?,?,?,?,?,?,0)
-		ON CONFLICT(project_id) DO UPDATE SET pid=excluded.pid,token=excluded.token,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at,executable_path=excluded.executable_path,executable_device=excluded.executable_device,executable_inode=excluded.executable_inode,failure_notice_raised=0`,
-		projectID, watch.PID, watch.Token, watch.StartedAt, watch.HeartbeatAt, watch.ExecutablePath, int64(watch.ExecutableDevice), int64(watch.ExecutableInode))
+	_, err := db.ExecContext(ctx, `INSERT INTO project_lookout_pollers(project_id,pid,token,started_at,heartbeat_at,executable_path,executable_device,executable_inode,executable_size,executable_modified_at,executable_version,failure_notice_raised) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)
+		ON CONFLICT(project_id) DO UPDATE SET pid=excluded.pid,token=excluded.token,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at,executable_path=excluded.executable_path,executable_device=excluded.executable_device,executable_inode=excluded.executable_inode,executable_size=excluded.executable_size,executable_modified_at=excluded.executable_modified_at,executable_version=excluded.executable_version,failure_notice_raised=0`,
+		projectID, watch.PID, watch.Token, watch.StartedAt, watch.HeartbeatAt, watch.ExecutablePath, int64(watch.ExecutableDevice), int64(watch.ExecutableInode), watch.ExecutableSize, watch.ExecutableModifiedAt, watch.ExecutableVersion)
 	return err
 }
 
