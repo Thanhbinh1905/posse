@@ -471,7 +471,7 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	for _, setting := range [][2]string{{"defaults.merge_mode", "pr"}, {"defaults.review", "full-pipeline"}, {"review_loop.enabled", "true"}} {
 		runPosse(t, f.binary, f.repo, f.env, "config", "set", setting[0], setting[1])
 	}
-	if code, output := runReleaseCLI(t, f.binary, f.repo, f.env, "config", "set", "review_loop.max_rounds", "1", "--user-approved", "Use a one-round cap to test blocking-finding repair accounting"); code != 0 {
+	if code, output := runReleaseCLI(t, f.binary, f.repo, f.env, "config", "set", "review_loop.max_rounds", "2", "--user-approved", "Use a two-round cap to test blocking-finding repair accounting"); code != 0 {
 		t.Fatalf("set one-round cap: %d %s", code, output)
 	}
 	if code, output := startStagingTask(t, f, "Staging review rounds"); code != 0 {
@@ -578,9 +578,42 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Applied blocking-finding repair", "--turn", turn, "--resolutions", resolutions); code != 0 {
 		t.Fatalf("complete blocking-finding repair: %d %s", code, output)
 	}
+	if decisions := openReviewCapDecisions(t, f, change); len(decisions) != 0 {
+		t.Fatalf("one blocking repair raised a cap Decision before the two-round cap: %v", decisions)
+	}
+
+	recordReviewRound(t, f, "t1", "changes_requested", blockingFindings("unsafe-operation-3", name, "validated operation"))
+	if code, output := runReviewIdentityCLI(t, f, "review", "fix", "t1"); code != 0 || !strings.Contains(output, "queued") {
+		t.Fatalf("queue second blocking-finding repair: %d %s", code, output)
+	}
+	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "show", "t1"); code != 0 {
+		t.Fatalf("deliver second blocking-finding repair: %d %s", code, output)
+	}
+	candidate, err = f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, name), []byte("fully validated operation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, candidate.WorktreePath, "add", name)
+	gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "repair second blocking review finding")
+	if err := os.WriteFile(resolutions, []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"},{"pattern":"P-2","status":"fixed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Applied second blocking-finding repair", "--turn", turn, "--resolutions", resolutions); code != 0 {
+		t.Fatalf("complete second blocking-finding repair: %d %s", code, output)
+	}
 	decisions := openReviewCapDecisions(t, f, change)
 	if len(decisions) != 1 {
-		t.Fatalf("completed blocking repair raised %d cap Decisions, want one", len(decisions))
+		t.Fatalf("two blocking repairs raised %d cap Decisions, want one", len(decisions))
 	}
 	var origin string
 	repairedHead := gitRef(t, f, candidate.WorktreePath, "HEAD")
@@ -592,8 +625,8 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 			t.Fatalf("Lead answered the cap Decision with %s: %d %s", option, code, output)
 		}
 	}
-	if rounds := reviewRoundCount(t, f, change); rounds != 2 {
-		t.Fatalf("Review Rounds=%d, want 2", rounds)
+	if rounds := reviewRoundCount(t, f, change); rounds != 3 {
+		t.Fatalf("Review Rounds=%d, want 3", rounds)
 	}
 	audit("cap Decision")
 }
