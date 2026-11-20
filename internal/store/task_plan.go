@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,19 @@ import (
 // AdmittedPlan returns nil for a historical Task. Never reconstruct a missing
 // plan from today's configuration or infer historical identity.
 func (t Task) AdmittedPlan() (*taskplan.Plan, error) {
+	if t.PlanJSON == "" && t.PlanRevision < 1 && t.planLoader == nil {
+		return nil, nil
+	}
+	if t.planLoader != nil {
+		if t.PlanJSON != "" && t.planJSONFingerprintValid && sha256.Sum256([]byte(t.PlanJSON)) != t.planJSONFingerprint {
+			plan, err := taskplan.Decode(t.PlanJSON)
+			if err != nil {
+				return nil, err
+			}
+			return &plan, nil
+		}
+		return t.planLoader(t.PlanJSON, t.PlanRevision)
+	}
 	if t.PlanJSON == "" {
 		return nil, nil
 	}
@@ -22,7 +36,7 @@ func (t Task) AdmittedPlan() (*taskplan.Plan, error) {
 	return &plan, nil
 }
 
-func bindTaskPlan(task Task, sequence int, workflowRunID string) (string, error) {
+func (db *DB) bindTaskPlan(task Task, sequence int, workflowRunID string) (string, error) {
 	plan, err := task.AdmittedPlan()
 	if err != nil || plan == nil {
 		return "", err
@@ -36,7 +50,11 @@ func bindTaskPlan(task Task, sequence int, workflowRunID string) (string, error)
 		}
 		plan.Workflow.RunID = workflowRunID
 	}
-	return plan.Bind(fmt.Sprintf("t%d", sequence)).Encode()
+	data, err := plan.Bind(fmt.Sprintf("t%d", sequence)).Encode()
+	if err != nil {
+		return "", err
+	}
+	return db.externalizePlanJSON(data)
 }
 
 func (db *DB) TaskPlanRevisions(ctx context.Context, taskID int64) ([]string, error) {
@@ -74,7 +92,12 @@ func (db *DB) reviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan,
 	if previous == nil || plan.Revision != previous.Revision+1 || plan.PreviousSHA256 != previous.SHA256() {
 		return fmt.Errorf("execution plan revision does not extend the admitted plan")
 	}
+	plan.AdmittedSHA256 = ""
 	data, err := plan.Encode()
+	if err != nil {
+		return err
+	}
+	data, err = db.externalizePlanJSON(data)
 	if err != nil {
 		return err
 	}
@@ -83,8 +106,8 @@ func (db *DB) reviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan,
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
-		data, plan.Launch.ProfileName, plan.Launch.DispatchRule, time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State)
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, workflow_run_id=?, plan_revision=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
+		data, plan.Launch.ProfileName, plan.Launch.DispatchRule, storedWorkflowRunID(data), storedPlanRevision(data), time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State)
 	if err != nil {
 		return err
 	}

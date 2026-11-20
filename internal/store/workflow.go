@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
-	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 var (
@@ -283,22 +282,23 @@ func workflowCurrentStageTx(ctx context.Context, tx *sql.Tx, projectID int64, ru
 	return current, rows.Err()
 }
 
-func validateWorkflowTaskAdmissionTx(ctx context.Context, tx *sql.Tx, projectID int64, taskType string, selection *config.WorkflowSelection) error {
+func (db *DB) validateWorkflowTaskAdmissionTx(ctx context.Context, tx *sql.Tx, projectID int64, taskType string, selection *config.WorkflowSelection) error {
 	if selection == nil || selection.RunID == "" || selection.RunID == "new" {
 		return nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT plan_json FROM tasks WHERE project_id=? AND plan_json<>'' ORDER BY seq`, projectID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,plan_json FROM tasks WHERE project_id=? AND COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id'))=? ORDER BY seq`, projectID, selection.RunID)
 	if err != nil {
 		return err
 	}
 	var frozen *config.WorkflowSelection
 	for rows.Next() {
+		var taskID int64
 		var data string
-		if err := rows.Scan(&data); err != nil {
+		if err := rows.Scan(&taskID, &data); err != nil {
 			rows.Close()
 			return err
 		}
-		plan, err := taskplan.Decode(data)
+		plan, err := db.loadAdmittedPlan(taskID, data)
 		if err != nil {
 			rows.Close()
 			return err
@@ -347,8 +347,8 @@ func validateWorkflowTaskAdmissionTx(ctx context.Context, tx *sql.Tx, projectID 
 
 func nextWorkflowRunIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (string, error) {
 	var next int64
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(CASE WHEN json_valid(plan_json) AND json_extract(plan_json,'$.workflow.run_id') GLOB 'w[0-9]*'
-		THEN CAST(substr(json_extract(plan_json,'$.workflow.run_id'),2) AS INTEGER) ELSE 0 END),0)+1
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(CASE WHEN COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id')) GLOB 'w[0-9]*'
+		THEN CAST(substr(COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id')),2) AS INTEGER) ELSE 0 END),0)+1
 		FROM tasks WHERE project_id=?`, projectID).Scan(&next)
 	if err != nil {
 		return "", err
@@ -356,8 +356,8 @@ func nextWorkflowRunIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (stri
 	return "w" + strconv.FormatInt(next, 10), nil
 }
 
-func validateWorkflowResultCoverageTx(ctx context.Context, tx *sql.Tx, projectID int64, advance WorkflowAdvance, stage config.WorkflowStage) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id,type,plan_json FROM tasks WHERE project_id=? AND plan_json<>'' ORDER BY seq`, projectID)
+func (db *DB) validateWorkflowResultCoverageTx(ctx context.Context, tx *sql.Tx, projectID int64, advance WorkflowAdvance, stage config.WorkflowStage) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id,type,plan_json FROM tasks WHERE project_id=? AND COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id'))=? ORDER BY seq`, projectID, advance.RunID)
 	if err != nil {
 		return err
 	}
@@ -369,7 +369,7 @@ func validateWorkflowResultCoverageTx(ctx context.Context, tx *sql.Tx, projectID
 			rows.Close()
 			return err
 		}
-		plan, err := taskplan.Decode(data)
+		plan, err := db.loadAdmittedPlan(taskID, data)
 		if err != nil {
 			rows.Close()
 			return err
@@ -421,7 +421,7 @@ func (db *DB) RecordWorkflowAdvance(ctx context.Context, projectID, taskID int64
 	if err := tx.QueryRowContext(ctx, `SELECT plan_json,state FROM tasks WHERE id=? AND project_id=?`, taskID, projectID).Scan(&profileJSON, &state); err != nil {
 		return Decision{}, err
 	}
-	anchorPlan, err := taskplan.Decode(profileJSON)
+	anchorPlan, err := db.loadAdmittedPlan(taskID, profileJSON)
 	if err != nil || anchorPlan.Workflow == nil || anchorPlan.Workflow.RunID != advance.RunID {
 		return Decision{}, ErrWorkflowRunUnknown
 	}
@@ -465,7 +465,7 @@ func (db *DB) RecordWorkflowAdvance(ctx context.Context, projectID, taskID int64
 	} else if anchorTaskPlan.StageIndex != advance.FromIndex {
 		return Decision{}, ErrWorkflowAdvanceInvalid
 	}
-	if err := validateWorkflowResultCoverageTx(ctx, tx.Tx, projectID, advance, fromStage); err != nil {
+	if err := db.validateWorkflowResultCoverageTx(ctx, tx.Tx, projectID, advance, fromStage); err != nil {
 		return Decision{}, err
 	}
 	var taskSeq int

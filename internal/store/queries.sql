@@ -106,8 +106,8 @@ INSERT INTO tasks(
     herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, agent_session_kind, pr_url,
     landed_ref, last_output_hash, last_worktree_hash, last_progress_at,
     agent_absent_since, idle_since, created_at, updated_at, plan_json, report_kind,
-    containment_mode, containment_path, containment_marker, pane_shell_identity
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    containment_mode, containment_path, containment_marker, pane_shell_identity, workflow_run_id, plan_revision
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertProject :execresult
 INSERT INTO projects(name, root, default_branch, status, created_at, last_activity_at, project_uuid)
@@ -347,15 +347,52 @@ SELECT * FROM tasks WHERE project_id = ? ORDER BY seq;
 SELECT * FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id = ? AND state = ? ORDER BY seq;
 
 -- name: TasksWithPaneLabels :many
-SELECT * FROM tasks
+SELECT id, project_id, seq, type, title, short_name, state, worktree_path, pane_id, pane_label, agent_session_kind
+FROM tasks INDEXED BY tasks_project_pane_label_idx
 WHERE project_id = ? AND pane_label IN (SELECT value FROM json_each(sqlc.arg(labels_json))) ORDER BY seq;
 
+-- name: TaskStateBySeq :one
+SELECT id, project_id, seq, state FROM tasks INDEXED BY tasks_project_seq_idx WHERE project_id=? AND seq=?;
+
+-- name: TaskExistsBySeq :one
+SELECT EXISTS(SELECT 1 FROM tasks INDEXED BY tasks_project_seq_idx WHERE project_id=? AND seq=?);
+
+-- name: PendingGroupRecoveryTaskIDs :many
+SELECT r.task_id FROM tasks t INDEXED BY tasks_project_state_idx
+JOIN task_recovery r ON r.task_id=t.id
+WHERE t.project_id=? AND t.state<>'failed' AND r.status IN ('pending','running') AND r.generation LIKE '%/group/%' AND r.next_attempt_at<=?
+ORDER BY t.seq;
+
+-- name: OpenTaskSummaries :many
+SELECT id, project_id, seq, title, short_name, state
+FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id=? AND state NOT IN ('merged','reported','torn-down') ORDER BY seq;
+
+-- name: SpawningLaunchTasks :many
+SELECT id, project_id, seq, state, profile, dispatch_rule, pane_id, pane_label, plan_revision,
+       EXISTS(SELECT 1 FROM task_plan_revisions WHERE task_id=tasks.id) AS has_admitted_plan
+FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id=? AND state='spawning' ORDER BY seq;
+
+-- name: MergedTaskCandidates :many
+SELECT id, project_id, seq, title, state, landing_mode, pr_url
+FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id=? AND state='merged' ORDER BY seq;
+
+-- name: QueuedMessageTaskIDs :many
+SELECT t.id FROM tasks t JOIN messages m ON m.task_id=t.id
+WHERE t.project_id=? AND m.status='queued' AND t.state NOT IN ('failed','lost') AND (t.state<>'done' OR t.type='change')
+GROUP BY t.id ORDER BY t.seq;
+
+-- name: QueuedTaskIDs :many
+SELECT id FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id = ? AND state = 'queued' ORDER BY seq;
+
 -- name: LiveTasks :many
-SELECT * FROM tasks
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, '' AS plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity, agent_status, agent_status_since, plan_revision,
+       EXISTS(SELECT 1 FROM task_plan_revisions WHERE task_id=tasks.id) AS has_admitted_plan
+FROM tasks INDEXED BY tasks_project_state_idx
 WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'merging') ORDER BY seq;
 
 -- name: StallTasks :many
-SELECT * FROM tasks
+SELECT id, project_id, seq, title, state, pane_id, pane_label, worktree_path, last_output_hash, last_worktree_hash, last_progress_at
+FROM tasks INDEXED BY tasks_project_state_idx
 WHERE project_id = ? AND state IN ('working', 'stalled') ORDER BY seq;
 
 -- name: UpdateTaskObservation :exec

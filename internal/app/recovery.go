@@ -542,20 +542,16 @@ func groupRecoveryInProgress(state store.TaskRecovery) bool {
 }
 
 func pendingGroupRecoveryDue(ctx context.Context, db *store.DB, projectID int64) (bool, error) {
-	tasks, err := db.Tasks(ctx, projectID, false)
+	taskIDs, err := db.PendingGroupRecoveryTaskIDs(ctx, projectID, time.Now().UnixMilli())
 	if err != nil {
 		return false, err
 	}
-	now := time.Now().UnixMilli()
-	for _, task := range tasks {
-		if task.State == store.StateFailed {
-			continue
-		}
-		state, err := db.TaskRecovery(ctx, task.ID)
+	for _, taskID := range taskIDs {
+		state, err := db.TaskRecovery(ctx, taskID)
 		if err != nil {
 			return false, err
 		}
-		if groupRecoveryInProgress(state) && state.NextAttemptAt <= now && (state.OwnerPID == 0 || !processAlive(state.OwnerPID)) {
+		if groupRecoveryInProgress(state) && (state.OwnerPID == 0 || !processAlive(state.OwnerPID)) {
 			return true, nil
 		}
 	}

@@ -3159,6 +3159,11 @@ func relaunchNeedsPlanRevision(plan, revision *taskplan.Plan) bool {
 
 func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config, task store.Task, requestedProfile string, automatic bool) (relaunchResult, error) {
 	failure := func(err error) (relaunchResult, error) { return relaunchResult{}, err }
+	current, err := db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return failure(err)
+	}
+	task = current
 	// A completed Change Task keeps its state, so only an explicit relaunch
 	// brings its Worker back for follow-ups.
 	completed := completedChangeTask(task) && !automatic

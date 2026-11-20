@@ -1162,6 +1162,13 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	}
 	for _, snapshot := range snapshots {
 		task := snapshot.Task
+		if task.PlanJSON != "" {
+			task.PlanJSON, err = db.externalizePlanJSON(task.PlanJSON)
+			if err != nil {
+				return err
+			}
+			db.attachPlanLoader(&task, true)
+		}
 		if task.ReportKind != "" && (task.Type != "research" || task.ReportKind != "spec" && task.ReportKind != "tickets") {
 			return fmt.Errorf("invalid Report kind in snapshot for t%d", task.Seq)
 		}
@@ -1172,8 +1179,8 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if task.ReviewsTaskID != 0 {
 			reviewed = task.ReviewsTaskID
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,agent_status,agent_status_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.AgentStatus, task.AgentStatusSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,agent_status,agent_status_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity,workflow_run_id,plan_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.AgentStatus, task.AgentStatusSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity, storedWorkflowRunID(task.PlanJSON), storedPlanRevision(task.PlanJSON)); err != nil {
 			return err
 		}
 		for _, a := range snapshot.TaskAdoptions {
@@ -1225,17 +1232,21 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		}
 		var previous *taskplan.Plan
 		for index, data := range snapshot.PlanRevisions {
-			plan, err := taskplan.Decode(data)
+			plan, err := db.loadAdmittedPlan(task.ID, data, index+1)
 			if err != nil {
 				return fmt.Errorf("rebuild t%d plan: %w", task.Seq, err)
 			}
 			if plan.Revision != index+1 || index == 0 && plan.PreviousSHA256 != "" || previous != nil && plan.PreviousSHA256 != previous.SHA256() {
 				return fmt.Errorf("invalid execution plan revision history for t%d", task.Seq)
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, task.ID, plan.Revision, data); err != nil {
+			storedData, err := db.externalizePlanJSON(data)
+			if err != nil {
 				return err
 			}
-			previous = &plan
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, task.ID, plan.Revision, storedData); err != nil {
+				return err
+			}
+			previous = plan
 		}
 		if task.PlanJSON != "" || previous != nil {
 			plan, err := task.AdmittedPlan()

@@ -48,8 +48,9 @@ const (
 type Input struct {
 	Role   string `json:"role"`
 	Source string `json:"source"`
-	Bytes  []byte `json:"bytes"`
+	Bytes  []byte `json:"bytes,omitempty"`
 	SHA256 string `json:"sha256"`
+	Path   string `json:"path,omitempty"`
 	Layer  string `json:"layer,omitempty"`
 	Legacy bool   `json:"legacy,omitempty"`
 }
@@ -171,6 +172,7 @@ func (loops ValidationLoops) MaxReviewRounds() int {
 type Plan struct {
 	// Original bytes retain the digest and provenance of admitted 0.14 plans.
 	legacyJSON       string
+	AdmittedSHA256   string                    `json:"admitted_sha256,omitempty"`
 	Version          int                       `json:"version"`
 	Revision         int                       `json:"revision"`
 	PreviousSHA256   string                    `json:"previous_sha256,omitempty"`
@@ -711,6 +713,25 @@ func (p Plan) Validate() error {
 		return invalid("unsupported autonomy grant")
 	}
 	for _, input := range p.Inputs {
+		if input.Path != "" {
+			if input.Role == "brief" || len(input.Bytes) != 0 || len(input.SHA256) != sha256.Size*2 {
+				return invalid("invalid selected input path: " + input.Source)
+			}
+			if decoded, err := hex.DecodeString(input.SHA256); err != nil || hex.EncodeToString(decoded) != input.SHA256 {
+				return invalid("invalid selected input digest: " + input.Source)
+			}
+			expectedPath := filepath.ToSlash(filepath.Join("blobs", "sha256", input.SHA256[:2], input.SHA256))
+			if input.Path != expectedPath {
+				return invalid("invalid selected input path: " + input.Source)
+			}
+			if len(p.AdmittedSHA256) != sha256.Size*2 {
+				return invalid("externalized plan is missing its admitted digest")
+			}
+			if decoded, err := hex.DecodeString(p.AdmittedSHA256); err != nil || hex.EncodeToString(decoded) != p.AdmittedSHA256 {
+				return invalid("externalized plan has an invalid admitted digest")
+			}
+			continue
+		}
 		selected := Select(input.Role, input.Source, input.Bytes)
 		if input.SHA256 != selected.SHA256 {
 			return invalid("selected input digest mismatch: " + input.Source)
@@ -789,7 +810,7 @@ func (p Plan) ChangedFields(previous Plan) []string {
 	var fields []string
 	for index := 0; index < currentValue.NumField(); index++ {
 		field := typeOfPlan.Field(index)
-		if !field.IsExported() || field.Name == "Revision" || field.Name == "PreviousSHA256" {
+		if !field.IsExported() || field.Name == "Revision" || field.Name == "PreviousSHA256" || field.Name == "AdmittedSHA256" {
 			continue
 		}
 		if !reflect.DeepEqual(currentValue.Field(index).Interface(), previousValue.Field(index).Interface()) {
@@ -804,6 +825,9 @@ func (p Plan) ChangedFields(previous Plan) []string {
 }
 
 func (p Plan) SHA256() string {
+	if p.AdmittedSHA256 != "" {
+		return p.AdmittedSHA256
+	}
 	data, _ := json.Marshal(p)
 	if p.legacyJSON != "" {
 		data = []byte(p.legacyJSON)
@@ -842,6 +866,7 @@ func (p Plan) WithoutDependency(taskID, milestone string) (Plan, error) {
 		return Plan{}, fmt.Errorf("prerequisite %s:%s is not in the admitted plan", taskID, milestone)
 	}
 	p.PreviousSHA256 = p.SHA256()
+	p.AdmittedSHA256 = ""
 	p.legacyJSON = ""
 	p.Revision++
 	p.Dependencies = dependencies
@@ -859,6 +884,7 @@ func (p Plan) Reconfigure(launch Launch) (Plan, error) {
 		return Plan{}, err
 	}
 	p.PreviousSHA256 = p.SHA256()
+	p.AdmittedSHA256 = ""
 	p.legacyJSON = ""
 	p.Revision++
 	p.Launch = launch

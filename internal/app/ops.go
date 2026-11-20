@@ -946,7 +946,7 @@ func (s *Service) regenerateProjects(ctx context.Context, db *store.DB) error {
 			fmt.Fprintf(&out, "- Error: %s\n\n", err)
 			continue
 		}
-		tasks, err := db.Tasks(ctx, project.ID, false)
+		tasks, err := db.OpenTaskSummaries(ctx, project.ID)
 		if err != nil {
 			fmt.Fprintf(&out, "- Error: %s\n\n", err)
 			continue

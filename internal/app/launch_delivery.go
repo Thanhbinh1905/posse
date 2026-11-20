@@ -31,7 +31,7 @@ func (s *Service) retryPendingLaunches(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return err
 	}
-	tasks, err := db.TasksInState(ctx, project.ID, store.StateSpawning)
+	tasks, err := db.SpawningLaunchTasks(ctx, project.ID)
 	if err != nil {
 		return err
 	}
@@ -156,16 +156,23 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 			return admitted, err
 		}
 		full := active >= cfg.Defaults.MaxWorkers
-		tasks, err := db.Tasks(ctx, project.ID, false)
+		taskIDs, err := db.QueuedTaskIDs(ctx, project.ID)
 		if err != nil {
 			return admitted, err
 		}
 		launched := false
-		for _, queued := range tasks {
-			if queued.State != store.StateQueued || attempted[queued.ID] {
+		for _, taskID := range taskIDs {
+			if attempted[taskID] {
 				continue
 			}
-			if decline, found := declines[queued.ID]; found && (!watch || time.Since(decline.CheckedAt) < queuedDeclineRecheck) {
+			if decline, found := declines[taskID]; found && (!watch || time.Since(decline.CheckedAt) < queuedDeclineRecheck) {
+				continue
+			}
+			queued, err := db.TaskByID(ctx, project.ID, taskID)
+			if err != nil {
+				return admitted, err
+			}
+			if queued.State != store.StateQueued {
 				continue
 			}
 			plan, err := queued.AdmittedPlan()
