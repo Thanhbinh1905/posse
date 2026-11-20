@@ -212,6 +212,7 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	restored := []any{}
 	failed := []any{}
 	down := []any{}
+	parked := []any{}
 	skipped := []any{}
 	help := []any{}
 	inLeadPane := 0
@@ -223,6 +224,10 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		}
 		if project.IsDown() {
 			down = append(down, project.Name)
+			continue
+		}
+		if project.IsParked() {
+			parked = append(parked, map[string]any{"project": project.Name, "reason": projectParkReason()})
 			continue
 		}
 		if project.HerdrWorkspaceID == "" && project.LeadPaneID == "" {
@@ -262,12 +267,18 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	if len(down) > 0 {
 		help = append(help, "Run `posse up` in a down Project's folder to start it")
 	}
+	if len(parked) > 0 {
+		help = append(help, "Run `posse up` in a parked Project's folder to resume it")
+	}
 	if len(skipped) > 0 {
 		help = append(help, "Run `posse up` in a skipped Project's folder to restore it, or add it to up.projects")
 	}
 	result := axi.Object{{Key: "restored", Value: restored}, {Key: "failed_projects", Value: failed}}
 	if len(down) > 0 {
 		result = append(result, axi.Field{Key: "down_projects", Value: down})
+	}
+	if len(parked) > 0 {
+		result = append(result, axi.Field{Key: "parked_projects", Value: parked})
 	}
 	if len(skipped) > 0 {
 		result = append(result, axi.Field{Key: "skipped_projects", Value: skipped})
