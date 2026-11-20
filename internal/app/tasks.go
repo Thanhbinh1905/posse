@@ -1760,7 +1760,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				return err
 			}
 			if remoteHead != head {
-				return axi.Failure("signal_invalid", "published PR completion requires the Task branch on origin to match its current head", false, "Publish the current exact head before signalling done")
+				return axi.Failure("signal_invalid", "published PR completion requires the Task branch on origin to match its current head", false, "For Greenhouse full-pipeline review of an unpublished head, omit --pr and run `posse signal done \"<summary>\" --head "+head+"`; after Greenhouse passes, publish the exact head and signal done with --pr")
 			}
 			verified, err := db.WasVerifiedPRHead(ctx.Context, task.ID, parsed.Flags["pr"], head)
 			if err != nil {
@@ -1770,7 +1770,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 				return axi.Failure("signal_invalid", "published PR completion requires a PR Posse already verified for the exact head", false)
 			}
 			if err := requireGreenhouseGatePass(ctx.Context, db, project, cfg, task, head, ""); err != nil {
-				return axi.Failure("signal_invalid", "published PR completion requires a passing Greenhouse Verdict for the exact head", false, err.Error())
+				return axi.Failure("signal_invalid", "published PR completion requires a passing Greenhouse Verdict for the exact head", false, err.Error(), "Request review for this head with `posse signal done \"<summary>\" --head "+head+"` without --pr")
 			}
 		} else {
 			if parsed.Flags["head"] == "" {
