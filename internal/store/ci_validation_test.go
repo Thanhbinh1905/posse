@@ -35,14 +35,14 @@ func TestCIFixesDoNotConsumeTheFrozenReviewCap(t *testing.T) {
 	}
 }
 
-func TestActiveReviewRoundReservesSharedRepairCapacity(t *testing.T) {
+func TestActiveReviewRoundDoesNotReserveSharedRepairCapacity(t *testing.T) {
 	fixture := newReviewVerdictFixture(t, nil)
 	if _, err := fixture.db.ExecContext(fixture.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','admitted',NULL,1)`, fixture.change, fixture.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, reportHash); err != nil {
 		t.Fatal(err)
 	}
 	result, err := fixture.db.QueueValidationFixInstructionWithSharedBudget(fixture.ctx, fixture.change, "review", reviewShaA, "review:reserved", "Fix review findings", 3, 1)
-	if err != nil || !result.SharedExhausted || result.Queued {
-		t.Fatalf("active Review did not reserve shared capacity: %+v %v", result, err)
+	if err != nil || !result.Queued || result.SharedExhausted {
+		t.Fatalf("active Review reserved shared repair capacity before findings existed: %+v %v", result, err)
 	}
 }
 

@@ -177,7 +177,7 @@ SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 	if !anyNewHead && !finalReview {
 		return ErrReviewRoundUnchanged
 	}
-	if used+repairs >= admission.MaxRounds && !finalReview {
+	if (!admission.SharedRepairBudget && used >= admission.MaxRounds || admission.SharedRepairBudget && repairs >= admission.MaxRounds) && !finalReview {
 		return ErrReviewRoundCap
 	}
 	return nil

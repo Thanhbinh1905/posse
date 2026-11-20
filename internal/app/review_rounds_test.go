@@ -79,12 +79,7 @@ func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 	}
 	usage, err := db.ReviewCapUsage(context.Background(), change.ID)
 	if err != nil || usage.ReviewRounds != 1 {
-		t.Fatalf("earlier built-in Review round no longer counts toward cap: %+v %v", usage, err)
-	}
-	maxRounds := 1
-	fix, err := db.QueueProviderReviewFixInstruction(context.Background(), change.ID, strings.Repeat("b", 40), nil, "review:legacy:P-1", "Fix P-1", []int{1}, &maxRounds, &maxRounds)
-	if err != nil || !fix.SharedExhausted || fix.RoundsUsed != 1 {
-		t.Fatalf("provider Fix Round ignored the earlier built-in round at the frozen cap: %+v %v", fix, err)
+		t.Fatalf("earlier built-in Review history changed: %+v %v", usage, err)
 	}
 	head, err := lockedTaskBranchAuthorHead(context.Background(), f.project.Root, change.Branch)
 	if err != nil {

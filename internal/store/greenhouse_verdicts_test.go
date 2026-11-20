@@ -95,7 +95,12 @@ func TestProviderFindingsUseReviewFixQueueAndResolution(t *testing.T) {
 	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
 		t.Fatalf("record findings Verdict = %v, %v", recorded, err)
 	}
-	queued, err := f.db.QueueProviderReviewFixInstruction(f.ctx, f.change, reviewShaA, nil, "review:"+reviewShaA+":P-1", "Fix P-1", []int{1}, nil, nil)
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','verdict','pass',1)`,
+		f.change, f.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	maxRounds := 1
+	queued, err := f.db.QueueProviderReviewFixInstruction(f.ctx, f.change, reviewShaA, nil, "review:"+reviewShaA+":P-1", "Fix P-1", []int{1}, &maxRounds, &maxRounds)
 	if err != nil || !queued.Queued {
 		t.Fatalf("queue Greenhouse Review fix = %+v, %v", queued, err)
 	}
