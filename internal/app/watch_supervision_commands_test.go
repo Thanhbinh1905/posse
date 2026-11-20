@@ -101,7 +101,7 @@ func TestWatchExecutableVersionReadsInjectedVersion(t *testing.T) {
 	build := exec.Command("go", "build", "-ldflags=-X main.version=watch-version-test", "-o", binary, "./cmd/posse")
 	build.Dir = filepath.Clean(filepath.Join(workingDir, "../.."))
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build Posse CLI: %v\\n%s", err, output)
+		t.Fatalf("build Posse CLI: %v\n%s", err, output)
 	}
 	if got := watchExecutableVersion(binary); got != "watch-version-test" {
 		t.Fatalf("Watch executable version = %q, want watch-version-test", got)
