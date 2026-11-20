@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"debug/buildinfo"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -227,7 +228,43 @@ func watchExecutableAt(path string) (watchExecutableIdentity, bool) {
 	return watchExecutableIdentity{Path: resolved, Device: uint64(stat.Dev), Inode: stat.Ino}, true
 }
 
-func currentWatchExecutable(_ string) (watchExecutableIdentity, bool) {
+func watchExecutableVersion(path string) string {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	for _, setting := range info.Settings {
+		if setting.Key != "-ldflags" {
+			continue
+		}
+		fields := strings.Fields(setting.Value)
+		for index := 0; index < len(fields); index++ {
+			value := fields[index]
+			if value == "-X" && index+1 < len(fields) {
+				index++
+				value = fields[index]
+			} else {
+				value = strings.TrimPrefix(value, "-X")
+			}
+			key, version, found := strings.Cut(value, "=")
+			if found && key == "main.version" && version != "" {
+				return version
+			}
+		}
+	}
+	return "unknown"
+}
+
+func currentWatchExecutable(home string) (watchExecutableIdentity, bool) {
+	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
+	if err != nil {
+		return watchExecutableIdentity{}, false
+	}
+	if found && manifest.Binary != "" {
+		if identity, ok := watchExecutableAt(manifest.Binary); ok {
+			return identity, true
+		}
+	}
 	path, err := os.Executable()
 	if err != nil {
 		return watchExecutableIdentity{}, false

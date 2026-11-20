@@ -177,6 +177,10 @@ func (s *Service) watchRuntimeRow(ctx context.Context, db *store.DB, home string
 		row["started_at"] = time.UnixMilli(state.StartedAt).UTC().Format(time.RFC3339)
 		row["heartbeat_at"] = time.UnixMilli(state.HeartbeatAt).UTC().Format(time.RFC3339)
 		row["executable"] = state.ExecutablePath
+		row["version"] = "unknown"
+		if executable, ok := inspectWatchExecutable(state.PID); ok {
+			row["version"] = watchExecutableVersion(executable.Path)
+		}
 		row["device"] = state.ExecutableDevice
 		row["inode"] = state.ExecutableInode
 	}
