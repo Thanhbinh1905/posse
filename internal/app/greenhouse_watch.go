@@ -353,7 +353,7 @@ func (s *Service) openGreenhousePane(ctx context.Context, task store.Task) (stri
 		} `json:"pane"`
 	}
 	if json.Unmarshal(raw, &result) != nil || result.Pane.PaneID == "" {
-		return "", fmt.Errorf("Herdr did not return the Greenhouse pane")
+		return "", fmt.Errorf("herdr did not return the Greenhouse pane")
 	}
 	paneID := result.Pane.PaneID
 	if _, err := s.herdrCall(ctx, "pane.rename", map[string]any{"pane_id": paneID, "label": "greenhouse:" + task.PaneLabel}); err != nil {
