@@ -40,7 +40,7 @@ if git rev-parse --verify --quiet "$base" >/dev/null; then
     name=${1##*/}
     printf '%s\n' "${name%%_*}"
   }
-  git ls-tree --name-only "$base" "$migrations_dir/" | while read -r path; do
+  git ls-tree -r --name-only "$base" "$migrations_dir/" | while read -r path; do
     printf '%s %s\n' "$(version_of "$path")" "$path"
   done >"${TMPDIR:?TMPDIR must point to the Task scratch directory}/preflight-main-migrations.$$"
   for path in "$migrations_dir"/*.sql; do
