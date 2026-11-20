@@ -186,100 +186,6 @@ func TestPlanInputExternalizationRepairsMixedInlineAndBlobInputs(t *testing.T) {
 	}
 }
 
-func TestOpenDefersPlanInputExternalization(t *testing.T) {
-	ctx := context.Background()
-	home := t.TempDir()
-	db, err := Open(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := admittedStorePlan(t, home).Bind("t1")
-	plan.Inputs = append(plan.Inputs, taskplan.Select("review-round-file", "review/large.patch", make([]byte, 80<<10)))
-	inline, err := plan.Encode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Profile: "deep", PlanJSON: inline})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE id=?`, inline, taskID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, inline, taskID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE task_plan_input_migration SET completed=0 WHERE id=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET plan_revision=0 WHERE id=?`, taskID); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err = OpenAt(filepath.Join(home, "posse.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var stored string
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, taskID).Scan(&stored); err != nil {
-		t.Fatal(err)
-	}
-	if stored != inline {
-		t.Fatalf("Open rewrote inline plan input: stored %d bytes, want %d", len(stored), len(inline))
-	}
-	live, err := db.LiveTasks(ctx, project.ID)
-	if err != nil || len(live) != 1 {
-		t.Fatalf("load legacy live Task: tasks=%d err=%v", len(live), err)
-	}
-	livePlan, err := live[0].AdmittedPlan()
-	if err != nil || livePlan == nil || livePlan.Revision != 1 {
-		t.Fatalf("legacy LiveTasks plan unreadable before migration: plan=%v err=%v", livePlan, err)
-	}
-	task, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := task.AdmittedPlan()
-	if err != nil || loaded == nil || len(loaded.Inputs[len(loaded.Inputs)-1].Bytes) != 80<<10 {
-		t.Fatalf("inline plan was not readable before migration: plan=%v err=%v", loaded != nil, err)
-	}
-	if err := db.migrateTaskPlanRowsBatch(ctx, 0); err != nil {
-		t.Fatal(err)
-	}
-	current, err := db.TaskByID(ctx, project.ID, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	midMigration, err := current.AdmittedPlan()
-	if err != nil || midMigration == nil || len(midMigration.Inputs[len(midMigration.Inputs)-1].Bytes) != 80<<10 {
-		t.Fatalf("plan unreadable while revision rows remain inline: plan=%v err=%v", midMigration != nil, err)
-	}
-	var revisionDuringMigration string
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, taskID).Scan(&revisionDuringMigration); err != nil {
-		t.Fatal(err)
-	}
-	if revisionDuringMigration != inline {
-		t.Fatal("task revision row changed before its migration batch")
-	}
-	if err := db.migrateTaskPlanInputs(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, taskID).Scan(&stored); err != nil {
-		t.Fatal(err)
-	}
-	if stored == inline || !strings.Contains(stored, `"path":"blobs/sha256/`) {
-		t.Fatalf("batch migration did not externalize plan input: %d bytes", len(stored))
-	}
-}
-
 func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
@@ -287,7 +193,7 @@ func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
 	if err != nil {
 		t.Fatal(err)
@@ -307,29 +213,72 @@ func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := plan.SHA256()
-	if _, err := db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE project_id=?`, inline, project.ID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET plan_json=?,plan_revision=0 WHERE id=?`, inline, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=(SELECT id FROM tasks WHERE project_id=?)`, inline, project.ID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, inline, taskID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE task_plan_input_migration SET completed=0 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = OpenAt(filepath.Join(home, "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, taskID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != inline {
+		t.Fatalf("Open rewrote inline plan input: stored %d bytes, want %d", len(stored), len(inline))
+	}
+	live, err := db.LiveTasks(ctx, project.ID)
+	if err != nil || len(live) != 1 {
+		t.Fatalf("load legacy live Task: tasks=%d err=%v", len(live), err)
+	}
+	livePlan, err := live[0].AdmittedPlan()
+	if err != nil || livePlan == nil || len(livePlan.Inputs[len(livePlan.Inputs)-1].Bytes) != 1<<20 {
+		t.Fatalf("legacy LiveTasks plan unreadable before migration: plan=%v err=%v", livePlan != nil, err)
+	}
+	if err := db.migrateTaskPlanRowsBatch(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
 	db.planCacheMu.Lock()
 	db.planCache = nil
 	db.planCacheMu.Unlock()
+	currentTask, err := db.TaskByID(ctx, project.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	midMigration, err := currentTask.AdmittedPlan()
+	if err != nil || midMigration == nil || len(midMigration.Inputs[len(midMigration.Inputs)-1].Bytes) != 1<<20 {
+		t.Fatalf("plan unreadable while revision rows remain inline: plan=%v err=%v", midMigration != nil, err)
+	}
+	var revisionDuringMigration string
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, taskID).Scan(&revisionDuringMigration); err != nil {
+		t.Fatal(err)
+	}
+	if revisionDuringMigration != inline {
+		t.Fatal("task revision row changed before its migration batch")
+	}
 	if err := db.migrateTaskPlanInputs(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.migrateTaskPlanInputs(ctx); err != nil {
 		t.Fatalf("repeat migration: %v", err)
 	}
-	stored, err := db.TaskByID(ctx, project.ID, taskID)
+	db.planCacheMu.Lock()
+	db.planCache = nil
+	db.planCacheMu.Unlock()
+	storedTask, err := db.TaskByID(ctx, project.ID, taskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := stored.AdmittedPlan()
+	loaded, err := storedTask.AdmittedPlan()
 	if err != nil || loaded == nil || loaded.SHA256() != digest || len(loaded.Inputs[len(loaded.Inputs)-1].Bytes) != 1<<20 {
 		gotDigest, gotSize := "", 0
 		if loaded != nil {
@@ -339,10 +288,10 @@ func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
 		t.Fatalf("migrated plan lost its frozen input or digest: got digest=%s size=%d, want digest=%s size=%d, err=%v", gotDigest, gotSize, digest, 1<<20, err)
 	}
 	var current, revision string
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, stored.ID).Scan(&current); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM tasks WHERE id=?`, storedTask.ID).Scan(&current); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, stored.ID).Scan(&revision); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT plan_json FROM task_plan_revisions WHERE task_id=? AND revision=1`, storedTask.ID).Scan(&revision); err != nil {
 		t.Fatal(err)
 	}
 	if current != revision || strings.Contains(current, `"bytes":"`+strings.Repeat("A", 128)) || !strings.Contains(current, `"path":"blobs/sha256/`) {
