@@ -1686,6 +1686,8 @@ func (db *DB) CreateProject(ctx context.Context, name, root, defaultBranch strin
 // Nothing restarts its Lead or Workers until `posse up`.
 func (p Project) IsDown() bool { return p.DownAt != 0 }
 
+func (p Project) IsParked() bool { return p.Status == "parked" }
+
 func (db *DB) MarkProjectDown(ctx context.Context, projectID int64) error {
 	if err := db.queries.MarkProjectDown(ctx, dbgen.MarkProjectDownParams{DownAt: time.Now().UnixMilli(), ID: projectID}); err != nil {
 		return err
@@ -3590,13 +3592,32 @@ func (db *DB) projectObservationMatches(ctx context.Context, projectID int64, pa
 }
 
 func (db *DB) UpdateProjectStatus(ctx context.Context, projectID int64, status string) error {
-	if status != "active" && status != "missing" {
+	if status != "active" && status != "missing" && status != "parked" {
 		return fmt.Errorf("invalid Project status %q", status)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE projects SET status=? WHERE id=?`, status, projectID); err != nil {
 		return err
 	}
 	return db.PersistProject(ctx, projectID)
+}
+
+func (db *DB) ParkProjectIfIdle(ctx context.Context, project Project, now time.Time, grace time.Duration) (bool, error) {
+	cutoff := now.Add(-grace).UnixMilli()
+	result, err := db.ExecContext(ctx, `UPDATE projects SET status='parked'
+		WHERE id=? AND status<>'parked' AND down_at=0 AND lead_pane_id=? AND lead_absent_since=? AND lead_absent_since>0 AND lead_absent_since<=?
+		AND NOT EXISTS (SELECT 1 FROM tasks WHERE project_id=projects.id AND (state IN ('spawning','working','blocked','stalled') OR agent_status='working'))`,
+		project.ID, project.LeadPaneID, project.LeadAbsentSince, cutoff)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return false, err
+	}
+	if err := db.PersistProject(ctx, project.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (db *DB) UpdateProgress(ctx context.Context, taskID int64, outputHash, worktreeHash string, at int64) error {

@@ -58,6 +58,15 @@ func stopSystemdWatch(ctx context.Context, home string, projectID int64) error {
 	return nil
 }
 
+func stopSystemdWatchNoBlock(ctx context.Context, home string, projectID int64) error {
+	unit := systemdWatchUnitName(home, projectID)
+	command := exec.CommandContext(ctx, "systemctl", "--user", "--no-block", "stop", unit)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("stop Project Watch systemd unit: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func systemdWatchUnitLoaded(ctx context.Context, home string, projectID int64) bool {
 	output, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "--property=LoadState", "--value", systemdWatchUnitName(home, projectID)).Output()
 	return err == nil && strings.TrimSpace(string(output)) == "loaded"

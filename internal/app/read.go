@@ -35,9 +35,13 @@ type projectSummary struct {
 	Lowkey        bool                `json:"lowkey"`
 	ReportingRule string              `json:"reporting_rule"`
 	Error         string              `json:"error,omitempty"`
+	Reason        string              `json:"reason,omitempty"`
 }
 
 func (s *Service) leadStatus(ctx context.Context, project store.Project) string {
+	if project.IsParked() {
+		return "parked"
+	}
 	if project.IsDown() {
 		return "down"
 	}
@@ -310,6 +314,9 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 		}
 		result = axi.Object{{Key: "project", Value: project.Name}, {Key: "watch", Value: s.watchRuntimeRow(ctx.Context, db, home, project)}, {Key: "tasks", Value: active}, {Key: "needs_you", Value: attention}, {Key: "undelivered_notices", Value: len(pending)}, {Key: "next_action", Value: help[0]}}
 	}
+	if project.IsParked() {
+		result = append(result, axi.Field{Key: "project_state", Value: "parked"}, axi.Field{Key: "reason", Value: projectParkReason()})
+	}
 	update, _ := s.availableUpdate(ctx.Context, db, &project)
 	rule := reportingRule(cfg.Lowkey.Lead)
 	if !ctx.JSON && !full {
@@ -342,12 +349,16 @@ func summarizeHomeProject(ctx context.Context, project store.Project, cfg config
 	if leadStatus == "" {
 		leadStatus = "missing"
 	}
-	return axi.Row{
+	row := axi.Row{
 		{Key: "name", Value: project.Name},
 		{Key: "mode", Value: projectMergeMode(ctx, project, cfg)},
 		{Key: "autonomy", Value: "review=" + autonomy.Review + " merge=" + autonomy.Merge},
 		{Key: "lead", Value: leadStatus},
 	}
+	if project.IsParked() {
+		row = append(row, axi.Field{Key: "reason", Value: projectParkReason()})
+	}
+	return row
 }
 
 func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice) []any {
@@ -430,7 +441,11 @@ func summarizeProject(ctx context.Context, project store.Project, cfg config.Con
 		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 		rows = append(rows, row)
 	}
-	return projectSummary{Name: project.Name, Mode: projectMergeMode(ctx, project, cfg), Autonomy: "review=" + autonomy.Review + " merge=" + autonomy.Merge, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
+	summary := projectSummary{Name: project.Name, Mode: projectMergeMode(ctx, project, cfg), Autonomy: "review=" + autonomy.Review + " merge=" + autonomy.Merge, Lead: lead, OpenTasks: len(tasks), Tasks: rows, OpenNotices: noticeCount, Lowkey: cfg.Lowkey.Lead, ReportingRule: shortReportingRule(cfg.Lowkey.Lead)}
+	if project.IsParked() {
+		summary.Reason = projectParkReason()
+	}
+	return summary
 }
 
 func (s *Service) ls(ctx *axi.Context, args []string) error {

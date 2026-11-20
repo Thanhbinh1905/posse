@@ -295,6 +295,30 @@ func (s *Service) deliverNotices(ctx context.Context, db *store.DB, project stor
 }
 
 func (s *Service) deliverNoticesWithSnapshot(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
+	if project.IsParked() {
+		return nil
+	}
+	if project.HerdrWorkspaceID != "" {
+		if len(snapshot.Workspaces) == 0 {
+			var err error
+			snapshot, err = s.snapshot(ctx)
+			if err != nil {
+				return err
+			}
+		}
+		if len(snapshot.Workspaces) > 0 {
+			workspaceFound := false
+			for _, workspace := range snapshot.Workspaces {
+				if workspace.WorkspaceID == project.HerdrWorkspaceID {
+					workspaceFound = true
+					break
+				}
+			}
+			if !workspaceFound {
+				return nil
+			}
+		}
+	}
 	if err := s.raiseNoticeDecisions(ctx, db, project); err != nil {
 		return err
 	}
