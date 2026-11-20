@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -23,7 +24,9 @@ func TestGreenhouseFullPipelineDeliveryGatesRepairedHead(t *testing.T) {
 	if greenhouseBinary == "" {
 		t.Skip("set POSSE_T1202_GREENHOUSE_BIN to the Greenhouse main binary")
 	}
-	f := newWorkerTabsFixture(t)
+	f := newWorkerTabsFixtureWithManualWatchOwner(t)
+	greenhouseHome := filepath.Join(f.root, "greenhouse-custom-home")
+	f.leadEnv = setEnv(f.leadEnv, "GREENHOUSE_HOME", greenhouseHome)
 	if err := os.WriteFile(filepath.Join(f.root, "quiet-agent"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +35,6 @@ func TestGreenhouseFullPipelineDeliveryGatesRepairedHead(t *testing.T) {
 	gitTest(t, f.env, f.repo, "config", "url.file://"+remote+".insteadOf", "https://github.com/acme/shop.git")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "config", "set", "defaults.merge_mode", "greenhouse", "--project", "shop")
 
-	greenhouseHome := filepath.Join(f.root, "greenhouse-custom-home")
 	control := filepath.Join(f.root, "greenhouse-control")
 	agentHome := filepath.Join(f.root, "pi-home")
 	for _, path := range []string{greenhouseHome, control, agentHome} {
@@ -167,10 +169,24 @@ esac
 	if err := os.Symlink(greenhouseBinary, ghBin); err != nil {
 		t.Fatal(err)
 	}
+	_ = startGreenhouseDaemon(t, ghBin, greenhouseHome, greenhouseEnv)
 	defer func() {
 		stop := exec.Command(ghBin, "stop")
 		stop.Dir, stop.Env = task.WorktreePath, greenhouseEnv
 		_, _ = stop.CombinedOutput()
+		find := func() ([]isolatedHerdrServerProcess, error) {
+			processes, err := fixtureSpawnedProcesses(f.root)
+			var daemons []isolatedHerdrServerProcess
+			for _, process := range processes {
+				if process.PID > 1 && strings.Contains(process.Args, "greenhouse daemon") {
+					daemons = append(daemons, process)
+				}
+			}
+			return daemons, err
+		}
+		if err := stopProcesses("Greenhouse daemon", find, 3*time.Second); err != nil {
+			t.Errorf("stop fixture Greenhouse daemon: %v", err)
+		}
 	}()
 	attach := greenhouseAXI(t, ghBin, task.WorktreePath, greenhouseEnv, map[string]any{"version": 2, "op": "attach"})
 	if attach["outcome"] != "ok" {
@@ -200,6 +216,9 @@ esac
 	runID := pipelineResult["run_id"].(string)
 	inspected := greenhouseAXI(t, ghBin, task.WorktreePath, greenhouseEnv, map[string]any{"version": 2, "op": "inspect", "run_id": runID})
 	run := inspected["run"].(map[string]any)
+	if _, err := time.Parse(time.RFC3339, run["started_at"].(string)); err != nil {
+		t.Fatalf("Greenhouse run started_at is not RFC 3339: %v", err)
+	}
 	submitted := run["submitted"].(map[string]any)
 	if run["status"] != "ci-ready" || run["pipeline"].(map[string]any)["outcome"] != "repaired-pass" || submitted["head"] != submittedHead || run["candidate"] == submittedHead {
 		t.Fatalf("Greenhouse did not deliver a repaired candidate descended from submitted head %s: %v", submittedHead, run)
@@ -244,7 +263,7 @@ esac
 	workerEnv = setEnv(workerEnv, "PATH", filepath.Dir(pi)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	mergeEnv := setEnv(f.leadEnv, "POSSE_TEST_ROOT", f.root)
 	mergeEnv = setEnv(mergeEnv, "POSSE_TEST_REMOTE", remote)
-	mergeEnv = setEnv(mergeEnv, "PATH", filepath.Dir(pi)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	mergeEnv = setEnv(mergeEnv, "PATH", filepath.Join(f.root, "bin")+string(os.PathListSeparator)+filepath.Dir(pi)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	turn := greenhouseTaskTurn(t, f, task.ID)
 	if output, err := runBinaryAllowFailure(f.binary, task.WorktreePath, workerEnv, "signal", "done", "Greenhouse run passed", "--greenhouse-run", runID, "--turn", turn); err == nil || !strings.Contains(output, "git push origin HEAD:refs/heads/<task-branch>") {
 		t.Fatalf("missing Task branch did not explain the required handback push: err=%v output=%s", err, output)
@@ -274,8 +293,25 @@ esac
 	if done.State != store.StateDone || done.GatedSHA != actualHead || done.PRURL != "https://github.com/acme/shop/pull/17" {
 		t.Fatalf("verified done Signal did not gate the exact Greenhouse delivery: %+v", done)
 	}
-	watchOutput := runPosse(t, f.binary, f.repo, mergeEnv, "pr", "inspect", "t1")
+	watchEnv := setEnv(mergeEnv, "POSSE_WATCH_TOKEN", "")
+	if output, err := runBinaryAllowFailure(f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("run Project Watch pass: %v\n%s", err, output)
+	}
+	statusOutput := runPosse(t, f.binary, f.repo, mergeEnv, "--json", "list", "--full")
+	if !strings.Contains(statusOutput, `"greenhouse":"PR green"`) {
+		t.Fatalf("posse list omitted the green Greenhouse status: %s", statusOutput)
+	}
 	watchDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch, watchErr := watchDB.GreenhouseTaskWatch(context.Background(), task.ID)
+	watchDB.Close()
+	if watchErr != nil || watch.RunID != runID || watch.Status != "ci-ready" {
+		t.Fatalf("Greenhouse Watch did not persist the completed run: %+v, %v", watch, watchErr)
+	}
+	watchOutput := runPosse(t, f.binary, f.repo, mergeEnv, "pr", "inspect", "t1")
+	watchDB, err = store.OpenReadOnly(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,16 +403,16 @@ func writeJSONFile(t *testing.T, path string, value any) {
 }
 
 const greenhouseDeliveryFakePi = `#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 control = %q
 if sys.argv[1:] == ['--list-models']:
     print('provider model context\nfixture model 128K')
     sys.exit(0)
 request = json.load(sys.stdin)
+worktree = os.getcwd()
 if 'Selected' in request:
     with open(os.path.join(control, 'fix-invocations'), 'a') as out:
         out.write(request.get('Stage', 'review') + '\n')
-    worktree = os.getcwd()
     for path in request['Paths']:
         with open(os.path.join(worktree, path), 'w') as out:
             out.write('repaired\n')
@@ -387,6 +423,11 @@ if 'Selected' in request:
 else:
     with open(os.path.join(control, 'review-invocations'), 'a') as out:
         out.write('review\n')
+    with open(os.path.join(control, 'review-worktrees'), 'a') as out:
+        out.write(os.getcwd() + '\n')
+    hold = os.path.join(control, 'hold-reviews')
+    while os.path.exists(hold):
+        time.sleep(0.01)
     mode = open(os.path.join(control, 'review-mode')).read().strip()
     answer = {'head': request['Head'], 'verdict': 'clean', 'coverage': request['Paths'], 'findings': [], 'documentation': {'status': 'not-needed', 'reason': 'No public documentation changed'}}
     if mode == 'findings':

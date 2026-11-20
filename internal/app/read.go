@@ -64,6 +64,7 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 
 type activeTaskSummary struct {
 	ID            string `json:"id"`
+	Greenhouse    string `json:"greenhouse,omitempty"`
 	Name          string `json:"name"`
 	State         string `json:"state"`
 	Agent         string `json:"agent,omitempty"`
@@ -81,6 +82,7 @@ type taskSummary struct {
 	Name          string       `json:"name"`
 	PRState       string       `json:"pr_state,omitempty"`
 	PRURL         string       `json:"pr_url,omitempty"`
+	Greenhouse    string       `json:"greenhouse,omitempty"`
 	Queue         string       `json:"merge_queue,omitempty"`
 	Profile       string       `json:"profile,omitempty"`
 	Branch        string       `json:"branch,omitempty"`
@@ -215,6 +217,10 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	needsYou := make([]taskSummary, 0)
 	for _, task := range tasks {
 		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID])}
+		row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
+		if err != nil {
+			return err
+		}
 		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
@@ -282,10 +288,18 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 					reason = idle
 				}
 				row := taskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), Reason: reason, Decisions: decisions[task.ID]}
+				row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
+				if err != nil {
+					return err
+				}
 				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 				attention = append(attention, row)
 			} else {
 				row := activeTaskSummary{ID: taskIDString(task.Seq), Name: taskDisplayName(task), State: string(task.State), MergeQueue: mergeQueueLabel(queuePlaces[task.ID])}
+				row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
+				if err != nil {
+					return err
+				}
 				row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 				active = append(active, row)
 			}
@@ -488,6 +502,10 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
 		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(task, cfg)}
+		row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
+		if err != nil {
+			return err
+		}
 		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
 		if taskNeedsUser(task) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)

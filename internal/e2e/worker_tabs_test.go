@@ -480,6 +480,7 @@ func cleanupEmptyFixtureTaskCgroups(t *testing.T, home string) {
 
 type workerTabsOptions struct {
 	manualWatchOwner bool
+	greenhouseHome   bool
 	// emptyFolder starts the Lead in a folder with no Git repository and no
 	// configured Merge Mode.
 	emptyFolder   bool
@@ -507,6 +508,9 @@ func newWorkerTabsFixtureWithOptions(t *testing.T, options workerTabsOptions) *w
 		}
 	}
 	env := isolatedE2EEnv(t, root)
+	if options.greenhouseHome {
+		env = setEnv(env, "GREENHOUSE_HOME", filepath.Join(root, "greenhouse"))
+	}
 	if options.manualWatchOwner {
 		env = setEnv(env, "POSSE_WATCH_TOKEN", "e2e-manual-owner")
 	}
