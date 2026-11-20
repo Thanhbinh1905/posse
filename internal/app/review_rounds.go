@@ -139,6 +139,22 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 			}
 			targets = []store.ReviewTarget{{Repository: project.Name, Commit: head}}
 		}
+		if len(targets) > 0 {
+			allPassed := true
+			for _, target := range targets {
+				passed, err := db.GreenhouseGatePass(ctx.Context, change.ID, target.Repository, target.Commit)
+				if err != nil {
+					return err
+				}
+				if !passed {
+					allPassed = false
+					break
+				}
+			}
+			if allPassed {
+				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "review", Value: "Greenhouse Verdict reused"}})
+			}
+		}
 		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
 			return err
 		}
