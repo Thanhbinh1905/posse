@@ -13,7 +13,7 @@ import (
 // AdmittedPlan returns nil for a historical Task. Never reconstruct a missing
 // plan from today's configuration or infer historical identity.
 func (t Task) AdmittedPlan() (*taskplan.Plan, error) {
-	if t.PlanJSON == "" && t.PlanRevision < 1 {
+	if t.PlanJSON == "" && t.PlanRevision < 1 && t.planLoader == nil {
 		return nil, nil
 	}
 	if t.planLoader != nil {

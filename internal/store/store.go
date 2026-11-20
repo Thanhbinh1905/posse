@@ -233,19 +233,7 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 		return err
 	}
 	if db.schemaCurrent(ctx, sources) {
-		completed, err := db.taskPlanInputMigrationComplete(ctx)
-		if err != nil {
-			return err
-		}
-		if completed {
-			return nil
-		}
-		lock, err := awaitMigrationLock(ctx, db.Path)
-		if err != nil {
-			return err
-		}
-		defer lock.Close()
-		return db.migrateTaskPlanInputs(ctx)
+		return nil
 	}
 	lock, err := awaitMigrationLock(ctx, db.Path)
 	if err != nil {
@@ -315,10 +303,7 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 					log.Printf("posse: applied missing migrations: %s", strings.Join(applied, ", "))
 				}
 			}
-			if err := db.recordChecksums(ctx, sources); err != nil {
-				return err
-			}
-			return db.migrateTaskPlanInputs(ctx)
+			return db.recordChecksums(ctx, sources)
 		} else {
 			lastErr = err
 			if !strings.Contains(strings.ToLower(err.Error()), "locked") && !strings.Contains(strings.ToLower(err.Error()), "busy") {
@@ -3327,7 +3312,7 @@ func (db *DB) SpawningLaunchTasks(ctx context.Context, projectID int64) ([]Task,
 	tasks := make([]Task, 0, len(rows))
 	for _, row := range rows {
 		task := Task{ID: row.ID, ProjectID: row.ProjectID, Seq: int(row.Seq), State: State(row.State), Profile: row.Profile, DispatchRule: row.DispatchRule, PaneID: row.PaneID, PaneLabel: row.PaneLabel, PlanRevision: int(row.PlanRevision)}
-		db.attachPlanLoader(&task)
+		db.attachPlanLoader(&task, row.HasAdmittedPlan)
 		tasks = append(tasks, task)
 	}
 	return tasks, nil
@@ -3407,7 +3392,7 @@ func (db *DB) taskFromLiveDB(row dbgen.LiveTasksRow) Task {
 		ReportManifestJSON: row.ReportManifestJson, ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath,
 		ContainmentMarker: row.ContainmentMarker, PaneShellIdentity: row.PaneShellIdentity,
 	}
-	db.attachPlanLoader(&task)
+	db.attachPlanLoader(&task, row.HasAdmittedPlan)
 	return task
 }
 
@@ -3438,12 +3423,12 @@ func (db *DB) taskFromDB(row dbgen.Task) Task {
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
 		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker,
 		PaneShellIdentity: row.PaneShellIdentity}
-	db.attachPlanLoader(&task)
+	db.attachPlanLoader(&task, false)
 	return task
 }
 
-func (db *DB) attachPlanLoader(task *Task) {
-	if task.PlanJSON == "" && task.PlanRevision < 1 {
+func (db *DB) attachPlanLoader(task *Task, hasPlan bool) {
+	if task.PlanJSON == "" && task.PlanRevision < 1 && !hasPlan {
 		return
 	}
 	if task.PlanJSON != "" {

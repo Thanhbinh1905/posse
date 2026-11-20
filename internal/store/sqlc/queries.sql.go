@@ -798,7 +798,8 @@ func (q *Queries) LeadStartClaim(ctx context.Context, projectID int64) (LeadStar
 }
 
 const liveTasks = `-- name: LiveTasks :many
-SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, '' AS plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity, agent_status, agent_status_since, plan_revision
+SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, '' AS plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity, agent_status, agent_status_since, plan_revision,
+       EXISTS(SELECT 1 FROM task_plan_revisions WHERE task_id=tasks.id) AS has_admitted_plan
 FROM tasks INDEXED BY tasks_project_state_idx
 WHERE project_id = ? AND state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled', 'done', 'merging') ORDER BY seq
 `
@@ -852,6 +853,7 @@ type LiveTasksRow struct {
 	AgentStatus          string
 	AgentStatusSince     int64
 	PlanRevision         int64
+	HasAdmittedPlan      bool
 }
 
 func (q *Queries) LiveTasks(ctx context.Context, projectID int64) ([]LiveTasksRow, error) {
@@ -912,6 +914,7 @@ func (q *Queries) LiveTasks(ctx context.Context, projectID int64) ([]LiveTasksRo
 			&i.AgentStatus,
 			&i.AgentStatusSince,
 			&i.PlanRevision,
+			&i.HasAdmittedPlan,
 		); err != nil {
 			return nil, err
 		}
@@ -2171,20 +2174,22 @@ func (q *Queries) SetTaskPaneShellIdentity(ctx context.Context, arg SetTaskPaneS
 }
 
 const spawningLaunchTasks = `-- name: SpawningLaunchTasks :many
-SELECT id, project_id, seq, state, profile, dispatch_rule, pane_id, pane_label, plan_revision
+SELECT id, project_id, seq, state, profile, dispatch_rule, pane_id, pane_label, plan_revision,
+       EXISTS(SELECT 1 FROM task_plan_revisions WHERE task_id=tasks.id) AS has_admitted_plan
 FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id=? AND state='spawning' ORDER BY seq
 `
 
 type SpawningLaunchTasksRow struct {
-	ID           int64
-	ProjectID    int64
-	Seq          int64
-	State        string
-	Profile      string
-	DispatchRule string
-	PaneID       string
-	PaneLabel    string
-	PlanRevision int64
+	ID              int64
+	ProjectID       int64
+	Seq             int64
+	State           string
+	Profile         string
+	DispatchRule    string
+	PaneID          string
+	PaneLabel       string
+	PlanRevision    int64
+	HasAdmittedPlan bool
 }
 
 func (q *Queries) SpawningLaunchTasks(ctx context.Context, projectID int64) ([]SpawningLaunchTasksRow, error) {
@@ -2206,6 +2211,7 @@ func (q *Queries) SpawningLaunchTasks(ctx context.Context, projectID int64) ([]S
 			&i.PaneID,
 			&i.PaneLabel,
 			&i.PlanRevision,
+			&i.HasAdmittedPlan,
 		); err != nil {
 			return nil, err
 		}

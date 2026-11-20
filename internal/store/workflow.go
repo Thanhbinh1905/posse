@@ -286,7 +286,7 @@ func (db *DB) validateWorkflowTaskAdmissionTx(ctx context.Context, tx *sql.Tx, p
 	if selection == nil || selection.RunID == "" || selection.RunID == "new" {
 		return nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,plan_json FROM tasks INDEXED BY tasks_project_workflow_idx WHERE project_id=? AND workflow_run_id=? ORDER BY seq`, projectID, selection.RunID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,plan_json FROM tasks WHERE project_id=? AND COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id'))=? ORDER BY seq`, projectID, selection.RunID)
 	if err != nil {
 		return err
 	}
@@ -347,8 +347,8 @@ func (db *DB) validateWorkflowTaskAdmissionTx(ctx context.Context, tx *sql.Tx, p
 
 func nextWorkflowRunIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (string, error) {
 	var next int64
-	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(CASE WHEN workflow_run_id GLOB 'w[0-9]*'
-		THEN CAST(substr(workflow_run_id,2) AS INTEGER) ELSE 0 END),0)+1
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(CASE WHEN COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id')) GLOB 'w[0-9]*'
+		THEN CAST(substr(COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id')),2) AS INTEGER) ELSE 0 END),0)+1
 		FROM tasks WHERE project_id=?`, projectID).Scan(&next)
 	if err != nil {
 		return "", err
@@ -357,7 +357,7 @@ func nextWorkflowRunIDTx(ctx context.Context, tx *sql.Tx, projectID int64) (stri
 }
 
 func (db *DB) validateWorkflowResultCoverageTx(ctx context.Context, tx *sql.Tx, projectID int64, advance WorkflowAdvance, stage config.WorkflowStage) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id,type,plan_json FROM tasks INDEXED BY tasks_project_workflow_idx WHERE project_id=? AND workflow_run_id=? ORDER BY seq`, projectID, advance.RunID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,type,plan_json FROM tasks WHERE project_id=? AND COALESCE(NULLIF(workflow_run_id,''),json_extract(plan_json,'$.workflow.run_id'))=? ORDER BY seq`, projectID, advance.RunID)
 	if err != nil {
 		return err
 	}

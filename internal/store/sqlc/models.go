@@ -792,8 +792,13 @@ type TaskLaunchIdentity struct {
 }
 
 type TaskPlanInputMigration struct {
-	ID        int64
-	Completed int64
+	ID                 int64
+	Completed          int64
+	TasksDone          int64
+	RevisionsDone      int64
+	TaskCursor         int64
+	RevisionTaskCursor int64
+	RevisionCursor     int64
 }
 
 type TaskPlanRevision struct {

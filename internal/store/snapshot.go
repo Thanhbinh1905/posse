@@ -1167,7 +1167,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 			if err != nil {
 				return err
 			}
-			db.attachPlanLoader(&task)
+			db.attachPlanLoader(&task, true)
 		}
 		if task.ReportKind != "" && (task.Type != "research" || task.ReportKind != "spec" && task.ReportKind != "tickets") {
 			return fmt.Errorf("invalid Report kind in snapshot for t%d", task.Seq)

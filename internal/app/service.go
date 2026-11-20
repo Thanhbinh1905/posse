@@ -407,6 +407,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 	if err := waitProjectRecovery(ctx, db, project); err != nil {
 		return runtime.RunResult{}, err
 	}
+	if err := db.MigrateTaskPlanInputsBatch(ctx); err != nil {
+		return runtime.RunResult{}, err
+	}
 	if !project.IsWorkspace() {
 		if snapshot, err := s.snapshot(ctx); err == nil {
 			if tasks, err := db.LiveTasks(ctx, project.ID); err == nil && workerGroupClosed(snapshot, project, tasks) {

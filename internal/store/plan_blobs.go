@@ -264,6 +264,14 @@ func (db *DB) loadAdmittedPlan(taskID int64, data string, revisions ...int) (*ta
 	if revision < 1 {
 		revision = storedPlanRevision(data)
 	}
+	if data == "" && revision < 1 {
+		if err := db.QueryRow(`SELECT revision,plan_json FROM task_plan_revisions WHERE task_id=? ORDER BY revision DESC LIMIT 1`, taskID).Scan(&revision, &data); err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("load latest Task plan revision: %w", err)
+		}
+	}
 	key := taskPlanCacheKey{taskID: taskID, revision: revision}
 	if data == "" {
 		db.planCacheMu.Lock()
