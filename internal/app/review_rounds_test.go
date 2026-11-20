@@ -86,6 +86,22 @@ func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 	if err != nil || !fix.SharedExhausted || fix.RoundsUsed != 1 {
 		t.Fatalf("provider Fix Round ignored the earlier built-in round at the frozen cap: %+v %v", fix, err)
 	}
+	head, err := lockedTaskBranchAuthorHead(context.Background(), f.project.Root, change.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: change.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r-pass", Head: head, Target: head, ReviewBase: head, Outcome: "clean", Mode: "gate"}
+	if recorded, err := db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record Greenhouse pass: recorded=%v err=%v", recorded, err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code != 0 || !strings.Contains(output.String(), "Greenhouse Verdict reused") {
+		t.Fatalf("review start did not report reuse of the passing Greenhouse Verdict: code=%d output=%s", code, output.String())
+	}
+	requests, err := db.GreenhouseReviewRequests(context.Background(), f.project.ID)
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("review start created a Greenhouse request despite reusing a passing Verdict: requests=%+v err=%v", requests, err)
+	}
 }
 
 func TestFailedReviewLaunchDoesNotConsumeRoundCap(t *testing.T) {

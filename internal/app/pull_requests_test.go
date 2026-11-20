@@ -868,6 +868,22 @@ func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing
 	if code, output, stderr := f.run("signal", "done", "Published exact Greenhouse head", "--head", head, "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
 		t.Fatalf("done after publication: %d %s %s", code, output, stderr)
 	}
+	cfgForReconcile, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(context.Background(), f.db, f.home, f.project, cfgForReconcile); err != nil {
+		t.Fatalf("reconcile published completion: %v", err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "greenhouse_review_failed" {
+			t.Fatalf("published completion raised a Greenhouse failure Notice: %+v", notice)
+		}
+	}
 	latestSignals, err := f.db.TaskSignals(context.Background(), task.ID, 2)
 	if err != nil || len(latestSignals) < 2 || latestSignals[0].Note != "Published exact Greenhouse head" || strings.Contains(latestSignals[0].DataJSON, "greenhouse_pending_head") {
 		t.Fatalf("published completion re-entered Greenhouse prepublication: %+v %v", latestSignals, err)

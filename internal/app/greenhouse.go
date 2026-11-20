@@ -625,6 +625,26 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 		if err := json.Unmarshal([]byte(signals[0].DataJSON), &data); err != nil || data.Head == "" {
 			if usesGreenhouse {
+				var published struct {
+					PRURL string `json:"pr_url"`
+				}
+				if json.Unmarshal([]byte(signals[0].DataJSON), &published) == nil && published.PRURL != "" {
+					head, err := taskBranchAuthorHead(ctx, project.Root, task.Branch)
+					if err != nil {
+						return err
+					}
+					verified, err := db.WasVerifiedPRHead(ctx, task.ID, published.PRURL, head)
+					if err != nil {
+						return err
+					}
+					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head)
+					if err != nil {
+						return err
+					}
+					if verified && passed {
+						continue
+					}
+				}
 				reason := "the latest done Signal has invalid or missing greenhouse_pending_head data"
 				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, reason); err != nil {
 					return err
