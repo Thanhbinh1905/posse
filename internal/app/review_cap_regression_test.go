@@ -5,8 +5,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
+
+func TestFullPipelineReviewFixRejectsNonBlockingPatterns(t *testing.T) {
+	plan := &taskplan.Plan{Review: "full-pipeline", ValidationLoops: &taskplan.ValidationLoops{Review: config.ReviewLoop{BlockAt: "P1"}}}
+	findings := []store.ReviewFindingDetail{{PatternSeq: 2, Severity: "P3", State: "open", Origin: "introduced", InScope: true}}
+	if selectedReviewPatternsBlock(findings, map[int]bool{2: true}, plan) {
+		t.Fatal("non-blocking pattern qualified as a blocking-finding repair")
+	}
+	findings = append(findings, store.ReviewFindingDetail{PatternSeq: 3, Severity: "P1", State: "open", Origin: "introduced", InScope: true})
+	if !selectedReviewPatternsBlock(findings, map[int]bool{2: true, 3: true}, plan) {
+		t.Fatal("selected blocking pattern did not qualify the repair round")
+	}
+}
 
 func TestFullPipelineReviewCapCountsOnlyBlockingFindingRepairs(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
