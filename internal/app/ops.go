@@ -222,6 +222,9 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		}
 	}()
 	if ctx.Err() == nil {
+		if err := s.observeGreenhouseTasks(ctx, db, project); err != nil {
+			return fmt.Errorf("observe Greenhouse Tasks: %w", err)
+		}
 		if err := s.reconcileGreenhousePrepublication(ctx, db, home, project); err != nil {
 			return err
 		}

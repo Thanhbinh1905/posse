@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -227,6 +228,11 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 		admission = "admitted"
 	}
 	output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}}
+	if greenhouse, err := greenhouseTaskStatus(ctx.Context, db, task, time.Now()); err != nil {
+		return err
+	} else if greenhouse != "" {
+		output = append(output, axi.Field{Key: "greenhouse", Value: greenhouse})
+	}
 	findings, err := db.ReviewFindingsForTask(ctx.Context, task.ID)
 	if err != nil {
 		return err
