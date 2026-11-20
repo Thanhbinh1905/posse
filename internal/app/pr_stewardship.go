@@ -710,7 +710,7 @@ func (s *Service) desiredForgeMetadata(ctx context.Context, db *store.DB, target
 	if err != nil {
 		return "", "", "", err
 	}
-	summary, err := validationSummaryFor(ctx, db, target.task)
+	summary, err := validationSummaryFor(ctx, db, target.task, target.member)
 	if err != nil {
 		return "", "", "", err
 	}
