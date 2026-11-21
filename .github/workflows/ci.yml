@@ -200,9 +200,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+      selected: ${{ steps.plan.outputs.selected }}
+      total: ${{ steps.plan.outputs.total }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Use job-local Go caches
         run: |
@@ -227,10 +230,34 @@ jobs:
           done
           exit 1
       - name: Check E2E shard assignments
-        run: scripts/run-e2e-shard.sh --self-test
+        run: |
+          scripts/run-e2e-shard.sh --self-test
+          scripts/select-e2e-tests.sh --self-test
       - name: Plan E2E shards
         id: plan
-        run: echo "shards=$(scripts/run-e2e-shard.sh --matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            selected=$(scripts/select-e2e-tests.sh --list "$BASE_SHA")
+            all=$(go test -tags=e2e -list '^Test' ./internal/e2e | awk '/^Test/ { print $1 }')
+            matrix=$(scripts/run-e2e-shard.sh --matrix)
+            echo "total=$(printf '%s' "$matrix" | tr -d '[]' | awk -F, '{ print NF }')" >> "$GITHUB_OUTPUT"
+            if [ "$selected" = "$all" ]; then
+              echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+            else
+              selected_pattern=$(printf '%s\n' "$selected" | paste -sd'|' -)
+              plan=$(scripts/run-e2e-shard.sh --plan)
+              shards=$(printf '%s\n' "$plan" | awk -v selected="$selected_pattern" '$3 ~ "^(" selected ")$" { seen[$1]=1 } END { for (s in seen) print s }' | sort -n | paste -sd, - | sed 's/.*/[&]/')
+              echo "shards=$shards" >> "$GITHUB_OUTPUT"
+              echo "selected=$selected_pattern" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            matrix=$(scripts/run-e2e-shard.sh --matrix)
+            echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+            echo "total=$(printf '%s' "$matrix" | tr -d '[]' | awk -F, '{ print NF }')" >> "$GITHUB_OUTPUT"
+          fi
       - name: Clean job-local Go caches
         if: ${{ always() }}
         run: |
@@ -289,8 +316,9 @@ jobs:
           "$herdr" --version
       - name: Run first isolated Herdr end-to-end shard
         env:
+          POSSE_E2E_SELECTED: ${{ needs.e2e-plan.outputs.selected }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-
-        run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
+        run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ needs.e2e-plan.outputs.total }}"
       - name: Check command CPU budgets without the race detector
         if: ${{ matrix.shard == 1 }}
         env:

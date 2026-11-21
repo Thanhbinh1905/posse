@@ -232,21 +232,44 @@ shard=$1
 listed=$(go test -tags=e2e -list '^Test' ./internal/e2e)
 validate_durations "$durations"
 estimated=$(estimate "$listed" "$durations")
-shard_count=$(shards "$estimated" "$target_seconds")
+if [ -n "${POSSE_E2E_SELECTED:-}" ]; then
+  shard_count=$2
+else
+  shard_count=$(shards "$estimated" "$target_seconds")
+fi
 if [ "$2" != "$shard_count" ]; then
   echo "E2E shard total $2 does not match the planned $shard_count shards; build the CI matrix from $0 --matrix" >&2
   exit 2
 fi
-case "$shard" in
-  ''|*[!0-9]*|0) echo "unknown E2E shard: $shard" >&2; exit 2 ;;
-esac
-if [ "$shard" -gt "$shard_count" ]; then
-  echo "unknown E2E shard: $shard" >&2
-  exit 2
+if [ -n "${POSSE_E2E_SELECTED:-}" ]; then
+  case "$shard" in
+    ''|*[!0-9]*|0) echo "unknown E2E shard: $shard" >&2; exit 2 ;;
+  esac
+  if [ "$shard" -gt "$(shards "$estimated" "$target_seconds")" ]; then
+    echo "unknown E2E shard: $shard" >&2
+    exit 2
+  fi
+  assigned=$(plan "$estimated" "$(shards "$estimated" "$target_seconds")" | awk -v shard="$shard" '$1 == shard { print $3 }')
+  pattern=$(printf '%s\n' "$assigned" | grep -E "^($POSSE_E2E_SELECTED)$" | paste -sd'|' - || true)
+  if [ -z "$pattern" ]; then
+    echo "No selected E2E tests in shard $shard."
+    exit 0
+  fi
+else
+  case "$shard" in
+    ''|*[!0-9]*|0) echo "unknown E2E shard: $shard" >&2; exit 2 ;;
+  esac
+  if [ "$shard" -gt "$shard_count" ]; then
+    echo "unknown E2E shard: $shard" >&2
+    exit 2
+  fi
+  pattern=$(plan "$estimated" "$shard_count" | awk -v shard="$shard" '$1 == shard { print $3 }' | paste -sd'|' -)
 fi
-
-pattern=$(plan "$estimated" "$shard_count" | awk -v shard="$shard" '$1 == shard { if (n++) printf "|"; printf "%s", $3 } END { print "" }')
 printf 'Running E2E shard %s/%s\n' "$shard" "$shard_count"
+if [ -z "$pattern" ]; then
+  echo "No selected E2E tests in shard $shard."
+  exit 0
+fi
 started=$(date +%s)
 # -v prints each top-level test's duration for scripts/refresh-e2e-durations.sh.
 go test -tags=e2e -v -count="$count" -timeout="$timeout" ./internal/e2e -run "^(${pattern})$"
