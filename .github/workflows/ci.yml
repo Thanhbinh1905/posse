@@ -8,6 +8,7 @@ on:
   pull_request:
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -200,9 +201,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+      selected: ${{ steps.plan.outputs.selected }}
+      total: ${{ steps.plan.outputs.total }}
+      coverage_required: ${{ steps.plan.outputs.coverage_required }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Use job-local Go caches
         run: |
@@ -226,11 +231,65 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
-      - name: Check E2E shard assignments
-        run: scripts/run-e2e-shard.sh --self-test
+      - name: Check E2E coverage map tools
+        run: |
+          scripts/run-e2e-shard.sh --self-test
+          scripts/test-e2e-selector.sh
+          scripts/test-e2e-coverage-map.sh
+      - name: Download latest main E2E coverage map
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! run_ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?branch=main&status=completed&per_page=100" | jq -r --arg sha "$BASE_SHA" '.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success" and ((.name == "CI" and .event == "push") or (.name == "E2E main flake detection" and .event == "schedule"))) | .id'); then
+            echo "Could not find a main coverage map; running the full suite."
+            exit 0
+          fi
+          for run_id in $run_ids; do
+            if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name e2e-test-coverage-map --dir "$RUNNER_TEMP/e2e-coverage-map"; then
+              break
+            fi
+          done
       - name: Plan E2E shards
         id: plan
-        run: echo "shards=$(scripts/run-e2e-shard.sh --matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          matrix=$(scripts/run-e2e-shard.sh --matrix)
+          total=$(printf '%s' "$matrix" | tr -d '[]' | awk -F, '{ print NF }')
+          echo "total=$total" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = pull_request ] && git diff --name-only "$BASE_SHA...HEAD" | sh scripts/e2e-coverage-map-required.sh | grep -q '^true$'; then
+            echo "coverage_required=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "coverage_required=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$EVENT_NAME" = pull_request ]; then
+            map_file="$RUNNER_TEMP/e2e-coverage-map/e2e-test-coverage.tsv"
+            if [ -r "$map_file" ] && ! scripts/select-e2e-tests.sh --self-test "$map_file"; then
+              echo "E2E coverage map is invalid; running the full suite."
+              echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ ! -r "$map_file" ]; then
+              echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            selected=$(scripts/select-e2e-tests.sh --list "$BASE_SHA" "$map_file")
+            if [ -z "$selected" ]; then
+              echo 'shards=[1]' >> "$GITHUB_OUTPUT"
+              echo 'selected=PosseNoSelectedE2ETests' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            selected_pattern=$(printf '%s\n' "$selected" | paste -sd'|' -)
+            plan=$(scripts/run-e2e-shard.sh --plan)
+            shards=$(printf '%s\n' "$plan" | awk -v selected="$selected_pattern" '$3 ~ "^(" selected ")$" { seen[$1]=1 } END { for (s in seen) print s }' | sort -n | paste -sd, - | sed 's/.*/[&]/')
+            echo "shards=$shards" >> "$GITHUB_OUTPUT"
+            echo "selected=$selected_pattern" >> "$GITHUB_OUTPUT"
+          else
+            echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+          fi
       - name: Clean job-local Go caches
         if: ${{ always() }}
         run: |
@@ -241,6 +300,7 @@ jobs:
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}
+    if: ${{ needs.e2e-plan.outputs.selected != 'PosseNoSelectedE2ETests' }}
     needs: [e2e-plan]
     runs-on: ubuntu-latest
     strategy:
@@ -289,8 +349,22 @@ jobs:
           "$herdr" --version
       - name: Run first isolated Herdr end-to-end shard
         env:
+          POSSE_E2E_SELECTED: ${{ needs.e2e-plan.outputs.selected }}
+          POSSE_E2E_COVERAGE_DIR: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' || needs.e2e-plan.outputs.coverage_required == 'true') && format('{0}/e2e-coverage', runner.temp) || '' }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-
-        run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
+        run: |
+          if [ -n "$POSSE_E2E_COVERAGE_DIR" ]; then
+            scripts/run-e2e-coverage-shard.sh "${{ matrix.shard }}" "${{ needs.e2e-plan.outputs.total }}" "$POSSE_E2E_COVERAGE_DIR"
+          else
+            scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ needs.e2e-plan.outputs.total }}"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' || needs.e2e-plan.outputs.coverage_required == 'true') && success() }}
+        with:
+          name: e2e-coverage-${{ matrix.shard }}
+          path: ${{ runner.temp }}/e2e-coverage
+          if-no-files-found: error
+          retention-days: 1
       - name: Check command CPU budgets without the race detector
         if: ${{ matrix.shard == 1 }}
         env:
@@ -324,20 +398,56 @@ jobs:
           fi
           rm -rf -- "$GOCACHE"
 
+  e2e-coverage-map:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' || needs.e2e-plan.outputs.coverage_required == 'true') && needs.e2e-shard.result == 'success' }}
+    needs: [e2e-plan, e2e-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: e2e-coverage-*
+          path: ${{ runner.temp }}/e2e-coverage
+          merge-multiple: true
+      - name: Build E2E test coverage map
+        env:
+          TOTAL: ${{ needs.e2e-plan.outputs.total }}
+          MAP_COMMIT: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+        run: scripts/build-e2e-coverage-map.sh "$RUNNER_TEMP/e2e-coverage" "$MAP_COMMIT" "$TOTAL" "$RUNNER_TEMP/e2e-test-coverage.tsv"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-test-coverage-map
+          path: ${{ runner.temp }}/e2e-test-coverage.tsv
+          retention-days: 30
+
   e2e:
     if: ${{ always() }}
-    needs: [e2e-shard]
+    needs: [e2e-plan, e2e-shard, e2e-coverage-map]
     runs-on: ubuntu-latest
     steps:
       - name: Preserve the required e2e check
         env:
           SHARDS_RESULT: ${{ needs.e2e-shard.result }}
+          COVERAGE_RESULT: ${{ needs.e2e-coverage-map.result }}
+          COVERAGE_REQUIRED: ${{ needs.e2e-plan.outputs.coverage_required }}
+          EVENT_NAME: ${{ github.event_name }}
+          SELECTED: ${{ needs.e2e-plan.outputs.selected }}
         run: |
+          if [ "$SHARDS_RESULT" = skipped ] && [ "$EVENT_NAME" = pull_request ] && [ "$SELECTED" = PosseNoSelectedE2ETests ]; then
+            echo "No E2E tests selected for this change."
+            exit 0
+          fi
           if [ "$SHARDS_RESULT" != success ]; then
             echo "E2E shard matrix result: $SHARDS_RESULT"
             exit 1
           fi
-          echo "All E2E shards passed."
+          if { [ "$EVENT_NAME" = push ] || [ "$COVERAGE_REQUIRED" = true ]; } && [ "$COVERAGE_RESULT" != success ]; then
+            echo "E2E coverage map result: $COVERAGE_RESULT"
+            exit 1
+          fi
+          echo "All required E2E checks passed."
 
   installer:
     runs-on: ubuntu-latest

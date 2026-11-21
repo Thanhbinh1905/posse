@@ -119,7 +119,7 @@ esac
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(fakeAgent), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := herdr.IsolatedTestEnvironment(root)
+	env := e2eCoverageEnvironment(t, herdr.IsolatedTestEnvironment(root))
 	for key, value := range map[string]string{
 		"POSSE_TEST_ROOT": root, "POSSE_E2E_POOL": pool, "POSSE_E2E_LEAD_LOG": leadLog, "POSSE_E2E_WORKER_LOG": workerLog,
 		"PATH":            binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
