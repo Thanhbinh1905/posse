@@ -184,7 +184,7 @@ func TestAcceptedNoticeReceiptSurvivesColdRebuild(t *testing.T) {
 
 func (f *acknowledgedNoticeFixture) cliAsUser(t *testing.T, args ...string) (int, []byte) {
 	t.Helper()
-	env := herdr.IsolatedTestEnvironment(f.root)
+	env := e2eCoverageEnvironment(t, herdr.IsolatedTestEnvironment(f.root))
 	env = setEnv(env, "PATH", filepath.Dir(f.binary)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	command := exec.Command(f.binary, args...)
 	command.Dir, command.Env = f.repo, env

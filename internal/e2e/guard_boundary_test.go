@@ -20,7 +20,7 @@ import (
 // a disposable Herdr server. No command in this test can reach the host server.
 func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	root := shortFixtureRootPath(t, newFixtureRoot(t, herdr.TestRootName()))
-	env := herdr.IsolatedTestEnvironment(root)
+	env := e2eCoverageEnvironment(t, herdr.IsolatedTestEnvironment(root))
 	if _, err := herdr.WriteIsolatedConfig(root); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	isolated := filepath.Join(other, "herdr.sock")
 	id := foreign.Workspace.WorkspaceID
 	otherRoot := shortFixtureRootPath(t, newFixtureRoot(t, herdr.TestRootName()))
-	otherEnv := herdr.IsolatedTestEnvironment(otherRoot)
+	otherEnv := e2eCoverageEnvironment(t, herdr.IsolatedTestEnvironment(otherRoot))
 	if _, err := herdr.WriteIsolatedConfig(otherRoot); err != nil {
 		t.Fatal(err)
 	}

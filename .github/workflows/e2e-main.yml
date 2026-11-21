@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+      total: ${{ steps.plan.outputs.total }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -53,7 +54,10 @@ jobs:
         run: scripts/run-e2e-shard.sh --self-test
       - name: Plan E2E shards
         id: plan
-        run: echo "shards=$(scripts/run-e2e-shard.sh --matrix)" >> "$GITHUB_OUTPUT"
+        run: |
+          matrix=$(scripts/run-e2e-shard.sh --matrix)
+          echo "shards=$matrix" >> "$GITHUB_OUTPUT"
+          echo "total=$(printf '%s' "$matrix" | tr -d '[]' | awk -F, '{ print NF }')" >> "$GITHUB_OUTPUT"
       - name: Clean job-local Go caches
         if: ${{ always() }}
         run: |
@@ -112,10 +116,18 @@ jobs:
           chmod 755 "$herdr"
           echo "$tool_dir" >> "$GITHUB_PATH"
           "$herdr" --version
-      - name: Run duplicate isolated Herdr E2E shard
+      - name: Run duplicate isolated Herdr E2E shard with coverage
         env:
+          POSSE_E2E_COVERAGE_DIR: ${{ runner.temp }}/e2e-coverage
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass2-shard-${{ matrix.shard }}-
-        run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
+        run: scripts/run-e2e-coverage-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}" "$POSSE_E2E_COVERAGE_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ success() }}
+        with:
+          name: e2e-coverage-${{ matrix.shard }}
+          path: ${{ runner.temp }}/e2e-coverage
+          if-no-files-found: error
+          retention-days: 1
       - name: Clean duplicate-pass Herdr processes, fixtures and caches
         if: ${{ always() }}
         run: |
@@ -143,6 +155,29 @@ jobs:
             find "$GOCACHE" -type d -exec chmod u+w {} +
           fi
           rm -rf -- "$GOCACHE"
+
+  e2e-main-coverage-map:
+    if: ${{ github.ref == 'refs/heads/main' && needs.e2e-main-duplicate.result == 'success' }}
+    needs: [e2e-plan, e2e-main-duplicate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: e2e-coverage-*
+          path: ${{ runner.temp }}/e2e-coverage
+          merge-multiple: true
+      - name: Build E2E test coverage map
+        env:
+          TOTAL: ${{ needs.e2e-plan.outputs.total }}
+        run: scripts/build-e2e-coverage-map.sh "$RUNNER_TEMP/e2e-coverage" "$GITHUB_SHA" "$TOTAL" "$RUNNER_TEMP/e2e-test-coverage.tsv"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-test-coverage-map
+          path: ${{ runner.temp }}/e2e-test-coverage.tsv
+          retention-days: 30
 
   e2e-main-stress:
     if: ${{ github.ref == 'refs/heads/main' }}

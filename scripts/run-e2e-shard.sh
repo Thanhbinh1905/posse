@@ -272,7 +272,16 @@ if [ -z "$pattern" ]; then
 fi
 started=$(date +%s)
 # -v prints each top-level test's duration for scripts/refresh-e2e-durations.sh.
-go test -tags=e2e -v -count="$count" -timeout="$timeout" ./internal/e2e -run "^(${pattern})$"
+set -- -tags=e2e -v -count="$count" -timeout="$timeout"
+if [ -n "${POSSE_E2E_COVERAGE_DIR:-}" ]; then
+  mkdir -p "$POSSE_E2E_COVERAGE_DIR"
+  set -- "$@" -coverprofile="$POSSE_E2E_COVERAGE_DIR/shard-$shard.out"
+fi
+go test "$@" ./internal/e2e -run "^(${pattern})$"
+if [ -n "${POSSE_E2E_COVERAGE_DIR:-}" ]; then
+  run_tests=$(printf '%s\n' "$(plan "$estimated" "$(shards "$estimated" "$target_seconds")" | awk -v shard="$shard" '$1 == shard { print $3 }')" | grep -E "^($pattern)$")
+  printf '%s\n' "$run_tests" > "$POSSE_E2E_COVERAGE_DIR/shard-$shard-of-$shard_count.complete"
+fi
 elapsed=$(($(date +%s) - started))
 limit=$((budget_seconds * 3 / 2))
 printf 'E2E shard %s/%s took %ss\n' "$shard" "$shard_count" "$elapsed"

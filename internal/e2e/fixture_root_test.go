@@ -123,6 +123,19 @@ func newFixtureRoot(t *testing.T, prefix string) string {
 	return newFixtureRootAt(t, parent, prefix)
 }
 
+func e2eCoverageEnvironment(t *testing.T, env []string) []string {
+	t.Helper()
+	coverageRoot := os.Getenv("POSSE_E2E_COVERAGE_DIR")
+	if coverageRoot == "" {
+		return env
+	}
+	coverageDir := filepath.Join(coverageRoot, t.Name())
+	if err := os.MkdirAll(coverageDir, 0o700); err != nil {
+		t.Fatalf("create E2E coverage directory: %v", err)
+	}
+	return setEnv(env, "GOCOVERDIR", coverageDir)
+}
+
 func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	t.Helper()
 	// Installed-binary fixtures need a path outside /tmp, but must still
@@ -168,6 +181,13 @@ func newFixtureRootAt(t *testing.T, parent, prefix string) string {
 	root, err := os.MkdirTemp(parent, prefix)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if coverageRoot := os.Getenv("POSSE_E2E_COVERAGE_DIR"); coverageRoot != "" {
+		coverageDir := filepath.Join(coverageRoot, t.Name())
+		if err := os.MkdirAll(coverageDir, 0o700); err != nil {
+			t.Fatalf("create E2E coverage directory: %v", err)
+		}
+		t.Setenv("GOCOVERDIR", coverageDir)
 	}
 	lock, err := os.OpenFile(filepath.Join(root, fixtureLockName), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err == nil {
@@ -260,6 +280,29 @@ func validTaskScratchRoot(root string) bool {
 	}
 	resolved, err := filepath.EvalSymlinks(root)
 	return err == nil && resolved == root
+}
+
+func TestFixtureRootUsesPerTestCoverageDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POSSE_E2E_COVERAGE_DIR", dir)
+	preserved := filepath.Join(dir, t.Name(), "covmeta.test")
+	t.Cleanup(func() {
+		if data, err := os.ReadFile(preserved); err != nil || string(data) != "coverage" {
+			t.Errorf("coverage data was not retained: data=%q err=%v", data, err)
+		}
+	})
+	newFixtureRoot(t, fixturePrefix("coverage-"))
+	want := filepath.Join(dir, t.Name())
+	got := testEnvValue(e2eCoverageEnvironment(t, nil), "GOCOVERDIR")
+	if got != want {
+		t.Fatalf("GOCOVERDIR = %q, want %q", got, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("per-test coverage directory is unavailable: info=%v err=%v", info, err)
+	}
+	if err := os.WriteFile(preserved, []byte("coverage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestIsolatedHerdrAcceptsDefaultTaskScratchTMPDIR(t *testing.T) {
