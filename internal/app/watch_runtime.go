@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"debug/buildinfo"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -224,15 +225,76 @@ func watchExecutableAt(path string) (watchExecutableIdentity, bool) {
 	if !ok || stat.Ino == 0 {
 		return watchExecutableIdentity{}, false
 	}
-	return watchExecutableIdentity{Path: resolved, Device: uint64(stat.Dev), Inode: stat.Ino}, true
+	return watchExecutableIdentity{Path: resolved, Device: uint64(stat.Dev), Inode: stat.Ino, Size: info.Size(), ModifiedAt: info.ModTime().UnixNano()}, true
 }
 
-func currentWatchExecutable(_ string) (watchExecutableIdentity, bool) {
+func watchExecutableChangedFromRuntime(spawned watchExecutableIdentity, watch *store.WatchRuntime) bool {
+	return spawned.Device != watch.ExecutableDevice || spawned.Inode != watch.ExecutableInode ||
+		spawned.Size != watch.ExecutableSize || spawned.ModifiedAt != watch.ExecutableModifiedAt ||
+		watchExecutableVersion(spawned.Path) != watch.ExecutableVersion
+}
+
+func watchExecutableChanged(spawned, running watchExecutableIdentity) bool {
+	if spawned.Device != running.Device || spawned.Inode != running.Inode || spawned.Size != running.Size || spawned.ModifiedAt != running.ModifiedAt {
+		return true
+	}
+	return watchExecutableVersion(spawned.Path) != watchExecutableVersion(running.Path)
+}
+
+func watchExecutableVersion(path string) string {
+	info, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return "unknown"
+	}
+	for _, setting := range info.Settings {
+		if setting.Key != "-ldflags" {
+			continue
+		}
+		fields := strings.Fields(setting.Value)
+		for index := 0; index < len(fields); index++ {
+			value := fields[index]
+			if value == "-X" && index+1 < len(fields) {
+				index++
+				value = fields[index]
+			} else {
+				value = strings.TrimPrefix(value, "-X")
+			}
+			key, version, found := strings.Cut(value, "=")
+			if found && key == "main.version" && version != "" {
+				return version
+			}
+		}
+	}
+	return "unknown"
+}
+
+func currentWatchExecutable() (watchExecutableIdentity, bool) {
 	path, err := os.Executable()
 	if err != nil {
 		return watchExecutableIdentity{}, false
 	}
+	path = strings.TrimSuffix(path, " (deleted)")
 	return watchExecutableAt(path)
+}
+
+func installedWatchExecutable(home string) (watchExecutableIdentity, bool) {
+	manifest, found, err := readSetupManifest(filepath.Join(home, setupManifestName))
+	if err != nil {
+		return watchExecutableIdentity{}, false
+	}
+	if found && manifest.Binary != "" {
+		if identity, ok := watchExecutableAt(manifest.Binary); ok {
+			return identity, true
+		}
+	}
+	return currentWatchExecutable()
+}
+
+func watchReexecExecutable(home string, watch *store.WatchRuntime) (watchExecutableIdentity, bool) {
+	if watch != nil && watch.ExecutablePath != "" {
+		return watchExecutableAt(watch.ExecutablePath)
+	}
+	return currentWatchExecutable()
 }
 
 func watchProcessMatchesWatch(process watchProcess, projectID int64, watch store.WatchRuntime) bool {
@@ -371,9 +433,11 @@ func (s *Service) ensureWatchRuntime(ctx context.Context, db *store.DB, home str
 		if startedAt == 0 {
 			startedAt = currentTime()
 		}
+		identity := candidate.Executable
 		record := store.WatchRuntime{
 			PID: candidate.PID, Token: candidate.WatchToken, StartedAt: startedAt, HeartbeatAt: currentTime(),
-			ExecutablePath: candidate.Executable.Path, ExecutableDevice: candidate.Executable.Device, ExecutableInode: candidate.Executable.Inode,
+			ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode,
+			ExecutableSize: identity.Size, ExecutableModifiedAt: identity.ModifiedAt, ExecutableVersion: watchExecutableVersion(identity.Path),
 		}
 		if err := db.SetWatchRuntime(ctx, project.ID, record); err != nil {
 			return err
@@ -636,6 +700,7 @@ func (s *Service) startWatchRuntime(ctx context.Context, db *store.DB, home stri
 	watch := store.WatchRuntime{
 		PID: pid, Token: token, StartedAt: startedAt, HeartbeatAt: startedAt,
 		ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode,
+		ExecutableSize: identity.Size, ExecutableModifiedAt: identity.ModifiedAt, ExecutableVersion: watchExecutableVersion(identity.Path),
 	}
 	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
 		if pid > 1 {
@@ -1012,7 +1077,7 @@ func (s *Service) runProjectWatchRuntime(ctx *axi.Context, db *store.DB, project
 	defer log.Close()
 	stamped := &timestampedLines{out: log}
 	ctx.Out, ctx.ErrOut = stamped, stamped
-	watch := store.WatchRuntime{PID: os.Getpid(), Token: token, StartedAt: startedAt, HeartbeatAt: currentTime(), ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode}
+	watch := store.WatchRuntime{PID: os.Getpid(), Token: token, StartedAt: startedAt, HeartbeatAt: currentTime(), ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode, ExecutableSize: identity.Size, ExecutableModifiedAt: identity.ModifiedAt, ExecutableVersion: watchExecutableVersion(identity.Path)}
 	if err := db.SetWatchRuntime(ctx.Context, project.ID, watch); err != nil {
 		return err
 	}
@@ -1173,9 +1238,9 @@ func watchUpdatePending(home string, pid int) bool {
 	if watchReexecRequested(home, pid) {
 		return true
 	}
-	installed, installedOK := currentWatchExecutable(home)
+	spawned, spawnedOK := currentWatchExecutable()
 	running, runningOK := inspectWatchExecutable(pid)
-	return installedOK && runningOK && (installed.Device != running.Device || installed.Inode != running.Inode)
+	return spawnedOK && runningOK && watchExecutableChanged(spawned, running)
 }
 
 func (s *Service) reexecWatchIfUpdated(projectID int64, watch *store.WatchRuntime) error {
@@ -1190,46 +1255,39 @@ func (s *Service) reexecWatchIfUpdated(projectID int64, watch *store.WatchRuntim
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	installed, installedOK := currentWatchExecutable(home)
+	spawned, spawnedOK := watchReexecExecutable(home, watch)
 	running, runningOK := inspectWatchExecutable(os.Getpid())
-	if installedOK && runningOK && (installed.Device != running.Device || installed.Inode != running.Inode) {
+	changed := false
+	if spawnedOK {
+		if watch != nil {
+			changed = watchExecutableChangedFromRuntime(spawned, watch)
+		} else if runningOK {
+			changed = watchExecutableChanged(spawned, running)
+		}
+	}
+	if changed {
 		requested = true
 	}
 	if !requested {
 		return nil
 	}
-	if !installedOK {
-		return fmt.Errorf("cannot verify the installed Posse executable")
-	}
-	if watch != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if db, _, openErr := s.openDB(); openErr == nil {
-			updated := *watch
-			updated.ExecutablePath, updated.ExecutableDevice, updated.ExecutableInode = installed.Path, installed.Device, installed.Inode
-			updated.HeartbeatAt = currentTime()
-			if setErr := db.SetWatchRuntime(ctx, projectID, updated); setErr != nil {
-				_ = db.Close()
-				return setErr
-			}
-			_ = db.Close()
-			*watch = updated
-		}
+	if !spawnedOK {
+		return fmt.Errorf("cannot verify the spawned Posse executable")
 	}
 	if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	args := watchReexecArguments(os.Args)
 	if len(args) == 0 {
-		args = []string{installed.Path}
+		args = []string{spawned.Path}
 	} else {
-		args[0] = installed.Path
+		args[0] = spawned.Path
 	}
 	execProcess := syscall.Exec
 	if s.reexecUpdate != nil {
 		execProcess = s.reexecUpdate
 	}
-	if err := execProcess(installed.Path, args, os.Environ()); err != nil {
+	if err := execProcess(spawned.Path, args, os.Environ()); err != nil {
 		return fmt.Errorf("re-exec updated Watch: %w", err)
 	}
 	return errors.New("watch re-exec returned unexpectedly")
@@ -1262,7 +1320,7 @@ func sameWatchExecutableIdentity(left, right watchExecutableIdentity) bool {
 }
 
 func requestWatchReexec(home string, processes []watchProcess) error {
-	installed, installedOK := currentWatchExecutable(home)
+	installed, installedOK := installedWatchExecutable(home)
 	return requestWatchReexecForIdentity(home, processes, installed, installedOK)
 }
 

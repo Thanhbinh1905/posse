@@ -27,6 +27,115 @@ const (
 	watchFixtureWorkerTabID  = "w2:t1"
 )
 
+func TestCurrentWatchExecutableUsesItsSpawnedPathInsteadOfSetupManifest(t *testing.T) {
+	home := t.TempDir()
+	installed := filepath.Join(t.TempDir(), "manifest-posse")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, contents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: installed}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+
+	got, ok := currentWatchExecutable()
+	want, wantOK := watchExecutableAt(binary)
+	if !ok || !wantOK || got.Device != want.Device || got.Inode != want.Inode || got.Path != want.Path {
+		t.Fatalf("current Watch executable = %#v, %t; want spawned binary %#v", got, ok, want)
+	}
+}
+
+func TestWatchReexecDoesNotSwitchToSetupManifestBinary(t *testing.T) {
+	home := t.TempDir()
+	installed := filepath.Join(t.TempDir(), "posse")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, contents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSetupManifest(filepath.Join(home, setupManifestName), setupManifest{Binary: installed}); err != nil {
+		t.Fatal(err)
+	}
+	previousVerifier := watchExecutableVerifier
+	watchExecutableVerifier = func(string) bool { return true }
+	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	identity, ok := watchExecutableAt(binary)
+	if !ok {
+		t.Fatal("spawned executable identity unavailable")
+	}
+	watch := &store.WatchRuntime{
+		ExecutablePath: identity.Path, ExecutableDevice: identity.Device, ExecutableInode: identity.Inode,
+		ExecutableSize: identity.Size, ExecutableModifiedAt: identity.ModifiedAt, ExecutableVersion: watchExecutableVersion(identity.Path),
+	}
+	service := New(home, nil)
+	var reexecPath string
+	service.reexecUpdate = func(path string, _ []string, _ []string) error {
+		reexecPath = path
+		return nil
+	}
+
+	err = service.reexecWatchIfUpdated(1, watch)
+	if err != nil {
+		t.Fatalf("Watch update check = %v, want no re-exec for the unchanged spawned binary", err)
+	}
+	if reexecPath != "" {
+		t.Fatalf("Watch re-exec switched to setup manifest binary %q", reexecPath)
+	}
+}
+
+func TestWatchRuntimeDetectsExecutableMetadataChanges(t *testing.T) {
+	spawned := watchExecutableIdentity{Device: 1, Inode: 2, Size: 30, ModifiedAt: 40, Path: "unused"}
+	watch := &store.WatchRuntime{ExecutableDevice: 1, ExecutableInode: 2, ExecutableSize: 29, ExecutableModifiedAt: 40, ExecutableVersion: "unknown"}
+	if !watchExecutableChangedFromRuntime(spawned, watch) {
+		t.Fatal("Watch ignored a size change at the spawned binary path")
+	}
+	watch.ExecutableSize = spawned.Size
+	watch.ExecutableModifiedAt = 39
+	if !watchExecutableChangedFromRuntime(spawned, watch) {
+		t.Fatal("Watch ignored an mtime change at the spawned binary path")
+	}
+}
+
+func TestWatchExecutableVersionReadsInjectedVersion(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "posse")
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-ldflags=-X main.version=watch-version-test", "-o", binary, "./cmd/posse")
+	build.Dir = filepath.Clean(filepath.Join(workingDir, "../.."))
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build Posse CLI: %v\n%s", err, output)
+	}
+	if got := watchExecutableVersion(binary); got != "watch-version-test" {
+		t.Fatalf("Watch executable version = %q, want watch-version-test", got)
+	}
+	identity, ok := watchExecutableAt(binary)
+	if !ok {
+		t.Fatal("Watch executable identity unavailable")
+	}
+	watch := &store.WatchRuntime{ExecutableDevice: identity.Device, ExecutableInode: identity.Inode, ExecutableSize: identity.Size, ExecutableModifiedAt: identity.ModifiedAt, ExecutableVersion: "old-version"}
+	if !watchExecutableChangedFromRuntime(identity, watch) {
+		t.Fatal("Watch ignored a version change at the spawned binary path")
+	}
+}
+
 func TestSystemdWatchCanBeDisabledInTestEnvironment(t *testing.T) {
 	t.Setenv("POSSE_TEST_HERDR", "1")
 	t.Setenv("POSSE_TEST_DISABLE_SYSTEMD_WATCH", "1")

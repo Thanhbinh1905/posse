@@ -305,7 +305,7 @@ func TestOpenWorkerTabOpensWorkspaceProjectWorkerInSubworkspace(t *testing.T) {
 		t.Fatalf("Workspace Project used the wrong Herdr operation: %#v", adapter.Calls)
 	}
 	for _, call := range adapter.Calls {
-		if call.Method == "workspace.create" && (call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "workspace-worker-t1" || call.Params["focus"] != false || call.Params["no_focus"] != true || !reflect.DeepEqual(call.Params["env"], map[string]string{workerHomeEnv: filepath.Clean(home)})) {
+		if call.Method == "workspace.create" && (call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "└ workspace-worker-t1" || call.Params["focus"] != false || call.Params["no_focus"] != true || !reflect.DeepEqual(call.Params["env"], map[string]string{workerHomeEnv: filepath.Clean(home)})) {
 			t.Fatalf("workspace.create params = %#v", call.Params)
 		}
 	}
