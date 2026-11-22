@@ -1302,7 +1302,7 @@ CI fixes, review fixes and target merges are author changes, never rounds. They 
 | `rethink` | Prints the command to start a new Change Task with `supersedes: <change>`. The new Task gets a fresh cap and inherits the ledger's findings as `inherited` entries so they are not reported again. The old Task follows the normal discard or Orphan path. |
 | `discard` | Tears down with the recorded discard approval. |
 
-Other Autonomy settings do not answer a `review_cap` Decision. Without YOLO, the Lead must record a new User choice with `--user-approved`.
+Other Autonomy settings do not answer a `review_cap` Decision. Without YOLO, the Lead must record a new User choice with `--user-approved`. `posse review start` refuses at a spent cap without a final-review grant and names the current `review_cap` Decision; it never reports a Greenhouse request unless a request record or pending run exists.
 
 An answered `final-fix` can be followed by an explicit rethink using `posse decide <original-cap-id> rethink --recover --lead-reason <reason>` under YOLO. Without YOLO, use a new `--user-approved <quote>` instead. Recovery creates a new exact-head `review_cap` Decision whose origin links the original Decision; the original answer remains unchanged. This supports a recovery mistakenly recorded as a `worker_question`: the Lead makes a new authorized choice, rather than treating that answer or its historical quote as review-cap authority. `supersedes` accepts the new audited rethink Decision. Recovery is limited to rethink after final-fix, and repeating the command cannot overwrite the new answer.
 
