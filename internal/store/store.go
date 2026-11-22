@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing/fstest"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -25,7 +26,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations/*.sql upgrades/*.sql
 var migrationFiles embed.FS
 
 type DB struct {
@@ -47,6 +48,7 @@ var ErrInvalidApprovedDiscardTransition = errors.New("approval-backed transition
 var ErrBusy = errors.New("database contention; retry the operation")
 
 const sqliteBusyTimeoutMillis = 5000
+const baselineMigrationVersion int64 = 20261120180000
 const storeOpenMigrationBudget = 30 * time.Second
 const migrationLockStallBudget = 5 * time.Second
 const migrationHeartbeatInterval = 500 * time.Millisecond
@@ -232,8 +234,41 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 	if err != nil {
 		return err
 	}
+	applied, err := db.appliedMigrations(ctx)
+	if err != nil {
+		return err
+	}
+	if len(applied) > 0 && !applied[baselineMigrationVersion] {
+		latest := int64(0)
+		for version := range applied {
+			if version > latest {
+				latest = version
+			}
+		}
+		if latest < 95 {
+			return fmt.Errorf("home schema version %d is too old for direct upgrade; update to posse v0.33.0 first", latest)
+		}
+		if !applied[95] {
+			return fmt.Errorf("home schema does not include minimum supported migration 95; update to posse v0.33.0 first")
+		}
+	}
 	if db.schemaCurrent(ctx, sources) {
 		return nil
+	}
+	hasBaseline := applied[baselineMigrationVersion]
+	hasAppliedUpgrade, hasMissingUpgrade := false, false
+	for _, source := range sources {
+		if source.version > 95 && source.version < baselineMigrationVersion {
+			hasAppliedUpgrade = hasAppliedUpgrade || applied[source.version]
+			hasMissingUpgrade = hasMissingUpgrade || !applied[source.version]
+		}
+	}
+	runUpgrades := len(applied) > 0 && (!hasBaseline || hasAppliedUpgrade && hasMissingUpgrade)
+	activeSources := make([]migrationSource, 0, len(sources))
+	for _, source := range sources {
+		if source.version >= baselineMigrationVersion || runUpgrades && source.version > 95 && source.version < baselineMigrationVersion {
+			activeSources = append(activeSources, source)
+		}
 	}
 	lock, err := awaitMigrationLock(ctx, db.Path)
 	if err != nil {
@@ -250,73 +285,84 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 			return err
 		}
 	}
-	if err := db.normalizeLegacyNoticeDeliveryMigration(ctx); err != nil {
+	if err := db.checkSchema(ctx, activeSources); err != nil {
 		return err
 	}
-	if err := db.normalizeLegacyProjectUUIDMigration(ctx); err != nil {
-		return err
-	}
-	if err := db.normalizeLegacyReportBundleMigration(ctx); err != nil {
-		return err
-	}
-	if err := db.normalizeLegacyVocabularyMigration(ctx); err != nil {
-		return err
-	}
-	if err := db.normalizeLegacyTaskContainmentMigration(ctx); err != nil {
-		return err
-	}
-	if err := db.normalizeLegacyTaskPaneShellIdentityMigration(ctx); err != nil {
-		return err
-	}
-	if err := db.checkSchema(ctx, sources); err != nil {
-		return err
-	}
-	migrations, err := fs.Sub(migrationFiles, "migrations")
-	if err != nil {
-		return err
-	}
-	var lastErr error
-	for attempt := 0; attempt < 20; attempt++ {
-		provider, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations, goose.WithAllowOutofOrder(true))
-		if err != nil {
-			return err
+	dirs := []string{"migrations"}
+	phases := [][]string{dirs}
+	if runUpgrades {
+		phases = [][]string{{"upgrades"}}
+		if !hasBaseline {
+			phases = append(phases, []string{"migrations"})
 		}
-		missing, err := missingMigrationVersions(ctx, provider)
-		if err != nil {
-			lastErr = err
-			if !strings.Contains(strings.ToLower(err.Error()), "locked") && !strings.Contains(strings.ToLower(err.Error()), "busy") {
+	}
+	for phaseIndex, phaseDirs := range phases {
+		migrations := fstest.MapFS{}
+		for _, dir := range phaseDirs {
+			entries, err := fs.ReadDir(migrationFiles, dir)
+			if err != nil {
 				return err
 			}
-		} else if results, err := provider.Up(ctx); err == nil {
-			if len(missing) > 0 {
-				missingSet := make(map[int64]bool, len(missing))
-				for _, version := range missing {
-					missingSet[version] = true
+			for _, entry := range entries {
+				data, err := fs.ReadFile(migrationFiles, filepath.Join(dir, entry.Name()))
+				if err != nil {
+					return err
 				}
-				applied := make([]string, 0, len(missing))
-				for _, result := range results {
-					if missingSet[result.Source.Version] {
-						applied = append(applied, strconv.FormatInt(result.Source.Version, 10))
+				migrations[entry.Name()] = &fstest.MapFile{Data: data}
+			}
+		}
+		var lastErr error
+		appliedPhase := false
+		for attempt := 0; attempt < 20; attempt++ {
+			provider, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations, goose.WithAllowOutofOrder(true))
+			if err != nil {
+				return err
+			}
+			missing, err := missingMigrationVersions(ctx, provider)
+			if err == nil {
+				var results []*goose.MigrationResult
+				results, err = provider.Up(ctx)
+				if err == nil {
+					missingSet := make(map[int64]bool, len(missing))
+					for _, version := range missing {
+						missingSet[version] = true
 					}
-				}
-				if len(applied) > 0 {
-					log.Printf("posse: applied missing migrations: %s", strings.Join(applied, ", "))
+					var changed []string
+					for _, result := range results {
+						if missingSet[result.Source.Version] {
+							changed = append(changed, strconv.FormatInt(result.Source.Version, 10))
+						}
+					}
+					if len(changed) > 0 {
+						log.Printf("posse: applied missing migrations: %s", strings.Join(changed, ", "))
+					}
+					appliedPhase = true
+					break
 				}
 			}
-			return db.recordChecksums(ctx, sources)
-		} else {
 			lastErr = err
 			if !strings.Contains(strings.ToLower(err.Error()), "locked") && !strings.Contains(strings.ToLower(err.Error()), "busy") {
 				return err
 			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * 25 * time.Millisecond):
+			}
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 25 * time.Millisecond):
+		if !appliedPhase {
+			return fmt.Errorf("migrate database after concurrent access: %w", lastErr)
+		}
+		if runUpgrades && !hasBaseline && phaseIndex == 0 {
+			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO task_plan_input_migration(id,completed) VALUES(1,0)`); err != nil {
+				return err
+			}
+			if err := db.migrateTaskPlanInputsWhileLocked(ctx); err != nil {
+				return err
+			}
 		}
 	}
-	return fmt.Errorf("migrate database after concurrent access: %w", lastErr)
+	return db.recordChecksums(ctx, activeSources)
 }
 
 func missingMigrationVersions(ctx context.Context, provider *goose.Provider) ([]int64, error) {
