@@ -60,13 +60,13 @@ func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousSelfExec := selfExecCommand
-	selfExecCommand = func(...string) (*exec.Cmd, error) { return exec.Command("true"), nil }
+	selfExecCommand = func(...string) (*exec.Cmd, error) { return exec.Command("/definitely/missing/greenhouse-review"), nil }
 	t.Cleanup(func() { selfExecCommand = previousSelfExec })
 	var output bytes.Buffer
 	cli := f.service.CLI()
 	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code != 0 || !strings.Contains(output.String(), "Greenhouse") || !strings.Contains(output.String(), "requested") {
-		t.Fatalf("review start did not request the Greenhouse Verdict: code=%d output=%s", code, output.String())
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), "greenhouse_review_not_started") || strings.Contains(output.String(), "Greenhouse Verdict requested") {
+		t.Fatalf("review start reported a Greenhouse request without a run: code=%d output=%s", code, output.String())
 	}
 	db, err = store.Open(f.home)
 	if err != nil {
@@ -94,8 +94,8 @@ func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 		t.Fatalf("review start did not report reuse of the passing Greenhouse Verdict: code=%d output=%s", code, output.String())
 	}
 	requests, err := db.GreenhouseReviewRequests(context.Background(), f.project.ID)
-	if err != nil || len(requests) != 0 {
-		t.Fatalf("review start created a Greenhouse request despite reusing a passing Verdict: requests=%+v err=%v", requests, err)
+	if err != nil || len(requests) != 1 || requests[0].Outcome != "failed" {
+		t.Fatalf("review start retried Greenhouse despite reusing a passing Verdict: requests=%+v err=%v", requests, err)
 	}
 }
 
