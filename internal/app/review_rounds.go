@@ -97,10 +97,10 @@ func (s *Service) reviewStart(ctx *axi.Context, args []string) error {
 	if change.Type == "research" {
 		return s.startReportReview(ctx, home, project, change, parsed.Flags["profile"], parsed.Flags["name"])
 	}
-	return s.startReviewRound(ctx, db, home, project, change, parsed.Flags["profile"], parsed.Flags["name"])
+	return s.startReviewRound(ctx, db, home, project, change, parsed.Flags["profile"], parsed.Flags["name"], true)
 }
 
-func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, change store.Task, profile, name string) error {
+func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, project store.Project, change store.Task, profile, name string, explicitStart bool) error {
 	if project.IsDirectory() {
 		return axi.Failure("review_round_unsupported", "directory Tasks cannot be reviewed as Git rounds", false)
 	}
@@ -190,7 +190,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 			priorRequestOutcomes[request.ID] = request.Outcome
 		}
 		started := false
-		if err := s.startParallelGreenhouseReviewsTracked(ctx.Context, db, home, project, change, targets, &started); err != nil {
+		if err := s.startParallelGreenhouseReviewsTracked(ctx.Context, db, home, project, change, targets, &started, explicitStart); err != nil {
 			return err
 		}
 		requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
@@ -273,7 +273,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		if err != nil {
 			return err
 		}
-		if err := s.startParallelGreenhouseReviewsExplicit(ctx.Context, db, home, project, change, targets); err != nil {
+		if err := s.startParallelGreenhouseReviewsTracked(ctx.Context, db, home, project, change, targets, nil, explicitStart); err != nil {
 			return err
 		}
 	}
@@ -1074,15 +1074,10 @@ func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
-	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, nil)
+	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, nil, false)
 }
 
-func (s *Service) startParallelGreenhouseReviewsExplicit(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
-	started := false
-	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, &started)
-}
-
-func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget, started *bool) error {
+func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget, started *bool, explicitStart bool) error {
 	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
 	if err != nil {
 		return err
@@ -1103,7 +1098,10 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			}
 			continue
 		}
-		if hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) || started == nil && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+		if hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) {
+			continue
+		}
+		if !explicitStart && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
 			continue
 		}
 		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
@@ -1312,7 +1310,7 @@ func (s *Service) maybeAutoStartReviewRound(ctx *axi.Context, db *store.DB, home
 	}
 	profile, err := s.autoStartReviewProfile(ctx.Context, project, home)
 	if err == nil {
-		err = s.startReviewRound(ctx, db, home, project, change, profile, "")
+		err = s.startReviewRound(ctx, db, home, project, change, profile, "", false)
 	}
 	if failure, unavailable := autoStartReviewerUnavailable(err); unavailable {
 		if noticeErr := recordAutoStartReviewerReadiness(ctx.Context, db, project, change, targets, failure); noticeErr != nil {
