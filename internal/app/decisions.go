@@ -293,13 +293,18 @@ func (s *Service) decisions(ctx *axi.Context, args []string) error {
 }
 
 func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.Decision) map[string]any {
-	return map[string]any{
+	output := map[string]any{
 		"id": d.ID, "project_id": d.ProjectID, "task_id": noticeTaskID(ctx, db, projectID, d.TaskID),
 		"origin": d.Origin, "question": d.Question, "options": d.Options,
 		"answer": d.Answer, "user_quote": d.UserQuote, "answer_actor": d.AnswerActor, "answer_reason": d.AnswerReason, "created_at": d.CreatedAt,
 		"answered_at": d.AnsweredAt, "kind": d.Kind, "task_launches": d.TaskLaunches,
 		"obsolete_at": d.ObsoleteAt, "obsolete_reason": d.ObsoleteReason,
 	}
+	if d.Kind == "review_dispute" {
+		output["evidence"] = string(d.Evidence)
+		output["evidence_digest"] = d.EvidenceDigest
+	}
+	return output
 }
 
 func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project store.Project) error {

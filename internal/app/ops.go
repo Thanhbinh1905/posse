@@ -39,6 +39,24 @@ const (
 	memberCheckoutSyncPhase = "checkout_sync"
 )
 
+func (s *Service) deliverQueuedMessagesAfterPRPoll(ctx context.Context, db *store.DB, project store.Project) error {
+	if s.Herdr == nil {
+		return nil
+	}
+	queued, err := db.HasQueuedMessages(ctx, project.ID)
+	if err != nil || !queued {
+		return err
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("worker instruction delivery snapshot: %w", err)
+	}
+	if err := s.deliverQueuedMessages(ctx, db, project, snapshot); err != nil {
+		return fmt.Errorf("worker instruction delivery after PR polling: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) recordMemberWatchFailure(ctx context.Context, db *store.DB, project store.Project, repo, phase string, cause error) error {
 	failure := truncate(normalizeCommandError(cause).Error(), 240)
 	writeErr := db.RecordMemberWatchError(ctx, project.ID, repo, phase, failure, time.Now().UnixMilli())
@@ -92,6 +110,9 @@ func (s *Service) startWorkspacePRPolls(ctx context.Context, db *store.DB, proje
 				s.startMergedMemberSync(ctx, db, project, repo)
 			}
 			pollErr := s.pollWorkspacePullRequestsForRepo(memberCtx, db, project, cfg, false, onMerged, repo, false, false, token)
+			if deliveryErr := s.deliverQueuedMessagesAfterPRPoll(memberCtx, db, project); deliveryErr != nil {
+				pollErr = errors.Join(pollErr, deliveryErr)
+			}
 			if decisionErr := s.raiseNoticeDecisions(memberCtx, db, project); decisionErr != nil {
 				pollErr = errors.Join(pollErr, fmt.Errorf("PR watch Decisions: %w", decisionErr))
 			}
@@ -281,6 +302,9 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 			pollResult = nil
 			if err != nil {
 				failures = append(failures, fmt.Errorf("PR polling: %w", err))
+			}
+			if deliveryErr := s.deliverQueuedMessagesAfterPRPoll(ctx, db, project); deliveryErr != nil {
+				failures = append(failures, deliveryErr)
 			}
 		case err := <-checkoutResult:
 			checkoutPending = false
