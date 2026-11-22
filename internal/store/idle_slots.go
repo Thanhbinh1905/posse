@@ -20,6 +20,13 @@ WHERE tasks.project_id=? AND tasks.type='change' AND tasks.state IN ('done','mer
 AND NOT EXISTS (SELECT 1 FROM notices WHERE notices.task_id=tasks.id AND notices.acked_at IS NULL)
 AND NOT EXISTS (SELECT 1 FROM decisions WHERE decisions.task_id=tasks.id AND decisions.answered_at=0)
 AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.task_id=tasks.id AND messages.status IN ('queued','claimed','interrupting','submitting'))
+AND NOT (tasks.landing_mode='pr' AND EXISTS (
+  SELECT 1 FROM pr_observations p WHERE p.task_id=tasks.id AND p.pr_url=tasks.pr_url
+  AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=tasks.id AND pr_url=tasks.pr_url)
+  AND p.state='OPEN' AND p.head_sha=tasks.gated_sha
+  AND json_extract(p.checks,'$.state')='SUCCESS'
+  AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'
+))
 AND MAX(
   COALESCE((SELECT MAX(at) FROM transitions WHERE task_id=tasks.id),0),
   COALESCE((SELECT MAX(at) FROM signals WHERE task_id=tasks.id),0),
