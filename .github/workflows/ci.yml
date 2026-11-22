@@ -118,6 +118,8 @@ jobs:
         run: scripts/run-race-shard.sh --self-test
       - name: Check changed-test stress script
         run: scripts/stress-changed-tests.sh --self-test
+      - name: Check test result recording and summary
+        run: python3 -m unittest scripts/tests/test_results.py
       - name: Plan race shards
         id: plan
         run: echo "shards=$(scripts/run-race-shard.sh --matrix)" >> "$GITHUB_OUTPUT"
@@ -166,7 +168,19 @@ jobs:
       - name: Run race-enabled test shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-test-${{ matrix.shard }}-
+          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/run-race-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
+      - name: Ensure per-test results file
+        if: ${{ always() }}
+        run: touch "$RUNNER_TEMP/test-results.jsonl"
+      - name: Upload per-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-results.jsonl
+          if-no-files-found: warn
       - name: Clean test temporary roots and caches
         if: ${{ always() }}
         run: |
@@ -290,12 +304,26 @@ jobs:
       - name: Run first isolated Herdr end-to-end shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-
+          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
       - name: Check command CPU budgets without the race detector
         if: ${{ matrix.shard == 1 }}
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-perf-
-        run: go test -tags='e2e perf' -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
+          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
+        run: python3 scripts/test-results.py record --shard perf -- go test -tags='e2e perf' -json -v -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
+      - name: Ensure per-test results file
+        if: ${{ always() }}
+        run: touch "$RUNNER_TEMP/test-results.jsonl"
+      - name: Upload per-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-results.jsonl
+          if-no-files-found: warn
       - name: Clean first-pass Herdr processes, fixtures and caches
         if: ${{ always() }}
         run: |
@@ -488,7 +516,19 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-stress-unit-
           POSSE_STRESS_UNIT_BUDGET: 600
+          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/stress-changed-tests.sh --run unit "$BASE_SHA"
+      - name: Ensure per-test results file
+        if: ${{ always() }}
+        run: touch "$RUNNER_TEMP/test-results.jsonl"
+      - name: Upload per-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stress-unit-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-results.jsonl
+          if-no-files-found: warn
       - name: Clean test temporary roots and caches
         if: ${{ always() }}
         run: |
@@ -564,7 +604,19 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-stress-e2e-
+          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/stress-changed-tests.sh --run e2e "$BASE_SHA"
+      - name: Ensure per-test results file
+        if: ${{ always() }}
+        run: touch "$RUNNER_TEMP/test-results.jsonl"
+      - name: Upload per-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stress-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-results.jsonl
+          if-no-files-found: warn
       - name: Clean stress Herdr processes, fixtures and tools
         if: ${{ always() }}
         run: |
