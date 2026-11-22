@@ -248,11 +248,15 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err := db.WithdrawProviderFinding(out.Context, task.ID, int64(findingID), decision.ID, decision.EvidenceDigest, decision.UserQuote); err != nil {
 				return axi.Failure("decision_refused", err.Error(), false)
 			}
-			passed, err := db.GreenhouseGatePass(out.Context, task.ID, finding.Repository, head, greenhouseBlockAt(task))
-			if err != nil {
-				return err
+			allPassed := len(targets) > 0
+			for _, target := range targets {
+				passed, err := db.GreenhouseGatePass(out.Context, task.ID, target.Repository, target.Commit, greenhouseBlockAt(task))
+				if err != nil {
+					return err
+				}
+				allPassed = allPassed && passed
 			}
-			if passed {
+			if allPassed {
 				if err := db.ObsoletePendingReviewCapDecisions(out.Context, task.ID, decision.ID); err != nil {
 					return err
 				}

@@ -38,6 +38,36 @@ func TestUnansweredReviewCapDecisionReusesOriginalOptions(t *testing.T) {
 	}
 }
 
+func TestDisputeEvidenceSurvivesSnapshotRebuild(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := OpenAt(filepath.Join(home, "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := []byte("Test: exact evidence\n")
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "review_dispute:t1:F-1", Kind: "review_dispute", Question: "Withdraw finding F-1?", Options: []string{"withdraw", "keep"}, Evidence: evidence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+		t.Fatalf("rebuild with stored dispute evidence: %v", err)
+	}
+	rebuilt, err := db.Decision(ctx, project.ID, decision.ID)
+	if err != nil || string(rebuilt.Evidence) != string(evidence) || rebuilt.EvidenceDigest != decision.EvidenceDigest {
+		t.Fatalf("rebuilt dispute evidence = %q digest %q err %v", rebuilt.Evidence, rebuilt.EvidenceDigest, err)
+	}
+}
+
 func TestDisputeDecisionStoresEvidenceAndDigest(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))

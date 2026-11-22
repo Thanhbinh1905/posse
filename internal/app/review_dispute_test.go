@@ -11,6 +11,64 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestWorkspaceDisputeDoesNotPublishWhileAnotherMemberIsBlocked(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, `review_provider = "greenhouse"
+[defaults]
+review = "full-pipeline"
+merge_mode = "local"
+auto_teardown = "never"
+`, []string{"backend", "worker"}, []string{"backend", "worker"})
+	ctx := context.Background()
+	targets, err := changeCandidateTargets(ctx, f.db, f.project, f.task)
+	if err != nil || len(targets) != 2 {
+		t.Fatalf("candidate targets = %+v, %v; want both workspace members", targets, err)
+	}
+	var backendHead string
+	for _, target := range targets {
+		if target.Repository == "backend" {
+			backendHead = target.Commit
+		}
+		verdict := store.Verdict{
+			TaskID: f.task.ID, Repository: target.Repository, Provider: store.GreenhouseReviewProvider, Protocol: "2",
+			Grant: "stack/t1/" + target.Repository + "/r1", Head: target.Commit, Target: target.Commit, ReviewBase: target.Commit,
+			Outcome: "findings", Blocking: 1, Mode: "gate",
+			Findings: []store.ProviderFinding{{Key: "G-" + target.Repository, Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "false claim", Head: target.Commit}},
+		}
+		if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return target.Commit, nil }); err != nil || !recorded {
+			t.Fatalf("record %s findings Verdict: recorded=%v err=%v", target.Repository, recorded, err)
+		}
+	}
+	cap, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: "review_cap:t1:" + backendHead, Question: "Review cap reached?", Options: []string{"accept-head", "rethink"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := filepath.Join(t.TempDir(), "evidence.md")
+	if err := os.WriteFile(evidence, []byte("Test: backend validation rejects this finding.\nHead: "+backendHead+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.run("review", "dispute", "t1", "F-1", "--evidence", evidence); code != 0 {
+		t.Fatalf("create workspace dispute Decision: %d %s", code, f.out.String())
+	}
+	var disputeID int64
+	if err := f.db.QueryRowContext(ctx, `SELECT id FROM decisions WHERE task_id=? AND kind='review_dispute'`, f.task.ID).Scan(&disputeID); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.run("decide", strconv.FormatInt(disputeID, 10), "withdraw", "--user-approved", "I reviewed the exact-head evidence and withdraw this finding."); code != 0 {
+		t.Fatalf("answer workspace dispute Decision: %d %s", code, f.out.String())
+	}
+	if code := f.run("apply", strconv.FormatInt(disputeID, 10)); code != 0 {
+		t.Fatalf("apply workspace dispute Decision: %d %s", code, f.out.String())
+	}
+	cap, err = f.db.Decision(ctx, f.project.ID, cap.ID)
+	if err != nil || cap.ObsoleteAt != 0 {
+		t.Fatalf("pending cap Decision = %+v, %v; want it preserved while worker remains blocked", cap, err)
+	}
+	var queued int
+	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND body LIKE '%Publish this exact head%'`, f.task.ID).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("queued publication count = %d, %v; want none while another member is blocked", queued, err)
+	}
+}
+
 func TestReviewDisputeDecisionWithdrawsOnlyAtBoundHead(t *testing.T) {
 	for _, moveHead := range []bool{false, true} {
 		t.Run(map[bool]string{false: "withdraw and queue publish", true: "refuse changed head"}[moveHead], func(t *testing.T) {
