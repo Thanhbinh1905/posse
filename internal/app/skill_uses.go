@@ -110,10 +110,7 @@ func roleSkillWhen(name string) string {
 
 // roleSkillProtocol tells a Worker when to invoke each loaded role skill.
 func roleSkillProtocol(plan *taskplan.Plan, task store.Task) string {
-	skills := planRoleSkills(plan)
-	if task.Type != "change" {
-		skills = taskRoleSkills(task, skills)
-	}
+	skills := taskRoleSkills(task, planRoleSkills(plan))
 	if len(skills) == 0 {
 		return ""
 	}

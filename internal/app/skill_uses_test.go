@@ -35,13 +35,15 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 	}
 	for _, want := range []string{
 		"## Role skills",
-		"- `posse-tdd`: before changing code",
-		"- `posse-deslop`: when this Task changes code, before the `done` Signal",
-		"- `posse-no-comments`: when this Task changes code, before the `done` Signal and after `posse-deslop`",
 		"- `posse-unslop`: on PR text, commit messages and Reports, before `posse publish` and the `done` Signal",
 	} {
 		if !strings.Contains(string(launch), want) {
 			t.Fatalf("launch.md lacks %q:\n%s", want, launch)
+		}
+	}
+	for _, notWant := range []string{"`posse-tdd`", "`posse-deslop`", "`posse-no-comments`"} {
+		if strings.Contains(string(launch), notWant) {
+			t.Fatalf("docs-only Change launch includes code skill %s:\n%s", notWant, launch)
 		}
 	}
 	if strings.Contains(string(launch), "`posse-better-each-day`:") {
@@ -356,6 +358,9 @@ func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T)
 		t.Fatalf("docs-only Change Task skills = %v, want report skill only", got)
 	}
 	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-tdd"}, {Role: "skill", Source: "posse-deslop"}, {Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
+	if got := roleSkillProtocol(plan, change); strings.Contains(got, "posse-tdd") || strings.Contains(got, "posse-deslop") || strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
+		t.Fatalf("docs-only Change launch protocol = %q", got)
+	}
 	if err := os.WriteFile(filepath.Join(root, "change.go"), []byte("package change\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
