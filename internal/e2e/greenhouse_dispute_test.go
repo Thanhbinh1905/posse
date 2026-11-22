@@ -75,9 +75,11 @@ func runGreenhouseSpentCapDispute(t *testing.T, moveHead bool) {
 		if err != nil || usage.ReviewRounds != 1 || plan == nil || plan.ValidationLoops.MaxReviewRounds() != 1 {
 			t.Fatalf("Greenhouse review cap usage = %+v, max rounds = %v, plan error = %v; want one of one rounds used", usage, plan, err)
 		}
-		cap, err := db.RaiseDecision(context.Background(), store.DecisionRequest{ProjectID: change.ProjectID, TaskID: change.ID, Kind: "review_cap", Origin: "review_cap:" + fmt.Sprint("t", change.Seq) + ":" + head, Question: "Review cap reached at this head?", Options: []string{"accept-head", "rethink", "discard"}})
-		if err != nil {
-			t.Fatal(err)
+		if output, err := c.posse(c.env, f.repo, "review", "start", "t1"); err == nil || !strings.Contains(output, "review_cap_reached") {
+			t.Fatalf("spent review cap was not enforced: %v\n%s", err, output)
+		}
+		if output, err := c.posse(c.env, f.repo, "decisions"); err != nil {
+			t.Fatalf("reconcile the spent-cap Notice: %v\n%s", err, output)
 		}
 		evidencePath := filepath.Join(f.root, "dispute-evidence.md")
 		evidence := fmt.Sprintf("Test: go test ./internal/app -run TestFalseGreenhouseFinding\nHead: %s\nResult: the reported behavior is rejected by validation at the called boundary.\n", head)
@@ -91,11 +93,17 @@ func runGreenhouseSpentCapDispute(t *testing.T, moveHead bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var dispute store.Decision
+		var dispute, cap store.Decision
 		for _, decision := range decisions {
 			if decision.Kind == "review_dispute" {
 				dispute = decision
 			}
+			if decision.Kind == "review_cap" && decision.AnsweredAt == 0 && decision.ObsoleteAt == 0 {
+				cap = decision
+			}
+		}
+		if cap.ID == 0 {
+			t.Fatalf("spent review cap did not create a pending Decision: %+v", decisions)
 		}
 		if dispute.ID == 0 || string(dispute.Evidence) != evidence || dispute.EvidenceDigest == "" {
 			t.Fatalf("dispute Decision did not retain evidence: %+v", dispute)

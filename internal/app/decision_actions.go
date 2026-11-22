@@ -256,7 +256,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				if err := db.ObsoletePendingReviewCapDecisions(out.Context, task.ID, decision.ID); err != nil {
 					return err
 				}
-				body := fmt.Sprintf("The User withdrew all blocking Greenhouse findings for Task head %s. Publish this exact head with `posse publish \\\"%s\\\"`; do not change the branch before publishing. Put `Fixes #1169` and `Fixes #1135` in `--proof` so both appear in the PR body.", shortSHA(head), task.Title)
+				body := fmt.Sprintf("The User withdrew all blocking Greenhouse findings for Task head %s. Publish this exact head with `posse publish \"%s\"`; do not change the branch before publishing. Put `Fixes #1169` and `Fixes #1135` in `--proof` so both appear in the PR body.", shortSHA(head), task.Title)
 				signals, err := db.TaskSignals(out.Context, task.ID, 100)
 				if err != nil {
 					return err
