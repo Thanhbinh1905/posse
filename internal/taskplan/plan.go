@@ -877,6 +877,42 @@ func (p Plan) WithoutDependency(taskID, milestone string) (Plan, error) {
 	return Decode(data)
 }
 
+// RepointDependency replaces one declared prerequisite as an explicit plan revision.
+func (p Plan) RepointDependency(taskID, replacementTaskID, milestone string) (Plan, error) {
+	if err := p.Validate(); err != nil {
+		return Plan{}, err
+	}
+	if replacementTaskID == "" || replacementTaskID == taskID {
+		return Plan{}, fmt.Errorf("replacement prerequisite must be a different Task")
+	}
+	dependencies := make([]dispatch.Dependency, 0, len(p.Dependencies))
+	replaced := false
+	for _, dependency := range p.Dependencies {
+		if dependency.TaskID == taskID && dependency.Milestone == milestone {
+			dependencies = append(dependencies, dispatch.Dependency{TaskID: replacementTaskID, Milestone: milestone})
+			replaced = true
+			continue
+		}
+		if dependency.TaskID == replacementTaskID {
+			return Plan{}, fmt.Errorf("replacement prerequisite %s is already in the admitted plan", replacementTaskID)
+		}
+		dependencies = append(dependencies, dependency)
+	}
+	if !replaced {
+		return Plan{}, fmt.Errorf("prerequisite %s:%s is not in the admitted plan", taskID, milestone)
+	}
+	p.PreviousSHA256 = p.SHA256()
+	p.AdmittedSHA256 = ""
+	p.legacyJSON = ""
+	p.Revision++
+	p.Dependencies = dependencies
+	data, err := p.Encode()
+	if err != nil {
+		return Plan{}, err
+	}
+	return Decode(data)
+}
+
 // Reconfigure changes launch settings explicitly while retaining the admitted
 // contract. Evidence from earlier revisions cannot attest the new revision.
 func (p Plan) Reconfigure(launch Launch) (Plan, error) {

@@ -137,6 +137,62 @@ func TestPendingDecisionsExcludeReopenedOrReplacedClosedPRsWithoutWrites(t *test
 	}
 }
 
+func TestDependencyDecisionObsoletesWhenPrerequisiteIsRelaunched(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Predecessor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependentID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Dependent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='queued' WHERE id=?`, dependentID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, StateWorking, StateFailed, "worker", "failed"); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: dependentID, Origin: "dependency:t2:t1:landed", Kind: "dependency", Question: "Prerequisite failed", Options: []string{"cancel", "drop-prerequisite-and-run"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, StateFailed, StateWorking, "cli", "relaunched"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("dependency Decision remained pending after relaunch: %#v %v", pending, err)
+	}
+	decision, err = db.Decision(ctx, project.ID, decision.ID)
+	if err != nil || decision.ObsoleteAt != 0 {
+		t.Fatalf("read-only pending query changed Decision history: %#v %v", decision, err)
+	}
+	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "cancel", "cancel dependent"); err == nil || !strings.Contains(err.Error(), "Prerequisite is no longer") {
+		t.Fatalf("stale dependency Decision was answerable before reconciliation: %v", err)
+	}
+	pending, err = db.Decisions(ctx, project.ID, true)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("dependency Decision remained pending after reconciliation: %#v %v", pending, err)
+	}
+	decision, err = db.Decision(ctx, project.ID, decision.ID)
+	if err != nil || decision.ObsoleteAt == 0 || decision.ObsoleteReason == "" {
+		t.Fatalf("dependency Decision was not obsoleted: %#v %v", decision, err)
+	}
+}
+
 func TestAnswerRefusesResolvedSituationEvenBeforeReconciliation(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))

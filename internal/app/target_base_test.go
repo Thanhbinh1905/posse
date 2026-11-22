@@ -152,7 +152,7 @@ func TestQueuedFeatureBaseAndPrerequisiteSurviveStoreRestart(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nafter: t1:landed\n---\nBuild on the landed feature.\n"
+	brief := "---\ntype: change\ntitle: Follow-up\ndone_when: follow-up is ready\nbase: main\ntarget: main\nafter: t1:landed\n---\nBuild on the landed feature.\n"
 	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,8 @@ func TestBaseFollowsTargetOnlyWithoutExplicitBase(t *testing.T) {
 		{name: "default target", brief: dispatch.Brief{Type: "change", Target: "main"}},
 		{name: "no target", brief: dispatch.Brief{Type: "change"}},
 		{name: "explicit base wins", brief: dispatch.Brief{Type: "change", Base: "main", Target: "staging"}, pinned: true},
-		{name: "member base wins", brief: dispatch.Brief{Type: "change", BaseByRepo: map[string]string{"api": "main"}}, repo: "api", pinned: true},
+		{name: "explicit base follows landed prerequisite", brief: dispatch.Brief{Type: "change", Base: "main", After: []dispatch.Dependency{{Milestone: "landed"}}}},
+		{name: "member base follows landed prerequisite", brief: dispatch.Brief{Type: "change", BaseByRepo: map[string]string{"api": "main"}, After: []dispatch.Dependency{{Milestone: "landed"}}}, repo: "api"},
 		{name: "landed prerequisite stays live", brief: dispatch.Brief{Type: "change", Target: "staging", After: []dispatch.Dependency{{Milestone: "landed"}}}, fromTarget: true},
 		{name: "review", brief: dispatch.Brief{Type: "review", Target: "staging"}},
 	} {

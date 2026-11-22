@@ -565,13 +565,31 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if _, err := s.finishSettledTeardownIntent(ctx.Context, db, project.ID, task.ID); err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}, {Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}}})
+		dependants, err := s.holdQueuedDependants(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		fields := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "already_torn_down", Value: true}}
+		if len(dependants) > 0 {
+			fields = append(fields, axi.Field{Key: "dependants", Value: dependants})
+		}
+		fields = append(fields, axi.Field{Key: "help", Value: []any{"Run `posse pool` to inspect released resources"}})
+		return ctx.Print(fields)
 	}
 	if task.State == store.StateQueued {
 		if err := db.Transition(ctx.Context, task.ID, store.StateQueued, store.StateTornDown, "cli", "Canceled before Worker dispatch"); err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "help", Value: []any{"Queued Task canceled without allocating a Sandbox, pane or branch"}}})
+		dependants, err := s.holdQueuedDependants(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		fields := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}}
+		if len(dependants) > 0 {
+			fields = append(fields, axi.Field{Key: "dependants", Value: dependants})
+		}
+		fields = append(fields, axi.Field{Key: "help", Value: []any{"Queued Task canceled without allocating a Sandbox, pane or branch"}})
+		return ctx.Print(fields)
 	}
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {
@@ -1287,6 +1305,10 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err := db.ObsoleteTaskDecisions(ctx, task.ID); err != nil {
 		return result, err
 	}
+	result.Dependants, err = s.holdQueuedDependants(ctx, db, project, task)
+	if err != nil {
+		return result, err
+	}
 	if err := s.regenerateProjects(ctx, db); err != nil {
 		return result, err
 	}
@@ -1307,6 +1329,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 }
 
 func withTeardownDetails(fields axi.Object, result teardownResult) axi.Object {
+	if len(result.Dependants) > 0 {
+		fields = append(fields, axi.Field{Key: "dependants", Value: result.Dependants})
+	}
 	if len(result.EscapedProcesses) > 0 {
 		fields = append(fields, axi.Field{Key: "escaped_processes", Value: describeTaskProcesses(result.EscapedProcesses)})
 	}
