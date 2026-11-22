@@ -330,17 +330,12 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 		return QueueValidationFixResult{RoundsUsed: roundsUsed, Exhausted: true}, nil
 	}
 	if sharedMax != nil {
-		var reviews, repairs int
-		if err := tx.QueryRowContext(ctx, `SELECT
-(SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status IN ('admitted','verdict')) +
-(SELECT COUNT(*) FROM verdicts WHERE task_id=? AND provider='greenhouse' AND mode='gate')`, taskID, taskID).Scan(&reviews); err != nil {
-			return QueueValidationFixResult{}, err
-		}
+		var repairs int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, taskID).Scan(&repairs); err != nil {
 			return QueueValidationFixResult{}, err
 		}
-		if reviews+repairs >= *sharedMax {
-			return QueueValidationFixResult{RoundsUsed: reviews + repairs, SharedExhausted: true}, nil
+		if repairs >= *sharedMax {
+			return QueueValidationFixResult{RoundsUsed: repairs, SharedExhausted: true}, nil
 		}
 	}
 	seq := lastSeq + 1

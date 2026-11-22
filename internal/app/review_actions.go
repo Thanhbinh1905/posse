@@ -141,6 +141,9 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if len(selectedPatterns) == 0 {
 		return reviewFixQueued{}, axi.Failure("review_fix_empty", "no open blocking Finding Patterns are available to fix", false)
 	}
+	if taskUsesSharedReviewRepairCap(change) && !selectedReviewPatternsBlock(findings, selectedPatterns, plan) {
+		return reviewFixQueued{}, axi.Failure("review_fix_non_blocking", "a full-pipeline Review fix must include at least one blocking finding", false)
+	}
 	selected := make([]int, 0, len(selectedPatterns))
 	for seq := range selectedPatterns {
 		selected = append(selected, seq)
@@ -328,6 +331,15 @@ func parsePatternID(value string) (int, bool) {
 
 func reviewFindingActionable(f store.ReviewFindingDetail) bool {
 	return oneOfString(f.State, "open", "fix_claimed", "unverified", "disputed", "regressed")
+}
+
+func selectedReviewPatternsBlock(findings []store.ReviewFindingDetail, selected map[int]bool, plan *taskplan.Plan) bool {
+	for _, finding := range findings {
+		if selected[finding.PatternSeq] && reviewFindingBlocks(finding, plan) {
+			return true
+		}
+	}
+	return false
 }
 
 func reviewFindingBlocks(f store.ReviewFindingDetail, plan *taskplan.Plan) bool {

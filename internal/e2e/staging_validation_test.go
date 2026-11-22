@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -463,16 +464,15 @@ func TestStagingFullPipelineWorkspaceMembersBindStagingTargets(t *testing.T) {
 	audit("Merge")
 }
 
-// TestStagingFullPipelineReviewCarryAndCapDecision proves three Review Rounds
-// on staging: a pass carries across a tree-preserving staging advance without
-// carrying local stages, and the third changes_requested round raises one
-// User-only cap Decision bound to the current candidate. Nothing is published.
 func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	stopBackgroundWatch(t, f)
 	staging := stagingTarget(t, f)
 	for _, setting := range [][2]string{{"defaults.merge_mode", "pr"}, {"defaults.review", "full-pipeline"}, {"review_loop.enabled", "true"}} {
 		runPosse(t, f.binary, f.repo, f.env, "config", "set", setting[0], setting[1])
+	}
+	if code, output := runReleaseCLI(t, f.binary, f.repo, f.env, "config", "set", "review_loop.max_rounds", "2", "--user-approved", "Use a two-round cap to test blocking-finding repair accounting"); code != 0 {
+		t.Fatalf("set one-round cap: %d %s", code, output)
 	}
 	if code, output := startStagingTask(t, f, "Staging review rounds"); code != 0 {
 		t.Fatalf("start staging Change Task: %d %s", code, output)
@@ -531,48 +531,96 @@ func TestStagingFullPipelineReviewCarryAndCapDecision(t *testing.T) {
 	}
 	audit("carry")
 
-	// Rounds 2 and 3 request changes on new author heads; the third spends
-	// the default cap.
-	for round := 2; round <= 3; round++ {
-		if round == 3 {
-			if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "signal", "working", "Address round 2"); code != 0 {
-				t.Fatalf("reopen Change Task: %d %s", code, output)
-			}
-		}
-		name := fmt.Sprintf("round-%d.txt", round)
-		commitCandidateFile(t, f, change.WorktreePath, name, "unsafe operation\n")
-		// The first publish reports the author movement and preserves the stale
-		// candidate; the next submits a fresh one.
-		if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "Staging candidate"); code == 0 || !strings.Contains(output, "candidate_author_moved") {
-			t.Fatalf("round %d author movement was not reported: %d %s", round, code, output)
-		}
-		candidate := submitStagingCandidate(t, f, change, workerEnv, "", staging)
-		turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", fmt.Sprintf("Candidate for round %d", round), "--turn", turn); code != 0 {
-			t.Fatalf("complete round %d submission: %d %s", round, code, output)
-		}
-		recordReviewRound(t, f, "t1", "changes_requested", blockingFindings(fmt.Sprintf("unsafe-operation-%d", round), name, "unsafe operation"))
-		audit(fmt.Sprintf("Review Round %d", round))
-		decisions := openReviewCapDecisions(t, f, change)
-		if round == 2 && len(decisions) != 0 {
-			t.Fatalf("round 2 of 3 raised a cap Decision: %v", decisions)
-		}
-		if round == 3 {
-			if len(decisions) != 1 {
-				t.Fatalf("round 3 raised %d cap Decisions, want one", len(decisions))
-			}
-			var origin string
-			if err := f.db.QueryRowContext(context.Background(), `SELECT origin FROM decisions WHERE id=?`, decisions[0]).Scan(&origin); err != nil || !strings.HasSuffix(origin, candidate.CandidateSHA) {
-				t.Fatalf("cap Decision origin=%q err=%v, want candidate %s", origin, err, candidate.CandidateSHA)
-			}
-			for _, option := range []string{"accept-head", "final-fix", "rethink", "discard"} {
-				if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisions[0]), option); code != 1 || !strings.Contains(output, "user_only") {
-					t.Fatalf("Lead answered the cap Decision with %s: %d %s", option, code, output)
-				}
-			}
+	round := 2
+	name := fmt.Sprintf("round-%d.txt", round)
+	commitCandidateFile(t, f, change.WorktreePath, name, "unsafe operation\n")
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "Staging candidate"); code == 0 || !strings.Contains(output, "candidate_author_moved") {
+		t.Fatalf("round %d author movement was not reported: %d %s", round, code, output)
+	}
+	candidate := submitStagingCandidate(t, f, change, workerEnv, "", staging)
+	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", fmt.Sprintf("Candidate for round %d", round), "--turn", turn); code != 0 {
+		t.Fatalf("complete round %d submission: %d %s", round, code, output)
+	}
+	recordReviewRound(t, f, "t1", "changes_requested", blockingFindings(fmt.Sprintf("unsafe-operation-%d", round), name, "unsafe operation"))
+	audit(fmt.Sprintf("Review Round %d", round))
+	if code, output := runReviewIdentityCLI(t, f, "review", "fix", "t1"); code != 0 || !strings.Contains(output, "queued") {
+		t.Fatalf("queue blocking-finding repair: %d %s", code, output)
+	}
+	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "show", "t1"); code != 0 {
+		t.Fatalf("deliver blocking-finding repair: %d %s", code, output)
+	}
+	candidate, err = f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, name), []byte("validated operation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, candidate.WorktreePath, "add", name)
+	gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "repair blocking review finding")
+	resolutions := filepath.Join(f.home, "scratch", "shop", "t1", "staging-review-resolutions.json")
+	if err := os.WriteFile(resolutions, []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Applied blocking-finding repair", "--turn", turn, "--resolutions", resolutions); code != 0 {
+		t.Fatalf("complete blocking-finding repair: %d %s", code, output)
+	}
+	if decisions := openReviewCapDecisions(t, f, change); len(decisions) != 0 {
+		t.Fatalf("one blocking repair raised a cap Decision before the two-round cap: %v", decisions)
+	}
+
+	recordReviewRound(t, f, "t1", "changes_requested", blockingFindings("unsafe-operation-3", name, "validated operation"))
+	if code, output := runReviewIdentityCLI(t, f, "review", "fix", "t1"); code != 0 || !strings.Contains(output, "queued") {
+		t.Fatalf("queue second blocking-finding repair: %d %s", code, output)
+	}
+	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "show", "t1"); code != 0 {
+		t.Fatalf("deliver second blocking-finding repair: %d %s", code, output)
+	}
+	candidate, err = f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate.WorktreePath, name), []byte("fully validated operation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, candidate.WorktreePath, "add", name)
+	gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "repair second blocking review finding")
+	if err := os.WriteFile(resolutions, []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"},{"pattern":"P-2","status":"fixed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, err = f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Applied second blocking-finding repair", "--turn", turn, "--resolutions", resolutions); code != 0 {
+		t.Fatalf("complete second blocking-finding repair: %d %s", code, output)
+	}
+	decisions := openReviewCapDecisions(t, f, change)
+	if len(decisions) != 1 {
+		t.Fatalf("two blocking repairs raised %d cap Decisions, want one", len(decisions))
+	}
+	var origin string
+	repairedHead := gitRef(t, f, candidate.WorktreePath, "HEAD")
+	if err := f.db.QueryRowContext(context.Background(), `SELECT origin FROM decisions WHERE id=?`, decisions[0]).Scan(&origin); err != nil || !strings.HasSuffix(origin, repairedHead) {
+		t.Fatalf("cap Decision origin=%q err=%v, want repaired candidate %s", origin, err, repairedHead)
+	}
+	for _, option := range []string{"accept-head", "final-fix", "rethink", "discard"} {
+		if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisions[0]), option); code != 1 || !strings.Contains(output, "user_only") {
+			t.Fatalf("Lead answered the cap Decision with %s: %d %s", option, code, output)
 		}
 	}
 	if rounds := reviewRoundCount(t, f, change); rounds != 3 {
