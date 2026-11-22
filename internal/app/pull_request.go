@@ -1239,6 +1239,55 @@ func (s *Service) refreshProjectPullRequests(ctx context.Context, db *store.DB, 
 	}
 }
 
+func (s *Service) reconcileCachedMergeReadiness(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, now time.Time) error {
+	if project.IsWorkspace() {
+		return nil
+	}
+	tasks, err := db.Tasks(ctx, project.ID, false)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.PRURL == "" || task.State != store.StateDone && task.State != store.StateMerging {
+			continue
+		}
+		observation, err := db.LatestPRObservation(ctx, task.ID)
+		if store.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		checks := decodeChecks(observation.Checks)
+		if observation.PRURL != task.PRURL || observation.State != "OPEN" || observation.HeadSHA != task.GatedSHA || checks.State != "SUCCESS" || observation.Review == "CHANGES_REQUESTED" || observation.Review == "REVIEW_REQUIRED" || observation.Mergeable != "MERGEABLE" {
+			continue
+		}
+		observation.ObservedAt = now.UnixMilli()
+		effect := prObservationEffect(project, task, observation, nil, observation, true)
+		if !slices.ContainsFunc(effect.Notices, func(notice store.Notice) bool { return notice.Kind == "merge_ready" }) {
+			continue
+		}
+		gateErr := requireSelectedReviewAt(ctx, db, project, cfg, task, observation.HeadSHA)
+		if gateErr == nil {
+			gateErr = pendingCandidateFailure(ctx, db, task)
+		}
+		if gateErr != nil {
+			if reviewGateRefusal(gateErr) {
+				continue
+			}
+			if err := recordPRTaskWatchFailure(ctx, db, project, task, fmt.Errorf("merge_ready review gate: %w", gateErr), now); err != nil {
+				return err
+			}
+			continue
+		}
+		s.annotateMergeReadyNotices(ctx, db, project, task, effect.Notices)
+		if _, err := db.RecordPRObservation(ctx, observation, effect, task); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // pollProjectPullRequestsPass observes every watched PR once. It sets
 // targetMoved when an open PR's target advanced during the forge query, and
 // contended when another poller held the claim so nothing was observed.
@@ -1250,6 +1299,9 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		return err
 	}
 	if claim == "" {
+		if err := s.reconcileCachedMergeReadiness(ctx, db, project, cfg, now); err != nil {
+			return err
+		}
 		if contended != nil {
 			*contended = true
 		}
