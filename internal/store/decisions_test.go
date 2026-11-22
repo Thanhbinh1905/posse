@@ -146,6 +146,16 @@ func TestDependencyDecisionQuestionFollowsPrerequisiteStateUntilAnswered(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	predecessorID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, StateSpawning, StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, StateWorking, StateFailed, "worker", "failed"); err != nil {
+		t.Fatal(err)
+	}
 	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "B", MergeMode: "local"})
 	if err != nil {
 		t.Fatal(err)

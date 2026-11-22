@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -194,6 +195,31 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 					}
 					if predecessor.State != store.StateFailed && predecessor.State != store.StateLost && predecessor.State != store.StateTornDown {
 						continue
+					}
+					if predecessor.State == store.StateTornDown {
+						decisions, decisionsErr := db.Decisions(ctx, project.ID, false)
+						if decisionsErr != nil {
+							return admitted, decisionsErr
+						}
+						covered := false
+						for _, decision := range decisions {
+							parts := strings.Split(decision.Origin, ":")
+							if decision.Kind != "teardown_dependants" || decision.TaskID != predecessor.ID || decision.ObsoleteAt != 0 || len(parts) != 3 {
+								continue
+							}
+							for _, dependantRef := range strings.Split(parts[2], ",") {
+								if dependantRef == taskIDString(queued.Seq) {
+									covered = true
+									break
+								}
+							}
+							if covered {
+								break
+							}
+						}
+						if covered {
+							continue
+						}
 					}
 					ready, readyErr := db.UnmetTaskDependencies(ctx, project.ID, []dispatch.Dependency{dependency})
 					if readyErr != nil {

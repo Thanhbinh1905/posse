@@ -314,7 +314,7 @@ func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project s
 }
 
 func (s *Service) decide(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("decide", args, map[string]flagSpec{"user-approved": {}, "lead-reason": {}, "recover": {boolean: true}})
+	parsed, err := parseArgs("decide", args, map[string]flagSpec{"user-approved": {}, "lead-reason": {}, "recover": {boolean: true}, "to": {}})
 	if err != nil {
 		return err
 	}
@@ -403,13 +403,33 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 		}
 		return ctx.Print(axi.Object{{Key: "decision", Value: decisionOutput(ctx.Context, db, project.ID, decision)}, {Key: "help", Value: []any{"The Lead's review-cap choice is recorded with its reason and exact-head binding"}}})
 	}
+	if decisionBefore.Kind == "teardown_dependants" && parsed.Positionals[1] == "re-point" {
+		replacementID := strings.TrimSpace(parsed.Flags["to"])
+		if replacementID == "" {
+			return axi.Failure("decision_refused", "re-point requires a replacement Task ID", false, "Pass `--to tN`")
+		}
+		replacement, err := db.Task(ctx.Context, project.ID, replacementID)
+		if err != nil {
+			return axi.Failure("decision_refused", "replacement Task does not exist in this Project", false)
+		}
+		if err := validateTeardownRepoint(ctx.Context, db, project, decisionBefore, replacement); err != nil {
+			return axi.Failure("decision_refused", err.Error(), false)
+		}
+	}
+	if _, supplied := parsed.Flags["to"]; supplied && (decisionBefore.Kind != "teardown_dependants" || parsed.Positionals[1] != "re-point") {
+		return axi.Usage("--to is available only with re-point on a teardown_dependants Decision")
+	}
 	if role == "lead" && strings.TrimSpace(quote) == "" {
 		return axi.Failure("user_only", "only the User answers a Decision; the Lead must quote the User", false, "Pass `--user-approved \"<User's words>\"` after the User answers")
 	}
 	if quote == "" {
 		quote = parsed.Positionals[1]
 	} // User's own shell input is their quote.
-	decision, err := db.AnswerDecision(ctx.Context, project.ID, id, parsed.Positionals[1], quote)
+	reason := ""
+	if decisionBefore.Kind == "teardown_dependants" && parsed.Positionals[1] == "re-point" {
+		reason = "to=" + parsed.Flags["to"]
+	}
+	decision, err := db.AnswerDecisionAs(ctx.Context, project.ID, id, parsed.Positionals[1], "user", quote, reason)
 	if store.IsNotFound(err) {
 		return axi.Failure("decision_unknown", "Decision not found in this Project", false, "Run `posse decisions` to list pending Decisions")
 	}

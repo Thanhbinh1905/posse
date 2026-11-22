@@ -57,6 +57,17 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return axi.Failure("decision_refused", "budget Decision is obsolete: "+reason, false)
 	}
 	switch decision.Kind {
+	case "teardown_dependants":
+		if task.State != store.StateTornDown {
+			return axi.Failure("decision_refused", "teardown dependant Decision no longer applies", false)
+		}
+		if decision.Answer == "re-point" && !strings.HasPrefix(decision.AnswerReason, "to=") {
+			return axi.Failure("decision_refused", "re-point requires a replacement Task ID", false, "Answer with `posse decide <id> re-point --to tN`")
+		}
+		if err := s.applyTeardownDependantsDecision(out.Context, db, project, cfg, decision); err != nil {
+			return axi.Failure("decision_refused", err.Error(), false)
+		}
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: decision.Answer}})
 	case "dependency":
 		if task.State != store.StateQueued {
 			return axi.Failure("decision_refused", "dependency Decision no longer applies to this queued Task", false)

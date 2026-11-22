@@ -606,6 +606,147 @@ Implement after the prerequisite.
 	}
 }
 
+func TestTeardownPredecessorHoldsQueuedDependantsForOneDecision(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}} {
+		if err := db.Transition(ctx, predecessorID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: change\ntitle: Dependent change\ndone_when: replacement dependency is resolved\nafter: t1:landed\n---\nWait for the replacement.\n"
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("start dependent: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved predecessor teardown"}); code != 0 {
+		t.Fatalf("teardown predecessor: code=%d output=%s", code, output.String())
+	}
+	if !strings.Contains(output.String(), "t2") {
+		t.Fatalf("teardown did not name its queued dependant: %s", output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "teardown_dependants" || strings.Join(decisions[0].Options, ",") != "re-point,cascade" {
+		t.Fatalf("teardown dependant Decision=%#v err=%v", decisions, err)
+	}
+	dependent, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || dependent.State != store.StateQueued || dependent.WorktreePath != "" {
+		t.Fatalf("dependent was not held: task=%+v err=%v", dependent, err)
+	}
+}
+
+func TestTeardownPredecessorDependantsCanBeRepointed(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}} {
+		if err := db.Transition(ctx, predecessorID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	replacementID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Replacement", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range []struct {
+		from, to store.State
+		source   string
+	}{{store.StateSpawning, store.StateWorking, "cli"}} {
+		if err := db.Transition(ctx, replacementID, transition.from, transition.to, transition.source, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: change\ntitle: Dependent change\ndone_when: replacement dependency is resolved\nafter: t1:landed\n---\nWait for the replacement.\n"
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("start dependent: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved predecessor teardown"}); code != 0 {
+		t.Fatalf("teardown predecessor: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "teardown_dependants" {
+		t.Fatalf("teardown dependant Decision=%#v err=%v", decisions, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	decisionID := fmt.Sprint(decisions[0].ID)
+	output.Reset()
+	if code := cli.Run([]string{"decide", decisionID, "re-point"}); code == 0 || !strings.Contains(output.String(), "replacement Task ID") {
+		t.Fatalf("re-point without --to was not refused: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"decide", decisionID, "re-point", "--to", "t2"}); code != 0 {
+		t.Fatalf("answer re-point: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"apply", decisionID}); code != 0 {
+		t.Fatalf("apply re-point: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dependent, err := db.Task(ctx, fixture.project.ID, "t3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := dependent.AdmittedPlan()
+	if err != nil || plan == nil || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t2" || dependent.State != store.StateQueued {
+		t.Fatalf("dependent was not re-pointed and held: task=%+v plan=%#v err=%v", dependent, plan, err)
+	}
+}
+
 func TestFailedPrerequisiteDecisionCanDropEdgeAndRunQueuedTask(t *testing.T) {
 	fixture := newStartFixture(t)
 	ctx := context.Background()
@@ -2008,10 +2149,10 @@ func TestTornDownFailedPrerequisiteKeepsAdmissionPassWorking(t *testing.T) {
 		t.Fatal(err)
 	}
 	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
-	if err != nil || len(decisions) != 1 || decisions[0].Kind != "dependency" || !strings.Contains(decisions[0].Question, "torn-down") {
-		t.Fatalf("dependency Decision after prerequisite teardown=%#v err=%v", decisions, err)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "teardown_dependants" || strings.Join(decisions[0].Options, ",") != "re-point,cascade" {
+		t.Fatalf("teardown dependant Decision=%#v err=%v", decisions, err)
 	}
-	decision, err := db.AnswerDecision(ctx, fixture.project.ID, decisions[0].ID, "cancel", "cancel the dependent Task")
+	decision, err := db.AnswerDecision(ctx, fixture.project.ID, decisions[0].ID, "cascade", "cascade the dependent Task")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2019,6 +2160,15 @@ func TestTornDownFailedPrerequisiteKeepsAdmissionPassWorking(t *testing.T) {
 		t.Fatal(err)
 	}
 	run("apply", fmt.Sprint(decision.ID))
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dependentTask, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || dependentTask.State != store.StateTornDown {
+		t.Fatalf("cascade did not tear down the queued dependant: task=%+v err=%v", dependentTask, err)
+	}
 	run("list")
 }
 
