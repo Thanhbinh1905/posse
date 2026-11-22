@@ -155,7 +155,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "review", Value: "Greenhouse Verdict reused"}})
 			}
 		}
-		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+		if err := s.startParallelGreenhouseReviewsExplicit(ctx.Context, db, home, project, change, targets); err != nil {
 			return err
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "review", Value: "Greenhouse Verdict requested"}})
@@ -198,7 +198,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		if err != nil {
 			return err
 		}
-		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+		if err := s.startParallelGreenhouseReviewsExplicit(ctx.Context, db, home, project, change, targets); err != nil {
 			return err
 		}
 	}
@@ -999,6 +999,15 @@ func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
+	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, nil)
+}
+
+func (s *Service) startParallelGreenhouseReviewsExplicit(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
+	started := false
+	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, &started)
+}
+
+func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget, started *bool) error {
 	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
 	if err != nil {
 		return err
@@ -1019,7 +1028,7 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			}
 			continue
 		}
-		if hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) || time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+		if hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) || started == nil && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
 			continue
 		}
 		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
@@ -1172,6 +1181,9 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			continue
 		}
 		_ = lock.Close()
+		if started != nil {
+			*started = true
+		}
 		go func() { _ = command.Wait() }()
 	}
 	return nil
