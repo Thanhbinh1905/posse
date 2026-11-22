@@ -140,7 +140,7 @@ run_unit_stress() {
         run_timeout=${timeout}
         case "$timeout" in *m) configured_minutes=${timeout%m}; configured_seconds=$((configured_minutes * 60)) ;; *s) configured_seconds=${timeout%s} ;; *) configured_seconds=$unit_budget ;; esac
         if [ "$configured_seconds" -gt "$remaining" ]; then
-          if [ "$remaining" -lt 30 ]; then
+          if [ "$remaining" -lt 60 ]; then
             run_timeout=60s
           else
             run_timeout="${remaining}s"
