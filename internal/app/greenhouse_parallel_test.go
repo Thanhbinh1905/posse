@@ -100,10 +100,10 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 	if err := f.service.maintainProjectWatch(context.Background(), f.db, f.project); err != nil {
 		t.Fatal(err)
 	}
-	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
+	messages, err := f.db.TaskMessagesAfter(context.Background(), f.task.ID, 0, 10)
 	published := false
 	for _, message := range messages {
-		published = published || strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish")
+		published = published || message.Status == "delivered" && strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish")
 	}
 	if err != nil || !published {
 		t.Fatalf("refreshed-head publication message=%+v err=%v", messages, err)
