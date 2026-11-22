@@ -181,6 +181,14 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 				}
 			}
 		}
+		requestsBefore, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
+		if err != nil {
+			return err
+		}
+		priorRequestOutcomes := make(map[int64]string, len(requestsBefore))
+		for _, request := range requestsBefore {
+			priorRequestOutcomes[request.ID] = request.Outcome
+		}
 		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
 			return err
 		}
@@ -191,7 +199,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		}
 		for _, target := range targets {
 			for _, request := range requests {
-				if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome != "failed" {
+				if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" && priorRequestOutcomes[request.ID] != "verdict" {
 					started = true
 					break
 				}
