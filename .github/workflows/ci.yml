@@ -168,7 +168,7 @@ jobs:
       - name: Run race-enabled test shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-test-${{ matrix.shard }}-
-          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_HEAD: ${{ github.sha }}
           POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/run-race-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
       - name: Ensure per-test results file
@@ -304,14 +304,14 @@ jobs:
       - name: Run first isolated Herdr end-to-end shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-
-          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_HEAD: ${{ github.sha }}
           POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
       - name: Check command CPU budgets without the race detector
         if: ${{ matrix.shard == 1 }}
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass1-shard-${{ matrix.shard }}-perf-
-          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_HEAD: ${{ github.sha }}
           POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: python3 scripts/test-results.py record --shard perf -- go test -tags='e2e perf' -json -v -count=1 ./internal/e2e -run '^TestCommandPerformanceBudgets$'
       - name: Ensure per-test results file
@@ -516,7 +516,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-stress-unit-
           POSSE_STRESS_UNIT_BUDGET: 600
-          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_HEAD: ${{ github.sha }}
           POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/stress-changed-tests.sh --run unit "$BASE_SHA"
       - name: Ensure per-test results file
@@ -604,7 +604,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-stress-e2e-
-          POSSE_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSSE_TEST_HEAD: ${{ github.sha }}
           POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/stress-changed-tests.sh --run e2e "$BASE_SHA"
       - name: Ensure per-test results file

@@ -18,6 +18,8 @@ class TestResultsCLI(unittest.TestCase):
                 {"test": "TestFlaky", "package": "./internal/x", "shard": "1", "head": "abc", "run_id": "10", "attempt": "2", "result": "pass", "duration_seconds": 4},
                 {"test": "TestStillFlaky", "package": "./internal/x", "shard": "1", "head": "ghi", "run_id": "12", "attempt": "1", "result": "fail", "duration_seconds": 2},
                 {"test": "TestStillFlaky", "package": "./internal/x", "shard": "1", "head": "ghi", "run_id": "12", "attempt": "2", "result": "fail", "duration_seconds": 2},
+                {"test": "TestRepeatAcrossRuns", "package": "./internal/x", "shard": "1", "head": "jkl", "run_id": "13", "attempt": "1", "result": "fail", "duration_seconds": 2},
+                {"test": "TestRepeatAcrossRuns", "package": "./internal/x", "shard": "2", "head": "jkl", "run_id": "14", "attempt": "1", "result": "pass", "duration_seconds": 3},
                 {"test": "TestStable", "package": "./internal/x", "shard": "1", "head": "def", "run_id": "11", "attempt": "1", "result": "pass", "duration_seconds": 6},
             ]
             result_file.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -33,6 +35,8 @@ class TestResultsCLI(unittest.TestCase):
             self.assertEqual(flaky["median_duration_seconds"], 3)
             still_flaky = next(test for test in summary["tests"] if test["test"] == "TestStillFlaky")
             self.assertEqual(still_flaky["same_head_reruns"], {"passed": 0, "failed": 1})
+            across_runs = next(test for test in summary["tests"] if test["test"] == "TestRepeatAcrossRuns")
+            self.assertEqual(across_runs["same_head_reruns"], {"passed": 1, "failed": 0})
 
     def test_recorder_preserves_go_exit_status_and_records_test_outcome(self):
         with tempfile.TemporaryDirectory() as directory:
