@@ -2634,6 +2634,71 @@ func (db *DB) WithdrawQueuedMessage(ctx context.Context, messageID int64) (Messa
 	return message, count == 1, err
 }
 
+func (db *DB) WithdrawQueuedFreshnessInstructions(ctx context.Context, taskID int64) ([]Message, []Message, error) {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	blockerRows, err := tx.QueryContext(ctx, `SELECT m.id,m.task_id,m.body,m.created_at,COALESCE(m.delivered_at,0),m.status,m.wait_for_idle
+FROM messages m WHERE m.task_id=? AND m.status IN ('queued','claimed','interrupting')
+AND (NOT EXISTS (SELECT 1 FROM validation_fix_rounds r WHERE r.message_id=m.id AND r.kind='freshness')
+OR EXISTS (SELECT 1 FROM validation_fix_rounds r WHERE r.message_id=m.id AND r.kind!='freshness')) ORDER BY m.id`, taskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var blockers []Message
+	for blockerRows.Next() {
+		var message Message
+		if err := blockerRows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			blockerRows.Close()
+			return nil, nil, err
+		}
+		blockers = append(blockers, message)
+	}
+	if err := blockerRows.Close(); err != nil {
+		return nil, nil, err
+	}
+	if len(blockers) > 0 {
+		return nil, blockers, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT m.id,m.task_id,m.body,m.created_at,COALESCE(m.delivered_at,0),m.status,m.wait_for_idle
+FROM messages m JOIN validation_fix_rounds r ON r.message_id=m.id
+WHERE r.ship_task_id=? AND r.kind='freshness' AND m.status IN ('queued','withdrawn')
+AND NOT EXISTS (SELECT 1 FROM validation_fix_rounds other WHERE other.message_id=m.id AND other.kind!='freshness') ORDER BY m.id`, taskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var messages []Message
+	for rows.Next() {
+		var message Message
+		if err := rows.Scan(&message.ID, &message.TaskID, &message.Body, &message.CreatedAt, &message.DeliveredAt, &message.Status, &message.WaitForIdle); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	for _, message := range messages {
+		if message.Status == "queued" {
+			if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='withdrawn' WHERE id=? AND status='queued'`, message.ID); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	if len(messages) > 0 {
+		if err := db.PersistTask(ctx, taskID); err != nil {
+			return nil, nil, err
+		}
+	}
+	return messages, nil, nil
+}
+
 // DeliverUndeliverableMessages marks the messages a failed or lost Worker never
 // received as delivered, because a relaunch hands them to its replacement in
 // the relaunch prompt.

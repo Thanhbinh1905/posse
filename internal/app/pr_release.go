@@ -25,6 +25,31 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 		if target.task.State != store.StateDone && target.task.State != store.StateMerging {
 			return prReleaseRefused("executor policy can change only after the Worker signals done", false)
 		}
+		var withdrawnFreshness bool
+		if intent, intentErr := db.IntentByTask(ctx.Context, target.task.ID); intentErr == nil && intent.Command == "pr-release" && !intentProcessAlive(intent) {
+			retry := "posse pr release " + target.taskLabel() + " --policy release"
+			if policy != "release" {
+				return axi.Failure("pr_release_refused", "an interrupted release must resume with its original policy", true, "Retry with `"+retry+"`")
+			}
+			withdrawn, pendingMessages, err := db.WithdrawQueuedFreshnessInstructions(ctx.Context, target.task.ID)
+			if err != nil {
+				return err
+			}
+			withdrawnFreshness = len(withdrawn) > 0
+			if len(pendingMessages) > 0 {
+				help := make([]string, 0, len(pendingMessages))
+				for _, message := range pendingMessages {
+					if message.Status == "queued" {
+						help = append(help, fmt.Sprintf("Withdraw queued instruction #%d with `posse unsend %d`, then retry with `%s`", message.ID, message.ID, retry))
+					} else {
+						help = append(help, fmt.Sprintf("Wait for instruction #%d delivery to settle, then retry with `%s`", message.ID, retry))
+					}
+				}
+				return axi.Failure("pr_release_refused", "an interrupted release is blocked by a Lead- or User-written instruction", true, help...)
+			}
+		} else if intentErr != nil && !store.IsNotFound(intentErr) {
+			return intentErr
+		}
 		pending, err := db.HasPendingTaskInstructions(ctx.Context, target.task.ID)
 		if err != nil {
 			return err
@@ -33,8 +58,24 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if pending || len(uncertain) > 0 {
-			return prReleaseRefused("pending Worker instructions could contain output that has not been preserved", true)
+		if pending {
+			messages, err := db.PendingTaskInstructions(ctx.Context, target.task.ID)
+			if err != nil {
+				return err
+			}
+			retry := "posse pr release " + target.taskLabel() + " --policy " + policy
+			help := make([]string, 0, len(messages))
+			for _, message := range messages {
+				if message.Status == "queued" {
+					help = append(help, fmt.Sprintf("Withdraw queued instruction #%d with `posse unsend %d`, then retry with `%s`", message.ID, message.ID, retry))
+				} else {
+					help = append(help, fmt.Sprintf("Wait for instruction #%d delivery to settle, then retry with `%s`", message.ID, retry))
+				}
+			}
+			return axi.Failure("pr_release_refused", "pending Worker instructions could contain output that has not been preserved", true, help...)
+		}
+		if len(uncertain) > 0 {
+			return prReleaseRefused("Worker instruction delivery is uncertain; inspect the Worker before retrying `posse pr release "+target.taskLabel()+" --policy "+policy, true)
 		}
 		if policy == "retain" {
 			held, err := taskSandboxHeldBy(ctx.Context, db, target.task)
@@ -74,6 +115,11 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 			}
 			if err := s.recordExecutorPolicy(ctx.Context, db, target, policy, "Executor stopped; Sandbox released after verifying PR head "+observation.HeadSHA); err != nil {
 				return err
+			}
+			if withdrawnFreshness {
+				if err := s.pollProjectPullRequests(ctx.Context, db, target.project, target.cfg, true); err != nil {
+					return axi.Failure("pr_release_incomplete", "Sandbox released, but the PR conflict refresh could not be re-raised: "+err.Error(), true, "Retry `posse pr inspect "+target.taskLabel()+"` to refresh the PR watch")
+				}
 			}
 			return printExecutorPolicy(ctx, target, policy, true)
 		}

@@ -240,6 +240,37 @@ func insertValidationStateFixture(t *testing.T, f reviewVerdictFixture) {
 	}
 }
 
+func TestQueueValidationFixRequeuesAfterAutomaticInstructionWasWithdrawn(t *testing.T) {
+	f := newReviewVerdictFixture(t, nil)
+	first, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "freshness", reviewShaA, "freshness:1", "Merge origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, withdrawn, err := f.db.WithdrawQueuedMessage(f.ctx, first.MessageID); err != nil || !withdrawn {
+		t.Fatalf("withdraw automatic instruction: withdrawn=%t err=%v", withdrawn, err)
+	}
+
+	second, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "freshness", reviewShaA, "freshness:1", "Merge origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Queued || second.MessageID == first.MessageID {
+		t.Fatalf("retry reused withdrawn instruction: first=%#v second=%#v", first, second)
+	}
+	old, err := f.db.MessageByID(f.ctx, first.MessageID)
+	if err != nil || old.Status != "withdrawn" {
+		t.Fatalf("old instruction history = %#v err=%v", old, err)
+	}
+	current, err := f.db.MessageByID(f.ctx, second.MessageID)
+	if err != nil || current.Status != "queued" {
+		t.Fatalf("re-raised instruction = %#v err=%v", current, err)
+	}
+	repeated, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "freshness", reviewShaA, "freshness:1", "Merge origin/main")
+	if err != nil || repeated.Queued || repeated.MessageID != second.MessageID {
+		t.Fatalf("repeated observation was not idempotent: %#v err=%v", repeated, err)
+	}
+}
+
 func TestQueueValidationFixCoalescesKindsForOneHead(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	gate, err := f.db.QueueValidationFixInstruction(f.ctx, f.change, "gate", reviewShaA, "gate:1", "Gate command failed")
