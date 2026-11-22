@@ -24,7 +24,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/herdr"
 )
 
-func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
+func TestOfficial015HomeRefusesDirectUpgradeBeforeV033(t *testing.T) {
 	if testProcessHasHerdrAncestor(os.Getpid()) {
 		t.Skip("release update fixture requires a process tree outside an active Herdr session")
 	}
@@ -65,29 +65,21 @@ func TestOfficial015HomeMigratesReviewModeDuringUpdate(t *testing.T) {
 	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")
 	updateEnv = setEnv(updateEnv, "SSL_CERT_FILE", certPath)
-	if code, output := runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, updateEnv, "update", "--version", release.tag); code != 0 {
-		t.Fatalf("v0.15.0 update failed: code=%d output=%s", code, output)
+	if code, output := runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, updateEnv, "update", "--version", release.tag); code != 1 || !strings.Contains(output, "setup_failed") || !strings.Contains(output, "update to posse v0.33.0 first") {
+		t.Fatalf("v0.15.0 home update did not refuse the unsupported schema: code=%d output=%s", code, output)
 	}
 	want := "# posse vocabulary: 2\n# Keep this User comment.\n[defaults]\nreview = 'quick' # Existing review behavior\nmerge_mode = 'local' # Local delivery is unchanged\n"
 	if got, err := os.ReadFile(configPath); err != nil || string(got) != want {
-		t.Fatalf("update did not migrate config in place: %q err=%v; want %q", got, err, want)
-	}
-	if backup, err := os.ReadFile(configPath + ".v015"); err != nil || !bytes.Equal(backup, original) {
-		t.Fatalf("update did not retain the original config bytes: %q err=%v", backup, err)
+		t.Fatalf("update config = %q err=%v; want migrated config %q", got, err, want)
 	}
 }
 
-func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
-	if testProcessHasHerdrAncestor(os.Getpid()) {
-		t.Skip("release update fixture requires a process tree outside an active Herdr session")
-	}
+func TestOfficial014HomeRefusesDirectUpgradeBeforeV033(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("official v0.14.0 release fixture is Linux amd64")
 	}
-	f := newPRLifecycleFixtureWithManualWatchOwner(t)
+	f := newPRLifecycleFixture(t)
 	defer f.db.Close()
-	userEnv := newPRLifecycleUserShellEnv(t, f)
-
 	stableBinaryDir := newFixtureRootAt(t, "/var/tmp", fixturePrefix("official-update-installed-"))
 	legacyBinary := downloadOfficialReleaseBinary(t, stableBinaryDir, "v0.14.0")
 	home := filepath.Join(f.root, "legacy-release-home")
@@ -95,95 +87,14 @@ func TestOfficial014HomeCanBeRepairedAfter015Update(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := setEnv(f.env, "POSSE_HOME", home)
-
-	if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, "config", "set", "defaults.review", "on_risk"); code != 0 {
-		t.Fatalf("v0.14.0 could not create the legacy review setting: %d %s", code, output)
-	}
 	if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, "config", "set", "defaults.landing_mode", "pr"); code != 0 {
-		t.Fatalf("v0.14.0 could not create its legacy vocabulary setting: %d %s", code, output)
+		t.Fatalf("v0.14.0 could not create its legacy delivery setting: %d %s", code, output)
 	}
-	configPath := filepath.Join(home, "config.toml")
-	original, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	officialRelease := downloadOfficialReleaseAsset(t, "v0.15.0")
-	officialProxyURL, officialCertPath := startUpdateReleaseProxy(t, officialRelease)
-	officialUpdateEnv := setEnv(userEnv, "POSSE_HOME", home)
-	officialUpdateEnv = setEnv(officialUpdateEnv, "PATH", updateFixturePath(t, f))
-	officialUpdateEnv = setEnv(officialUpdateEnv, "HTTPS_PROXY", officialProxyURL)
-	officialUpdateEnv = setEnv(officialUpdateEnv, "https_proxy", officialProxyURL)
-	officialUpdateEnv = setEnv(officialUpdateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
-	officialUpdateEnv = setEnv(officialUpdateEnv, "no_proxy", "localhost,127.0.0.1,::1")
-	officialUpdateEnv = setEnv(officialUpdateEnv, "SSL_CERT_FILE", officialCertPath)
-	updateCode, updateOutput := runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, officialUpdateEnv, "update", "--version", "v0.15.0")
-	if updateCode != 1 || !strings.Contains(updateOutput, "setup_failed") || !strings.Contains(updateOutput, "installed v0.15.0") || !strings.Contains(updateOutput, "legacy review policy") {
-		t.Fatalf("official v0.14.0 update did not reproduce the 0.15.0 setup failure: code=%d output=%s", updateCode, updateOutput)
-	}
-	if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, "--version"); code != 0 || !strings.Contains(output, "0.15.0") {
-		t.Fatalf("official v0.15.0 binary was not installed: code=%d output=%s", code, output)
-	}
-	for _, args := range [][]string{
-		{"config", "set", "defaults.review", "none"},
-		{"config", "unset", "defaults.review"},
-	} {
-		if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, args...); code == 0 || !strings.Contains(output, "config_invalid") {
-			t.Fatalf("official v0.15.0 did not reproduce the config repair deadlock for %v: code=%d output=%s", args, code, output)
-		}
-	}
-	if data, err := os.ReadFile(configPath); err != nil || !bytes.Equal(data, original) {
-		t.Fatalf("failed v0.15.0 repair attempts changed config: %q err=%v", data, err)
-	}
-
-	// Use a local TLS proxy for the second release so the real v0.15 updater installs this Task's binary.
-	currentBinary, err := os.ReadFile(f.binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	currentRelease := makeUpdateTestRelease(t, f.binary, "v0.15.1")
-	proxyURL, certPath := startUpdateReleaseProxy(t, currentRelease)
-	updateEnv := setEnv(userEnv, "POSSE_HOME", home)
-	updateEnv = setEnv(updateEnv, "PATH", updateFixturePath(t, f))
-	updateEnv = setEnv(updateEnv, "HTTPS_PROXY", proxyURL)
-	updateEnv = setEnv(updateEnv, "https_proxy", proxyURL)
-	updateEnv = setEnv(updateEnv, "NO_PROXY", "localhost,127.0.0.1,::1")
-	updateEnv = setEnv(updateEnv, "no_proxy", "localhost,127.0.0.1,::1")
-	updateEnv = setEnv(updateEnv, "SSL_CERT_FILE", certPath)
-	updateCode, updateOutput = runReleaseCLIInUserPane(t, f, legacyBinary, f.repo, updateEnv, "update", "--version", currentRelease.tag)
-	if updateCode != 1 || !strings.Contains(updateOutput, "setup_failed") || !strings.Contains(updateOutput, "installed "+currentRelease.tag) || !strings.Contains(updateOutput, "posse config set defaults.review none") {
-		t.Fatalf("official v0.15.0 update did not install the repair-capable binary: code=%d output=%s", updateCode, updateOutput)
-	}
-	installedBinary, err := os.ReadFile(legacyBinary)
-	if err != nil || !bytes.Equal(installedBinary, currentBinary) {
-		t.Fatalf("repair-capable binary was not installed: bytes=%d err=%v", len(installedBinary), err)
-	}
-	if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, "config", "set", "defaults.review", "none"); code != 0 {
-		t.Fatalf("current binary could not repair the v0.14 home: code=%d output=%s", code, output)
-	}
-	if code, output := runReleaseCLI(t, legacyBinary, f.repo, env, "config", "show"); code != 0 {
-		t.Fatalf("repaired config did not load: code=%d output=%s", code, output)
-	}
-	backup, err := os.ReadFile(configPath + ".v014")
-	if err != nil || !bytes.Equal(backup, original) {
-		t.Fatalf("migration backup did not preserve the v0.14 bytes: %q err=%v; want %q", backup, err, original)
-	}
-	setupBinDir := filepath.Join(f.root, "legacy-setup-bin")
-	if err := os.MkdirAll(setupBinDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(setupBinDir, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	herdrBinary, err := exec.LookPath("herdr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(herdrBinary, filepath.Join(setupBinDir, "herdr")); err != nil {
-		t.Fatal(err)
-	}
-	setupEnv := setEnv(env, "PATH", setupBinDir+string(os.PathListSeparator)+"/usr/bin:/bin")
-	if code, output := runReleaseCLI(t, legacyBinary, f.repo, setupEnv, "setup", "--binary", legacyBinary); code != 0 || !strings.Contains(output, "manifest:") {
-		t.Fatalf("setup did not complete after command-line repair: code=%d output=%s", code, output)
+	command := exec.Command(f.binary, "config", "set", "defaults.review", "none")
+	command.Dir, command.Env = f.repo, env
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "update to posse v0.33.0 first") {
+		t.Fatalf("current binary did not refuse the official v0.14.0 home: err=%v output=%s", err, output)
 	}
 }
 
