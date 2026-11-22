@@ -786,6 +786,32 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			return result, discardIdentityRefused("Task changed launch, PR identity or custody during Worker shutdown")
 		}
 		task = stoppedTask
+		if err := s.runIntentStep(ctx, db, intent, "task.helpers.stop", func() error {
+			roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
+			if err != nil {
+				return err
+			}
+			helperTask := task
+			helperTask.ContainmentMode, helperTask.ContainmentPath = "marker", ""
+			authorization := newSandboxProcessAuthorization()
+			defer authorization.Close()
+			if err := retainTaskContainmentProcesses(authorization, helperTask, roots); err != nil {
+				return err
+			}
+			pids, err := markedTaskPIDs(task.ContainmentMarker)
+			if err != nil {
+				return err
+			}
+			for _, pid := range pids {
+				if taskContainsProcess(pid, helperTask, roots) {
+					stopped = append(stopped, strconv.Itoa(pid))
+				}
+			}
+			_, err = stopTaskProcessContainmentWithGuard(ctx, helperTask, authorization.guardSignal)
+			return err
+		}); err != nil {
+			return result, s.teardownDiscardIncomplete(ctx, db, project, task, "Task process shutdown", err)
+		}
 		branchSHA := ""
 		if project.IsWorkspace() {
 			var tipsErr error

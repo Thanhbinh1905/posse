@@ -115,7 +115,7 @@ func (s *Service) beginIntentStep(ctx context.Context, db *store.DB, intent stor
 }
 
 func teardownStepIndex(step string) int {
-	steps := []string{"worker.stop", "approval.record", "discard.capture", "process.stop", "panes.close", "sandbox.stop", "orphan.snapshot", "report.attachments", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"}
+	steps := []string{"worker.stop", "task.helpers.stop", "approval.record", "discard.capture", "process.stop", "panes.close", "sandbox.stop", "orphan.snapshot", "report.attachments", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"}
 	for index, candidate := range steps {
 		if candidate == step {
 			return index
