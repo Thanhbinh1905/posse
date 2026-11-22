@@ -74,6 +74,51 @@ func recordBlockingReviewFinding(t *testing.T, f *prLifecycleFixture, changeSeq 
 	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "changes_requested")
 }
 
+func recordBlockingRepairThenFinding(t *testing.T, f *prLifecycleFixture, changeSeq, findingKey string) {
+	t.Helper()
+	recordBlockingReviewFinding(t, f, changeSeq)
+	change := f.mustTask(t, changeSeq)
+	if code, output := runReviewIdentityCLI(t, f, "review", "fix", changeSeq); code != 0 || !strings.Contains(output, "queued") {
+		t.Fatalf("queue blocking-finding repair: %d %s", code, output)
+	}
+	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "show", changeSeq); code != 0 {
+		t.Fatalf("deliver blocking-finding repair: %d %s", code, output)
+	}
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := filepath.Join(candidate.WorktreePath, "review-issue.txt")
+	if err := os.WriteFile(issue, []byte("repaired operation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, candidate.WorktreePath, "add", "review-issue.txt")
+	gitTest(t, f.env, candidate.WorktreePath, "commit", "-m", "repair blocking review finding")
+	resolutions := filepath.Join(f.home, "scratch", "shop", changeSeq, "repair-resolutions.json")
+	if err := os.MkdirAll(filepath.Dir(resolutions), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resolutions, []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := f.db.TaskTurnToken(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, workerEnv, "signal", "done", "Applied the blocking-finding repair", "--turn", turn, "--resolutions", resolutions); code != 0 {
+		t.Fatalf("record blocking-finding repair: %d %s", code, output)
+	}
+	if findingKey == "" {
+		findingKey = "unsafe-operation-after-repair"
+	}
+	recordReviewRound(t, f, changeSeq, "changes_requested", blockingFindings(findingKey, "review-issue.txt", "repaired operation"))
+}
+
 func recordPassingReview(t *testing.T, f *prLifecycleFixture, changeSeq string) {
 	t.Helper()
 	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 {
@@ -496,7 +541,7 @@ func TestFullPipelineReviewCarryIsReviewOnlyAtPublication(t *testing.T) {
 func TestReviewCapAcceptHeadRefusesAfterCandidateTargetMoves(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	var decisionID int64
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
@@ -527,7 +572,7 @@ func TestYoloReviewCapDiscardUsesDelegatedAuthority(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	_, _, seq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, seq)
+	recordBlockingRepairThenFinding(t, f, seq, "")
 	change := f.mustTask(t, seq)
 	var id int64
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, change.ID).Scan(&id); err != nil {
@@ -549,7 +594,7 @@ func TestReviewCapFinalFixWithoutOpenPatternsNeedsReview(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	_, _, seq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, seq)
+	recordBlockingRepairThenFinding(t, f, seq, "")
 	change := f.mustTask(t, seq)
 	if _, err := f.db.ExecContext(context.Background(), `UPDATE review_findings SET state='fixed' WHERE ship_task_id=?`, change.ID); err != nil {
 		t.Fatal(err)
@@ -628,7 +673,7 @@ func TestReviewCapRecoveryKeepsOriginalAnswer(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop")
 	_, _, seq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, seq)
+	recordBlockingRepairThenFinding(t, f, seq, "")
 	change := f.mustTask(t, seq)
 	var id int64
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap'`, change.ID).Scan(&id); err != nil {
@@ -654,7 +699,7 @@ func TestYoloLeadCanResolveReviewCapWithoutUserAnswer(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	runPosse(t, f.binary, f.repo, f.env, "config", "set", "autonomy.yolo", "true", "--project", "shop", "--user-approved", "User enabled YOLO")
 	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	var decisionID int64
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
@@ -700,7 +745,7 @@ func TestYoloLeadCanResolveReviewCapWithoutUserAnswer(t *testing.T) {
 func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	// The last allowed verdict is followed by a new author head. This is the
 	// cap condition for a final-pass candidate with unreviewed code changes.
@@ -782,7 +827,7 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 func TestReviewCapBlockingFindingNeedsTheUsersCapDecision(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	const quote = "ok làm hết"
 	for _, args := range [][]string{
@@ -791,21 +836,21 @@ func TestReviewCapBlockingFindingNeedsTheUsersCapDecision(t *testing.T) {
 		{"withdraw", "--reason", "not a real problem", "--user-approved", quote},
 		{"reclassify", "--severity", "P2", "--user-approved", quote},
 	} {
-		command := append([]string{"review", "dispose", changeSeq, "F-1"}, args...)
+		command := append([]string{"review", "dispose", changeSeq, "F-2"}, args...)
 		if code, output := runReviewIdentityCLI(t, f, command...); code != 1 || !strings.Contains(output, "review_cap_decision_required") || !strings.Contains(output, "review_cap") {
 			t.Fatalf("%s cleared an introduced P1 at the spent cap without the User's cap Decision: %d %s", args[0], code, output)
 		}
 	}
 	var state, severity string
-	if err := f.db.QueryRowContext(context.Background(), `SELECT state,severity FROM review_findings WHERE ship_task_id=?`, change.ID).Scan(&state, &severity); err != nil || state != "open" || severity != "P1" {
-		t.Fatalf("finding=(%s,%s) err=%v, want open P1", state, severity, err)
+	if err := f.db.QueryRowContext(context.Background(), `SELECT state,severity FROM review_findings WHERE ship_task_id=? ORDER BY seq DESC LIMIT 1`, change.ID).Scan(&state, &severity); err != nil || state != "open" || severity != "P1" {
+		t.Fatalf("latest finding=(%s,%s) err=%v, want open P1", state, severity, err)
 	}
 }
 
 func TestReviewCapRethinkStartsAChangeWithInheritedFindings(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	var decisionID int64
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
@@ -829,13 +874,13 @@ func TestReviewCapRethinkStartsAChangeWithInheritedFindings(t *testing.T) {
 	if code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "rethink-followup"); code != 0 {
 		t.Fatalf("start superseding Change Task: %d %s", code, output)
 	}
-	followup := f.mustTask(t, "t3")
-	if code, output := runReviewIdentityCLI(t, f, "review", "t3", "--full"); code != 0 || !strings.Contains(output, "inherited") {
+	followup := f.mustTask(t, "t4")
+	if code, output := runReviewIdentityCLI(t, f, "review", "t4", "--full"); code != 0 || !strings.Contains(output, "inherited") {
 		t.Fatalf("inspect inherited Finding Ledger: %d %s", code, output)
 	}
 	var inherited int
-	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=? AND inherited_from IN (SELECT id FROM review_findings WHERE ship_task_id=?) AND state='deferred'`, followup.ID, change.ID).Scan(&inherited); err != nil || inherited != 1 {
-		t.Fatalf("inherited findings=%d err=%v", inherited, err)
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=? AND inherited_from IN (SELECT id FROM review_findings WHERE ship_task_id=?) AND state='deferred'`, followup.ID, change.ID).Scan(&inherited); err != nil || inherited != 2 {
+		t.Fatalf("inherited findings=%d err=%v, want both reviewed patterns", inherited, err)
 	}
 	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
 }
@@ -843,7 +888,7 @@ func TestReviewCapRethinkStartsAChangeWithInheritedFindings(t *testing.T) {
 func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	if code, output := runReviewIdentityCLI(t, f, "decisions"); code != 0 || !strings.Contains(output, "review_cap") {
 		t.Fatalf("last-round changes_requested did not raise its User-only cap Decision: %d %s", code, output)
@@ -869,8 +914,8 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 		t.Fatalf("retry final-fix must return the existing application: %d %s", code, output)
 	}
 	var repairs int
-	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, change.ID).Scan(&repairs); err != nil || repairs != 1 {
-		t.Fatalf("retry queued %d repair rounds: %v", repairs, err)
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, change.ID).Scan(&repairs); err != nil || repairs != 2 {
+		t.Fatalf("initial blocking repair plus final fix produced %d repair rounds: %v", repairs, err)
 	}
 	if _, err := herdr.NewWithEnv("herdr", f.env).Run(context.Background(), "pane", "report-agent", change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
 		t.Fatal(err)
@@ -885,7 +930,7 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	gitTest(t, f.env, candidatePath, "add", "review-issue.txt")
 	gitTest(t, f.env, candidatePath, "commit", "-m", "apply final Review fix")
 	resolutions := filepath.Join(f.home, "scratch", "shop", "t1", "final-fix-resolutions.json")
-	contents := []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"}]}`)
+	contents := []byte(`{"schema":"posse.review-resolutions.v1","patterns":[{"pattern":"P-1","status":"fixed"},{"pattern":"P-2","status":"fixed"}]}`)
 	if err := os.WriteFile(resolutions, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1004,7 +1049,7 @@ func TestDefaultCapRoundThreeChangesRequestedRaisesOneUserOnlyDecision(t *testin
 func TestRethinkSuccessorSuppressesInheritedFingerprints(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	_, _, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "unsafe-operation")
 	change := f.mustTask(t, changeSeq)
 	var decisionID int64
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&decisionID); err != nil {
@@ -1025,7 +1070,7 @@ func TestRethinkSuccessorSuppressesInheritedFingerprints(t *testing.T) {
 	if code, output := runReviewIdentityCLI(t, f, "start", "--brief", brief, "--name", "rethink-successor", "--profile", "author"); code != 0 {
 		t.Fatalf("start superseding Change Task: %d %s", code, output)
 	}
-	successor := f.mustTask(t, "t3")
+	successor := f.mustTask(t, "t4")
 	// The successor still contains the line the predecessor's finding named.
 	commitFile(t, f, successor, "review-issue.txt", "unsafe operation")
 	workerEnv := setEnv(f.env, "HERDR_PANE_ID", successor.PaneID)
@@ -1045,10 +1090,10 @@ func TestRethinkSuccessorSuppressesInheritedFingerprints(t *testing.T) {
 		t.Fatalf("complete successor submission: %d %s", code, output)
 	}
 	// The Reviewer reports the predecessor's exact finding again.
-	recordReviewRound(t, f, "t3", "pass", blockingFindings("unsafe-operation", "review-issue.txt", "unsafe operation"))
+	recordReviewRound(t, f, "t4", "pass", blockingFindings("unsafe-operation", "review-issue.txt", "unsafe operation"))
 	var findings int
-	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=?`, successor.ID).Scan(&findings); err != nil || findings != 1 {
-		t.Fatalf("successor findings=%d err=%v, want only the inherited one", findings, err)
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM review_findings WHERE ship_task_id=?`, successor.ID).Scan(&findings); err != nil || findings != 2 {
+		t.Fatalf("successor findings=%d err=%v, want both inherited findings", findings, err)
 	}
 	var data string
 	if err := f.db.QueryRowContext(context.Background(), `SELECT data_json FROM notices WHERE task_id=? AND kind='review_round_done' ORDER BY id DESC LIMIT 1`, successor.ID).Scan(&data); err != nil {
