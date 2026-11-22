@@ -664,7 +664,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					if err != nil {
 						return err
 					}
-					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head)
+					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head, greenhouseBlockAt(task))
 					if err != nil {
 						return err
 					}

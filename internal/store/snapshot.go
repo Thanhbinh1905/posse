@@ -154,6 +154,8 @@ type decisionSnapshot struct {
 	TaskLaunches   int      `toml:"task_launches"`
 	ObsoleteAt     int64    `toml:"obsolete_at"`
 	ObsoleteReason string   `toml:"obsolete_reason"`
+	Evidence       []byte   `toml:"evidence,omitempty"`
+	EvidenceDigest string   `toml:"evidence_digest,omitempty"`
 }
 
 type noticeSnapshot struct {
@@ -1543,6 +1545,11 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				decision.ID, decision.ProjectID, decision.TaskID, decision.Origin, decision.Question, string(options), decision.Answer, decision.UserQuote,
 				decision.CreatedAt, decision.AnsweredAt, decision.Kind, decision.TaskLaunches, decision.ObsoleteAt, decision.ObsoleteReason, decision.AnswerActor, decision.AnswerReason); err != nil {
 				return err
+			}
+			if len(decision.Evidence) > 0 {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO decision_evidence(decision_id,evidence,digest) VALUES(?,?,?)`, decision.ID, decision.Evidence, decision.EvidenceDigest); err != nil {
+					return err
+				}
 			}
 		}
 		for _, notice := range state.Notices {

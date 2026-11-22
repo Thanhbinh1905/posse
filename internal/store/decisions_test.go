@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -34,6 +35,38 @@ func TestUnansweredReviewCapDecisionReusesOriginalOptions(t *testing.T) {
 	wantOptions := []string{"accept-head", "rethink", "discard"}
 	if err != nil || reused.ID != original.ID || !slices.Equal(reused.Options, wantOptions) {
 		t.Fatalf("review_cap Decision reuse = %#v, %v; want same Decision with options %v", reused, err, wantOptions)
+	}
+}
+
+func TestDisputeDecisionStoresEvidenceAndDigest(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "review_dispute:t1:F-1", Kind: "review_dispute", Question: "Withdraw finding F-1?", Options: []string{"withdraw", "keep"}, Evidence: []byte("the validation is present")}
+	decision, err := db.RaiseDecision(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Decision(ctx, project.ID, decision.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Evidence) != string(request.Evidence) || got.EvidenceDigest == "" {
+		t.Fatalf("Decision evidence = %q digest %q, want stored bytes and digest", got.Evidence, got.EvidenceDigest)
+	}
+	if _, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "review_dispute:oversize", Kind: "review_dispute", Question: "Too large?", Options: []string{"withdraw", "keep"}, Evidence: make([]byte, 64*1024+1)}); err == nil || !strings.Contains(err.Error(), "64 KiB") {
+		t.Fatalf("oversized evidence error = %v, want 64 KiB refusal", err)
 	}
 }
 

@@ -99,7 +99,7 @@ func (verdict Verdict) Qualifies(head string) bool {
 		(verdict.Outcome == "clean" || verdict.Outcome == "findings" && verdict.Blocking == 0)
 }
 
-func (db *DB) GreenhouseGatePass(ctx context.Context, taskID int64, repository, head string) (bool, error) {
+func (db *DB) GreenhouseGatePass(ctx context.Context, taskID int64, repository, head string, blockAt ...string) (bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT verdict,blocking,head_sha,mode FROM verdicts WHERE task_id=? AND repo=? AND provider=? ORDER BY recorded_at DESC,id DESC`, taskID, repository, GreenhouseReviewProvider)
 	if err != nil {
 		return false, err
@@ -112,7 +112,43 @@ func (db *DB) GreenhouseGatePass(ctx context.Context, taskID int64, repository, 
 	if err := rows.Scan(&verdict.Outcome, &verdict.Blocking, &verdict.Head, &verdict.Mode); err != nil {
 		return false, err
 	}
-	return verdict.Qualifies(head), rows.Err()
+	qualifies := verdict.Qualifies(head)
+	if !qualifies && verdict.Head == head && verdict.Mode == "gate" && verdict.Outcome == "findings" && verdict.Blocking > 0 {
+		threshold := "P1"
+		if len(blockAt) > 0 && blockAt[0] != "" {
+			threshold = blockAt[0]
+		}
+		rank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+		rows, err := db.QueryContext(ctx, `SELECT f.severity,COALESCE((SELECT event FROM provider_finding_events e WHERE e.finding_id=f.id ORDER BY e.id DESC LIMIT 1),'')
+FROM provider_findings f WHERE f.task_id=? AND f.repo=? AND f.head_sha=? AND f.verdict_id=(
+ SELECT id FROM verdicts v WHERE v.task_id=f.task_id AND v.repo=f.repo AND v.provider=f.provider ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1)`, taskID, repository, head)
+		if err != nil {
+			return false, err
+		}
+		thresholdRank := rank[threshold]
+		active, seen := false, false
+		for rows.Next() {
+			seen = true
+			var severity, event string
+			if err := rows.Scan(&severity, &event); err != nil {
+				rows.Close()
+				return false, err
+			}
+			severityRank, known := rank[severity]
+			if event != "withdrawn" && (!known || severityRank <= thresholdRank) {
+				active = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if err := rows.Close(); err != nil {
+			return false, err
+		}
+		qualifies = seen && !active
+	}
+	return qualifies, rows.Err()
 }
 
 func countBlockingReviewFindingsTx(ctx context.Context, tx *writeTx, taskID int64, repository, blockAt string) (int, error) {

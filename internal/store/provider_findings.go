@@ -82,8 +82,43 @@ func recordProviderFindingsTx(ctx context.Context, tx *sql.Tx, verdictID int64, 
 	return nil
 }
 
+func (db *DB) ProviderFindingForTask(ctx context.Context, taskID int64, seq int) (ProviderFindingDetail, error) {
+	var finding ProviderFindingDetail
+	err := db.QueryRowContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,CASE WHEN (SELECT event FROM provider_finding_events e WHERE e.finding_id=f.id ORDER BY e.id DESC LIMIT 1)='withdrawn' THEN 'withdrawn' ELSE f.state END
+FROM provider_findings f JOIN provider_finding_patterns p ON p.task_id=f.task_id AND p.seq=f.pattern_seq
+JOIN verdicts v ON v.id=f.verdict_id
+WHERE f.task_id=? AND f.id=? AND v.provider=f.provider AND v.id=(SELECT id FROM verdicts latest WHERE latest.task_id=f.task_id AND latest.repo=f.repo AND latest.provider=f.provider ORDER BY latest.recorded_at DESC,latest.id DESC LIMIT 1)`, taskID, seq).Scan(&finding.FindingSeq, &finding.PatternSeq, &finding.PatternKey, &finding.Title, &finding.Rule, &finding.FixGuidance,
+		&finding.Repository, &finding.HeadSHA, &finding.Path, &finding.Line, &finding.Excerpt, &finding.Severity, &finding.Origin, &finding.State)
+	return finding, err
+}
+
+func (db *DB) WithdrawProviderFinding(ctx context.Context, taskID, findingID, decisionID int64, evidenceDigest, userQuote string) error {
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state, latestEvent string
+	if err := tx.QueryRowContext(ctx, `SELECT f.state,COALESCE((SELECT event FROM provider_finding_events e WHERE e.finding_id=f.id ORDER BY e.id DESC LIMIT 1),'') FROM provider_findings f WHERE f.task_id=? AND f.id=?`, taskID, findingID).Scan(&state, &latestEvent); err != nil {
+		return err
+	}
+	if latestEvent == "withdrawn" {
+		return tx.Commit()
+	}
+	if state != "open" && state != "disputed" {
+		return fmt.Errorf("Greenhouse finding is no longer open")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO provider_finding_events(finding_id,event,note,at) VALUES(?, 'withdrawn', ?, ?)`, findingID, fmt.Sprintf("Decision #%d; evidence SHA-256 %s; User: %s", decisionID, evidenceDigest, userQuote), time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
 func (db *DB) ProviderFindingsForTask(ctx context.Context, taskID int64) ([]ProviderFindingDetail, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,f.state
+	rows, err := db.QueryContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,CASE WHEN (SELECT event FROM provider_finding_events e WHERE e.finding_id=f.id ORDER BY e.id DESC LIMIT 1)='withdrawn' THEN 'withdrawn' ELSE f.state END
 FROM provider_findings f JOIN provider_finding_patterns p ON p.task_id=f.task_id AND p.seq=f.pattern_seq
 JOIN verdicts v ON v.id=f.verdict_id
 WHERE f.task_id=? AND v.provider=f.provider AND v.id=(SELECT id FROM verdicts latest WHERE latest.task_id=f.task_id AND latest.repo=f.repo AND latest.provider=f.provider ORDER BY latest.recorded_at DESC,latest.id DESC LIMIT 1)

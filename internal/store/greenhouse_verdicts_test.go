@@ -85,6 +85,30 @@ func TestGreenhouseVerdictPersistsFindingsByTaskRepositoryAndHead(t *testing.T) 
 	}
 }
 
+func TestWithdrawingLastP1ProviderFindingQualifiesExactHead(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r-withdraw", reviewShaA)
+	verdict.Outcome, verdict.Mode, verdict.Blocking = "findings", "gate", 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "internal/app/tasks.go", Line: 42, Excerpt: "False finding", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("provider findings = %+v, %v", findings, err)
+	}
+	if err := f.db.WithdrawProviderFinding(f.ctx, f.change, int64(findings[0].FindingSeq), 17, strings.Repeat("a", 64), "User-approved dispute"); err != nil {
+		t.Fatal(err)
+	}
+	if passed, err := f.db.GreenhouseGatePass(f.ctx, f.change, "shop", reviewShaA); err != nil || !passed {
+		t.Fatalf("withdrawn exact-head finding did not qualify: passed=%v err=%v", passed, err)
+	}
+	findings, err = f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 || findings[0].State != "withdrawn" {
+		t.Fatalf("withdrawn finding projection = %+v, %v", findings, err)
+	}
+}
+
 func TestProviderFindingsUseReviewFixQueueAndResolution(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r5", reviewShaA)

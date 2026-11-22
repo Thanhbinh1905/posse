@@ -741,6 +741,21 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
+	if parsed.Bool("full") {
+		decisions, err := db.Decisions(ctx.Context, project.ID, false)
+		if err != nil {
+			return err
+		}
+		var disputes []any
+		for _, decision := range decisions {
+			if decision.TaskID == task.ID && decision.Kind == "review_dispute" {
+				disputes = append(disputes, decisionOutput(ctx.Context, db, project.ID, decision))
+			}
+		}
+		if len(disputes) > 0 {
+			view["review_disputes"] = disputes
+		}
+	}
 	adoptions, err := db.TaskAdoptions(ctx.Context, task.ID)
 	if err != nil {
 		return err
