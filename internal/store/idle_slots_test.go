@@ -8,10 +8,10 @@ import (
 
 func TestIdleSlotTasksRespectsPRReviewReadiness(t *testing.T) {
 	for _, test := range []struct {
-		name, mode, verdict string
-		blocking            int
-		olderVerdict        string
-		wantIdle            bool
+		name, mode, verdict, verdictMode string
+		blocking                         int
+		olderVerdict                     string
+		wantIdle                         bool
 	}{
 		{name: "pr", mode: "pr"},
 		{name: "greenhouse without verdict", mode: "greenhouse", wantIdle: true},
@@ -19,6 +19,7 @@ func TestIdleSlotTasksRespectsPRReviewReadiness(t *testing.T) {
 		{name: "greenhouse blocking verdict", mode: "greenhouse", verdict: "findings", blocking: 1, wantIdle: true},
 		{name: "greenhouse older pass and latest blocker", mode: "greenhouse", verdict: "findings", blocking: 1, olderVerdict: "clean", wantIdle: true},
 		{name: "greenhouse nonblocking findings", mode: "greenhouse", verdict: "findings"},
+		{name: "greenhouse parallel verdict after gate pass", mode: "greenhouse", verdict: "clean", verdictMode: "parallel", olderVerdict: "clean"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -58,7 +59,11 @@ func TestIdleSlotTasksRespectsPRReviewReadiness(t *testing.T) {
 				}
 			}
 			if test.verdict != "" {
-				if _, err := db.ExecContext(ctx, `INSERT INTO verdicts(task_id,repo,provider,protocol,grant_id,head_sha,target_sha,review_base_sha,verdict,blocking,mode,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, readyID, project.Name, GreenhouseReviewProvider, "2", "review-grant", head, head, head, test.verdict, test.blocking, "gate", 2); err != nil {
+				verdictMode := test.verdictMode
+				if verdictMode == "" {
+					verdictMode = "gate"
+				}
+				if _, err := db.ExecContext(ctx, `INSERT INTO verdicts(task_id,repo,provider,protocol,grant_id,head_sha,target_sha,review_base_sha,verdict,blocking,mode,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, readyID, project.Name, GreenhouseReviewProvider, "2", "review-grant", head, head, head, test.verdict, test.blocking, verdictMode, 2); err != nil {
 					t.Fatal(err)
 				}
 			}
