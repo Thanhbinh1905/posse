@@ -359,6 +359,22 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
+			terminalFailure := reviewerContextOverflow(err)
+			if parallelMode {
+				requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
+				if err != nil {
+					return err
+				}
+				failures, _ := repeatedGreenhouseReviewFailures(requests, task.ID, member.name, requestHead)
+				terminalFailure = terminalFailure || failures >= greenhouseReviewFailureLimit
+			}
+			if terminalFailure {
+				reason := fmt.Sprintf("Greenhouse review failed for %s at %s. Needs a decision: split the change or land it another way. Latest failure: %s", member.name, shortSHA(requestHead), failureReason)
+				if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx.Context, project.ID, task.ID, member.name, requestHead, reason); err != nil {
+					return err
+				}
+				return axi.Failure("greenhouse_failed", failureReason, false)
+			}
 			if noticeErr := notifyFailure(requestHead, failureReason); noticeErr != nil {
 				return noticeErr
 			}
@@ -664,7 +680,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					if err != nil {
 						return err
 					}
-					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head)
+					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head, greenhouseBlockAt(task))
 					if err != nil {
 						return err
 					}

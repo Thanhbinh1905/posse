@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
@@ -16,7 +17,7 @@ func reviewGreenhouseWithRetries(ctx context.Context, parallel bool, wait time.D
 		}
 		var protocolErr *greenhouse.ProtocolError
 		var terminalErr *greenhouse.TerminalReviewError
-		if !parallel || errors.As(err, &protocolErr) || errors.As(err, &terminalErr) || retries >= 3 {
+		if !parallel || errors.As(err, &protocolErr) || errors.As(err, &terminalErr) || reviewerContextOverflow(err) || retries >= 3 {
 			return result, retries + 1, err
 		}
 		timer := time.NewTimer(time.Duration(1<<retries) * time.Second)
@@ -27,4 +28,17 @@ func reviewGreenhouseWithRetries(ctx context.Context, parallel bool, wait time.D
 		case <-timer.C:
 		}
 	}
+}
+
+func reviewerContextOverflow(err error) bool {
+	if err == nil {
+		return false
+	}
+	reason := strings.ToLower(err.Error())
+	for _, marker := range []string{"context overflow", "context length", "maximum context", "context window", "prompt is too long", "input is too long", "prompt exceeds"} {
+		if strings.Contains(reason, marker) {
+			return true
+		}
+	}
+	return false
 }
