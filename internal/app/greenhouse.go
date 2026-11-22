@@ -424,7 +424,13 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err := recordRequest("verdict", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
 			}
-			if recorded && verdict.Outcome == "findings" && verdict.Blocking > 0 {
+			if len(result.Result.Uncovered) > 0 {
+				summary := greenhousePartialDecisionQuestion(shortSHA(verdict.Head), *result.Result)
+				if _, err := db.CreateGreenhousePartialNoticeOnce(ctx.Context, project.ID, task.ID, member.name, verdict.Head, summary, result.Result); err != nil {
+					return err
+				}
+			}
+			if recorded && result.Result.Verdict == "findings" && verdict.Blocking > 0 {
 				if err := s.handleGreenhouseBlockingVerdict(ctx.Context, db, project, task, verdict); err != nil {
 					return err
 				}
@@ -432,7 +438,11 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err := greenhouse.ClearPending(round.Pending); err != nil {
 				return err
 			}
-			output = append(output, axi.Field{Key: "head", Value: verdict.Head}, axi.Field{Key: "verdict", Value: verdict.Outcome},
+			outputVerdict := result.Result.Verdict
+			if len(result.Result.Uncovered) > 0 && outputVerdict == "clean" {
+				outputVerdict = "partial"
+			}
+			output = append(output, axi.Field{Key: "head", Value: verdict.Head}, axi.Field{Key: "verdict", Value: outputVerdict},
 				axi.Field{Key: "blocking", Value: verdict.Blocking}, axi.Field{Key: "findings", Value: verdict.FindingsPath}, axi.Field{Key: "recorded", Value: recorded}, axi.Field{Key: "replayed", Value: result.Replayed})
 		case greenhouse.Stale:
 			if err := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); err != nil {
@@ -726,17 +736,35 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 		if latest != nil {
 			verdict := *latest
-			if verdict.Qualifies(head) {
-				body := fmt.Sprintf("Greenhouse passed Task head %s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", shortSHA(head), task.Title)
+			var partialReview bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.head')=?)`, task.ID, head).Scan(&partialReview); err != nil {
+				return err
+			}
+			accepted := false
+			if partialReview {
+				accepted, err = greenhouseAcceptHeadDisposition(ctx, db, task, head)
+				if err != nil {
+					return err
+				}
+			}
+			if accepted || verdict.Qualifies(head) && !partialReview {
+				message := fmt.Sprintf("Greenhouse passed Task head %s", shortSHA(head))
+				if accepted {
+					message = fmt.Sprintf("User accepted Greenhouse coverage at Task head %s", shortSHA(head))
+				}
+				body := fmt.Sprintf("%s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", message, task.Title)
 				_, queued, err := db.QueueMessageOnceAfter(ctx, task.ID, body, true, signals[0].At-1)
 				if err != nil {
 					return err
 				}
 				if queued {
-					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: Greenhouse passed %s; Posse queued publication", task.Title, shortSHA(head)), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
+					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: %s; Posse queued publication", task.Title, message), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
 						return err
 					}
 				}
+				continue
+			}
+			if partialReview {
 				continue
 			}
 			reason := fmt.Sprintf("Greenhouse returned %s for Task head %s; Posse will not publish it. The review findings are at %s. A new head requires a new done Signal.", verdict.Outcome, shortSHA(head), verdict.FindingsPath)
@@ -939,6 +967,9 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 			Key: finding.ID, Severity: finding.Priority, Origin: finding.Origin, Path: finding.File, Line: finding.Start,
 			Excerpt: finding.Explanation, Guidance: finding.Action, Rule: finding.Rule, Head: finding.Head,
 		})
+	}
+	if hr.Verdict == "partial" || len(hr.Uncovered) > 0 {
+		verdict.Outcome = "inconclusive"
 	}
 	if hr.Verdict == "findings" {
 		verdict.Blocking = greenhouseBlocking(hr.Findings, blockAt)

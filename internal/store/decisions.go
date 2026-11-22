@@ -72,7 +72,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least one option")
 	}
 	switch request.Kind {
-	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "teardown_dependants", "quota", "budget", "review_dispute":
+	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "greenhouse_coverage", "worker_question", "orphan", "pr_closed", "dependency", "teardown_dependants", "quota", "budget", "review_dispute":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
 	}

@@ -37,7 +37,11 @@ if '--list-models' in sys.argv:
     print('provider model context')
     print('fixture model 128K')
     sys.exit(0)
-request = json.load(sys.stdin)
+raw = sys.stdin.read()
+if os.path.exists(os.path.join(ctl, 'prefix-input')):
+    request, _ = json.JSONDecoder().raw_decode(raw.lstrip())
+else:
+    request = json.loads(raw)
 with open(os.path.join(ctl, 'invocations'), 'a') as log:
     log.write(request['Head'] + '\n')
 while os.path.exists(os.path.join(ctl, 'hold')):
@@ -649,10 +653,19 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 
 func newGreenhouseContract(t *testing.T, f *workerTabsFixture) *greenhouseContract {
 	t.Helper()
-	install := exec.Command("go", "install", greenhouseModule+"@"+greenhouseVersion)
-	install.Env = setEnv(os.Environ(), "GOBIN", filepath.Join(f.root, "bin"))
-	if output, err := install.CombinedOutput(); err != nil {
-		t.Fatalf("install pinned Greenhouse: %v\n%s", err, output)
+	if binary := os.Getenv("POSSE_T1237_GREENHOUSE_BIN"); binary != "" {
+		if !filepath.IsAbs(binary) {
+			t.Fatalf("POSSE_T1237_GREENHOUSE_BIN must be absolute: %s", binary)
+		}
+		if err := os.Symlink(binary, filepath.Join(f.root, "bin", "greenhouse")); err != nil {
+			t.Fatalf("link real Greenhouse binary: %v", err)
+		}
+	} else {
+		install := exec.Command("go", "install", greenhouseModule+"@"+greenhouseVersion)
+		install.Env = setEnv(os.Environ(), "GOBIN", filepath.Join(f.root, "bin"))
+		if output, err := install.CombinedOutput(); err != nil {
+			t.Fatalf("install pinned Greenhouse: %v\n%s", err, output)
+		}
 	}
 	c := &greenhouseContract{f: f, ctl: filepath.Join(f.root, "home", "greenhouse-reviewer"), home: filepath.Join(f.home, "greenhouse")}
 	agent := filepath.Join(f.root, "home", "pi-agent")

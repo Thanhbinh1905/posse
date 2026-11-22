@@ -65,23 +65,39 @@ type Finding struct {
 	Head        string `json:"head"`
 }
 
+// UncoveredPath identifies a changed path that Greenhouse could not review.
+type UncoveredPath struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+// GeneratedPath records review by provenance for a target-declared generated path.
+type GeneratedPath struct {
+	Path       string   `json:"path"`
+	Added      int      `json:"added"`
+	Removed    int      `json:"removed"`
+	Generators []string `json:"generators"`
+}
+
 // HostResult is the exact-head review result of a host run.
 type HostResult struct {
-	Grant        string    `json:"grant"`
-	ReviewID     string    `json:"review_id"`
-	Head         string    `json:"head"`
-	Target       string    `json:"target"`
-	ReviewBase   string    `json:"review_base"`
-	Status       string    `json:"status"`
-	Verdict      string    `json:"verdict"`
-	Current      bool      `json:"current"`
-	Findings     []Finding `json:"findings"`
-	RulesDigest  string    `json:"rules_digest"`
-	ConfigDigest string    `json:"config_digest"`
-	InputDigest  string    `json:"input_digest"`
-	Backend      string    `json:"backend"`
-	Model        string    `json:"model"`
-	Reason       string    `json:"reason"`
+	Grant        string          `json:"grant"`
+	ReviewID     string          `json:"review_id"`
+	Head         string          `json:"head"`
+	Target       string          `json:"target"`
+	ReviewBase   string          `json:"review_base"`
+	Status       string          `json:"status"`
+	Verdict      string          `json:"verdict"`
+	Current      bool            `json:"current"`
+	Findings     []Finding       `json:"findings"`
+	Uncovered    []UncoveredPath `json:"uncovered"`
+	Generated    []GeneratedPath `json:"generated"`
+	RulesDigest  string          `json:"rules_digest"`
+	ConfigDigest string          `json:"config_digest"`
+	InputDigest  string          `json:"input_digest"`
+	Backend      string          `json:"backend"`
+	Model        string          `json:"model"`
+	Reason       string          `json:"reason"`
 }
 
 // Recovery is set while a run waits for recovery after an interruption.
@@ -91,6 +107,11 @@ type Recovery struct {
 	Options []string `json:"options"`
 }
 
+type review struct {
+	Uncovered []UncoveredPath `json:"uncovered"`
+	Generated []GeneratedPath `json:"generated"`
+}
+
 type run struct {
 	ID         string    `json:"id"`
 	Status     string    `json:"status"`
@@ -98,12 +119,29 @@ type run struct {
 	HostGrants []string  `json:"host_grants"`
 	ReviewUsed int       `json:"review_used"`
 	Recovery   *Recovery `json:"recovery"`
+	Review     *review   `json:"review"`
 }
 
 type defaults struct {
 	Rules           []string `json:"rules"`
 	ReviewerBackend string   `json:"reviewer_backend"`
 	ReviewerModel   string   `json:"reviewer_model"`
+}
+
+func (v response) reviewResult() *HostResult {
+	result := v.HostResult
+	if result == nil {
+		return nil
+	}
+	if v.Run != nil && v.Run.Review != nil {
+		if len(result.Uncovered) == 0 {
+			result.Uncovered = v.Run.Review.Uncovered
+		}
+		if len(result.Generated) == 0 {
+			result.Generated = v.Run.Review.Generated
+		}
+	}
+	return result
 }
 
 type response struct {

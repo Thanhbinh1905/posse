@@ -295,12 +295,12 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 		if err != nil {
 			return RoundResult{}, err
 		}
-		result := RoundResult{Grant: grant, RunID: v.RunID, Result: v.HostResult}
+		result := RoundResult{Grant: grant, RunID: v.RunID, Result: v.reviewResult()}
 		if v.Run != nil && v.Run.Recovery != nil {
 			result.Outcome, result.Recovery = RecoveryRequired, v.Run.Recovery
 			return result, nil
 		}
-		if hr := v.HostResult; hr != nil && hr.Grant == grant {
+		if hr := v.reviewResult(); hr != nil && hr.Grant == grant {
 			if hr.Verdict == "" && terminalReviewStatus(hr.Status) {
 				_ = ClearPending(round.Pending)
 				return result, &TerminalReviewError{Status: hr.Status, Reason: hr.Reason}
@@ -347,7 +347,7 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 }
 
 func settledInspection(ctx context.Context, round Round, grant string, inspected response) (RoundResult, bool, error) {
-	result := inspected.HostResult
+	result := inspected.reviewResult()
 	if result == nil || result.Grant != grant || !result.Current || result.Verdict == "" {
 		return RoundResult{}, false, nil
 	}
