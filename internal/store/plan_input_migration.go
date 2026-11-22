@@ -27,7 +27,26 @@ func (db *DB) MigrateTaskPlanInputsBatch(ctx context.Context) error {
 		return err
 	}
 	defer lock.Close()
+	return db.migrateTaskPlanInputsBatchLocked(ctx)
+}
 
+func (db *DB) migrateTaskPlanInputsWhileLocked(ctx context.Context) error {
+	for {
+		complete, err := db.taskPlanInputMigrationComplete(ctx)
+		if err != nil || complete {
+			return err
+		}
+		if err := db.migrateTaskPlanInputsBatchLocked(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func (db *DB) migrateTaskPlanInputsBatchLocked(ctx context.Context) error {
+	complete, err := db.taskPlanInputMigrationComplete(ctx)
+	if err != nil || complete {
+		return err
+	}
 	var taskDone, revisionDone int
 	var taskCursor, revisionTaskCursor int64
 	var revisionCursor int

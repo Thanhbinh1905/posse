@@ -841,7 +841,7 @@ func TestGreenhouseStaleRefreshNamesReviewCommand(t *testing.T) {
 	}
 }
 
-func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing.T) {
+func TestGreenhouseFullPipelineAcceptHeadPublishesAndMergesExactHead(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -890,12 +890,38 @@ func TestGreenhouseFullPipelineDoneSignalCreatesPrepublicationHandoff(t *testing
 	if code, output, _ := f.run("publish", "Greenhouse prepublication test"); code == 0 || !strings.Contains(output, "full-pipeline requires a passing Greenhouse Verdict") {
 		t.Fatalf("publish after findings Verdict was not refused: %d %s", code, output)
 	}
-	verdict := store.Verdict{TaskID: task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r2", Head: head, Target: head, ReviewBase: head, Outcome: "clean", Mode: "gate"}
-	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
-		t.Fatalf("record Gate pass = %v, %v", recorded, err)
+	quote := "I accept the remaining Greenhouse findings on this exact head."
+	decision, err := f.db.RaiseDecision(context.Background(), store.DecisionRequest{ProjectID: f.project.ID, TaskID: task.ID, Kind: "review_cap", Origin: reviewCapOrigin(task, head), Question: "Accept this exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err = f.db.AnswerDecision(context.Background(), f.project.ID, decision.ID, "accept-head", quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.db.ExecContext(context.Background(), `INSERT INTO review_patterns(ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(?,1,'P-1','Validate accepted input','Validate external input','Missing validation','Add validation',1)`, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patternID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,?,?,1,?,'internal/input.go','parseInput','unvalidated value',1,?,'P1','introduced',1,'open')`, task.ID, patternID, strings.Repeat("a", 64), f.project.Name, head); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("apply", fmt.Sprint(decision.ID)); code != 0 {
+		t.Fatalf("apply exact-head acceptance: %d %s %s", code, output, stderr)
+	}
+	messages, err := f.db.UndeliveredTaskMessages(context.Background(), task.ID)
+	if err != nil || len(messages) == 0 || !strings.Contains(messages[len(messages)-1].Body, "Publish it unchanged") {
+		t.Fatalf("accept-head did not queue publication instruction: %+v %v", messages, err)
 	}
 	if code, output, stderr := f.run("publish", "Greenhouse prepublication test"); code != 0 {
-		t.Fatalf("publish after exact-head Gate pass: %d %s %s", code, output, stderr)
+		t.Fatalf("publish after exact-head acceptance: %d %s %s", code, output, stderr)
+	}
+	if body, err := os.ReadFile(f.ghLog); err != nil || !strings.Contains(string(body), quote) || !strings.Contains(string(body), "Validate accepted input") {
+		t.Fatalf("PR body omitted the accepted finding or User quote: %s %v", body, err)
 	}
 	if got := strings.TrimSpace(gitTest(t, f.remote, "rev-parse", "refs/heads/posse/t1")); got != head {
 		t.Fatalf("published head %s, want %s", got, head)

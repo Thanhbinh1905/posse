@@ -41,27 +41,29 @@ type migrationSource struct {
 var embeddedMigrations = sync.OnceValues(loadEmbeddedMigrations)
 
 func loadEmbeddedMigrations() ([]migrationSource, error) {
-	entries, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil {
-		return nil, err
-	}
-	sources := []migrationSource{}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".sql") {
-			continue
-		}
-		prefix, _, _ := strings.Cut(name, "_")
-		version, err := strconv.ParseInt(prefix, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("migration %s has no version prefix", name)
-		}
-		data, err := fs.ReadFile(migrationFiles, path.Join("migrations", name))
+	var sources []migrationSource
+	for _, dir := range []string{"upgrades", "migrations"} {
+		entries, err := fs.ReadDir(migrationFiles, dir)
 		if err != nil {
 			return nil, err
 		}
-		sum := sha256.Sum256(data)
-		sources = append(sources, migrationSource{version: version, checksum: hex.EncodeToString(sum[:])})
+		for _, entry := range entries {
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".sql") {
+				continue
+			}
+			prefix, _, _ := strings.Cut(name, "_")
+			version, err := strconv.ParseInt(prefix, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("migration %s has no version prefix", name)
+			}
+			data, err := fs.ReadFile(migrationFiles, path.Join(dir, name))
+			if err != nil {
+				return nil, err
+			}
+			sum := sha256.Sum256(data)
+			sources = append(sources, migrationSource{version: version, checksum: hex.EncodeToString(sum[:])})
+		}
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].version < sources[j].version })
 	return sources, nil
@@ -81,7 +83,7 @@ func (db *DB) schemaCurrent(ctx context.Context, sources []migrationSource) bool
 		return false
 	}
 	applied, err := db.appliedMigrations(ctx)
-	if err != nil || len(applied) != len(sources) {
+	if err != nil {
 		return false
 	}
 	rows, err := db.QueryContext(ctx, `SELECT version, sha256 FROM posse_migration_checksums`)
@@ -98,11 +100,46 @@ func (db *DB) schemaCurrent(ctx context.Context, sources []migrationSource) bool
 		}
 		recorded[version] = checksum
 	}
-	if rows.Err() != nil || len(recorded) != len(sources) {
+	if rows.Err() != nil {
+		return false
+	}
+	known := make(map[int64]string, len(sources))
+	for _, source := range sources {
+		known[source.version] = source.checksum
+	}
+	baselineVersion := baselineMigrationVersion
+	for version := range applied {
+		checksum, ok := known[version]
+		if !ok {
+			checksum, ok = supportedLegacyMigrationChecksums[version]
+			if !ok || recorded[version] != checksum {
+				return false
+			}
+			continue
+		}
+		if recorded[version] != checksum {
+			return false
+		}
+	}
+	legacyApplied := false
+	for _, source := range sources {
+		if source.version > 95 && source.version < baselineVersion && applied[source.version] {
+			legacyApplied = true
+		}
+	}
+	if !applied[baselineVersion] {
 		return false
 	}
 	for _, source := range sources {
-		if !applied[source.version] || recorded[source.version] != source.checksum {
+		if legacyApplied && source.version > 95 && source.version < baselineVersion && !applied[source.version] {
+			return false
+		}
+		if source.version > baselineVersion && !applied[source.version] {
+			return false
+		}
+	}
+	for version := range recorded {
+		if _, ok := known[version]; !ok && version > 95 {
 			return false
 		}
 	}
@@ -155,6 +192,9 @@ func (db *DB) checkSchema(ctx context.Context, sources []migrationSource) error 
 	unknown, diverged := []string{}, []string{}
 	for version := range applied {
 		checksum, ok := known[version]
+		if !ok {
+			checksum, ok = supportedLegacyMigrationChecksums[version]
+		}
 		if !ok {
 			unknown = append(unknown, strconv.FormatInt(version, 10))
 		} else if previous, ok := recorded[version]; ok && previous != checksum {

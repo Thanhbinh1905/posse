@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -34,10 +36,11 @@ type validationSummary struct {
 	Findings      map[string]int
 	Carries       int
 	Dispositions  int
+	Accepted      []string
 	CI            string
 }
 
-func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task) (validationSummary, error) {
+func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task, repository string) (validationSummary, error) {
 	summary := validationSummary{Head: task.GatedSHA, Review: "unknown", Findings: map[string]int{}, CI: "unknown"}
 	plan, err := task.AdmittedPlan()
 	if err != nil {
@@ -86,6 +89,40 @@ func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task) (v
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM review_dispositions WHERE ship_task_id=?`, task.ID).Scan(&summary.Dispositions); err != nil {
 		return summary, err
+	}
+	if summary.Head == "" {
+		err := db.QueryRowContext(ctx, `SELECT head_sha FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC LIMIT 1`, task.ID).Scan(&summary.Head)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return summary, err
+		}
+	}
+	if summary.Head != "" {
+		var quote string
+		err := db.QueryRowContext(ctx, `SELECT user_quote FROM review_dispositions WHERE ship_task_id=? AND head_sha=? ORDER BY id DESC LIMIT 1`, task.ID, summary.Head).Scan(&quote)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return summary, err
+		}
+		if quote != "" {
+			summary.Accepted = append(summary.Accepted, "User quote: \""+quote+"\"")
+			rows, err := db.QueryContext(ctx, `SELECT f.severity,COALESCE(parent.title,p.title),f.path
+FROM review_findings f JOIN review_patterns p ON p.id=f.pattern_id LEFT JOIN review_patterns parent ON parent.id=p.merged_into
+WHERE f.ship_task_id=? AND f.head_sha=? AND f.state='accepted' AND (?='' OR f.repository=?)
+ORDER BY COALESCE(parent.seq,p.seq),f.seq`, task.ID, summary.Head, repository, repository)
+			if err != nil {
+				return summary, err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var severity, title, path string
+				if err := rows.Scan(&severity, &title, &path); err != nil {
+					return summary, err
+				}
+				summary.Accepted = append(summary.Accepted, fmt.Sprintf("Accepted finding %s: %s (%s)", severity, title, path))
+			}
+			if err := rows.Err(); err != nil {
+				return summary, err
+			}
+		}
 	}
 	if task.PRURL != "" {
 		observation, err := db.LatestPRObservation(ctx, task.ID)
@@ -161,6 +198,10 @@ func (summary validationSummary) markdown() string {
 		}
 		findings = strings.Join(parts, ", ")
 	}
+	accepted := "none"
+	if len(summary.Accepted) > 0 {
+		accepted = strings.Join(summary.Accepted, "; ")
+	}
 	return strings.Join([]string{
 		validationBlockStart,
 		"## Validation",
@@ -169,6 +210,7 @@ func (summary validationSummary) markdown() string {
 		"- Review: " + summary.Review + " (" + rounds + "; latest verdict: " + verdict + ")",
 		"- Findings: " + findings,
 		fmt.Sprintf("- Carries: %d, dispositions: %d", summary.Carries, summary.Dispositions),
+		"- Accepted at review cap: " + accepted,
 		"- CI: " + summary.CI,
 		validationBlockEnd,
 	}, "\n")
@@ -220,7 +262,7 @@ func (s *Service) refreshPRValidationBlock(ctx context.Context, db *store.DB, pr
 	if marker.PRURL != prURL {
 		return nil
 	}
-	summary, err := validationSummaryFor(ctx, db, task)
+	summary, err := validationSummaryFor(ctx, db, task, member)
 	if err != nil {
 		return err
 	}

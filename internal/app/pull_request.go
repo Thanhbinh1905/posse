@@ -1042,7 +1042,7 @@ func prDetails(ctx context.Context, db *store.DB, project store.Project, task st
 		"## Documentation\n\n" + documentation,
 	}
 	if task.Type == "change" {
-		validation, err := validationSummaryFor(ctx, db, task)
+		validation, err := validationSummaryFor(ctx, db, task, member)
 		if err != nil {
 			return "", "", err
 		}

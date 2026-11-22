@@ -839,7 +839,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 	}
 	if task.Type == "change" {
-		validation, err := validationSummaryFor(ctx.Context, db, task)
+		validation, err := validationSummaryFor(ctx.Context, db, task, "")
 		if err != nil {
 			return err
 		}

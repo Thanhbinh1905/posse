@@ -36,13 +36,9 @@ func TestOpenRecordsMigrationChecksums(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	sources, err := embeddedMigrations()
-	if err != nil {
-		t.Fatal(err)
-	}
 	var count int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM posse_migration_checksums`).Scan(&count); err != nil || count != len(sources) {
-		t.Fatalf("checksums recorded = %d, want %d (%v)", count, len(sources), err)
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM posse_migration_checksums`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("checksums recorded = %d, want one baseline checksum (%v)", count, err)
 	}
 }
 
@@ -61,20 +57,21 @@ func TestOpenRefusesASchemaThisBuildDoesNotKnow(t *testing.T) {
 
 func TestOpenRefusesADivergedSchema(t *testing.T) {
 	home := t.TempDir()
-	openAndExec(t, home, `UPDATE posse_migration_checksums SET sha256='from-another-branch' WHERE version=1`)
+	openAndExec(t, home, `UPDATE posse_migration_checksums SET sha256='from-another-branch' WHERE version=20261120180000`)
 	_, err := Open(home)
 	requireSchemaError(t, err, "schema_diverged")
 }
 
 func TestMigrationGateDecidesPendingMigrations(t *testing.T) {
 	home := t.TempDir()
-	sources, err := embeddedMigrations()
+	db, err := Open(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	latest := sources[len(sources)-1].version
-	// Pretend the latest migration is pending; the gate refuses before goose runs.
-	openAndExec(t, home, `DELETE FROM goose_db_version WHERE version_id = (SELECT MAX(version_id) FROM goose_db_version)`)
+	prepareSupportedHomeAtVersion(t, db, 95)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	previous := MigrationGate
 	t.Cleanup(func() { MigrationGate = previous })
 	var gotPending []int64
@@ -85,8 +82,8 @@ func TestMigrationGateDecidesPendingMigrations(t *testing.T) {
 	}
 	_, err = Open(home)
 	requireSchemaError(t, err, "migration_refused")
-	if len(gotPending) != 1 || gotPending[0] != latest || gotForced {
-		t.Fatalf("gate saw pending=%v forced=%v, want [%d] false", gotPending, gotForced, latest)
+	if len(gotPending) != 9 || gotForced {
+		t.Fatalf("gate saw pending=%v forced=%v, want migrations 96-101 and the baseline", gotPending, gotForced)
 	}
 	calls := 0
 	MigrationGate = func(string, []int64, bool) error { calls++; return nil }
