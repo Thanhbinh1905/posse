@@ -189,14 +189,15 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		for _, request := range requestsBefore {
 			priorRequestOutcomes[request.ID] = request.Outcome
 		}
-		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+		started := false
+		if err := s.startParallelGreenhouseReviewsTracked(ctx.Context, db, home, project, change, targets, &started); err != nil {
 			return err
 		}
-		started := false
 		requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
 		if err != nil {
 			return err
 		}
+		roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
 		for _, target := range targets {
 			for _, request := range requests {
 				if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" && priorRequestOutcomes[request.ID] != "verdict" {
@@ -207,7 +208,6 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 			if started {
 				break
 			}
-			roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
 			pending := filepath.Join(roundDir, target.Repository+".pending.json")
 			if _, err := os.Stat(pending); err == nil {
 				started = true
@@ -1074,6 +1074,10 @@ func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
+	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, nil)
+}
+
+func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget, started *bool) error {
 	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
 	if err != nil {
 		return err
@@ -1229,6 +1233,9 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			continue
 		}
 		_ = lock.Close()
+		if started != nil {
+			*started = true
+		}
 		go func() { _ = command.Wait() }()
 	}
 	return nil
