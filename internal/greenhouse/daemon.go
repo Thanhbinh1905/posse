@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -44,6 +45,11 @@ type DaemonState struct {
 
 func HomeFor(posseHome string) string { return filepath.Join(posseHome, "greenhouse") }
 
+// Environment returns the sanitized client environment with the Posse-owned home.
+func (d *Daemon) Environment() []string {
+	return d.environment()
+}
+
 func (d *Daemon) environment() []string {
 	env := make([]string, 0, len(d.Env)+1)
 	for _, entry := range d.Env {
@@ -55,6 +61,39 @@ func (d *Daemon) environment() []string {
 		env = append(env, entry)
 	}
 	return append(env, "GREENHOUSE_HOME="+d.Home)
+}
+
+func (d *Daemon) daemonEnvironment() []string {
+	env := d.environment()
+	binaryDir := filepath.Dir(d.Binary)
+	if !filepath.IsAbs(binaryDir) {
+		return env
+	}
+	path := ""
+	for _, entry := range env {
+		if key, value, ok := strings.Cut(entry, "="); ok && key == "PATH" {
+			path = value
+			break
+		}
+	}
+	if !slices.Contains(filepath.SplitList(path), binaryDir) {
+		if path != "" {
+			path += string(os.PathListSeparator)
+		}
+		env = setEnv(env, "PATH", path+binaryDir)
+	}
+	return env
+}
+
+func setEnv(env []string, key, value string) []string {
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || name != key {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, key+"="+value)
 }
 
 // Ensure returns the running daemon, starting and probing it first if needed.
@@ -81,12 +120,25 @@ func (d *Daemon) Ensure(ctx context.Context) (DaemonState, error) {
 		return DaemonState{}, err
 	}
 	state, err := ReadState(d.Home)
-	if err != nil || state.PID != pid {
+	persistState := false
+	if err != nil || state.PID != pid || state.Range == (Range{}) {
 		probed, err := d.probe(ctx)
 		if err != nil {
 			return DaemonState{}, err
 		}
-		state = DaemonState{PID: pid, Binary: d.Binary, Range: probed}
+		state = DaemonState{PID: pid, Range: probed}
+		persistState = true
+	}
+	if executable, err := RunningExecutable(pid); err == nil {
+		if state.Binary != executable {
+			state.Binary = executable
+			persistState = true
+		}
+	} else if state.Binary == "" {
+		state.Binary = d.Binary
+		persistState = true
+	}
+	if persistState {
 		encoded, _ := json.Marshal(state)
 		if err := atomicfile.Write(filepath.Join(d.Home, stateFile), encoded, 0o600); err != nil {
 			return DaemonState{}, err
@@ -96,6 +148,16 @@ func (d *Daemon) Ensure(ctx context.Context) (DaemonState, error) {
 		return state, &ProtocolError{Daemon: state.Range}
 	}
 	return state, nil
+}
+
+// RunningExecutable returns the executable path for a live process when the
+// operating system exposes it. The fallback is left to callers for platforms
+// without a process executable lookup.
+func RunningExecutable(pid int) (string, error) {
+	if pid < 2 {
+		return "", fmt.Errorf("invalid process ID %d", pid)
+	}
+	return os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
 }
 
 func ReadState(home string) (DaemonState, error) {
@@ -137,7 +199,7 @@ func (d *Daemon) start(ctx context.Context) (int, error) {
 	defer log.Close()
 	command := exec.Command(d.Binary, "daemon")
 	command.Dir = d.Home
-	command.Env = d.environment()
+	command.Env = d.daemonEnvironment()
 	command.Stdout, command.Stderr = log, log
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := command.Start(); err != nil {
