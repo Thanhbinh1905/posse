@@ -154,6 +154,8 @@ type decisionSnapshot struct {
 	TaskLaunches   int      `toml:"task_launches"`
 	ObsoleteAt     int64    `toml:"obsolete_at"`
 	ObsoleteReason string   `toml:"obsolete_reason"`
+	Evidence       []byte   `toml:"evidence,omitempty"`
+	EvidenceDigest string   `toml:"evidence_digest,omitempty"`
 }
 
 type noticeSnapshot struct {
@@ -1131,7 +1133,7 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"provider_finding_events", "fix_round_provider_findings", "provider_findings", "provider_finding_patterns", "review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	for _, table := range []string{"provider_finding_events", "fix_round_provider_findings", "provider_findings", "provider_finding_patterns", "review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decision_evidence", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1543,6 +1545,11 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 				decision.ID, decision.ProjectID, decision.TaskID, decision.Origin, decision.Question, string(options), decision.Answer, decision.UserQuote,
 				decision.CreatedAt, decision.AnsweredAt, decision.Kind, decision.TaskLaunches, decision.ObsoleteAt, decision.ObsoleteReason, decision.AnswerActor, decision.AnswerReason); err != nil {
 				return err
+			}
+			if len(decision.Evidence) > 0 {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO decision_evidence(decision_id,evidence,digest) VALUES(?,?,?)`, decision.ID, decision.Evidence, decision.EvidenceDigest); err != nil {
+					return err
+				}
 			}
 		}
 		for _, notice := range state.Notices {

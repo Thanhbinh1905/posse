@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -73,6 +74,23 @@ func TestClaudePastePlaceholderInstructionIsSubmitted(t *testing.T) {
 	waitForInput(instruction)
 	waitDelivered(instruction)
 	fixture.waitTaskState(t, "t1", store.StateDone)
+	task = fixture.mustTask(t, "t1")
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if !waitForCondition(10*time.Second, func() bool {
+		snapshot, err := client.Snapshot(context.Background())
+		if err != nil {
+			return false
+		}
+		for _, pane := range snapshot.Panes {
+			if pane.PaneID == task.PaneID {
+				return pane.AgentStatus == "idle" || pane.AgentStatus == "done"
+			}
+		}
+		return false
+	}) {
+		snapshot, err := client.Snapshot(context.Background())
+		t.Fatalf("Worker was not idle after its done Signal: snapshot=%#v err=%v", snapshot, err)
+	}
 
 	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "merge", "t1"); !strings.Contains(output, "merging") {
 		t.Fatalf("PR did not open: %s", output)

@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func greenhouseVerdict(taskID int64, grant, head string) Verdict {
@@ -85,6 +87,98 @@ func TestGreenhouseVerdictPersistsFindingsByTaskRepositoryAndHead(t *testing.T) 
 	}
 }
 
+func TestWithdrawingLastP1ProviderFindingQualifiesExactHead(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r-withdraw", reviewShaA)
+	verdict.Outcome, verdict.Mode, verdict.Blocking = "findings", "gate", 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "internal/app/tasks.go", Line: 42, Excerpt: "False finding", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("provider findings = %+v, %v", findings, err)
+	}
+	if err := f.db.WithdrawProviderFinding(f.ctx, f.change, int64(findings[0].FindingSeq), 17, strings.Repeat("a", 64), "User-approved dispute"); err != nil {
+		t.Fatal(err)
+	}
+	if passed, err := f.db.GreenhouseGatePass(f.ctx, f.change, "shop", reviewShaA); err != nil || !passed {
+		t.Fatalf("withdrawn exact-head finding did not qualify: passed=%v err=%v", passed, err)
+	}
+	findings, err = f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 || findings[0].State != "withdrawn" {
+		t.Fatalf("withdrawn finding projection = %+v, %v", findings, err)
+	}
+}
+
+func TestWithdrawnProviderFindingCannotEnterReviewFixRound(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r-withdraw-fix", reviewShaA)
+	verdict.Outcome, verdict.Mode, verdict.Blocking = "findings", "gate", 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "withdrawn", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("provider findings = %+v, %v", findings, err)
+	}
+	if err := f.db.WithdrawProviderFinding(f.ctx, f.change, int64(findings[0].FindingSeq), 17, strings.Repeat("a", 64), "User-approved dispute"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.db.QueueProviderReviewFixInstruction(f.ctx, f.change, reviewShaA, nil, "review:"+reviewShaA+":P-1", "Fix P-1", []int{1}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "no current findings") {
+		t.Fatalf("queue fix for withdrawn finding = %v; want no current findings", err)
+	}
+	var bindings int
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM fix_round_provider_findings WHERE finding_id=?`, findings[0].FindingSeq).Scan(&bindings); err != nil || bindings != 0 {
+		t.Fatalf("withdrawn finding fix-round bindings = %d, %v; want none", bindings, err)
+	}
+}
+
+func TestWithdrawnProviderFindingCannotBeMutatedByPendingFix(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r-withdraw-pending", reviewShaA)
+	verdict.Outcome, verdict.Mode, verdict.Blocking = "findings", "gate", 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "withdrawn", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,1,?,'shop','full',?,?,?,?,?,'[]','verdict','pass',1)`,
+		f.change, f.review, reviewShaA, reviewShaA, reviewShaA, reviewShaA, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	maxRounds := 1
+	queued, err := f.db.QueueProviderReviewFixInstruction(f.ctx, f.change, reviewShaA, nil, "review:"+reviewShaA+":P-1", "Fix P-1", []int{1}, &maxRounds, &maxRounds)
+	if err != nil || !queued.Queued {
+		t.Fatalf("queue Greenhouse Review fix = %+v, %v", queued, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE messages SET status='delivered',delivered_at=created_at WHERE id=?`, queued.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("provider findings = %+v, %v", findings, err)
+	}
+	if err := f.db.WithdrawProviderFinding(f.ctx, f.change, int64(findings[0].FindingSeq), 17, strings.Repeat("a", 64), "User-approved dispute"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := f.db.beginTxWithRetry(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := &ReviewFixResolutionsInput{ExpectedBaseHead: reviewShaA, ActualHead: reviewShaB, Patterns: []ReviewFixResolution{{Pattern: "P-1", Status: "fixed"}}}
+	if err := applyReviewFixResolutionsTx(f.ctx, tx, f.change, input); err == nil {
+		tx.Rollback()
+		t.Fatal("pending fix mutated a withdrawn finding")
+	}
+	tx.Rollback()
+	var state string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT state FROM provider_findings WHERE task_id=?`, f.change).Scan(&state); err != nil || state != "open" {
+		t.Fatalf("underlying finding state = %q, %v; want unchanged open state after rejected stale resolution", state, err)
+	}
+}
+
 func TestProviderFindingsUseReviewFixQueueAndResolution(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r5", reviewShaA)
@@ -122,6 +216,30 @@ func TestProviderFindingsUseReviewFixQueueAndResolution(t *testing.T) {
 	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
 	if err != nil || len(findings) != 1 || findings[0].State != "fix_claimed" {
 		t.Fatalf("Greenhouse finding after resolution = %+v, %v", findings, err)
+	}
+}
+
+func TestGreenhouseGatePassReleasesVerdictRowsBeforeFindingQuery(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r-single-connection", reviewShaA)
+	verdict.Outcome, verdict.Mode, verdict.Blocking = "findings", "gate", 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "false finding", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("provider findings = %+v, %v", findings, err)
+	}
+	if err := f.db.WithdrawProviderFinding(f.ctx, f.change, int64(findings[0].FindingSeq), 17, strings.Repeat("a", 64), "User-approved dispute"); err != nil {
+		t.Fatal(err)
+	}
+	f.db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
+	defer cancel()
+	passed, err := f.db.GreenhouseGatePass(ctx, f.change, "shop", reviewShaA)
+	if err != nil || !passed {
+		t.Fatalf("single-connection withdrawn finding gate = passed %v, err %v; want pass without waiting for a second connection", passed, err)
 	}
 }
 
@@ -202,6 +320,85 @@ func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	var count int
 	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("failure Notices = %d, %v; want one per head", count, err)
+	}
+	var summary string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT summary FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&summary); err != nil || !strings.Contains(summary, "protocol refusal") {
+		t.Fatalf("latest failure summary = %q, %v; want latest reason", summary, err)
+	}
+	var noticeID int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT id FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE notices SET delivered_at=10,acked_at=11,claim_token='delivery-owner',claimed_at=12 WHERE id=?`, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO notice_delivery_receipts(delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at) VALUES('delivery-1','batch-1',?,'[' || ? || ']','test','generation','claimed','delivery-owner',12,20,0,10,12)`, task.ProjectID, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: latest context overflow"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("same-head needs-decision Notices = %d, %v; want one", count, err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind IN ('greenhouse_review_failed','needs_decision')`, task.ID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("failure and needs-decision Notices = %d, %v; want one of each", count, err)
+	}
+	var kind, claim string
+	var delivered, acked sql.NullInt64
+	var claimedAt int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,summary,delivered_at,acked_at,claim_token,claimed_at FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&kind, &summary, &delivered, &acked, &claim, &claimedAt); err != nil || kind != "needs_decision" || !strings.Contains(summary, "context overflow") || delivered.Valid || acked.Valid || claim != "" || claimedAt != 0 {
+		t.Fatalf("needs-decision Notice = kind %q summary %q delivered %v acked %v claim %q claimed_at %d err=%v", kind, summary, delivered, acked, claim, claimedAt, err)
+	}
+	var oldSummary string
+	var oldAcked sql.NullInt64
+	var oldClaim string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT summary,acked_at,claim_token FROM notices WHERE id=?`, noticeID).Scan(&oldSummary, &oldAcked, &oldClaim); err != nil || !strings.Contains(oldSummary, "protocol refusal") || !oldAcked.Valid || oldClaim != "" {
+		t.Fatalf("old failure Notice summary=%q acked=%v claim=%q err=%v", oldSummary, oldAcked, oldClaim, err)
+	}
+	var receiptState, receiptOwner string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT state,owner_token FROM notice_delivery_receipts WHERE delivery_id='delivery-1'`).Scan(&receiptState, &receiptOwner); err != nil || receiptState != "rejected" || receiptOwner != "" {
+		t.Fatalf("old Notice delivery receipt = state %q owner %q err=%v", receiptState, receiptOwner, err)
+	}
+}
+
+func TestGreenhouseNeedsDecisionPreservesUncertainFailureDelivery(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "review setup failed: missing Greenhouse binary"); err != nil {
+		t.Fatal(err)
+	}
+	var noticeID int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT id FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&noticeID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE notices SET claim_token='delivery-owner',claimed_at=? WHERE id=?`, now, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO notice_delivery_receipts(delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at) VALUES('delivery-uncertain','batch-uncertain',?,'[' || ? || ']','test','generation','printed','delivery-owner',?,?,0,?,?)`, task.ProjectID, noticeID, now, now+1000, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.MarkNoticeDeliveryUncertain(f.ctx, "delivery-uncertain", now+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: missing Greenhouse binary"); err != nil {
+		t.Fatal(err)
+	}
+	var oldKind, oldClaim string
+	var oldAcked sql.NullInt64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,acked_at,claim_token FROM notices WHERE id=?`, noticeID).Scan(&oldKind, &oldAcked, &oldClaim); err != nil || oldKind != "greenhouse_review_failed" || !oldAcked.Valid || oldClaim != "uncertain:delivery-uncertain" {
+		t.Fatalf("old Notice kind=%q acked=%v claim=%q err=%v; want acknowledged failure with its uncertain claim intact", oldKind, oldAcked, oldClaim, err)
+	}
+	if err := f.db.ResolveUncertainNoticeDelivery(f.ctx, task.ProjectID, "delivery-uncertain", "accepted", now+2); err != nil {
+		t.Fatalf("resolve old uncertain delivery after escalation: %v", err)
+	}
+	var state string
+	var delivered sql.NullInt64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,delivered_at FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&state, &delivered); err != nil || delivered.Valid {
+		t.Fatalf("escalated Notice kind=%q delivered=%v err=%v; want a new open needs_decision Notice", state, delivered, err)
 	}
 }
 

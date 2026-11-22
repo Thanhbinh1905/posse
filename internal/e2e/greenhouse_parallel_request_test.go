@@ -168,6 +168,9 @@ func TestGreenhouseParallelInconclusiveRunEndsOwnerAndAdvancesGrant(t *testing.T
 	if err != nil || len(requests) != 1 || requests[0].Outcome != "failed" || requests[0].Grant != "shop/t1/shop/r1" {
 		t.Fatalf("terminal review requests = %+v, %v; want failed r1", requests, err)
 	}
+	if retryAt := requests[0].SettledAt + 30_000; retryAt <= time.Now().UnixMilli() {
+		t.Fatalf("fresh review test did not exercise active retry backoff: retry at %d", retryAt)
+	}
 	if got := c.notices(t, "greenhouse_review_failed"); got != 1 {
 		t.Fatalf("greenhouse_review_failed Notices = %d, want 1", got)
 	}
