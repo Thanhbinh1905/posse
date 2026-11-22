@@ -53,6 +53,9 @@ func (s *Service) reviewDispute(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return axi.Failure("review_dispute_refused", "Greenhouse finding not found in the latest Verdict", false)
 	}
+	if finding.State != "open" && finding.State != "disputed" {
+		return axi.Failure("review_dispute_refused", "only open or disputed Greenhouse findings may be disputed", false)
+	}
 	if finding.Severity != "P0" && finding.Severity != "P1" {
 		return axi.Failure("review_dispute_refused", "only P0 and P1 Greenhouse findings may be disputed", false)
 	}

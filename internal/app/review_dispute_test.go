@@ -69,6 +69,34 @@ auto_teardown = "never"
 	}
 }
 
+func TestReviewDisputeRefusesResolvedFindingStates(t *testing.T) {
+	for _, state := range []string{"fix_claimed", "fixed"} {
+		t.Run(state, func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateDone)
+			defer f.db.Close()
+			ctx := context.Background()
+			verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "findings", Blocking: 1, Mode: "gate", Findings: []store.ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "false claim", Head: f.headSHA}}}
+			if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+				t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+			}
+			if _, err := f.db.ExecContext(ctx, `UPDATE provider_findings SET state=? WHERE task_id=?`, state, f.task.ID); err != nil {
+				t.Fatal(err)
+			}
+			evidence := filepath.Join(t.TempDir(), "evidence.md")
+			if err := os.WriteFile(evidence, []byte("Test: validation rejects this finding.\nHead: "+f.headSHA+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code, output, _ := f.run("review", "dispute", "t1", "F-1", "--evidence", evidence); code == 0 || !strings.Contains(output, "only open or disputed") {
+				t.Fatalf("dispute %s finding = %d %s; want refusal", state, code, output)
+			}
+			var count int
+			if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decisions WHERE task_id=? AND kind='review_dispute'`, f.task.ID).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("created dispute Decisions = %d, %v; want none", count, err)
+			}
+		})
+	}
+}
+
 func TestReviewDisputeDecisionWithdrawsOnlyAtBoundHead(t *testing.T) {
 	for _, moveHead := range []bool{false, true} {
 		t.Run(map[bool]string{false: "withdraw and queue publish", true: "refuse changed head"}[moveHead], func(t *testing.T) {
