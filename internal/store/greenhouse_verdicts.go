@@ -99,7 +99,28 @@ func (db *DB) createGreenhouseFailureNoticeOnce(ctx context.Context, projectID, 
 		return false, err
 	}
 	summary := fmt.Sprintf("Greenhouse parallel review failed for %s at %s: %s", repository, head, reason)
-	updated, err := db.ExecContext(ctx, `UPDATE notices SET kind=?,summary=? WHERE task_id=? AND kind IN ('greenhouse_review_failed',?) AND data_json=? AND (kind<>? OR summary<>?)`, kind, summary, taskID, kind, string(data), kind, summary)
+	var invalidatedReceipts int64
+	if kind == "needs_decision" {
+		_, err := db.ExecContext(ctx, `UPDATE notices SET claim_token='',claimed_at=0 WHERE claim_token IN (
+			SELECT r.owner_token FROM notice_delivery_receipts r WHERE r.project_id=? AND r.state IN ('claimed','printed') AND EXISTS (
+				SELECT 1 FROM json_each(r.notice_ids_json) ids JOIN notices n ON n.id=CAST(ids.value AS INTEGER)
+				WHERE n.task_id=? AND n.kind IN ('greenhouse_review_failed','needs_decision') AND n.data_json=?))`, projectID, taskID, string(data))
+		if err != nil {
+			return false, err
+		}
+		result, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='rejected',owner_token='',lease_until=0,updated_at=? WHERE project_id=? AND state IN ('claimed','printed') AND EXISTS (
+			SELECT 1 FROM json_each(notice_delivery_receipts.notice_ids_json) ids JOIN notices n ON n.id=CAST(ids.value AS INTEGER)
+			WHERE n.task_id=? AND n.kind IN ('greenhouse_review_failed','needs_decision') AND n.data_json=?)`, time.Now().UnixMilli(), projectID, taskID, string(data))
+		if err != nil {
+			return false, err
+		}
+		invalidatedReceipts, err = result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+	}
+	reopen := kind == "needs_decision"
+	updated, err := db.ExecContext(ctx, `UPDATE notices SET kind=?,summary=?,delivered_at=CASE WHEN ? THEN NULL ELSE delivered_at END,acked_at=CASE WHEN ? THEN NULL ELSE acked_at END,claim_token=CASE WHEN ? THEN '' ELSE claim_token END,claimed_at=CASE WHEN ? THEN 0 ELSE claimed_at END WHERE task_id=? AND kind IN ('greenhouse_review_failed',?) AND data_json=? AND (? OR kind<>? OR summary<>?)`, kind, summary, reopen, reopen, reopen, reopen, taskID, kind, string(data), reopen, kind, summary)
 	if err != nil {
 		return false, err
 	}
@@ -108,7 +129,15 @@ func (db *DB) createGreenhouseFailureNoticeOnce(ctx context.Context, projectID, 
 		return false, err
 	}
 	if updatedRows > 0 {
-		return false, db.PersistProject(ctx, projectID)
+		if err := db.PersistProject(ctx, projectID); err != nil {
+			return false, err
+		}
+		if invalidatedReceipts > 0 {
+			if err := db.PersistNoticeDeliverySnapshot(ctx, projectID); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
 	}
 	result, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
 		SELECT ?, ?, ?, ?, ?, ?

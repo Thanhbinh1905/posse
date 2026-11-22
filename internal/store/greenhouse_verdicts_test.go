@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -268,14 +269,31 @@ func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	if err := f.db.QueryRowContext(f.ctx, `SELECT summary FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&summary); err != nil || !strings.Contains(summary, "protocol refusal") {
 		t.Fatalf("latest failure summary = %q, %v; want latest reason", summary, err)
 	}
+	var noticeID int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT id FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE notices SET delivered_at=10,acked_at=11,claim_token='delivery-owner',claimed_at=12 WHERE id=?`, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO notice_delivery_receipts(delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at) VALUES('delivery-1','batch-1',?,'[' || ? || ']','test','generation','claimed','delivery-owner',12,20,0,10,12)`, task.ProjectID, noticeID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: latest context overflow"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind IN ('greenhouse_review_failed','needs_decision')`, task.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("failure and needs-decision Notices = %d, %v; want one Notice", count, err)
 	}
-	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,summary FROM notices WHERE task_id=?`, task.ID).Scan(new(string), &summary); err != nil || !strings.Contains(summary, "context overflow") {
-		t.Fatalf("needs-decision summary = %q, %v", summary, err)
+	var kind, claim string
+	var delivered, acked sql.NullInt64
+	var claimedAt int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,summary,delivered_at,acked_at,claim_token,claimed_at FROM notices WHERE task_id=?`, task.ID).Scan(&kind, &summary, &delivered, &acked, &claim, &claimedAt); err != nil || kind != "needs_decision" || !strings.Contains(summary, "context overflow") || delivered.Valid || acked.Valid || claim != "" || claimedAt != 0 {
+		t.Fatalf("needs-decision Notice = kind %q summary %q delivered %v acked %v claim %q claimed_at %d err=%v", kind, summary, delivered, acked, claim, claimedAt, err)
+	}
+	var receiptState, receiptOwner string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT state,owner_token FROM notice_delivery_receipts WHERE delivery_id='delivery-1'`).Scan(&receiptState, &receiptOwner); err != nil || receiptState != "rejected" || receiptOwner != "" {
+		t.Fatalf("old Notice delivery receipt = state %q owner %q err=%v", receiptState, receiptOwner, err)
 	}
 }
 
