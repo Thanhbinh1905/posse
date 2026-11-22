@@ -331,6 +331,61 @@ func TestPRWatchDequeuesRedMergeQueueHead(t *testing.T) {
 	}
 }
 
+func TestPRWatchMakesGreenhouseVerdictedDoneTaskMergeReadyInOnePoll(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	freezeCILoopWithReview(t, fixture, 0, 0, "full-pipeline")
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: fixture.task.ID, Repository: fixture.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: fixture.headSHA, Target: fixture.headSHA, ReviewBase: fixture.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := fixture.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return fixture.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record exact-head clean Verdict: recorded=%v err=%v", recorded, err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
+		t.Fatalf("working Task merge_ready notices=%+v err=%v", notices, err)
+	}
+	token, err := fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("signal", "done", "Worker completion summary", "--head", fixture.headSHA, "--turn", token); code != 0 {
+		t.Fatalf("done: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("merge_ready after one Watch poll over green observation = notices=%+v err=%v", notices, err)
+	}
+}
+
 func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
