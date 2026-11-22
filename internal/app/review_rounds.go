@@ -1009,7 +1009,17 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 		if err != nil {
 			return err
 		}
-		if failures >= greenhouseReviewFailureLimit || hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) || time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+		if failures >= greenhouseReviewFailureLimit {
+			reason := "Needs a decision: split the change or land it another way. Latest failure: " + lastFailure
+			if !hasFailureNotice {
+				reason = "Needs a decision: split the change or land it another way. The latest Greenhouse review failed, but Posse could not retrieve its failure reason."
+			}
+			if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx, project.ID, change.ID, target.Repository, target.Commit, reason); err != nil {
+				return err
+			}
+			continue
+		}
+		if hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) || time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
 			continue
 		}
 		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
