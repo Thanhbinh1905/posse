@@ -70,7 +70,7 @@ func (s *Service) reviewDispute(ctx *axi.Context, args []string) error {
 			break
 		}
 	}
-	if finding.State == "withdrawn" || head == "" || finding.HeadSHA != head {
+	if head == "" || finding.HeadSHA != head {
 		return axi.Failure("review_dispute_refused", "Greenhouse finding is not bound to the current Task head", false)
 	}
 	if !strings.Contains(string(data), head) {
