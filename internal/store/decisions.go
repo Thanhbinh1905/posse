@@ -72,7 +72,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least one option")
 	}
 	switch request.Kind {
-	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "quota", "budget", "review_dispute":
+	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "teardown_dependants", "quota", "budget", "review_dispute":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
 	}
@@ -509,7 +509,11 @@ const resolvedDecisionPredicate = `
 			AND p.review NOT IN ('CHANGES_REQUESTED','REVIEW_REQUIRED') AND p.mergeable='MERGEABLE'))))
 		OR (d.kind='recovery' AND (t.state NOT IN ('failed','lost') OR t.launches<>d.task_launches))
 		OR (d.kind='worker_exited' AND (t.state NOT IN ('done','merging') OR t.launches<>d.task_launches))
-		OR (d.kind='dependency' AND t.state<>'queued')
+		OR (d.kind='dependency' AND (t.state<>'queued' OR EXISTS(
+			SELECT 1 FROM tasks p WHERE p.project_id=d.project_id
+			AND substr(d.origin,1,length('dependency:t'||t.seq||':t'||p.seq||':'))='dependency:t'||t.seq||':t'||p.seq||':'
+			AND p.state NOT IN ('failed','lost','torn-down')
+		)))
 		OR (d.kind='quota' AND (t.state NOT IN ('working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches))
 		OR (d.kind='budget' AND (t.state NOT IN ('spawning','working','stalled','blocked','needs-decision') OR t.launches<>d.task_launches
 			OR (d.origin LIKE 'budget:daily:%' AND substr(d.origin,14)<>date('now','localtime'))
@@ -520,6 +524,24 @@ const resolvedDecisionPredicate = `
 				OR (t.pr_url<>substr(d.origin,11) AND NOT EXISTS(SELECT 1 FROM task_repos r WHERE r.task_id=t.id AND r.pr_url=substr(d.origin,11)))
 				OR (SELECT state FROM pr_observations WHERE task_id=t.id AND pr_url=substr(d.origin,11) ORDER BY id DESC LIMIT 1)<>'CLOSED'))))
 		OR (d.kind='orphan' AND d.origin LIKE 'orphan:unrecoverable:%' AND t.state='torn-down')`
+
+func (db *DB) ObsoleteDependencyDecision(ctx context.Context, taskID int64, taskRef, predecessorRef string) error {
+	prefix := "dependency:" + taskRef + ":" + predecessorRef + ":"
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason='Predecessor teardown replaced the dependency Decision'
+		WHERE task_id=? AND kind='dependency' AND origin LIKE ? AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), taskID, prefix+"%")
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
+}
 
 // ObsoleteTaskDecisions retires every unanswered question when its Task is torn down.
 func (db *DB) ObsoleteTaskDecisions(ctx context.Context, taskID int64) error {
@@ -549,7 +571,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'orphan' THEN 'Unrecoverable Orphan resolved during Teardown'
 		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
 		WHEN 'budget' THEN 'Budget Decision no longer applies to this Worker launch, Task state or Project day'
-		WHEN 'dependency' THEN 'Task is no longer queued'
+		WHEN 'dependency' THEN 'Queued Task or prerequisite state changed'
 		ELSE 'Task no longer failed or lost' END
 		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','budget','dependency')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=d.task_id AND (`+resolvedDecisionPredicate+`))`, time.Now().UnixMilli(), projectID)
@@ -564,7 +586,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" {
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" {
 		return "", nil
 	}
 	var state State
@@ -586,6 +608,20 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "recovery" && (state != StateFailed && state != StateLost || launches != decision.TaskLaunches) {
 		return "Task no longer failed or lost", nil
+	}
+	if decision.Kind == "dependency" {
+		parts := strings.Split(decision.Origin, ":")
+		if len(parts) < 4 || parts[0] != "dependency" {
+			return "", nil
+		}
+		predecessorSeq := mustTaskSequence(parts[2])
+		var predecessorState State
+		if err := tx.QueryRowContext(ctx, `SELECT state FROM tasks WHERE project_id=? AND seq=?`, decision.ProjectID, predecessorSeq).Scan(&predecessorState); err != nil {
+			return "", err
+		}
+		if predecessorState != StateFailed && predecessorState != StateLost && predecessorState != StateTornDown {
+			return "Prerequisite is no longer failed, lost or torn down", nil
+		}
 	}
 	if decision.Kind == "worker_exited" && (state != StateDone && state != StateMerging || launches != decision.TaskLaunches) {
 		return "Task reopened or Worker launch changed", nil
