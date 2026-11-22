@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -109,13 +111,31 @@ esac
 	}
 	t.Setenv("POSSE_TEST_GH_VIEW", viewPath)
 
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET pane_id='w2:p1',pane_label='posse:stack:t1',agent_status='idle' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{
+		PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:stack:t1", CWD: fixture.task.WorktreePath, Agent: "claude", AgentStatus: "idle",
+	})
 	poll := func() {
 		t.Helper()
-		if err := fixture.service.pollWorkspacePullRequests(ctx, fixture.db, fixture.project, fixture.config(), true); err != nil {
+		if err := fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project); err != nil {
 			t.Fatal(err)
+		}
+		if !fixture.service.waitForWatchMaintenance(5 * time.Second) {
+			t.Fatal("workspace member PR poll did not finish")
 		}
 	}
 	poll()
+	for _, query := range []string{
+		`UPDATE project_watch_state SET pr_polled_at=0 WHERE project_id=?`,
+		`UPDATE member_pr_poll_state SET pr_polled_at=0 WHERE project_id=? AND repo='worker'`,
+	} {
+		if _, err := fixture.db.ExecContext(ctx, query, fixture.project.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
 	poll()
 	var rounds, reruns int
 	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&rounds); err != nil || rounds != 1 {
@@ -129,7 +149,7 @@ esac
 		t.Fatalf("workspace CI rerun notices=%d err=%v", reruns, err)
 	}
 	var body string
-	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
+	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&body); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, "--repo worker") || !strings.Contains(body, "unit failed log") {
@@ -141,6 +161,11 @@ esac
 	}
 	if strings.Count(string(log), "run rerun --failed 123 --repo acme/worker") != 1 {
 		t.Fatalf("workspace rerun commands = %q", log)
+	}
+
+	var status string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&status); err != nil || status != "delivered" {
+		t.Fatalf("workspace CI fix instruction status=%q err=%v, want delivered after the member PR poll", status, err)
 	}
 }
 
