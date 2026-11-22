@@ -154,9 +154,84 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 			if allPassed {
 				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "review", Value: "Greenhouse Verdict reused"}})
 			}
+			findings, err := db.ProviderFindingsForTask(ctx.Context, change.ID)
+			if err != nil {
+				return err
+			}
+			for _, target := range targets {
+				for _, finding := range findings {
+					if finding.Repository == target.Repository && finding.HeadSHA == target.Commit && finding.State == "disputed" {
+						disputePath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse", "disputes", finding.Repository+"-"+target.Commit+".md")
+						return axi.Failure("greenhouse_dispute_pending", "Greenhouse finding "+finding.PatternKey+" remains unresolved at this exact head; `posse review start` did not create a new run", false, "Record the Worker's evidence at `"+disputePath+"` and resolve the finding before requesting another Verdict")
+					}
+				}
+			}
+			if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {
+				usage, err := db.ReviewCapUsage(ctx.Context, change.ID)
+				if err != nil {
+					return err
+				}
+				used, max := reviewCapUsed(change, usage), plan.ValidationLoops.MaxReviewRounds()
+				if used >= max {
+					if _, err := db.ReviewCapGrant(ctx.Context, change.ID); store.IsNotFound(err) {
+						return s.reviewCapFailure(ctx.Context, db, project, change, used, max)
+					} else if err != nil {
+						return err
+					}
+				}
+			}
 		}
-		if err := s.startParallelGreenhouseReviews(ctx.Context, db, home, project, change, targets); err != nil {
+		requestsBefore, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
+		if err != nil {
 			return err
+		}
+		priorRequestOutcomes := make(map[int64]string, len(requestsBefore))
+		for _, request := range requestsBefore {
+			priorRequestOutcomes[request.ID] = request.Outcome
+		}
+		started := false
+		if err := s.startParallelGreenhouseReviewsTracked(ctx.Context, db, home, project, change, targets, &started); err != nil {
+			return err
+		}
+		requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
+		if err != nil {
+			return err
+		}
+		roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
+		for _, target := range targets {
+			for _, request := range requests {
+				if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" && priorRequestOutcomes[request.ID] != "verdict" {
+					started = true
+					break
+				}
+			}
+			if started {
+				break
+			}
+			pending := filepath.Join(roundDir, target.Repository+".pending.json")
+			if _, err := os.Stat(pending); err == nil {
+				started = true
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			owner, err := readParallelReviewOwner(parallelReviewOwnerPath(roundDir, target.Repository))
+			if err != nil {
+				return err
+			}
+			if owner != nil && owner.PID != os.Getpid() && owner.Head == target.Commit {
+				process, err := os.FindProcess(owner.PID)
+				if err != nil {
+					return err
+				}
+				if process.Signal(syscall.Signal(0)) == nil {
+					started = true
+					break
+				}
+			}
+		}
+		if !started {
+			return axi.Failure("greenhouse_review_not_started", "No Greenhouse run was created for the requested head", false, "Inspect the Greenhouse request and owner state, then retry `posse review start`")
 		}
 		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(change.Seq)}, {Key: "review", Value: "Greenhouse Verdict requested"}})
 	}
@@ -999,6 +1074,10 @@ func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Pro
 }
 
 func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
+	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, nil)
+}
+
+func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget, started *bool) error {
 	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
 	if err != nil {
 		return err
@@ -1154,6 +1233,9 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 			continue
 		}
 		_ = lock.Close()
+		if started != nil {
+			*started = true
+		}
 		go func() { _ = command.Wait() }()
 	}
 	return nil

@@ -59,20 +59,27 @@ func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousSelfExec := selfExecCommand
-	selfExecCommand = func(...string) (*exec.Cmd, error) { return exec.Command("true"), nil }
-	t.Cleanup(func() { selfExecCommand = previousSelfExec })
-	var output bytes.Buffer
-	cli := f.service.CLI()
-	cli.Out, cli.ErrOut = &output, &output
-	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code != 0 || !strings.Contains(output.String(), "Greenhouse") || !strings.Contains(output.String(), "requested") {
-		t.Fatalf("review start did not request the Greenhouse Verdict: code=%d output=%s", code, output.String())
-	}
 	db, err = store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	previousSelfExec := selfExecCommand
+	selfExecCommand = func(...string) (*exec.Cmd, error) { return exec.Command("/definitely/missing/greenhouse-review"), nil }
+	t.Cleanup(func() { selfExecCommand = previousSelfExec })
+	var output bytes.Buffer
+	cli := f.service.CLI()
+	cli.Out, cli.ErrOut = &output, &output
+	currentHead, err := lockedTaskBranchAuthorHead(context.Background(), f.project.Root, change.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordGreenhouseReviewRequest(context.Background(), store.GreenhouseReviewRequest{ProjectID: f.project.ID, TaskID: change.ID, Repository: f.project.Name, RequestedHead: currentHead, Provider: store.GreenhouseReviewProvider, RequestedAt: 10, SettledAt: 20, Outcome: "refused"}); err != nil {
+		t.Fatal(err)
+	}
+	if code := cli.Run([]string{"review", "start", fmt.Sprintf("t%d", change.Seq)}); code == 0 || !strings.Contains(output.String(), "greenhouse_review_not_started") || strings.Contains(output.String(), "Greenhouse Verdict requested") {
+		t.Fatalf("review start reported a Greenhouse request without a run: code=%d output=%s", code, output.String())
+	}
 	rounds, err := db.ReviewRoundsFor(context.Background(), change.ID)
 	if err != nil || len(rounds) != 1 || rounds[0].Round != 1 || rounds[0].Verdict != "changes_requested" {
 		t.Fatalf("earlier built-in Review history changed: %+v %v", rounds, err)
@@ -94,8 +101,8 @@ func TestReviewStartRequestsGreenhouseVerdict(t *testing.T) {
 		t.Fatalf("review start did not report reuse of the passing Greenhouse Verdict: code=%d output=%s", code, output.String())
 	}
 	requests, err := db.GreenhouseReviewRequests(context.Background(), f.project.ID)
-	if err != nil || len(requests) != 0 {
-		t.Fatalf("review start created a Greenhouse request despite reusing a passing Verdict: requests=%+v err=%v", requests, err)
+	if err != nil || len(requests) != 2 || requests[0].Outcome != "refused" || requests[1].Outcome != "failed" {
+		t.Fatalf("review start retried Greenhouse despite reusing a passing Verdict: requests=%+v err=%v", requests, err)
 	}
 }
 

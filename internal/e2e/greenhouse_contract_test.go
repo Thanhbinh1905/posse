@@ -356,6 +356,22 @@ func TestGreenhousePrepublicationFindingsQueueReviewFix(t *testing.T) {
 	if len(verdicts) == 0 || verdicts[len(verdicts)-1].Outcome != "findings" || verdicts[len(verdicts)-1].Blocking == 0 {
 		t.Fatalf("Watch did not record blocking Greenhouse findings: %+v", verdicts)
 	}
+	disputeDB, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := disputeDB.ExecContext(context.Background(), `UPDATE provider_findings SET state='disputed' WHERE task_id=? AND head_sha=?`, c.change.ID, head); err != nil {
+		disputeDB.Close()
+		t.Fatal(err)
+	}
+	if err := disputeDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	startOutput, startErr := c.posse(c.env, f.repo, "review", "start", "t1")
+	disputePath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse", "disputes", "shop-"+head+".md")
+	if startErr == nil || strings.Contains(startOutput, "requested") || !strings.Contains(startOutput, disputePath) {
+		t.Fatalf("review start did not refuse with the exact-head dispute path: err=%v output=%s want_path=%s", startErr, startOutput, disputePath)
+	}
 	db, err := store.OpenReadOnly(f.home)
 	if err != nil {
 		t.Fatal(err)
