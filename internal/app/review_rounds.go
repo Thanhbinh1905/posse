@@ -142,7 +142,7 @@ func (s *Service) startReviewRound(ctx *axi.Context, db *store.DB, home string, 
 		if len(targets) > 0 {
 			allPassed := true
 			for _, target := range targets {
-				passed, err := db.GreenhouseGatePass(ctx.Context, change.ID, target.Repository, target.Commit)
+				passed, err := db.GreenhouseGatePass(ctx.Context, change.ID, target.Repository, target.Commit, greenhouseBlockAt(change))
 				if err != nil {
 					return err
 				}
