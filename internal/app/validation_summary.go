@@ -25,19 +25,20 @@ const (
 // validationSummary is the read-only report of a Change Task's built-in
 // validation evidence. It never authorizes publication or Merge.
 type validationSummary struct {
-	Head          string
-	Review        string
-	MaxRounds     int
-	RoundsUsed    int
-	RepairUsed    int
-	Pending       int
-	Remaining     int
-	LatestVerdict string
-	Findings      map[string]int
-	Carries       int
-	Dispositions  int
-	Accepted      []string
-	CI            string
+	Head                    string
+	Review                  string
+	MaxRounds               int
+	RoundsUsed              int
+	RepairUsed              int
+	Pending                 int
+	Remaining               int
+	LatestVerdict           string
+	LatestGreenhouseVerdict *store.Verdict
+	Findings                map[string]int
+	Carries                 int
+	Dispositions            int
+	Accepted                []string
+	CI                      string
 }
 
 func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task, repository string) (validationSummary, error) {
@@ -61,6 +62,7 @@ func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task, re
 	if err != nil {
 		return summary, err
 	}
+	var latestRoundHead string
 	for _, round := range rounds {
 		if round.Status == "admitted" {
 			summary.Pending++
@@ -68,8 +70,31 @@ func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task, re
 		if round.Verdict != "" {
 			summary.LatestVerdict = round.Verdict
 		}
-		if summary.Head == "" {
-			summary.Head = round.HeadSHA
+		if latestRoundHead == "" {
+			latestRoundHead = round.HeadSHA
+		}
+	}
+	if summary.Head == "" {
+		summary.Head = latestRoundHead
+		var dispositionHead string
+		err := db.QueryRowContext(ctx, `SELECT head_sha FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC LIMIT 1`, task.ID).Scan(&dispositionHead)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return summary, err
+		}
+		if dispositionHead != "" {
+			summary.Head = dispositionHead
+		}
+	}
+	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	if err != nil {
+		return summary, err
+	}
+	for i := len(verdicts) - 1; i >= 0; i-- {
+		if verdicts[i].Provider == store.GreenhouseReviewProvider && (repository == "" || verdicts[i].Repository == repository) {
+			verdict := verdicts[i]
+			summary.LatestGreenhouseVerdict = &verdict
+			summary.LatestVerdict = verdict.Outcome
+			break
 		}
 	}
 	summary.Remaining = max(0, summary.MaxRounds-reviewCapUsed(task, usage)-summary.Pending)
@@ -162,6 +187,14 @@ func (summary validationSummary) view() axi.Object {
 		findings = append(findings, axi.Field{Key: state, Value: summary.Findings[state]})
 		total += summary.Findings[state]
 	}
+	var greenhouseVerdict any
+	if summary.LatestGreenhouseVerdict != nil {
+		greenhouseVerdict = map[string]any{
+			"grant":   summary.LatestGreenhouseVerdict.Grant,
+			"head":    summary.LatestGreenhouseVerdict.Head,
+			"outcome": summary.LatestGreenhouseVerdict.Outcome,
+		}
+	}
 	return axi.Object{
 		{Key: "head", Value: summary.Head},
 		{Key: "review", Value: summary.Review},
@@ -171,6 +204,7 @@ func (summary validationSummary) view() axi.Object {
 		{Key: "max_rounds", Value: summary.MaxRounds},
 		{Key: "remaining", Value: summary.Remaining},
 		{Key: "latest_verdict", Value: summary.LatestVerdict},
+		{Key: "greenhouse_verdict", Value: greenhouseVerdict},
 		{Key: "findings_total", Value: total},
 		{Key: "findings", Value: findings},
 		{Key: "carries", Value: summary.Carries},
@@ -190,6 +224,9 @@ func (summary validationSummary) markdown() string {
 		rounds = "review loop off"
 	}
 	verdict := defaultValue(summary.LatestVerdict, "none yet")
+	if greenhouse := summary.LatestGreenhouseVerdict; greenhouse != nil {
+		verdict = fmt.Sprintf("%s (grant %s, head %s)", greenhouse.Outcome, greenhouse.Grant, shortSHA(greenhouse.Head))
+	}
 	findings := "none"
 	if states := summary.findingStates(); len(states) > 0 {
 		parts := make([]string, 0, len(states))

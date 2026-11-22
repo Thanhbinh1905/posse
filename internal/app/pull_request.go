@@ -512,6 +512,9 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 		existingBody = strings.ReplaceAll(existingBody, publishBodyMarker("start", oldToken), publishBodyMarker("start", token))
 		existingBody = strings.ReplaceAll(existingBody, publishBodyMarker("end", oldToken), publishBodyMarker("end", token))
 	}
+	if refreshLegacy {
+		nextBody = preserveOmittedPublishBodyFields(existingBody, nextBody, token)
+	}
 	nextBody, err = refreshPublishBody(existingBody, nextBody, token, refreshLegacy)
 	if err != nil {
 		return err
@@ -2031,10 +2034,17 @@ func prObservationEffect(project store.Project, task store.Task, current store.P
 			withdrawReadiness("the PR is no longer green and mergeable")
 		}
 		if ready && !checks.MergeRequested && (task.State == store.StateDone || task.State == store.StateMerging) {
-			addNotice("merge_ready", task.Title+": pull request checks and reviews are ready to merge head "+shortSHA(current.HeadSHA), map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
+			addNotice("merge_ready", mergeReadySummary(task, current.HeadSHA), map[string]any{"url": current.PRURL, "head_sha": current.HeadSHA})
 		}
 	}
 	return effect
+}
+
+func mergeReadySummary(task store.Task, head string) string {
+	if plan, err := task.AdmittedPlan(); err == nil && plan != nil && plan.Review == "none" {
+		return task.Title + ": pull request checks are ready; merging without review (review: none) for head " + shortSHA(head)
+	}
+	return task.Title + ": pull request checks and reviews are ready to merge head " + shortSHA(head)
 }
 
 func headDiscontinuityPRSummary(project store.Project, task store.Task, current store.PRObservation) string {

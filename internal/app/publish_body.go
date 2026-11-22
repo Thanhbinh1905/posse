@@ -68,6 +68,94 @@ func refreshPublishBody(existing, next, token string, refreshLegacy bool) (strin
 	return "", legacyPublishConflict("description has no Posse ownership markers and is not a recognized legacy template")
 }
 
+func preserveOmittedPublishBodyFields(existing, next, token string) string {
+	startMarker, endMarker := publishBodyMarker("start", token), publishBodyMarker("end", token)
+	if token == "" || strings.Count(existing, startMarker) != 1 || strings.Count(existing, endMarker) != 1 {
+		return next
+	}
+	start, end := strings.Index(existing, startMarker)+len(startMarker), strings.Index(existing, endMarker)
+	if end <= start {
+		return next
+	}
+	previous := existing[start:end]
+	defaults := map[string]string{
+		"Verification":      "- [ ] Not run; reason: not supplied",
+		"Proof":             "_No proof supplied._",
+		"Risk And Rollback": "Risk: not stated\nRollback: revert this PR",
+	}
+	for heading, placeholder := range defaults {
+		current, found := publishSection(next, heading)
+		if !found || current != placeholder {
+			continue
+		}
+		prior, found := publishSection(previous, heading)
+		if !found || prior == "" || prior == placeholder {
+			continue
+		}
+		next = replacePublishSection(next, heading, prior)
+	}
+	return next
+}
+
+func publishSection(body, heading string) (string, bool) {
+	marker := "## " + heading
+	for offset := 0; offset < len(body); {
+		end := strings.IndexByte(body[offset:], '\n')
+		if end < 0 {
+			return "", false
+		}
+		lineEnd := offset + end
+		if body[offset:lineEnd] == marker {
+			contentStart := lineEnd + 1
+			contentEnd := len(body)
+			for pos := contentStart; pos < len(body); {
+				nextEnd := strings.IndexByte(body[pos:], '\n')
+				if nextEnd < 0 {
+					break
+				}
+				lineEnd := pos + nextEnd
+				if strings.HasPrefix(body[pos:lineEnd], "## ") || strings.HasPrefix(body[pos:lineEnd], "<!-- posse:") {
+					contentEnd = pos
+					break
+				}
+				pos = lineEnd + 1
+			}
+			return strings.TrimSpace(body[contentStart:contentEnd]), true
+		}
+		offset = lineEnd + 1
+	}
+	return "", false
+}
+
+func replacePublishSection(body, heading, content string) string {
+	marker := "## " + heading
+	for offset := 0; offset < len(body); {
+		lineEnd := strings.IndexByte(body[offset:], '\n')
+		if lineEnd < 0 {
+			return body
+		}
+		lineEnd += offset
+		if body[offset:lineEnd] == marker {
+			contentStart, contentEnd := lineEnd+1, len(body)
+			for pos := contentStart; pos < len(body); {
+				nextEnd := strings.IndexByte(body[pos:], '\n')
+				if nextEnd < 0 {
+					break
+				}
+				sectionEnd := pos + nextEnd
+				if strings.HasPrefix(body[pos:sectionEnd], "## ") || strings.HasPrefix(body[pos:sectionEnd], "<!-- posse:") {
+					contentEnd = pos
+					break
+				}
+				pos = sectionEnd + 1
+			}
+			return body[:contentStart] + content + "\n\n" + body[contentEnd:]
+		}
+		offset = lineEnd + 1
+	}
+	return body
+}
+
 func markerIsWholeLine(value string, start int, marker string) bool {
 	end := start + len(marker)
 	lineStart := start == 0 || value[start-1] == '\n'
