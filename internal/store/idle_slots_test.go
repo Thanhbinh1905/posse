@@ -6,9 +6,21 @@ import (
 	"time"
 )
 
-func TestIdleSlotTasksExcludesReadyPullRequests(t *testing.T) {
-	for _, mode := range []string{"pr", "greenhouse"} {
-		t.Run(mode, func(t *testing.T) {
+func TestIdleSlotTasksRespectsPRReviewReadiness(t *testing.T) {
+	for _, test := range []struct {
+		name, mode, verdict string
+		blocking            int
+		olderVerdict        string
+		wantIdle            bool
+	}{
+		{name: "pr", mode: "pr"},
+		{name: "greenhouse without verdict", mode: "greenhouse", wantIdle: true},
+		{name: "greenhouse pass", mode: "greenhouse", verdict: "clean"},
+		{name: "greenhouse blocking verdict", mode: "greenhouse", verdict: "findings", blocking: 1, wantIdle: true},
+		{name: "greenhouse older pass and latest blocker", mode: "greenhouse", verdict: "findings", blocking: 1, olderVerdict: "clean", wantIdle: true},
+		{name: "greenhouse nonblocking findings", mode: "greenhouse", verdict: "findings"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			db, err := Open(t.TempDir())
 			if err != nil {
@@ -19,7 +31,7 @@ func TestIdleSlotTasksExcludesReadyPullRequests(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			readyID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Ready", ShortName: "ready", State: StateSpawning, MergeMode: mode}, func(int) (bool, error) { return false, nil })
+			readyID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Ready", ShortName: "ready", State: StateSpawning, MergeMode: test.mode}, func(int) (bool, error) { return false, nil })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -28,7 +40,7 @@ func TestIdleSlotTasksExcludesReadyPullRequests(t *testing.T) {
 				t.Fatal(err)
 			}
 			prURL, head := "https://github.com/acme/shop/pull/1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done',landing_mode=?,pr_url=?,gated_sha=?,created_at=1 WHERE id=?`, mode, prURL, head, readyID); err != nil {
+			if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='done',landing_mode=?,pr_url=?,gated_sha=?,created_at=1 WHERE id=?`, test.mode, prURL, head, readyID); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.ExecContext(ctx, `UPDATE transitions SET at=1 WHERE task_id=?`, readyID); err != nil {
@@ -40,6 +52,16 @@ func TestIdleSlotTasksExcludesReadyPullRequests(t *testing.T) {
 			if _, err := db.ExecContext(ctx, `INSERT INTO pr_observations(project_id,task_id,pr_url,head_sha,state,checks,review,mergeable,observed_at,confirmed_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, project.ID, readyID, prURL, head, "OPEN", `{"state":"SUCCESS"}`, "APPROVED", "MERGEABLE", 1, 1); err != nil {
 				t.Fatal(err)
 			}
+			if test.olderVerdict != "" {
+				if _, err := db.ExecContext(ctx, `INSERT INTO verdicts(task_id,repo,provider,protocol,grant_id,head_sha,target_sha,review_base_sha,verdict,blocking,mode,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, readyID, project.Name, GreenhouseReviewProvider, "2", "older-review-grant", head, head, head, test.olderVerdict, 0, "gate", 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.verdict != "" {
+				if _, err := db.ExecContext(ctx, `INSERT INTO verdicts(task_id,repo,provider,protocol,grant_id,head_sha,target_sha,review_base_sha,verdict,blocking,mode,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, readyID, project.Name, GreenhouseReviewProvider, "2", "review-grant", head, head, head, test.verdict, test.blocking, "gate", 2); err != nil {
+					t.Fatal(err)
+				}
+			}
 			idle, waiting, err := db.IdleSlotTasks(ctx, project.ID, time.Second, time.Now())
 			if err != nil {
 				t.Fatal(err)
@@ -47,8 +69,8 @@ func TestIdleSlotTasksExcludesReadyPullRequests(t *testing.T) {
 			if len(waiting) != 1 || waiting[0].ID != queuedID {
 				t.Fatalf("waiting Tasks = %+v, want queued Task %d", waiting, queuedID)
 			}
-			if len(idle) != 0 {
-				t.Fatalf("ready-to-merge %s Task holds an idle Pool slot: %+v", mode, idle)
+			if gotIdle := len(idle) > 0; gotIdle != test.wantIdle {
+				t.Fatalf("idle Tasks=%+v, want idle=%t for %s mode with verdict %q", idle, test.wantIdle, test.mode, test.verdict)
 			}
 		})
 	}
