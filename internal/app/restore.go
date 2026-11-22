@@ -39,7 +39,7 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 	}
 	data := marshalJSON(map[string]any{"episode": episode, "tasks": workers})
 	var existing int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE project_id=? AND kind='restore_needed' AND json_extract(data_json,'$.episode')=?`, project.ID, episode).Scan(&existing); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE project_id=? AND kind='restore_needed' AND (json_extract(data_json,'$.episode')=? OR acked_at IS NULL)`, project.ID, episode).Scan(&existing); err != nil {
 		return err
 	}
 	if existing == 0 {
