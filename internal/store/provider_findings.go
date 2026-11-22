@@ -106,7 +106,7 @@ func (db *DB) WithdrawProviderFinding(ctx context.Context, taskID, findingID, de
 		return tx.Commit()
 	}
 	if state != "open" && state != "disputed" {
-		return fmt.Errorf("Greenhouse finding is no longer open")
+		return fmt.Errorf("greenhouse finding is no longer open")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO provider_finding_events(finding_id,event,note,at) VALUES(?, 'withdrawn', ?, ?)`, findingID, fmt.Sprintf("Decision #%d; evidence SHA-256 %s; User: %s", decisionID, evidenceDigest, userQuote), time.Now().UnixMilli()); err != nil {
 		return err

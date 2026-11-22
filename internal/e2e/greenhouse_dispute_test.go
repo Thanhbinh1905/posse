@@ -68,6 +68,9 @@ func runGreenhouseSpentCapDispute(t *testing.T, moveHead bool) {
 			t.Fatal(err)
 		}
 		usage, err := db.ReviewCapUsage(context.Background(), change.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
 		plan, err := change.AdmittedPlan()
 		if err != nil || usage.ReviewRounds != 1 || plan == nil || plan.ValidationLoops.MaxReviewRounds() != 1 {
 			t.Fatalf("Greenhouse review cap usage = %+v, max rounds = %v, plan error = %v; want one of one rounds used", usage, plan, err)
