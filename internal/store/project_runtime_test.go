@@ -22,7 +22,7 @@ func TestWatchRuntimeHeartbeatAndFailureNoticeEpisode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	watch := WatchRuntime{PID: 123, Token: "episode-one", StartedAt: 100, HeartbeatAt: 101, ExecutablePath: "/usr/bin/posse", ExecutableDevice: 7, ExecutableInode: 11}
+	watch := WatchRuntime{PID: 123, Token: "episode-one", StartedAt: 100, HeartbeatAt: 101, ExecutablePath: "/usr/bin/posse", ExecutableDevice: 7, ExecutableInode: 11, ExecutableSize: 12, ExecutableModifiedAt: 13, ExecutableVersion: "v1.2.3"}
 	if err := db.SetWatchRuntime(ctx, project.ID, watch); err != nil {
 		t.Fatal(err)
 	}

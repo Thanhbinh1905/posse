@@ -27,8 +27,8 @@ func TestHistoricalVocabularyMigrationReceiptUpgradesWithPublishedMain(t *testin
 		`ALTER TABLE tasks DROP COLUMN containment_mode`,
 		`ALTER TABLE tasks DROP COLUMN containment_path`,
 		`ALTER TABLE tasks DROP COLUMN containment_marker`,
-		`DELETE FROM goose_db_version WHERE version_id IN (53,54)`,
-		`DELETE FROM posse_migration_checksums WHERE version IN (53,54)`,
+		`DELETE FROM goose_db_version WHERE version_id IN (53,54,20261120173211)`,
+		`DELETE FROM posse_migration_checksums WHERE version IN (53,54,20261120173211)`,
 		`UPDATE goose_db_version SET version_id=53 WHERE version_id=55`,
 		`UPDATE posse_migration_checksums SET version=53 WHERE version=55`,
 	} {
