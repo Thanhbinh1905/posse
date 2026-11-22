@@ -579,8 +579,17 @@ func TestGreenhouseFailureAtRetryLimitRaisesNeedsDecisionNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(notices) != 1 || notices[0].Kind != "needs_decision" || !strings.Contains(notices[0].Summary, "Greenhouse binary is missing") {
-		t.Fatalf("retry-limit Notice = %+v, want one needs_decision naming latest failure", notices)
+	needsDecision, failure := 0, 0
+	for _, notice := range notices {
+		if notice.Kind == "needs_decision" && strings.Contains(notice.Summary, "Greenhouse binary is missing") {
+			needsDecision++
+		}
+		if notice.Kind == "greenhouse_review_failed" && notice.AckedAt > 0 {
+			failure++
+		}
+	}
+	if needsDecision != 1 || failure != 1 {
+		t.Fatalf("retry-limit Notices = %+v, want one actionable needs_decision and one acknowledged failure Notice", notices)
 	}
 }
 

@@ -83,74 +83,100 @@ func (db *DB) GreenhouseFailureNoticeSummary(ctx context.Context, taskID int64, 
 }
 
 func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
-	return db.createGreenhouseFailureNoticeOnce(ctx, projectID, taskID, repository, head, reason, "greenhouse_review_failed")
-}
-
-func (db *DB) CreateGreenhouseNeedsDecisionNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
-	return db.createGreenhouseFailureNoticeOnce(ctx, projectID, taskID, repository, head, reason, "needs_decision")
-}
-
-func (db *DB) createGreenhouseFailureNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason, kind string) (bool, error) {
-	data, err := json.Marshal(struct {
-		Repository string `json:"repo"`
-		Head       string `json:"head"`
-	}{repository, head})
+	data, err := greenhouseNoticeData(repository, head)
 	if err != nil {
 		return false, err
 	}
 	summary := fmt.Sprintf("Greenhouse parallel review failed for %s at %s: %s", repository, head, reason)
-	var invalidatedReceipts int64
-	if kind == "needs_decision" {
-		_, err := db.ExecContext(ctx, `UPDATE notices SET claim_token='',claimed_at=0 WHERE claim_token IN (
-			SELECT r.owner_token FROM notice_delivery_receipts r WHERE r.project_id=? AND r.state IN ('claimed','printed') AND EXISTS (
-				SELECT 1 FROM json_each(r.notice_ids_json) ids JOIN notices n ON n.id=CAST(ids.value AS INTEGER)
-				WHERE n.task_id=? AND n.kind IN ('greenhouse_review_failed','needs_decision') AND n.data_json=?))`, projectID, taskID, string(data))
-		if err != nil {
-			return false, err
-		}
-		result, err := db.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='rejected',owner_token='',lease_until=0,updated_at=? WHERE project_id=? AND state IN ('claimed','printed') AND EXISTS (
-			SELECT 1 FROM json_each(notice_delivery_receipts.notice_ids_json) ids JOIN notices n ON n.id=CAST(ids.value AS INTEGER)
-			WHERE n.task_id=? AND n.kind IN ('greenhouse_review_failed','needs_decision') AND n.data_json=?)`, time.Now().UnixMilli(), projectID, taskID, string(data))
-		if err != nil {
-			return false, err
-		}
-		invalidatedReceipts, err = result.RowsAffected()
-		if err != nil {
-			return false, err
-		}
-	}
-	reopen := kind == "needs_decision"
-	updated, err := db.ExecContext(ctx, `UPDATE notices SET kind=?,summary=?,delivered_at=CASE WHEN ? THEN NULL ELSE delivered_at END,acked_at=CASE WHEN ? THEN NULL ELSE acked_at END,claim_token=CASE WHEN ? THEN '' ELSE claim_token END,claimed_at=CASE WHEN ? THEN 0 ELSE claimed_at END WHERE task_id=? AND kind IN ('greenhouse_review_failed',?) AND data_json=? AND (? OR kind<>? OR summary<>?)`, kind, summary, reopen, reopen, reopen, reopen, taskID, kind, string(data), reopen, kind, summary)
+	updated, err := db.ExecContext(ctx, `UPDATE notices SET summary=? WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=? AND summary<>?`, summary, taskID, data, summary)
 	if err != nil {
 		return false, err
 	}
-	updatedRows, err := updated.RowsAffected()
+	rows, err := updated.RowsAffected()
 	if err != nil {
 		return false, err
 	}
-	if updatedRows > 0 {
-		if err := db.PersistProject(ctx, projectID); err != nil {
-			return false, err
-		}
-		if invalidatedReceipts > 0 {
-			if err := db.PersistNoticeDeliverySnapshot(ctx, projectID); err != nil {
-				return false, err
-			}
-		}
-		return false, nil
+	if rows > 0 {
+		return false, db.PersistProject(ctx, projectID)
 	}
 	result, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
-		SELECT ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind=? AND data_json=?)`,
-		projectID, taskID, kind, summary, string(data), time.Now().UnixMilli(), taskID, kind, string(data))
+		SELECT ?, ?, 'greenhouse_review_failed', ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=?)`,
+		projectID, taskID, summary, data, time.Now().UnixMilli(), taskID, data)
 	if err != nil {
 		return false, err
 	}
-	rows, err := result.RowsAffected()
+	rows, err = result.RowsAffected()
 	if err != nil || rows == 0 {
 		return false, err
 	}
 	return true, db.PersistProject(ctx, projectID)
+}
+
+func (db *DB) CreateGreenhouseNeedsDecisionNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
+	data, err := greenhouseNoticeData(repository, head)
+	if err != nil {
+		return false, err
+	}
+	summary := fmt.Sprintf("Greenhouse review failed for %s at %s: %s", repository, head, reason)
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `UPDATE notices SET claim_token='',claimed_at=0 WHERE claim_token IN (
+		SELECT r.owner_token FROM notice_delivery_receipts r WHERE r.project_id=? AND r.state IN ('claimed','printed') AND EXISTS (
+			SELECT 1 FROM json_each(r.notice_ids_json) ids JOIN notices n ON n.id=CAST(ids.value AS INTEGER)
+			WHERE n.task_id=? AND n.kind IN ('greenhouse_review_failed','needs_decision') AND n.data_json=?))`, projectID, taskID, data)
+	if err != nil {
+		return false, err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='rejected',owner_token='',lease_until=0,updated_at=? WHERE project_id=? AND state IN ('claimed','printed') AND EXISTS (
+		SELECT 1 FROM json_each(notice_delivery_receipts.notice_ids_json) ids JOIN notices n ON n.id=CAST(ids.value AS INTEGER)
+		WHERE n.task_id=? AND n.kind IN ('greenhouse_review_failed','needs_decision') AND n.data_json=?)`, time.Now().UnixMilli(), projectID, taskID, data)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE notices SET acked_at=COALESCE(acked_at,?),claim_token=CASE WHEN claim_token LIKE 'uncertain:%' THEN claim_token ELSE '' END,claimed_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN claimed_at ELSE 0 END WHERE project_id=? AND task_id=? AND kind='greenhouse_review_failed' AND data_json=?`, time.Now().UnixMilli(), projectID, taskID, data); err != nil {
+		return false, err
+	}
+	var noticeID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM notices WHERE task_id=? AND kind='needs_decision' AND data_json=?`, taskID, data).Scan(&noticeID)
+	created := false
+	if errors.Is(err, sql.ErrNoRows) {
+		result, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at) VALUES(?,?,'needs_decision',?,?,?)`, projectID, taskID, summary, data, time.Now().UnixMilli())
+		if err != nil {
+			return false, err
+		}
+		noticeID, err = result.LastInsertId()
+		if err != nil {
+			return false, err
+		}
+		created = true
+	} else if err != nil {
+		return false, err
+	} else if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,delivered_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN delivered_at ELSE NULL END,acked_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN acked_at ELSE NULL END,claim_token=CASE WHEN claim_token LIKE 'uncertain:%' THEN claim_token ELSE '' END,claimed_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN claimed_at ELSE 0 END WHERE id=?`, summary, noticeID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if err := db.PersistProject(ctx, projectID); err != nil {
+		return false, err
+	}
+	if err := db.PersistNoticeDeliverySnapshot(ctx, projectID); err != nil {
+		return false, err
+	}
+	return created, nil
+}
+
+func greenhouseNoticeData(repository, head string) (string, error) {
+	data, err := json.Marshal(struct {
+		Repository string `json:"repo"`
+		Head       string `json:"head"`
+	}{repository, head})
+	return string(data), err
 }
 
 // CreateGreenhouseRecoveryNoticeOnce raises one Notice per parked Greenhouse

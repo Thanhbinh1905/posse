@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func greenhouseVerdict(taskID int64, grant, head string) Verdict {
@@ -279,21 +280,70 @@ func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO notice_delivery_receipts(delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at) VALUES('delivery-1','batch-1',?,'[' || ? || ']','test','generation','claimed','delivery-owner',12,20,0,10,12)`, task.ProjectID, noticeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: latest context overflow"); err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: latest context overflow"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind IN ('greenhouse_review_failed','needs_decision')`, task.ID).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("failure and needs-decision Notices = %d, %v; want one Notice", count, err)
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("same-head needs-decision Notices = %d, %v; want one", count, err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind IN ('greenhouse_review_failed','needs_decision')`, task.ID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("failure and needs-decision Notices = %d, %v; want one of each", count, err)
 	}
 	var kind, claim string
 	var delivered, acked sql.NullInt64
 	var claimedAt int64
-	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,summary,delivered_at,acked_at,claim_token,claimed_at FROM notices WHERE task_id=?`, task.ID).Scan(&kind, &summary, &delivered, &acked, &claim, &claimedAt); err != nil || kind != "needs_decision" || !strings.Contains(summary, "context overflow") || delivered.Valid || acked.Valid || claim != "" || claimedAt != 0 {
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,summary,delivered_at,acked_at,claim_token,claimed_at FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&kind, &summary, &delivered, &acked, &claim, &claimedAt); err != nil || kind != "needs_decision" || !strings.Contains(summary, "context overflow") || delivered.Valid || acked.Valid || claim != "" || claimedAt != 0 {
 		t.Fatalf("needs-decision Notice = kind %q summary %q delivered %v acked %v claim %q claimed_at %d err=%v", kind, summary, delivered, acked, claim, claimedAt, err)
+	}
+	var oldSummary string
+	var oldAcked sql.NullInt64
+	var oldClaim string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT summary,acked_at,claim_token FROM notices WHERE id=?`, noticeID).Scan(&oldSummary, &oldAcked, &oldClaim); err != nil || !strings.Contains(oldSummary, "protocol refusal") || !oldAcked.Valid || oldClaim != "" {
+		t.Fatalf("old failure Notice summary=%q acked=%v claim=%q err=%v", oldSummary, oldAcked, oldClaim, err)
 	}
 	var receiptState, receiptOwner string
 	if err := f.db.QueryRowContext(f.ctx, `SELECT state,owner_token FROM notice_delivery_receipts WHERE delivery_id='delivery-1'`).Scan(&receiptState, &receiptOwner); err != nil || receiptState != "rejected" || receiptOwner != "" {
 		t.Fatalf("old Notice delivery receipt = state %q owner %q err=%v", receiptState, receiptOwner, err)
+	}
+}
+
+func TestGreenhouseNeedsDecisionPreservesUncertainFailureDelivery(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "review setup failed: missing Greenhouse binary"); err != nil {
+		t.Fatal(err)
+	}
+	var noticeID int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT id FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&noticeID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := f.db.ExecContext(f.ctx, `UPDATE notices SET claim_token='delivery-owner',claimed_at=? WHERE id=?`, now, noticeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `INSERT INTO notice_delivery_receipts(delivery_id,batch_id,project_id,notice_ids_json,destination,generation,state,owner_token,claimed_at,lease_until,accepted_at,created_at,updated_at) VALUES('delivery-uncertain','batch-uncertain',?,'[' || ? || ']','test','generation','printed','delivery-owner',?,?,0,?,?)`, task.ProjectID, noticeID, now, now+1000, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.MarkNoticeDeliveryUncertain(f.ctx, "delivery-uncertain", now+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: missing Greenhouse binary"); err != nil {
+		t.Fatal(err)
+	}
+	var oldKind, oldClaim string
+	var oldAcked sql.NullInt64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,acked_at,claim_token FROM notices WHERE id=?`, noticeID).Scan(&oldKind, &oldAcked, &oldClaim); err != nil || oldKind != "greenhouse_review_failed" || !oldAcked.Valid || oldClaim != "uncertain:delivery-uncertain" {
+		t.Fatalf("old Notice kind=%q acked=%v claim=%q err=%v; want acknowledged failure with its uncertain claim intact", oldKind, oldAcked, oldClaim, err)
+	}
+	if err := f.db.ResolveUncertainNoticeDelivery(f.ctx, task.ProjectID, "delivery-uncertain", "accepted", now+2); err != nil {
+		t.Fatalf("resolve old uncertain delivery after escalation: %v", err)
+	}
+	var state string
+	var delivered sql.NullInt64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,delivered_at FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&state, &delivered); err != nil || delivered.Valid {
+		t.Fatalf("escalated Notice kind=%q delivered=%v err=%v; want a new open needs_decision Notice", state, delivered, err)
 	}
 }
 
