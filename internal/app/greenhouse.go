@@ -175,7 +175,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		}
 		return notifyFailure(requestedHead, reason)
 	}
-	binary, err := exec.LookPath("greenhouse")
+	binary, err := greenhouseBinary()
 	if err != nil {
 		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
 			return recordErr
@@ -963,6 +963,26 @@ func greenhouseTaskMember(ctx context.Context, db *store.DB, project store.Proje
 	return greenhouseMember{}, axi.Usage("Task " + taskIDString(task.Seq) + " has no Member " + repo)
 }
 
+func greenhouseBinary() (string, error) {
+	if binary, err := exec.LookPath("greenhouse"); err == nil {
+		return binary, nil
+	}
+	candidates := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "greenhouse"))
+	}
+	if executable, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "greenhouse"))
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("greenhouse is not installed on PATH or in ~/.local/bin")
+}
+
 func greenhouseTarget(ctx context.Context, member greenhouseMember) (string, error) {
 	ref := "refs/heads/" + member.targetBranch
 	if _, err := gitOutput(ctx, member.root, "remote", "get-url", "origin"); err == nil {
@@ -1008,14 +1028,18 @@ func greenhouseDaemonCheck(home string) (name, status, detail, action string) {
 	if !live {
 		return name, "ok", "not running; Posse starts it in " + greenhouseHome + " when it requests a Greenhouse review", ""
 	}
+	binary := "unknown executable"
+	if running, err := greenhouse.RunningExecutable(pid); err == nil {
+		binary = running
+	}
 	state, err := greenhouse.ReadState(greenhouseHome)
 	if err != nil || state.PID != pid {
-		return name, "warn", fmt.Sprintf("PID %d serves %s, but Posse has no protocol record for it", pid, greenhouseHome), "Request a Greenhouse review to probe it again"
+		return name, "warn", fmt.Sprintf("PID %d runs %s and serves %s, but Posse has no protocol record for it", pid, binary, greenhouseHome), "Request a Greenhouse review to probe it again"
 	}
 	if !state.Range.Includes(greenhouse.Protocol) {
-		return name, "fail", fmt.Sprintf("PID %d speaks protocol %s; Posse needs protocol %s", pid, state.Range, greenhouse.PosseRange), "Let its work settle, stop it with SIGTERM to PID " + strconv.Itoa(pid) + " and install a Greenhouse that speaks protocol " + strconv.Itoa(greenhouse.Protocol)
+		return name, "fail", fmt.Sprintf("PID %d runs %s and speaks protocol %s; Posse needs protocol %s", pid, binary, state.Range, greenhouse.PosseRange), "Let its work settle, stop it with SIGTERM to PID " + strconv.Itoa(pid) + " and install a Greenhouse that speaks protocol " + strconv.Itoa(greenhouse.Protocol)
 	}
-	return name, "ok", fmt.Sprintf("PID %d speaks protocol %s; Posse uses %d", pid, state.Range, greenhouse.Protocol), ""
+	return name, "ok", fmt.Sprintf("PID %d runs %s and speaks protocol %s; Posse uses %d", pid, binary, state.Range, greenhouse.Protocol), ""
 }
 
 const greenhouseStopWait = 10 * time.Second

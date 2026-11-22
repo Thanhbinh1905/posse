@@ -3,15 +3,67 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestDoctorReportsTheRunningGreenhouseExecutable(t *testing.T) {
+	home := t.TempDir()
+	greenhouseHome := greenhouse.HomeFor(home)
+	if err := os.MkdirAll(greenhouseHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(greenhouseHome, "socket"))
+	if err != nil {
+		t.Skipf("Unix sockets are unavailable: %v", err)
+	}
+	defer listener.Close()
+	if err := os.WriteFile(filepath.Join(greenhouseHome, "pid"), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := json.Marshal(greenhouse.DaemonState{PID: os.Getpid(), Binary: "/configured/greenhouse", Range: greenhouse.Range{Min: 1, Max: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(greenhouseHome, "posse-daemon.json"), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want, err := greenhouse.RunningExecutable(os.Getpid())
+	if err != nil {
+		t.Skipf("process executable lookup is unavailable: %v", err)
+	}
+	_, status, detail, _ := greenhouseDaemonCheck(home)
+	if status != "ok" || !strings.Contains(detail, want) || strings.Contains(detail, "/configured/greenhouse") {
+		t.Fatalf("Greenhouse daemon check = %q, %q; want running executable %q", status, detail, want)
+	}
+}
+
+func TestGreenhouseBinaryIsFoundOutsideTheCallerPATH(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(bin, "greenhouse")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", root)
+	t.Setenv("PATH", filepath.Join(root, "empty-path"))
+	got, err := greenhouseBinary()
+	if err != nil || got != binary {
+		t.Fatalf("greenhouseBinary() = %q, %v; want %q", got, err, binary)
+	}
+}
 
 func TestGreenhouseWatchUsesGreenhouseTimestampsAndFallsBackWhenAbsent(t *testing.T) {
 	started := "2026-11-20T00:00:00Z"
@@ -159,6 +211,9 @@ func TestGreenhouseWatchFollowsDoneSignalRunAfterWorkerFinishes(t *testing.T) {
 	}
 	inspect := filepath.Join(bin, "greenhouse")
 	script := `#!/bin/sh
+[ "$GREENHOUSE_HOME" = "` + greenhouse.HomeFor(home) + `" ] || exit 10
+[ -z "$POSSE_TASK_ID" ] || exit 11
+[ -z "$HERDR_PANE_ID" ] || exit 12
 request=$(cat)
 case "$request" in
   *run-1046*) printf '%s\n' '{"run_id":"run-1046","run":{"id":"run-1046","status":"ci-ready","stage":"ci"}}' ;;
@@ -169,6 +224,9 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GREENHOUSE_HOME", filepath.Join(home, "wrong-greenhouse-home"))
+	t.Setenv("POSSE_TASK_ID", "t999")
+	t.Setenv("HERDR_PANE_ID", "wrong-pane")
 	service := New(home, nil)
 	if err := service.observeGreenhouseTasks(ctx, db, project); err != nil {
 		t.Fatal(err)
