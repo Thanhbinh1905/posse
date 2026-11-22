@@ -425,7 +425,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				return err
 			}
 			if len(result.Result.Uncovered) > 0 {
-				summary := greenhousePartialDecisionQuestion(shortSHA(verdict.Head), *result.Result)
+				summary := greenhousePartialDecisionQuestion(member.name, shortSHA(verdict.Head), *result.Result)
 				if _, err := db.CreateGreenhousePartialNoticeOnce(ctx.Context, project.ID, task.ID, member.name, verdict.Head, summary, result.Result); err != nil {
 					return err
 				}
@@ -548,6 +548,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 			return err
 		}
 		allPassed := true
+		acceptedMembers := make(map[string]bool)
 		var failed *store.Verdict
 		for _, target := range targets {
 			var latest *store.Verdict
@@ -562,11 +563,25 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				allPassed = false
 				break
 			}
-			if !latest.Qualifies(target.Commit) {
-				allPassed = false
-				failed = latest
-				break
+			var partialReview bool
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, target.Repository, target.Commit).Scan(&partialReview); err != nil {
+				return err
 			}
+			if partialReview {
+				accepted, err := greenhouseAcceptHeadDisposition(ctx, db, task, target.Repository, target.Commit)
+				if err != nil {
+					return err
+				}
+				if accepted && latest.Blocking == 0 {
+					acceptedMembers[target.Repository] = true
+					continue
+				}
+			} else if latest.Qualifies(target.Commit) {
+				continue
+			}
+			allPassed = false
+			failed = latest
+			break
 		}
 		if !allPassed {
 			if failed != nil && failed.Outcome == "findings" && failed.Blocking > 0 {
@@ -581,17 +596,27 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				}
 			}
 			if failed != nil {
-				_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, failed.Repository, failed.Head, fmt.Sprintf("Greenhouse returned %s for Member %s at %s; publication is blocked", failed.Outcome, failed.Repository, shortSHA(failed.Head)))
-				if err != nil {
+				var partialReview bool
+				if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, failed.Repository, failed.Head).Scan(&partialReview); err != nil {
 					return err
+				}
+				if !partialReview || failed.Blocking > 0 {
+					_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, failed.Repository, failed.Head, fmt.Sprintf("Greenhouse returned %s for Member %s at %s; publication is blocked", failed.Outcome, failed.Repository, shortSHA(failed.Head)))
+					if err != nil {
+						return err
+					}
 				}
 			}
 			continue
 		}
 		var body strings.Builder
-		body.WriteString("Greenhouse passed these exact Member heads. Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
+		body.WriteString("Greenhouse passed or the User accepted coverage for these exact Member heads. Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
 		for _, target := range targets {
-			fmt.Fprintf(&body, "- %s at %s: `posse publish --repo %s \"<summary>\"`\n", target.Repository, shortSHA(target.Commit), target.Repository)
+			status := "Greenhouse passed"
+			if acceptedMembers[target.Repository] {
+				status = "User accepted coverage"
+			}
+			fmt.Fprintf(&body, "- %s: %s at %s: `posse publish --repo %s \"<summary>\"`\n", target.Repository, status, shortSHA(target.Commit), target.Repository)
 		}
 		_, queued, err := db.QueueMessageOnceAfter(ctx, task.ID, body.String(), true, signals[0].At-1)
 		if err != nil {
@@ -685,7 +710,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 						return err
 					}
 					if !passed {
-						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, head)
+						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, project.Name, head)
 						if err != nil {
 							return err
 						}
@@ -737,12 +762,12 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		if latest != nil {
 			verdict := *latest
 			var partialReview bool
-			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.head')=?)`, task.ID, head).Scan(&partialReview); err != nil {
+			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, project.Name, head).Scan(&partialReview); err != nil {
 				return err
 			}
 			accepted := false
 			if partialReview {
-				accepted, err = greenhouseAcceptHeadDisposition(ctx, db, task, head)
+				accepted, err = greenhouseAcceptHeadDisposition(ctx, db, task, project.Name, head)
 				if err != nil {
 					return err
 				}

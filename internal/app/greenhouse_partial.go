@@ -7,9 +7,27 @@ import (
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
 )
 
-func greenhousePartialDecisionQuestion(head string, result greenhouse.HostResult) string {
+func greenhouseCoverageDecisionOrigin(taskSeq int, repository, head string) string {
+	return fmt.Sprintf("greenhouse-coverage:%s:%s:%s", taskIDString(taskSeq), repository, head)
+}
+
+func parseGreenhouseCoverageDecisionOrigin(origin string, taskSeq int) (string, string, bool) {
+	prefix := "greenhouse-coverage:" + taskIDString(taskSeq) + ":"
+	value, ok := strings.CutPrefix(origin, prefix)
+	if !ok {
+		return "", "", false
+	}
+	separator := strings.LastIndex(value, ":")
+	if separator < 1 {
+		return "", "", false
+	}
+	repository, head := value[:separator], value[separator+1:]
+	return repository, head, true
+}
+
+func greenhousePartialDecisionQuestion(repository, head string, result greenhouse.HostResult) string {
 	var question strings.Builder
-	fmt.Fprintf(&question, "Greenhouse reviewed Task head %s partially. The uncovered paths were not reviewed:\n", head)
+	fmt.Fprintf(&question, "Greenhouse reviewed Member %s at Task head %s partially. The uncovered paths were not reviewed:\n", repository, head)
 	for _, path := range result.Uncovered {
 		fmt.Fprintf(&question, "- %s: %s\n", path.Path, path.Reason)
 	}

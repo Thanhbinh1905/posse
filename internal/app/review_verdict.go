@@ -185,13 +185,13 @@ func reviewPassFor(ctx context.Context, db *store.DB, change store.Task, candida
 
 // requireReviewPass requires a D01 pass of the exact candidate: commit when
 // given, otherwise the current Task branch tips.
-func greenhouseAcceptHeadDisposition(ctx context.Context, db *store.DB, task store.Task, head string) (bool, error) {
+func greenhouseAcceptHeadDisposition(ctx context.Context, db *store.DB, task store.Task, repository, head string) (bool, error) {
 	var accepted bool
 	err := db.QueryRowContext(ctx, `SELECT EXISTS(
 SELECT 1 FROM review_dispositions rd JOIN decisions d ON d.id=rd.decision_id
 WHERE rd.ship_task_id=? AND rd.head_sha=? AND d.task_id=? AND d.answered_at>0 AND d.obsolete_at=0
-AND ((d.kind='review_cap' AND d.answer='accept-head') OR (d.kind='greenhouse_coverage' AND d.answer='accept-coverage-at-exact-head' AND COALESCE((SELECT v.blocking FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.provider='greenhouse' AND v.head_sha=rd.head_sha ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=0))
-)`, task.ID, head, task.ID).Scan(&accepted)
+AND ((d.kind='review_cap' AND d.answer='accept-head') OR (d.kind='greenhouse_coverage' AND d.answer='accept-coverage-at-exact-head' AND d.origin=? AND COALESCE((SELECT v.blocking FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.repo=? AND v.provider='greenhouse' AND v.head_sha=rd.head_sha ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=0))
+)`, task.ID, head, task.ID, greenhouseCoverageDecisionOrigin(task.Seq, repository, head), repository).Scan(&accepted)
 	return accepted, err
 }
 
@@ -238,7 +238,7 @@ func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.
 			return err
 		}
 		if !passed {
-			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, task, target.Commit)
+			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, task, target.Repository, target.Commit)
 			if err != nil {
 				return err
 			}

@@ -89,10 +89,10 @@ SELECT 1 FROM review_rounds WHERE ship_task_id=? AND repository=? AND status='ve
 UNION ALL
 SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 UNION ALL
-SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`,
+SELECT 1 FROM review_dispositions rd LEFT JOIN decisions d ON d.id=rd.decision_id JOIN tasks t ON t.id=rd.ship_task_id WHERE rd.ship_task_id=? AND rd.head_sha=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||?))`,
 			changeTaskID, target.Repository, target.Commit,
 			changeTaskID, target.Repository, target.Commit,
-			changeTaskID, target.Commit).Scan(&covered); err != nil || !covered {
+			changeTaskID, target.Commit, target.Repository, target.Commit).Scan(&covered); err != nil || !covered {
 			return false, err
 		}
 	}

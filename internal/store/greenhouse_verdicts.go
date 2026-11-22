@@ -190,8 +190,8 @@ func (db *DB) CreateGreenhousePartialNoticeOnce(ctx context.Context, projectID, 
 	}
 	inserted, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
 		SELECT ?, ?, 'greenhouse_partial_review', ?, ?, ?
-		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.head')=?)`,
-		projectID, taskID, summary, string(data), time.Now().UnixMilli(), taskID, head)
+		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`,
+		projectID, taskID, summary, string(data), time.Now().UnixMilli(), taskID, repository, head)
 	if err != nil {
 		return false, err
 	}

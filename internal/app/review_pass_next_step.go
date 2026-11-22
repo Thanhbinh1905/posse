@@ -126,7 +126,7 @@ func queueSettledReviewStep(ctx context.Context, db *store.DB, project store.Pro
 			if err != nil {
 				return err
 			}
-			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, change, head)
+			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, change, project.Name, head)
 			if err != nil || !accepted {
 				return err
 			}

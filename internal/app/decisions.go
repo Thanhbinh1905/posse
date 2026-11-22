@@ -70,15 +70,16 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		switch {
 		case notice.Kind == "greenhouse_partial_review" && task.Type == "change":
 			var data struct {
-				Head   string                `json:"head"`
-				Result greenhouse.HostResult `json:"result"`
+				Repository string                `json:"repo"`
+				Head       string                `json:"head"`
+				Result     greenhouse.HostResult `json:"result"`
 			}
 			if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
 				return err
 			}
 			request.Kind = "greenhouse_coverage"
-			request.Origin = "greenhouse-coverage:" + taskIDString(task.Seq) + ":" + data.Head
-			request.Question = greenhousePartialDecisionQuestion(data.Head, data.Result)
+			request.Origin = greenhouseCoverageDecisionOrigin(task.Seq, data.Repository, data.Head)
+			request.Question = greenhousePartialDecisionQuestion(data.Repository, data.Head, data.Result)
 			request.Options = []string{"accept-coverage-at-exact-head", "hold"}
 		case notice.Kind == "review_cap_reached" && task.Type == "change":
 			binding, used, max, err := reviewCapNoticeData(notice)

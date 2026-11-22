@@ -347,7 +347,7 @@ func TestGreenhouseCoverageAcceptanceDoesNotPublishBlockingFindings(t *testing.T
 	if code, output, stderr := f.run("apply", fmt.Sprint(decision.ID)); code != 0 {
 		t.Fatalf("apply coverage Decision: %s %s", output, stderr)
 	}
-	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.headSHA)
+	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.project.Name, f.headSHA)
 	if err != nil || accepted {
 		t.Fatalf("coverage disposition with blocking findings = %t, %v; want false", accepted, err)
 	}

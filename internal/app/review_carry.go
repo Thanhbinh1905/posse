@@ -100,7 +100,7 @@ func reviewCarrySources(ctx context.Context, db *store.DB, taskID int64, reposit
 			sources = append(sources, verdict.Targets[0].Commit)
 		}
 	}
-	accepted, err := db.ReviewDispositionHeads(ctx, taskID)
+	accepted, err := db.ReviewDispositionHeads(ctx, taskID, repository)
 	if err != nil {
 		return nil, err
 	}
