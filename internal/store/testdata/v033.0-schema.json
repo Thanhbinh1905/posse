@@ -1,0 +1,1251 @@
+{
+  "source": "v0.33.0 release binary, initialized in an empty POSSE_HOME by `posse list`",
+  "objects": [
+    {
+      "type": "table",
+      "name": "approvals",
+      "table": "approvals",
+      "sql": "CREATE TABLE approvals (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    action TEXT NOT NULL,\n    user_quote TEXT NOT NULL,\n    at INTEGER NOT NULL\n, branch_sha TEXT NOT NULL DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "branch_author_invalidated_verdicts",
+      "table": "branch_author_invalidated_verdicts",
+      "sql": "CREATE TABLE branch_author_invalidated_verdicts (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    change_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    invalidated_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "branch_authorship",
+      "table": "branch_authorship",
+      "sql": "CREATE TABLE branch_authorship (\n    repository TEXT NOT NULL,\n    branch TEXT NOT NULL,\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    attempt INTEGER NOT NULL CHECK (attempt > 0),\n    generation INTEGER NOT NULL CHECK (generation > 0),\n    head_sha TEXT NOT NULL,\n    updated_at INTEGER NOT NULL,\n    PRIMARY KEY (repository, branch)\n)"
+    },
+    {
+      "type": "table",
+      "name": "budget_crossings",
+      "table": "budget_crossings",
+      "sql": "CREATE TABLE budget_crossings (\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    scope TEXT NOT NULL,\n    scope_key TEXT NOT NULL,\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    created_at INTEGER NOT NULL,\n    PRIMARY KEY(project_id, scope, scope_key)\n)"
+    },
+    {
+      "type": "table",
+      "name": "ci_reruns",
+      "table": "ci_reruns",
+      "sql": "CREATE TABLE ci_reruns (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL,\n    head_sha TEXT NOT NULL,\n    check_name TEXT NOT NULL,\n    run_id TEXT NOT NULL DEFAULT '',\n    job_id TEXT NOT NULL DEFAULT '',\n    reason TEXT NOT NULL CHECK (reason IN ('cancelled', 'flake', 'steward')),\n    tests_json TEXT NOT NULL DEFAULT '[]',\n    outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN ('pending', 'passed', 'failed', 'request_failed')),\n    requested_at INTEGER NOT NULL,\n    settled_at INTEGER NOT NULL DEFAULT 0\n)"
+    },
+    {
+      "type": "table",
+      "name": "ci_test_failures",
+      "table": "ci_test_failures",
+      "sql": "CREATE TABLE ci_test_failures (\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    task_id INTEGER NOT NULL,\n    repo TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL,\n    head_sha TEXT NOT NULL,\n    check_name TEXT NOT NULL,\n    job_id TEXT NOT NULL DEFAULT '',\n    package TEXT NOT NULL,\n    test TEXT NOT NULL,\n    observed_at INTEGER NOT NULL,\n    PRIMARY KEY (project_id, pr_url, head_sha, check_name, job_id, package, test)\n)"
+    },
+    {
+      "type": "table",
+      "name": "completed_rider_busy",
+      "table": "completed_rider_busy",
+      "sql": "CREATE TABLE completed_rider_busy (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id),\n    transition_id INTEGER NOT NULL REFERENCES transitions(id),\n    pane_id TEXT NOT NULL,\n    server_started_at TEXT NOT NULL,\n    busy_since INTEGER NOT NULL\n, turn_ended INTEGER NOT NULL DEFAULT 0, baseline TEXT NOT NULL DEFAULT '', resumed INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "config_approvals",
+      "table": "config_approvals",
+      "sql": "CREATE TABLE \"config_approvals\" (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    key TEXT NOT NULL,\n    action TEXT NOT NULL CHECK (action IN ('set', 'unset', 'move')),\n    value TEXT,\n    user_quote TEXT NOT NULL CHECK (length(trim(user_quote)) > 0),\n    at INTEGER NOT NULL,\n    CHECK ((action IN ('set', 'move') AND value IS NOT NULL) OR (action = 'unset' AND value IS NULL))\n)"
+    },
+    {
+      "type": "table",
+      "name": "decision_notice_cursors",
+      "table": "decision_notice_cursors",
+      "sql": "CREATE TABLE decision_notice_cursors (\n    project_id INTEGER PRIMARY KEY REFERENCES projects(id),\n    last_notice_id INTEGER NOT NULL DEFAULT 0\n)"
+    },
+    {
+      "type": "table",
+      "name": "decisions",
+      "table": "decisions",
+      "sql": "CREATE TABLE decisions (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    origin TEXT NOT NULL,\n    question TEXT NOT NULL,\n    options_json TEXT NOT NULL,\n    answer TEXT NOT NULL DEFAULT '',\n    user_quote TEXT NOT NULL DEFAULT '',\n    created_at INTEGER NOT NULL,\n    answered_at INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT '', task_launches INTEGER NOT NULL DEFAULT 0, obsolete_at INTEGER NOT NULL DEFAULT 0, obsolete_reason TEXT NOT NULL DEFAULT '', answer_actor TEXT NOT NULL DEFAULT 'user', answer_reason TEXT NOT NULL DEFAULT '',\n    UNIQUE(project_id, origin)\n)"
+    },
+    {
+      "type": "table",
+      "name": "deliveries",
+      "table": "deliveries",
+      "sql": "CREATE TABLE deliveries (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    repo TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL CHECK (pr_url <> ''),\n    steward TEXT NOT NULL DEFAULT 'lead' CHECK (steward IN ('lead')),\n    origin TEXT NOT NULL CHECK (origin IN ('publish', 'legacy')),\n    created_at INTEGER NOT NULL,\n    UNIQUE (task_id, repo, pr_url)\n)"
+    },
+    {
+      "type": "table",
+      "name": "delivery_operations",
+      "table": "delivery_operations",
+      "sql": "CREATE TABLE delivery_operations (\n    id INTEGER PRIMARY KEY,\n    delivery_id INTEGER NOT NULL REFERENCES deliveries(id),\n    operation TEXT NOT NULL CHECK (operation IN ('inspect', 'reply', 'refresh', 'rerun', 'executor_policy')),\n    actor TEXT NOT NULL CHECK (actor IN ('lead', 'user')),\n    actor_pane TEXT NOT NULL DEFAULT '',\n    head_sha TEXT NOT NULL DEFAULT '',\n    subject TEXT NOT NULL DEFAULT '',\n    baseline TEXT NOT NULL DEFAULT '',\n    outcome TEXT NOT NULL CHECK (outcome IN ('pending', 'succeeded', 'failed', 'uncertain')),\n    detail TEXT NOT NULL DEFAULT '',\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "events",
+      "table": "events",
+      "sql": "CREATE TABLE events (\n    id INTEGER PRIMARY KEY,\n    received_at INTEGER NOT NULL,\n    kind TEXT NOT NULL,\n    pane_id TEXT NOT NULL DEFAULT '',\n    data_json TEXT NOT NULL DEFAULT '{}'\n)"
+    },
+    {
+      "type": "table",
+      "name": "goose_db_version",
+      "table": "goose_db_version",
+      "sql": "CREATE TABLE goose_db_version (\n\t\tid INTEGER PRIMARY KEY AUTOINCREMENT,\n\t\tversion_id INTEGER NOT NULL,\n\t\tis_applied INTEGER NOT NULL,\n\t\ttstamp TIMESTAMP DEFAULT (datetime('now'))\n\t)"
+    },
+    {
+      "type": "table",
+      "name": "intents",
+      "table": "intents",
+      "sql": "CREATE TABLE intents (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    command TEXT NOT NULL,\n    step TEXT NOT NULL,\n    process_id INTEGER NOT NULL DEFAULT 0,\n    updated_at INTEGER NOT NULL,\n    payload_json TEXT NOT NULL DEFAULT '{}', process_boot_id TEXT NOT NULL DEFAULT '', process_start_time TEXT NOT NULL DEFAULT '',\n    UNIQUE(task_id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "interventions",
+      "table": "interventions",
+      "sql": "CREATE TABLE interventions (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,\n    kind TEXT NOT NULL,\n    reason TEXT NOT NULL DEFAULT '',\n    at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "lead_start_claims",
+      "table": "lead_start_claims",
+      "sql": "CREATE TABLE lead_start_claims (\n    project_id INTEGER PRIMARY KEY REFERENCES projects(id),\n    claimed_at INTEGER NOT NULL\n, holder TEXT NOT NULL DEFAULT 'unknown', pid INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "member_pr_poll_state",
+      "table": "member_pr_poll_state",
+      "sql": "CREATE TABLE member_pr_poll_state (\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL,\n    pr_polled_at INTEGER NOT NULL DEFAULT 0,\n    claim_until INTEGER NOT NULL DEFAULT 0,\n    claim_token TEXT NOT NULL DEFAULT '',\n    PRIMARY KEY(project_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "member_watch_errors",
+      "table": "member_watch_errors",
+      "sql": "CREATE TABLE member_watch_errors (\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL,\n    phase TEXT NOT NULL,\n    error TEXT NOT NULL,\n    updated_at INTEGER NOT NULL,\n    PRIMARY KEY(project_id, repo, phase)\n)"
+    },
+    {
+      "type": "table",
+      "name": "merge_queue_entries",
+      "table": "merge_queue_entries",
+      "sql": "CREATE TABLE merge_queue_entries (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    target_branch TEXT NOT NULL,\n    entered_at INTEGER NOT NULL,\n    created_at INTEGER NOT NULL,\n    dequeued_at INTEGER NOT NULL DEFAULT 0,\n    dequeue_reason TEXT NOT NULL DEFAULT ''\n)"
+    },
+    {
+      "type": "table",
+      "name": "messages",
+      "table": "messages",
+      "sql": "CREATE TABLE messages (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    body TEXT NOT NULL,\n    created_at INTEGER NOT NULL,\n    delivered_at INTEGER,\n    status TEXT NOT NULL DEFAULT 'queued'\n, claim_token TEXT NOT NULL DEFAULT '', claimed_at INTEGER NOT NULL DEFAULT 0, wait_for_idle INTEGER NOT NULL DEFAULT 1)"
+    },
+    {
+      "type": "table",
+      "name": "model_error_episodes",
+      "table": "model_error_episodes",
+      "sql": "CREATE TABLE model_error_episodes (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    episode INTEGER NOT NULL,\n    launch INTEGER NOT NULL,\n    agent TEXT NOT NULL,\n    kind TEXT NOT NULL,\n    fingerprint TEXT NOT NULL,\n    attempts INTEGER NOT NULL DEFAULT 0,\n    turn_state INTEGER NOT NULL DEFAULT 0,\n    status TEXT NOT NULL,\n    started_at INTEGER NOT NULL,\n    next_attempt_at INTEGER NOT NULL DEFAULT 0,\n    updated_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "mounts",
+      "table": "mounts",
+      "sql": "CREATE TABLE mounts (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    n INTEGER NOT NULL,\n    path TEXT NOT NULL UNIQUE,\n    state TEXT NOT NULL,\n    task_id INTEGER REFERENCES tasks(id),\n    acquired_at INTEGER NOT NULL DEFAULT 0,\n    released_at INTEGER NOT NULL DEFAULT 0,\n    UNIQUE(project_id, n)\n)"
+    },
+    {
+      "type": "table",
+      "name": "notice_delivery_receipts",
+      "table": "notice_delivery_receipts",
+      "sql": "CREATE TABLE notice_delivery_receipts (\n    delivery_id TEXT PRIMARY KEY,\n    batch_id TEXT NOT NULL,\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    notice_ids_json TEXT NOT NULL,\n    destination TEXT NOT NULL,\n    generation TEXT NOT NULL,\n    state TEXT NOT NULL CHECK(state IN ('claimed','printed','accepted','rejected','uncertain')),\n    owner_token TEXT NOT NULL DEFAULT '',\n    claimed_at INTEGER NOT NULL DEFAULT 0,\n    lease_until INTEGER NOT NULL DEFAULT 0,\n    accepted_at INTEGER NOT NULL DEFAULT 0,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE(batch_id, destination)\n)"
+    },
+    {
+      "type": "table",
+      "name": "notice_notifications",
+      "table": "notice_notifications",
+      "sql": "CREATE TABLE notice_notifications (\n    project_id INTEGER PRIMARY KEY REFERENCES projects(id),\n    notified_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "notices",
+      "table": "notices",
+      "sql": "CREATE TABLE notices (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    task_id INTEGER REFERENCES tasks(id),\n    kind TEXT NOT NULL,\n    summary TEXT NOT NULL,\n    data_json TEXT NOT NULL DEFAULT '{}',\n    created_at INTEGER NOT NULL,\n    delivered_at INTEGER,\n    acked_at INTEGER\n, claim_token TEXT NOT NULL DEFAULT '', claimed_at INTEGER NOT NULL DEFAULT 0, command_notified_at INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "posse_migration_checksums",
+      "table": "posse_migration_checksums",
+      "sql": "CREATE TABLE posse_migration_checksums (version INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "pr_body_markers",
+      "table": "pr_body_markers",
+      "sql": "CREATE TABLE pr_body_markers (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL DEFAULT '',\n    marker_token TEXT NOT NULL UNIQUE,\n    updated_at INTEGER NOT NULL, validation_digest TEXT NOT NULL DEFAULT '',\n    PRIMARY KEY(task_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "pr_observations",
+      "table": "pr_observations",
+      "sql": "CREATE TABLE pr_observations (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    pr_url TEXT NOT NULL,\n    head_sha TEXT NOT NULL DEFAULT '',\n    state TEXT NOT NULL DEFAULT '',\n    checks TEXT NOT NULL DEFAULT '',\n    review TEXT NOT NULL DEFAULT '',\n    mergeable TEXT NOT NULL DEFAULT '',\n    merge_commit TEXT NOT NULL DEFAULT '',\n    observed_at INTEGER NOT NULL\n, repo TEXT NOT NULL DEFAULT '', confirmed_at INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "pr_task_watch_failures",
+      "table": "pr_task_watch_failures",
+      "sql": "CREATE TABLE pr_task_watch_failures (\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    repo TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL DEFAULT '',\n    consecutive_failures INTEGER NOT NULL DEFAULT 0,\n    last_error TEXT NOT NULL DEFAULT '',\n    updated_at INTEGER NOT NULL DEFAULT 0,\n    PRIMARY KEY(task_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "project_history_revisions",
+      "table": "project_history_revisions",
+      "sql": "CREATE TABLE project_history_revisions (\n    project_id INTEGER PRIMARY KEY,\n    revision INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "project_lookout_pollers",
+      "table": "project_lookout_pollers",
+      "sql": "CREATE TABLE project_lookout_pollers (\n    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,\n    pid INTEGER NOT NULL,\n    token TEXT NOT NULL,\n    started_at INTEGER NOT NULL,\n    heartbeat_at INTEGER NOT NULL,\n    executable_path TEXT NOT NULL,\n    executable_device INTEGER NOT NULL,\n    executable_inode INTEGER NOT NULL,\n    failure_notice_raised INTEGER NOT NULL DEFAULT 0\n)"
+    },
+    {
+      "type": "table",
+      "name": "project_repos",
+      "table": "project_repos",
+      "sql": "CREATE TABLE project_repos (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    name TEXT NOT NULL,\n    path TEXT NOT NULL,\n    default_branch TEXT NOT NULL,\n    status TEXT NOT NULL DEFAULT 'active',\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL, origin_host TEXT NOT NULL DEFAULT '',\n    UNIQUE(project_id, name),\n    UNIQUE(project_id, path)\n)"
+    },
+    {
+      "type": "table",
+      "name": "project_runtime",
+      "table": "project_runtime",
+      "sql": "CREATE TABLE project_runtime (\n    project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,\n    server_started_at TEXT NOT NULL DEFAULT ''\n, recovery_generation TEXT NOT NULL DEFAULT '', recovery_owner_pid INTEGER NOT NULL DEFAULT 0, recovery_claimed_at INTEGER NOT NULL DEFAULT 0, lookout_pane_id TEXT NOT NULL DEFAULT '', lookout_retry_at INTEGER NOT NULL DEFAULT 0, lookout_failed_starts INTEGER NOT NULL DEFAULT 0, lookout_notice_raised INTEGER NOT NULL DEFAULT 0, lead_agent_kind TEXT NOT NULL DEFAULT '', lead_agent_session TEXT NOT NULL DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "project_watch_state",
+      "table": "project_watch_state",
+      "sql": "CREATE TABLE project_watch_state (\n    project_id INTEGER PRIMARY KEY REFERENCES projects(id),\n    pr_polled_at INTEGER NOT NULL DEFAULT 0,\n    pr_consecutive_failures INTEGER NOT NULL DEFAULT 0,\n    checkout_checked_at INTEGER NOT NULL DEFAULT 0,\n    root_behind_head TEXT NOT NULL DEFAULT ''\n, pr_poll_claim_until INTEGER NOT NULL DEFAULT 0, pr_poll_claim_token TEXT NOT NULL DEFAULT '', reconcile_blocked_since INTEGER NOT NULL DEFAULT 0, reconcile_block_cause TEXT NOT NULL DEFAULT '', reconcile_block_notice_raised INTEGER NOT NULL DEFAULT 0, pr_poll_last_error TEXT NOT NULL DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "projects",
+      "table": "projects",
+      "sql": "CREATE TABLE projects (\n    id INTEGER PRIMARY KEY,\n    name TEXT NOT NULL UNIQUE,\n    root TEXT NOT NULL UNIQUE,\n    default_branch TEXT NOT NULL DEFAULT '',\n    herdr_workspace_id TEXT NOT NULL DEFAULT '',\n    lead_pane_id TEXT NOT NULL DEFAULT '',\n    lead_label TEXT NOT NULL DEFAULT '',\n    lead_absent_since INTEGER NOT NULL DEFAULT 0,\n    status TEXT NOT NULL DEFAULT 'active',\n    created_at INTEGER NOT NULL,\n    last_activity_at INTEGER NOT NULL\n, lead_launches INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'repo', down_at INTEGER NOT NULL DEFAULT 0, project_uuid TEXT NOT NULL DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "publish_pre_push_heads",
+      "table": "publish_pre_push_heads",
+      "sql": "CREATE TABLE publish_pre_push_heads (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    request_url TEXT NOT NULL DEFAULT '',\n    head_sha TEXT NOT NULL,\n    recorded_at INTEGER NOT NULL,\n    PRIMARY KEY (task_id, repo, request_url, head_sha)\n)"
+    },
+    {
+      "type": "table",
+      "name": "queued_task_declines",
+      "table": "queued_task_declines",
+      "sql": "CREATE TABLE queued_task_declines (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    reason TEXT NOT NULL,\n    checked_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "quota_exhaustions",
+      "table": "quota_exhaustions",
+      "sql": "CREATE TABLE quota_exhaustions (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    launch INTEGER NOT NULL,\n    agent TEXT NOT NULL,\n    profile TEXT NOT NULL,\n    line TEXT NOT NULL,\n    resets TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL,\n    fallback TEXT NOT NULL DEFAULT '',\n    detail TEXT NOT NULL DEFAULT '',\n    owner_pid INTEGER NOT NULL DEFAULT 0,\n    observed_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    PRIMARY KEY (task_id, launch)\n)"
+    },
+    {
+      "type": "table",
+      "name": "remote_branch_cleanups",
+      "table": "remote_branch_cleanups",
+      "sql": "CREATE TABLE remote_branch_cleanups (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    branch TEXT NOT NULL,\n    head_sha TEXT NOT NULL,\n    cause TEXT NOT NULL,\n    attempts INTEGER NOT NULL DEFAULT 1,\n    failed_at INTEGER NOT NULL,\n    PRIMARY KEY (task_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "repo_fetch_failures",
+      "table": "repo_fetch_failures",
+      "sql": "CREATE TABLE repo_fetch_failures (\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    repo TEXT NOT NULL DEFAULT '',\n    consecutive_failures INTEGER NOT NULL DEFAULT 0,\n    last_error TEXT NOT NULL DEFAULT '',\n    updated_at INTEGER NOT NULL DEFAULT 0,\n    PRIMARY KEY(project_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "repo_watch_state",
+      "table": "repo_watch_state",
+      "sql": "CREATE TABLE repo_watch_state (\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    repo TEXT NOT NULL,\n    root_behind_head TEXT NOT NULL DEFAULT '', checkout_checked_at INTEGER NOT NULL DEFAULT 0, checkout_status TEXT NOT NULL DEFAULT '', checkout_reason TEXT NOT NULL DEFAULT '',\n    PRIMARY KEY(project_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "report_acceptances",
+      "table": "report_acceptances",
+      "sql": "CREATE TABLE report_acceptances (\n    report_task_id INTEGER PRIMARY KEY REFERENCES tasks(id),\n    report_digest TEXT NOT NULL,\n    accepted_by TEXT NOT NULL CHECK (accepted_by = 'user'),\n    recorded_by TEXT NOT NULL CHECK (recorded_by IN ('user', 'lead')),\n    provenance TEXT NOT NULL CHECK (provenance IN ('user-command', 'lead-quote')),\n    user_quote TEXT NOT NULL DEFAULT '',\n    accepted_at INTEGER NOT NULL,\n    CHECK (\n        (recorded_by = 'user' AND provenance = 'user-command') OR\n        (recorded_by = 'lead' AND provenance = 'lead-quote' AND length(trim(user_quote)) > 0)\n    )\n)"
+    },
+    {
+      "type": "table",
+      "name": "report_reviews",
+      "table": "report_reviews",
+      "sql": "CREATE TABLE report_reviews (\n    id INTEGER PRIMARY KEY,\n    report_task_id INTEGER NOT NULL REFERENCES tasks(id),\n    review_task_id INTEGER NOT NULL REFERENCES tasks(id),\n    report_digest TEXT NOT NULL,\n    verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'changes_requested', 'inconclusive')),\n    reviewer_launch INTEGER NOT NULL CHECK (reviewer_launch > 0),\n    recorded_at INTEGER NOT NULL,\n    UNIQUE(report_task_id, review_task_id, report_digest, reviewer_launch)\n)"
+    },
+    {
+      "type": "table",
+      "name": "research_attempts",
+      "table": "research_attempts",
+      "sql": "CREATE TABLE research_attempts (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,\n    parent_role TEXT NOT NULL CHECK (parent_role IN ('lead', 'worker')),\n    parent_session TEXT NOT NULL DEFAULT '',\n    parent_pid INTEGER NOT NULL DEFAULT 0,\n    parent_identity TEXT NOT NULL DEFAULT '',\n    harness TEXT NOT NULL CHECK (harness IN ('claude', 'codex', 'pi')),\n    harness_version TEXT NOT NULL DEFAULT '',\n    idempotency_key TEXT NOT NULL DEFAULT '',\n    previous_id INTEGER REFERENCES research_attempts(id) ON DELETE SET NULL,\n    child_id TEXT NOT NULL DEFAULT '',\n    agent_type TEXT NOT NULL DEFAULT '',\n    model TEXT NOT NULL DEFAULT '',\n    tools TEXT NOT NULL DEFAULT '[]',\n    access TEXT NOT NULL DEFAULT 'read-only' CHECK (access = 'read-only'),\n    scope TEXT NOT NULL,\n    prompt_digest TEXT NOT NULL DEFAULT '',\n    state TEXT NOT NULL CHECK (state IN ('registered', 'running', 'completed', 'interrupted', 'cancelled', 'failed', 'refused')),\n    resumable INTEGER NOT NULL DEFAULT 0 CHECK (resumable IN (0, 1)),\n    session_ref TEXT NOT NULL DEFAULT '',\n    runner_pid INTEGER NOT NULL DEFAULT 0,\n    runner_identity TEXT NOT NULL DEFAULT '',\n    child_pid INTEGER NOT NULL DEFAULT 0,\n    child_identity TEXT NOT NULL DEFAULT '',\n    usage TEXT NOT NULL DEFAULT '{}',\n    result_path TEXT NOT NULL DEFAULT '',\n    result_bytes INTEGER NOT NULL DEFAULT 0,\n    result_digest TEXT NOT NULL DEFAULT '',\n    result_truncated INTEGER NOT NULL DEFAULT 0 CHECK (result_truncated IN (0, 1)),\n    note TEXT NOT NULL DEFAULT '',\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    CHECK ((parent_role = 'worker') = (task_id IS NOT NULL))\n)"
+    },
+    {
+      "type": "table",
+      "name": "resource_leases",
+      "table": "resource_leases",
+      "sql": "CREATE TABLE resource_leases (\n    id INTEGER PRIMARY KEY,\n    resource_type TEXT NOT NULL CHECK(resource_type IN ('path', 'git_ref')),\n    scope_root TEXT NOT NULL DEFAULT '',\n    scope_path TEXT NOT NULL,\n    owner_project_id INTEGER NOT NULL REFERENCES projects(id),\n    owner_task_id INTEGER REFERENCES tasks(id),\n    owner TEXT NOT NULL,\n    source_key TEXT NOT NULL UNIQUE,\n    custody_token TEXT NOT NULL,\n    intent_id INTEGER NOT NULL DEFAULT 0,\n    mount_id INTEGER REFERENCES mounts(id) ON DELETE CASCADE,\n    owner_pid INTEGER NOT NULL DEFAULT 0,\n    owner_boot_id TEXT NOT NULL DEFAULT '',\n    owner_start_time TEXT NOT NULL DEFAULT '',\n    custody TEXT NOT NULL DEFAULT 'held' CHECK(custody IN ('held', 'recovery')),\n    acquired_at INTEGER NOT NULL,\n    CHECK((resource_type = 'path' AND scope_root = '') OR (resource_type = 'git_ref' AND scope_root <> ''))\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_cap_grants",
+      "table": "review_cap_grants",
+      "sql": "CREATE TABLE review_cap_grants (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id),\n    decision_id INTEGER NOT NULL REFERENCES decisions(id),\n    round INTEGER NOT NULL CHECK(round > 0),\n    result_json TEXT NOT NULL,\n    created_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_carries",
+      "table": "review_carries",
+      "sql": "CREATE TABLE review_carries (\n    ship_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repository TEXT NOT NULL,\n    from_head TEXT NOT NULL CHECK (length(from_head) IN (40, 64)),\n    to_head TEXT NOT NULL CHECK (length(to_head) IN (40, 64)),\n    target_commit_sha TEXT NOT NULL CHECK (length(target_commit_sha) IN (40, 64)),\n    tree TEXT NOT NULL CHECK (length(tree) IN (40, 64)),\n    created_at INTEGER NOT NULL,\n    PRIMARY KEY (ship_task_id, repository, from_head, to_head)\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_dispositions",
+      "table": "review_dispositions",
+      "sql": "CREATE TABLE review_dispositions (\n    id INTEGER PRIMARY KEY,\n    ship_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    head_sha TEXT NOT NULL CHECK (length(head_sha) IN (40, 64)),\n    decision_id INTEGER REFERENCES decisions(id),\n    user_quote TEXT NOT NULL DEFAULT '',\n    at INTEGER NOT NULL\n, actor TEXT NOT NULL DEFAULT 'user', reason TEXT NOT NULL DEFAULT '')"
+    },
+    {
+      "type": "table",
+      "name": "review_finding_events",
+      "table": "review_finding_events",
+      "sql": "CREATE TABLE review_finding_events (\n    id INTEGER PRIMARY KEY,\n    finding_id INTEGER NOT NULL REFERENCES review_findings(id) ON DELETE CASCADE,\n    round INTEGER NOT NULL CHECK (round >= 0),\n    event TEXT NOT NULL,\n    actor TEXT NOT NULL,\n    note TEXT NOT NULL DEFAULT '',\n    user_quote TEXT NOT NULL DEFAULT '',\n    at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_findings",
+      "table": "review_findings",
+      "sql": "CREATE TABLE review_findings (\n    id INTEGER PRIMARY KEY,\n    ship_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    seq INTEGER NOT NULL CHECK (seq > 0),\n    pattern_id INTEGER NOT NULL REFERENCES review_patterns(id),\n    fingerprint TEXT NOT NULL CHECK (length(fingerprint) = 64),\n    round INTEGER NOT NULL CHECK (round > 0),\n    repository TEXT NOT NULL,\n    path TEXT NOT NULL,\n    symbol TEXT NOT NULL,\n    excerpt TEXT NOT NULL,\n    line_at_report INTEGER NOT NULL CHECK (line_at_report > 0),\n    head_sha TEXT NOT NULL CHECK (length(head_sha) IN (40, 64)),\n    severity TEXT NOT NULL CHECK (severity IN ('P0', 'P1', 'P2', 'P3', 'unclassified')),\n    origin TEXT NOT NULL CHECK (origin IN ('introduced', 'pre_existing')),\n    in_scope INTEGER NOT NULL CHECK (in_scope IN (0, 1)),\n    state TEXT NOT NULL CHECK (state IN ('open', 'fix_claimed', 'unverified', 'fixed', 'disputed', 'regressed', 'accepted', 'deferred', 'withdrawn')),\n    follow_up_url TEXT NOT NULL DEFAULT '',\n    inherited_from INTEGER REFERENCES review_findings(id),\n    UNIQUE (ship_task_id, seq),\n    UNIQUE (ship_task_id, fingerprint)\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_patterns",
+      "table": "review_patterns",
+      "sql": "CREATE TABLE review_patterns (\n    id INTEGER PRIMARY KEY,\n    ship_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    seq INTEGER NOT NULL CHECK (seq > 0),\n    key TEXT NOT NULL,\n    title TEXT NOT NULL,\n    rule TEXT NOT NULL,\n    root_cause TEXT NOT NULL,\n    fix_guidance TEXT NOT NULL,\n    merged_into INTEGER REFERENCES review_patterns(id),\n    created_round INTEGER NOT NULL CHECK (created_round > 0),\n    UNIQUE (ship_task_id, seq),\n    UNIQUE (ship_task_id, key),\n    CHECK (merged_into IS NULL OR merged_into <> id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_receipts",
+      "table": "review_receipts",
+      "sql": "CREATE TABLE review_receipts (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repository TEXT NOT NULL,\n    run_id TEXT NOT NULL,\n    head_sha TEXT NOT NULL CHECK (length(head_sha) = 40 OR length(head_sha) = 64),\n    review_status TEXT NOT NULL,\n    reviewer_profile TEXT NOT NULL,\n    reviewer_model TEXT NOT NULL,\n    report_sha256 TEXT NOT NULL CHECK (length(report_sha256) = 64),\n    receipt_sha256 TEXT NOT NULL CHECK (length(receipt_sha256) = 64),\n    observed_at INTEGER NOT NULL,\n    PRIMARY KEY(task_id, receipt_sha256)\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_rounds",
+      "table": "review_rounds",
+      "sql": "CREATE TABLE review_rounds (\n    ship_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    round INTEGER NOT NULL CHECK (round > 0),\n    review_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repository TEXT NOT NULL,\n    scope_kind TEXT NOT NULL CHECK (scope_kind IN ('full', 'delta', 'full_fallback')),\n    scope_base_sha TEXT NOT NULL CHECK (length(scope_base_sha) IN (40, 64)),\n    head_sha TEXT NOT NULL CHECK (length(head_sha) IN (40, 64)),\n    target_commit_sha TEXT NOT NULL CHECK (length(target_commit_sha) IN (40, 64)),\n    baseline_tree TEXT NOT NULL CHECK (length(baseline_tree) IN (40, 64)),\n    delta_sha256 TEXT NOT NULL CHECK (length(delta_sha256) = 64),\n    conflicted_paths_json TEXT NOT NULL DEFAULT '[]',\n    status TEXT NOT NULL CHECK (status IN ('admitted', 'verdict', 'void')),\n    verdict TEXT CHECK (verdict IN ('pass', 'changes_requested', 'inconclusive')),\n    created_at INTEGER NOT NULL,\n    PRIMARY KEY (ship_task_id, review_task_id, repository),\n    CHECK ((status = 'verdict' AND verdict IS NOT NULL) OR (status IN ('admitted', 'void') AND verdict IS NULL))\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_targets",
+      "table": "review_targets",
+      "sql": "CREATE TABLE review_targets (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repository TEXT NOT NULL,\n    commit_sha TEXT NOT NULL CHECK (length(commit_sha) = 40 OR length(commit_sha) = 64),\n    PRIMARY KEY(task_id, repository)\n)"
+    },
+    {
+      "type": "table",
+      "name": "review_verdicts",
+      "table": "review_verdicts",
+      "sql": "CREATE TABLE review_verdicts (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    signal_id INTEGER NOT NULL,\n    verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'changes_requested', 'inconclusive')),\n    report_sha256 TEXT NOT NULL CHECK (length(report_sha256) = 64),\n    targets_json TEXT NOT NULL,\n    launch_number INTEGER NOT NULL CHECK (launch_number > 0),\n    profile_name TEXT NOT NULL,\n    configured_model TEXT NOT NULL,\n    model_known INTEGER NOT NULL,\n    created_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "signals",
+      "table": "signals",
+      "sql": "CREATE TABLE signals (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    verb TEXT NOT NULL,\n    note TEXT NOT NULL DEFAULT '',\n    data_json TEXT NOT NULL DEFAULT '{}',\n    at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_adoptions",
+      "table": "task_adoptions",
+      "sql": "CREATE TABLE task_adoptions (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id),\n    source_task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id),\n    repository TEXT NOT NULL,\n    branch TEXT NOT NULL,\n    pr_url TEXT NOT NULL,\n    head_sha TEXT NOT NULL,\n    generation INTEGER NOT NULL,\n    created_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_budget_usage",
+      "table": "task_budget_usage",
+      "sql": "CREATE TABLE task_budget_usage (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    launch INTEGER NOT NULL,\n    session_id TEXT NOT NULL,\n    session_kind TEXT NOT NULL,\n    tokens INTEGER NOT NULL DEFAULT 0,\n    local_day TEXT NOT NULL,\n    day_tokens INTEGER NOT NULL DEFAULT 0,\n    PRIMARY KEY(task_id, session_id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_launch_identities",
+      "table": "task_launch_identities",
+      "sql": "CREATE TABLE task_launch_identities (\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    launch_number INTEGER NOT NULL CHECK (launch_number > 0),\n    profile_name TEXT NOT NULL DEFAULT '',\n    configured_model TEXT NOT NULL DEFAULT '',\n    model_known INTEGER NOT NULL DEFAULT 0 CHECK (model_known IN (0, 1)), plan_revision INTEGER NOT NULL DEFAULT 0,\n    PRIMARY KEY (task_id, launch_number)\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_plan_revisions",
+      "table": "task_plan_revisions",
+      "sql": "CREATE TABLE task_plan_revisions (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    revision INTEGER NOT NULL CHECK (revision > 0),\n    plan_json TEXT NOT NULL,\n    PRIMARY KEY(task_id, revision)\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_recovery",
+      "table": "task_recovery",
+      "sql": "CREATE TABLE task_recovery (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    generation TEXT NOT NULL,\n    attempts INTEGER NOT NULL DEFAULT 0,\n    next_attempt_at INTEGER NOT NULL DEFAULT 0,\n    owner_pid INTEGER NOT NULL DEFAULT 0,\n    status TEXT NOT NULL DEFAULT 'pending',\n    last_error TEXT NOT NULL DEFAULT ''\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_repos",
+      "table": "task_repos",
+      "sql": "CREATE TABLE task_repos (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    repo TEXT NOT NULL,\n    worktree_path TEXT NOT NULL,\n    base_ref TEXT NOT NULL,\n    landing_mode TEXT NOT NULL,\n    state TEXT NOT NULL DEFAULT 'open',\n    gated_sha TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL DEFAULT '',\n    landed_ref TEXT NOT NULL DEFAULT '',\n    updated_at INTEGER NOT NULL, target_branch TEXT NOT NULL DEFAULT '',\n    UNIQUE(task_id, repo)\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_skill_uses",
+      "table": "task_skill_uses",
+      "sql": "CREATE TABLE task_skill_uses (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    skill TEXT NOT NULL,\n    uses INTEGER NOT NULL DEFAULT 1,\n    first_at INTEGER NOT NULL,\n    last_at INTEGER NOT NULL,\n    PRIMARY KEY (task_id, skill)\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_spec_checks",
+      "table": "task_spec_checks",
+      "sql": "CREATE TABLE task_spec_checks (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    checked_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_target_changes",
+      "table": "task_target_changes",
+      "sql": "CREATE TABLE task_target_changes (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    repo TEXT NOT NULL DEFAULT '',\n    source_task_id INTEGER NOT NULL REFERENCES tasks(id),\n    from_branch TEXT NOT NULL,\n    to_branch TEXT NOT NULL,\n    pr_url TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL CHECK(status IN ('pending', 'complete', 'blocked', 'skipped')),\n    error TEXT NOT NULL DEFAULT '',\n    created_at INTEGER NOT NULL,\n    completed_at INTEGER NOT NULL DEFAULT 0,\n    UNIQUE(task_id, repo, source_task_id)\n)"
+    },
+    {
+      "type": "table",
+      "name": "task_turn_tokens",
+      "table": "task_turn_tokens",
+      "sql": "CREATE TABLE task_turn_tokens (\n    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,\n    token TEXT NOT NULL,\n    updated_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "tasks",
+      "table": "tasks",
+      "sql": "CREATE TABLE tasks (\n    id INTEGER PRIMARY KEY,\n    project_id INTEGER NOT NULL REFERENCES projects(id),\n    seq INTEGER NOT NULL,\n    type TEXT NOT NULL,\n    reviews_task_id INTEGER REFERENCES tasks(id),\n    title TEXT NOT NULL,\n    state TEXT NOT NULL,\n    profile TEXT NOT NULL DEFAULT '',\n    dispatch_rule TEXT NOT NULL DEFAULT '',\n    landing_mode TEXT NOT NULL,\n    autonomy_review TEXT NOT NULL DEFAULT 'ask',\n    autonomy_land TEXT NOT NULL DEFAULT 'ask',\n    branch TEXT NOT NULL DEFAULT '',\n    base_ref TEXT NOT NULL DEFAULT '',\n    worktree_path TEXT NOT NULL DEFAULT '',\n    herdr_workspace_id TEXT NOT NULL DEFAULT '',\n    pane_id TEXT NOT NULL DEFAULT '',\n    pane_label TEXT NOT NULL DEFAULT '',\n    agent_name TEXT NOT NULL DEFAULT '',\n    agent_session TEXT NOT NULL DEFAULT '',\n    pr_url TEXT NOT NULL DEFAULT '',\n    landed_ref TEXT NOT NULL DEFAULT '',\n    last_output_hash TEXT NOT NULL DEFAULT '',\n    last_worktree_hash TEXT NOT NULL DEFAULT '',\n    last_progress_at INTEGER NOT NULL DEFAULT 0,\n    agent_absent_since INTEGER NOT NULL DEFAULT 0,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL, mount_id INTEGER REFERENCES mounts(id), launches INTEGER NOT NULL DEFAULT 0, gated_sha TEXT NOT NULL DEFAULT '', agent_server_started_at TEXT NOT NULL DEFAULT '', idle_since INTEGER NOT NULL DEFAULT 0, short_name TEXT NOT NULL DEFAULT '', agent_session_kind TEXT NOT NULL DEFAULT '', target_branch TEXT NOT NULL DEFAULT '', pr_title TEXT NOT NULL DEFAULT '', plan_json TEXT NOT NULL DEFAULT '', report_kind TEXT NOT NULL DEFAULT '', report_digest TEXT NOT NULL DEFAULT '', report_manifest_json TEXT NOT NULL DEFAULT '', containment_mode TEXT NOT NULL DEFAULT '', containment_path TEXT NOT NULL DEFAULT '', containment_marker TEXT NOT NULL DEFAULT '', pane_shell_identity TEXT NOT NULL DEFAULT '', agent_status TEXT NOT NULL DEFAULT '', agent_status_since INTEGER NOT NULL DEFAULT 0,\n    UNIQUE(project_id, seq)\n)"
+    },
+    {
+      "type": "table",
+      "name": "transitions",
+      "table": "transitions",
+      "sql": "CREATE TABLE transitions (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id),\n    from_state TEXT NOT NULL,\n    to_state TEXT NOT NULL,\n    source TEXT NOT NULL,\n    note TEXT NOT NULL DEFAULT '',\n    at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "validation_candidates",
+      "table": "validation_candidates",
+      "sql": "CREATE TABLE validation_candidates (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    generation INTEGER NOT NULL CHECK (generation > 0),\n    submitted_sha TEXT NOT NULL CHECK (length(submitted_sha) IN (40, 64)),\n    candidate_sha TEXT NOT NULL CHECK (length(candidate_sha) IN (40, 64)),\n    target_sha TEXT NOT NULL CHECK (length(target_sha) IN (40, 64)),\n    expected_remote_sha TEXT NOT NULL DEFAULT '' CHECK (expected_remote_sha = '' OR length(expected_remote_sha) IN (40, 64)),\n    observed_author_sha TEXT NOT NULL DEFAULT '',\n    ref_name TEXT NOT NULL,\n    worktree_path TEXT NOT NULL,\n    state TEXT NOT NULL CHECK (state IN ('preparing', 'active', 'stale', 'promoting', 'promoted', 'superseded', 'discarded')),\n    promoted_sha TEXT NOT NULL DEFAULT '',\n    summary TEXT NOT NULL,\n    verification TEXT NOT NULL DEFAULT '',\n    proof TEXT NOT NULL DEFAULT '',\n    risk TEXT NOT NULL DEFAULT '',\n    refresh INTEGER NOT NULL DEFAULT 0 CHECK (refresh IN (0, 1)),\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    UNIQUE (task_id, repo, generation),\n    CHECK (state <> 'promoted' OR promoted_sha = candidate_sha)\n)"
+    },
+    {
+      "type": "table",
+      "name": "validation_fix_rounds",
+      "table": "validation_fix_rounds",
+      "sql": "CREATE TABLE \"validation_fix_rounds\" (\n    id INTEGER PRIMARY KEY,\n    ship_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    kind TEXT NOT NULL CHECK (kind IN ('gate', 'ci', 'review', 'freshness')),\n    seq INTEGER NOT NULL CHECK (seq > 0),\n    expected_base_head TEXT NOT NULL CHECK (length(expected_base_head) IN (40, 64)),\n    dedupe_key TEXT NOT NULL,\n    message_id INTEGER NOT NULL,\n    created_at INTEGER NOT NULL, member_heads_json TEXT NOT NULL DEFAULT '[]',\n    UNIQUE (ship_task_id, kind, seq),\n    UNIQUE (ship_task_id, kind, dedupe_key)\n)"
+    },
+    {
+      "type": "table",
+      "name": "validation_stage_results",
+      "table": "validation_stage_results",
+      "sql": "CREATE TABLE validation_stage_results (\n    id INTEGER PRIMARY KEY,\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    candidate_id INTEGER NOT NULL REFERENCES validation_candidates(id) ON DELETE CASCADE,\n    repo TEXT NOT NULL DEFAULT '',\n    stage TEXT NOT NULL CHECK (stage IN ('test', 'docs', 'lint')),\n    candidate_sha TEXT NOT NULL CHECK (length(candidate_sha) IN (40, 64)),\n    target_sha TEXT NOT NULL CHECK (length(target_sha) IN (40, 64)),\n    config_sha256 TEXT NOT NULL CHECK (length(config_sha256) = 64),\n    status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'invalidated')),\n    summary TEXT NOT NULL,\n    evidence TEXT NOT NULL,\n    coverage TEXT NOT NULL DEFAULT '',\n    invalidated_by_sha TEXT NOT NULL DEFAULT '',\n    created_at INTEGER NOT NULL, invalidated_from_status TEXT NOT NULL DEFAULT ''\n    CHECK (invalidated_from_status IN ('', 'passed', 'failed')),\n    UNIQUE (candidate_id, stage, candidate_sha),\n    CHECK (invalidated_by_sha = '' OR length(invalidated_by_sha) IN (40, 64))\n)"
+    },
+    {
+      "type": "table",
+      "name": "verified_pr_heads",
+      "table": "verified_pr_heads",
+      "sql": "CREATE TABLE verified_pr_heads (\n    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,\n    pr_url TEXT NOT NULL,\n    head_sha TEXT NOT NULL,\n    PRIMARY KEY (task_id, pr_url, head_sha)\n)"
+    },
+    {
+      "type": "index",
+      "name": "branch_author_invalidated_verdicts_change_idx",
+      "table": "branch_author_invalidated_verdicts",
+      "sql": "CREATE INDEX branch_author_invalidated_verdicts_change_idx ON branch_author_invalidated_verdicts(change_task_id)"
+    },
+    {
+      "type": "index",
+      "name": "branch_authorship_task_idx",
+      "table": "branch_authorship",
+      "sql": "CREATE INDEX branch_authorship_task_idx ON branch_authorship(task_id)"
+    },
+    {
+      "type": "index",
+      "name": "ci_reruns_by_pr",
+      "table": "ci_reruns",
+      "sql": "CREATE INDEX ci_reruns_by_pr ON ci_reruns(task_id, repo, pr_url, head_sha)"
+    },
+    {
+      "type": "index",
+      "name": "ci_reruns_one_flake_per_head",
+      "table": "ci_reruns",
+      "sql": "CREATE UNIQUE INDEX ci_reruns_one_flake_per_head ON ci_reruns(task_id, repo, head_sha, check_name) WHERE reason = 'flake'"
+    },
+    {
+      "type": "index",
+      "name": "ci_test_failures_by_test",
+      "table": "ci_test_failures",
+      "sql": "CREATE INDEX ci_test_failures_by_test ON ci_test_failures(project_id, test, observed_at)"
+    },
+    {
+      "type": "index",
+      "name": "decisions_one_pending_recovery_idx",
+      "table": "decisions",
+      "sql": "CREATE UNIQUE INDEX decisions_one_pending_recovery_idx ON decisions(task_id)\n    WHERE kind='recovery' AND answered_at=0 AND obsolete_at=0"
+    },
+    {
+      "type": "index",
+      "name": "decisions_project_pending_idx",
+      "table": "decisions",
+      "sql": "CREATE INDEX decisions_project_pending_idx ON decisions(project_id, answered_at, id)"
+    },
+    {
+      "type": "index",
+      "name": "delivery_operations_subject_idx",
+      "table": "delivery_operations",
+      "sql": "CREATE INDEX delivery_operations_subject_idx ON delivery_operations(delivery_id, operation, head_sha, subject)"
+    },
+    {
+      "type": "index",
+      "name": "events_age_idx",
+      "table": "events",
+      "sql": "CREATE INDEX events_age_idx ON events(received_at)"
+    },
+    {
+      "type": "index",
+      "name": "intents_updated_at_idx",
+      "table": "intents",
+      "sql": "CREATE INDEX intents_updated_at_idx ON intents(updated_at)"
+    },
+    {
+      "type": "index",
+      "name": "interventions_project_kind",
+      "table": "interventions",
+      "sql": "CREATE INDEX interventions_project_kind ON interventions(project_id, kind)"
+    },
+    {
+      "type": "index",
+      "name": "merge_queue_entries_live_idx",
+      "table": "merge_queue_entries",
+      "sql": "CREATE UNIQUE INDEX merge_queue_entries_live_idx ON merge_queue_entries(task_id, repo) WHERE dequeued_at = 0"
+    },
+    {
+      "type": "index",
+      "name": "merge_queue_entries_target_idx",
+      "table": "merge_queue_entries",
+      "sql": "CREATE INDEX merge_queue_entries_target_idx ON merge_queue_entries(project_id, repo, target_branch, dequeued_at)"
+    },
+    {
+      "type": "index",
+      "name": "messages_claim_idx",
+      "table": "messages",
+      "sql": "CREATE INDEX messages_claim_idx ON messages(task_id, status, claimed_at)"
+    },
+    {
+      "type": "index",
+      "name": "messages_queue_idx",
+      "table": "messages",
+      "sql": "CREATE INDEX messages_queue_idx ON messages(task_id, status, created_at)"
+    },
+    {
+      "type": "index",
+      "name": "mounts_project_state_idx",
+      "table": "mounts",
+      "sql": "CREATE INDEX mounts_project_state_idx ON mounts(project_id, state, n)"
+    },
+    {
+      "type": "index",
+      "name": "notice_delivery_active_destination_idx",
+      "table": "notice_delivery_receipts",
+      "sql": "CREATE INDEX notice_delivery_active_destination_idx ON notice_delivery_receipts(project_id, destination, created_at, delivery_id) WHERE state IN ('claimed','printed')"
+    },
+    {
+      "type": "index",
+      "name": "notice_delivery_receipts_lookup_idx",
+      "table": "notice_delivery_receipts",
+      "sql": "CREATE INDEX notice_delivery_receipts_lookup_idx ON notice_delivery_receipts(project_id, destination, state, updated_at)"
+    },
+    {
+      "type": "index",
+      "name": "notices_claim_idx",
+      "table": "notices",
+      "sql": "CREATE INDEX notices_claim_idx ON notices(project_id, claim_token, delivered_at, acked_at)"
+    },
+    {
+      "type": "index",
+      "name": "notices_message_delivery_uncertain_idx",
+      "table": "notices",
+      "sql": "CREATE UNIQUE INDEX notices_message_delivery_uncertain_idx\nON notices(project_id, task_id, json_extract(data_json, '$.message_id'))\nWHERE kind='message_delivery_uncertain'"
+    },
+    {
+      "type": "index",
+      "name": "notices_open_idx",
+      "table": "notices",
+      "sql": "CREATE INDEX notices_open_idx ON notices(project_id, acked_at, delivered_at)"
+    },
+    {
+      "type": "index",
+      "name": "notices_project_id_idx",
+      "table": "notices",
+      "sql": "CREATE INDEX notices_project_id_idx ON notices(project_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "notices_sandbox_episode_idx",
+      "table": "notices",
+      "sql": "CREATE INDEX notices_sandbox_episode_idx ON notices(task_id, id) WHERE kind IN ('sandbox_missing','sandbox_recovered')"
+    },
+    {
+      "type": "index",
+      "name": "notices_task_kind_idx",
+      "table": "notices",
+      "sql": "CREATE INDEX notices_task_kind_idx ON notices(task_id, kind)"
+    },
+    {
+      "type": "index",
+      "name": "notices_worker_exited_once",
+      "table": "notices",
+      "sql": "CREATE UNIQUE INDEX notices_worker_exited_once ON notices(task_id) WHERE kind = 'worker_exited'"
+    },
+    {
+      "type": "index",
+      "name": "pr_observations_task_latest_idx",
+      "table": "pr_observations",
+      "sql": "CREATE INDEX pr_observations_task_latest_idx ON pr_observations(task_id, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "projects_project_uuid_idx",
+      "table": "projects",
+      "sql": "CREATE UNIQUE INDEX projects_project_uuid_idx ON projects(project_uuid)"
+    },
+    {
+      "type": "index",
+      "name": "report_reviews_target_idx",
+      "table": "report_reviews",
+      "sql": "CREATE INDEX report_reviews_target_idx ON report_reviews(report_task_id, report_digest, verdict, recorded_at)"
+    },
+    {
+      "type": "index",
+      "name": "research_attempts_child_idx",
+      "table": "research_attempts",
+      "sql": "CREATE INDEX research_attempts_child_idx ON research_attempts(harness, child_id) WHERE child_id <> ''"
+    },
+    {
+      "type": "index",
+      "name": "research_attempts_key_idx",
+      "table": "research_attempts",
+      "sql": "CREATE UNIQUE INDEX research_attempts_key_idx ON research_attempts(project_id, harness, idempotency_key) WHERE idempotency_key <> ''"
+    },
+    {
+      "type": "index",
+      "name": "research_attempts_parent_idx",
+      "table": "research_attempts",
+      "sql": "CREATE INDEX research_attempts_parent_idx ON research_attempts(project_id, task_id, state)"
+    },
+    {
+      "type": "index",
+      "name": "resource_leases_intent_idx",
+      "table": "resource_leases",
+      "sql": "CREATE INDEX resource_leases_intent_idx ON resource_leases(intent_id) WHERE intent_id != 0"
+    },
+    {
+      "type": "index",
+      "name": "resource_leases_owner_idx",
+      "table": "resource_leases",
+      "sql": "CREATE INDEX resource_leases_owner_idx ON resource_leases(owner_project_id, owner_task_id, custody)"
+    },
+    {
+      "type": "index",
+      "name": "resource_leases_scope_idx",
+      "table": "resource_leases",
+      "sql": "CREATE INDEX resource_leases_scope_idx ON resource_leases(resource_type, scope_root)"
+    },
+    {
+      "type": "index",
+      "name": "review_cap_final_review_once",
+      "table": "notices",
+      "sql": "CREATE UNIQUE INDEX review_cap_final_review_once ON notices(task_id) WHERE kind='review_cap_final_review'"
+    },
+    {
+      "type": "index",
+      "name": "review_dispositions_ship_idx",
+      "table": "review_dispositions",
+      "sql": "CREATE INDEX review_dispositions_ship_idx ON review_dispositions(ship_task_id, at, id)"
+    },
+    {
+      "type": "index",
+      "name": "review_finding_events_finding_idx",
+      "table": "review_finding_events",
+      "sql": "CREATE INDEX review_finding_events_finding_idx ON review_finding_events(finding_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "review_findings_pattern_idx",
+      "table": "review_findings",
+      "sql": "CREATE INDEX review_findings_pattern_idx ON review_findings(pattern_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "review_findings_ship_idx",
+      "table": "review_findings",
+      "sql": "CREATE INDEX review_findings_ship_idx ON review_findings(ship_task_id, state, severity)"
+    },
+    {
+      "type": "index",
+      "name": "review_patterns_ship_idx",
+      "table": "review_patterns",
+      "sql": "CREATE INDEX review_patterns_ship_idx ON review_patterns(ship_task_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "review_rounds_ship_idx",
+      "table": "review_rounds",
+      "sql": "CREATE INDEX review_rounds_ship_idx ON review_rounds(ship_task_id, round, repository)"
+    },
+    {
+      "type": "index",
+      "name": "task_budget_usage_day_idx",
+      "table": "task_budget_usage",
+      "sql": "CREATE INDEX task_budget_usage_day_idx ON task_budget_usage(local_day, task_id)"
+    },
+    {
+      "type": "index",
+      "name": "task_target_changes_pending",
+      "table": "task_target_changes",
+      "sql": "CREATE INDEX task_target_changes_pending ON task_target_changes(project_id, status, id)"
+    },
+    {
+      "type": "index",
+      "name": "tasks_pane_idx",
+      "table": "tasks",
+      "sql": "CREATE INDEX tasks_pane_idx ON tasks(pane_id)"
+    },
+    {
+      "type": "index",
+      "name": "tasks_project_state_idx",
+      "table": "tasks",
+      "sql": "CREATE INDEX tasks_project_state_idx ON tasks(project_id, state)"
+    },
+    {
+      "type": "index",
+      "name": "validation_candidates_one_live_idx",
+      "table": "validation_candidates",
+      "sql": "CREATE UNIQUE INDEX validation_candidates_one_live_idx ON validation_candidates(task_id, repo)\n    WHERE state IN ('preparing', 'active', 'stale', 'promoting')"
+    },
+    {
+      "type": "index",
+      "name": "validation_candidates_task_idx",
+      "table": "validation_candidates",
+      "sql": "CREATE INDEX validation_candidates_task_idx ON validation_candidates(task_id, repo, generation)"
+    },
+    {
+      "type": "index",
+      "name": "validation_fix_rounds_ship_idx",
+      "table": "validation_fix_rounds",
+      "sql": "CREATE INDEX validation_fix_rounds_ship_idx ON validation_fix_rounds(ship_task_id, kind, seq)"
+    },
+    {
+      "type": "index",
+      "name": "validation_stage_results_candidate_idx",
+      "table": "validation_stage_results",
+      "sql": "CREATE INDEX validation_stage_results_candidate_idx ON validation_stage_results(candidate_id, stage, created_at)"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_decision_delete",
+      "table": "decisions",
+      "sql": "CREATE TRIGGER project_history_revision_decision_delete AFTER DELETE ON decisions\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = OLD.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT OLD.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = OLD.project_id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_decision_insert",
+      "table": "decisions",
+      "sql": "CREATE TRIGGER project_history_revision_decision_insert AFTER INSERT ON decisions\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = NEW.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT NEW.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = NEW.project_id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_decision_update",
+      "table": "decisions",
+      "sql": "CREATE TRIGGER project_history_revision_decision_update AFTER UPDATE ON decisions\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = OLD.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT OLD.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = OLD.project_id);\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = NEW.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT NEW.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = NEW.project_id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_notice_delete",
+      "table": "notices",
+      "sql": "CREATE TRIGGER project_history_revision_notice_delete AFTER DELETE ON notices\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = OLD.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT OLD.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = OLD.project_id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_notice_insert",
+      "table": "notices",
+      "sql": "CREATE TRIGGER project_history_revision_notice_insert AFTER INSERT ON notices\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = NEW.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT NEW.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = NEW.project_id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_notice_update",
+      "table": "notices",
+      "sql": "CREATE TRIGGER project_history_revision_notice_update \nAFTER UPDATE OF id, project_id, task_id, kind, summary, data_json, created_at, delivered_at, acked_at ON notices\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = OLD.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT OLD.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = OLD.project_id);\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = NEW.project_id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT NEW.project_id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = NEW.project_id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "project_history_revision_project_insert",
+      "table": "projects",
+      "sql": "CREATE TRIGGER project_history_revision_project_insert AFTER INSERT ON projects\nBEGIN\n    UPDATE project_history_revisions SET revision = random() WHERE project_id = NEW.id;\n    INSERT INTO project_history_revisions(project_id, revision) SELECT NEW.id, random()\n        WHERE NOT EXISTS (SELECT 1 FROM project_history_revisions WHERE project_id = NEW.id);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "research_attempts_identity_immutable",
+      "table": "research_attempts",
+      "sql": "CREATE TRIGGER research_attempts_identity_immutable\nBEFORE UPDATE OF project_id, task_id, parent_role, harness, idempotency_key, previous_id, scope, access, prompt_digest, created_at ON research_attempts\nBEGIN SELECT RAISE(ABORT, 'research attempt identity is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_cap_grants_immutable",
+      "table": "review_cap_grants",
+      "sql": "CREATE TRIGGER review_cap_grants_immutable BEFORE UPDATE ON review_cap_grants\nBEGIN SELECT RAISE(ABORT, 'Review cap grant is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_carries_immutable",
+      "table": "review_carries",
+      "sql": "CREATE TRIGGER review_carries_immutable BEFORE UPDATE ON review_carries\nBEGIN SELECT RAISE(ABORT, 'review carry is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_dispositions_immutable",
+      "table": "review_dispositions",
+      "sql": "CREATE TRIGGER review_dispositions_immutable BEFORE UPDATE ON review_dispositions\nBEGIN SELECT RAISE(ABORT, 'review disposition is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_finding_events_immutable",
+      "table": "review_finding_events",
+      "sql": "CREATE TRIGGER review_finding_events_immutable BEFORE UPDATE ON review_finding_events\nBEGIN SELECT RAISE(ABORT, 'review finding event is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_findings_evidence_immutable",
+      "table": "review_findings",
+      "sql": "CREATE TRIGGER review_findings_evidence_immutable\nBEFORE UPDATE OF ship_task_id, seq, pattern_id, fingerprint, round, repository,\n    path, symbol, excerpt, line_at_report, head_sha, inherited_from ON review_findings\nBEGIN SELECT RAISE(ABORT, 'review finding evidence is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_patterns_definition_immutable",
+      "table": "review_patterns",
+      "sql": "CREATE TRIGGER review_patterns_definition_immutable\nBEFORE UPDATE OF ship_task_id, seq, key, title, rule, root_cause, fix_guidance, created_round ON review_patterns\nBEGIN SELECT RAISE(ABORT, 'review pattern definition is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_receipts_immutable",
+      "table": "review_receipts",
+      "sql": "CREATE TRIGGER review_receipts_immutable BEFORE UPDATE ON review_receipts\nBEGIN SELECT RAISE(ABORT, 'review receipt is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_rounds_binding_immutable",
+      "table": "review_rounds",
+      "sql": "CREATE TRIGGER review_rounds_binding_immutable\nBEFORE UPDATE OF ship_task_id, round, review_task_id, repository, scope_kind,\n    scope_base_sha, head_sha, target_commit_sha, baseline_tree, delta_sha256,\n    conflicted_paths_json, created_at ON review_rounds\nBEGIN SELECT RAISE(ABORT, 'review round binding is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_rounds_terminal_status_immutable",
+      "table": "review_rounds",
+      "sql": "CREATE TRIGGER review_rounds_terminal_status_immutable\nBEFORE UPDATE OF status, verdict ON review_rounds\nWHEN OLD.status = 'void'\n    OR (OLD.status = 'verdict' AND NOT (NEW.status = 'void' AND NEW.verdict IS NULL))\n    OR NEW.status NOT IN ('verdict', 'void')\n    OR (NEW.status = 'verdict' AND NEW.verdict IS NULL)\n    OR (NEW.status = 'void' AND NEW.verdict IS NOT NULL)\nBEGIN SELECT RAISE(ABORT, 'review round status is terminal'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_targets_immutable",
+      "table": "review_targets",
+      "sql": "CREATE TRIGGER review_targets_immutable BEFORE UPDATE ON review_targets\nBEGIN SELECT RAISE(ABORT, 'review target is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "review_verdicts_immutable",
+      "table": "review_verdicts",
+      "sql": "CREATE TRIGGER review_verdicts_immutable BEFORE UPDATE ON review_verdicts\nBEGIN SELECT RAISE(ABORT, 'review verdict is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "terminalize_queued_messages",
+      "table": "tasks",
+      "sql": "CREATE TRIGGER terminalize_queued_messages\nAFTER UPDATE OF state ON tasks\nWHEN NEW.state IN ('reported', 'failed', 'lost', 'merged', 'torn-down')\nBEGIN\n    INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)\n    SELECT NEW.project_id, NEW.id, 'queued_message_undeliverable',\n        'Queued messages ' || (\n            SELECT group_concat('#' || id, ', ')\n            FROM (SELECT id FROM messages WHERE task_id=NEW.id AND status IN ('queued', 'claimed') ORDER BY id)\n        ) || ' can no longer be delivered because t' || NEW.seq || ' entered ' || NEW.state || '. ' ||\n        CASE\n            WHEN NEW.state IN ('failed', 'lost') THEN 'Relaunch with `posse relaunch t' || NEW.seq || '`; the relaunched Worker receives them in its relaunch prompt.'\n            ELSE 'Create a new Change Task, then resend with `posse send <task> <message>`.'\n        END,\n        '{}', NEW.updated_at\n    WHERE EXISTS (SELECT 1 FROM messages WHERE task_id=NEW.id AND status IN ('queued', 'claimed'));\n\n    UPDATE messages\n    SET status='undeliverable', claim_token='', claimed_at=0\n    WHERE task_id=NEW.id AND status IN ('queued', 'claimed');\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "validation_candidates_submission_immutable",
+      "table": "validation_candidates",
+      "sql": "CREATE TRIGGER validation_candidates_submission_immutable\nBEFORE UPDATE OF task_id, repo, generation, submitted_sha, target_sha, expected_remote_sha,\n    refresh, created_at ON validation_candidates\nBEGIN SELECT RAISE(ABORT, 'validation candidate submission is immutable'); END"
+    },
+    {
+      "type": "trigger",
+      "name": "validation_fix_rounds_immutable",
+      "table": "validation_fix_rounds",
+      "sql": "CREATE TRIGGER validation_fix_rounds_immutable BEFORE UPDATE ON validation_fix_rounds\nBEGIN SELECT RAISE(ABORT, 'validation fix round is immutable'); END"
+    }
+  ],
+  "applied_migrations": [
+    {
+      "version": 1,
+      "checksum": "8b0d40899be2b6a67e7541004f7f41b253ac2a27eafe4aae8111520b85797e56"
+    },
+    {
+      "version": 2,
+      "checksum": "8fbfc0aeff1105a1d7f687fb3deb01b6b246796f5162148c1717a0bcbf0215fa"
+    },
+    {
+      "version": 3,
+      "checksum": "f7662c973b4b6501d5a3fe98e3a37562d7782320a9af44c3ad1ed4fc747c39a4"
+    },
+    {
+      "version": 4,
+      "checksum": "da0695444aad113ce763266102ccf9fdc3f41ea515ac55478265821dc7d93d7b"
+    },
+    {
+      "version": 5,
+      "checksum": "c46ada59e0db6a87463887fbe3fdd8a9d99e5d24e24d3a9271e44f0bcbf841fa"
+    },
+    {
+      "version": 6,
+      "checksum": "9d45e32615c6bd29f4f5d3bd4fef08120f3838776ad4aad5ca06ee687a3f15e8"
+    },
+    {
+      "version": 7,
+      "checksum": "b6f8589e346312afc0fd1b7457ac313fbd6074d7941ba5265a099b013c041b31"
+    },
+    {
+      "version": 8,
+      "checksum": "5eb2363e5e8a3e21dd8da7a16792b8942b4611bcf43ba7821d7cb9b16519054e"
+    },
+    {
+      "version": 9,
+      "checksum": "fe36480013747a4a4125eeafeb8435819bb835a88694f993229d7a48575a65a3"
+    },
+    {
+      "version": 10,
+      "checksum": "6eba8920bcf7165a18594a5eb1db8fc0219e17da8efd178059ef767a0aa91de8"
+    },
+    {
+      "version": 11,
+      "checksum": "288e60c821fbf4344608345db91560107a695c7d3140ed5ddcfc83afde095247"
+    },
+    {
+      "version": 12,
+      "checksum": "29ecad206cbba80fa1791bb7adef9a16636326092569c42ed049d013f220c32a"
+    },
+    {
+      "version": 13,
+      "checksum": "f9019a4b06577c9f2c2c74118094964656c90d2f8100c8efc05bacf24c054f74"
+    },
+    {
+      "version": 14,
+      "checksum": "9fcaa0d418abf9c518892257e03407e9eab3880e2602d11eda3ec91de0fdc25f"
+    },
+    {
+      "version": 15,
+      "checksum": "532da505f86d3798255ae896e65747962f81e6ee0bf6e5caa03df26e17ea1b38"
+    },
+    {
+      "version": 16,
+      "checksum": "1a23a0a7b7bb2bdf44b5cbd02ce6af234b5d99cff8195d8dd453841b49e9fc3f"
+    },
+    {
+      "version": 17,
+      "checksum": "cc1b8b0b113b90bc8c75b58834de418f2e01b984759b8d9010b65ea70b23b7dd"
+    },
+    {
+      "version": 18,
+      "checksum": "279cdefff67e7806bf1b25104be9560d60dd320ea4b5c249a5db6374bbaf7225"
+    },
+    {
+      "version": 19,
+      "checksum": "1f59be586217ec07be8f73b7334919a2e25d326246d0082ad7ac4ad7b6a7ca41"
+    },
+    {
+      "version": 20,
+      "checksum": "0345bd3bb003a4ea60aff4ecfd9710fbe069178726808ebf1c33014eb5063114"
+    },
+    {
+      "version": 21,
+      "checksum": "9ae3a63fccb4f7a39abd10f049edd44967955afc2116d65808342ed3c0992fa7"
+    },
+    {
+      "version": 22,
+      "checksum": "3ad1a6a97f0f78efd46cca400de2b075564e440ec845f70a38a49a05e9ea635c"
+    },
+    {
+      "version": 23,
+      "checksum": "e039e8b3ee1bc43b6d263a08d6079448d6d53645a68f7bf1f62d00a3b4377b0c"
+    },
+    {
+      "version": 24,
+      "checksum": "e8af144920a8f8502ed6889c3e14e3488059160cd1422a028e68f356cac71d58"
+    },
+    {
+      "version": 25,
+      "checksum": "f0225a7143d1d13d88f45f5f39837a60d32d29273cf3b4c7a5688746bb6d6fff"
+    },
+    {
+      "version": 26,
+      "checksum": "957e59d858dc042f25913c0dfb70c16b7b842693adb80605a0ba20f829979dac"
+    },
+    {
+      "version": 27,
+      "checksum": "89b4086e88def4ce33c465c78def64a676c16acd4a562a859cce70666ff2f37e"
+    },
+    {
+      "version": 28,
+      "checksum": "4be38078679fae265c38f9d03f02f7b82e31262acdf506c33899d30bdd0277ea"
+    },
+    {
+      "version": 29,
+      "checksum": "f4989ac5c012b1f43161d42dfb7151a79feecd734774ae17c9956aee3ba0a58c"
+    },
+    {
+      "version": 30,
+      "checksum": "7b3fbebd468b05f92d261dbba534512dfb3f93f7219574848d9d518ed3b31276"
+    },
+    {
+      "version": 31,
+      "checksum": "3447ec8b491ba44425661c566a0f60bb76adb668996513190f625e539dc8c5c4"
+    },
+    {
+      "version": 32,
+      "checksum": "555f36eb2646e8f1294c3a2e8d79ed8056418f4e33a9ecd7b0829fdcc09e50e2"
+    },
+    {
+      "version": 33,
+      "checksum": "e6708eea3f1d552952f3566064aa362d32c6ab8333122e549c2153c0036047c1"
+    },
+    {
+      "version": 34,
+      "checksum": "b2cede33cbe9a5103353f2ed9d1347d0de660d07f3bd13a7d43b4b2c2620705d"
+    },
+    {
+      "version": 35,
+      "checksum": "b6efe295fbb0243007317297f16daa097c80eab0957311ef5b320e4527ef59f9"
+    },
+    {
+      "version": 36,
+      "checksum": "d9a8b74b6361b1a3a033f72769697f0982f474a9e2180bf6ebcd180f99bdbe37"
+    },
+    {
+      "version": 37,
+      "checksum": "2c9e6e03a41bf2bbfd747ff2e436b99f76505e4026763e58d9621f1e6bb005a6"
+    },
+    {
+      "version": 38,
+      "checksum": "9cdaaf70cf5cd1a21aff092d6ba251c8d5b7873ad71415015eb814e419e14c02"
+    },
+    {
+      "version": 39,
+      "checksum": "35988360f90d6babe22c17b82c283cb357ac96d33e164d053c0a54a23f65221b"
+    },
+    {
+      "version": 40,
+      "checksum": "a819a4d0b2cfe64ec340dd5851b2af0b60d66070c5a866aed033e53136073f62"
+    },
+    {
+      "version": 41,
+      "checksum": "b092bf899103132f211982375e752bc768f464d50b0135cc850c267d21df09b9"
+    },
+    {
+      "version": 42,
+      "checksum": "cd9c5e31f817383bbd921ef2e5bb59f9c8b60cdc3200ccde776a20091c036027"
+    },
+    {
+      "version": 43,
+      "checksum": "723281dcd9c46e401d6491c36a83ad7635e87697866b995324c0784245f0329e"
+    },
+    {
+      "version": 44,
+      "checksum": "ea5c1e430e268f57db1e5fc3798a5a92507a90ee92661474a5c767c8aeeda719"
+    },
+    {
+      "version": 45,
+      "checksum": "4ac62cb276794a4a1f655dc8a0f1cb7465b4a47563199c2a4b9e8dddbf1c31cf"
+    },
+    {
+      "version": 46,
+      "checksum": "91dd3b135bf395c0485e774cdf036109b0a9a65c0b46ea97e02250d484d41cdf"
+    },
+    {
+      "version": 47,
+      "checksum": "1e1cd0c00f0d275d46b75fb1617320bcf482fca49db8146e04f785604163cc00"
+    },
+    {
+      "version": 48,
+      "checksum": "ecf94dda04c45b4dc91895987653b885a1802999a0783cda7744b8f61dc2063b"
+    },
+    {
+      "version": 49,
+      "checksum": "5b612952ed72b703eb6818bd6ced43d75d7eef0afbd1f14abc7cb95a22629fb2"
+    },
+    {
+      "version": 50,
+      "checksum": "89c2fdfbf2920f118ec19add65ae88e5deeb07048a59899a43a04e3b385a29a3"
+    },
+    {
+      "version": 51,
+      "checksum": "1c035d7c07e6419535b98e048c0a11fb41bb07a32d8e7c363abae794d0b64601"
+    },
+    {
+      "version": 52,
+      "checksum": "7ade06c393e3a4de2356097ac727526ce000bb455edbbf3e37c6dd97f23f26ac"
+    },
+    {
+      "version": 53,
+      "checksum": "ee14ae5c9d5c028c0a3a493d01aa17b3ae1442d8096e56eacebbf1b3c6a1a398"
+    },
+    {
+      "version": 54,
+      "checksum": "80f7ce98b714a0d7c2852e843fd6008312fd84c5047cd0999ef7ad845a19a955"
+    },
+    {
+      "version": 55,
+      "checksum": "b974a5f9ae9d6341d5192d7217f552f0f2e673682992ad9c0e3449ff569779e3"
+    },
+    {
+      "version": 56,
+      "checksum": "9ac49aeb65d7c089f62d527ea7e1e7fe32174af607eee2c100356a1004505c93"
+    },
+    {
+      "version": 57,
+      "checksum": "b67beac3b167c5eea9954bad70f16f953831dd7991f8a9f745e30e6742c91462"
+    },
+    {
+      "version": 58,
+      "checksum": "ee0932ddefad61f6d497dc903bf5a0dd15cb6a04cb0dfad53bf8ea60ff814f50"
+    },
+    {
+      "version": 59,
+      "checksum": "1b6df4f9812494bba86dc9b77445118afa111569dc916169571440f92ef757bd"
+    },
+    {
+      "version": 60,
+      "checksum": "74a70660637a0fb7dec5d1425f100e825882cd51453bddaf383d8699cd0d88c7"
+    },
+    {
+      "version": 61,
+      "checksum": "e4f37ba91afde38bd1bde020183366d51c5619419453a82539fdca7e56294764"
+    },
+    {
+      "version": 62,
+      "checksum": "e342aa13224885dd18cf0d364701b35677fe1175aa2a294a23ce05d585cc19fa"
+    },
+    {
+      "version": 63,
+      "checksum": "879e6d8d0952476b531af975e7851c376cdfd832a6c2c25be71c68a211896917"
+    },
+    {
+      "version": 64,
+      "checksum": "2fa82a8fcb2c526986e131a1545945da8c0c249913cc49fa29287bffb1e731bb"
+    },
+    {
+      "version": 65,
+      "checksum": "5432bc22bf713dcf1324331b6872d41a10f6108575291b6d26dc86b9fb26770c"
+    },
+    {
+      "version": 66,
+      "checksum": "dcd60f913665ee1d16c0c81d23f90e5a92f253c1414c3ef04285892d9dd361c1"
+    },
+    {
+      "version": 67,
+      "checksum": "377ab6497532a2e1d98aed1109a80d8de475ac828cebbf0394b2d51004b82efd"
+    },
+    {
+      "version": 68,
+      "checksum": "5b2e1ae9777e1d73a474b14fed1d1482290f5934899963e1dc0f6510e2fde582"
+    },
+    {
+      "version": 69,
+      "checksum": "5bb6b6ac55b15beab2a65480483ae44c4f0ff6607980817bc77ed11adf26c40d"
+    },
+    {
+      "version": 70,
+      "checksum": "0f4e689abfac9a9b3143c6d57e3112232571ae7c7480c46f11ea152e033903e0"
+    },
+    {
+      "version": 71,
+      "checksum": "6d8730afd201f298c161219c99bceb35584bab22d7d1521f5a164881467a5391"
+    },
+    {
+      "version": 72,
+      "checksum": "a011827df86db5c3ba6a3160162579b71e3a1dac8352285a93b4e012981c68b1"
+    },
+    {
+      "version": 73,
+      "checksum": "10366909374e63371e19c31d9899e7ddb685d207cd6de345217bf5b519e16073"
+    },
+    {
+      "version": 74,
+      "checksum": "2527c2980ab2794b0773bbbcebf7e2600676333f6e8d843f15313bf290dd5867"
+    },
+    {
+      "version": 75,
+      "checksum": "970f4956270f36bc556219cc59b4ec8fb16af580188d8094c088ec9df1ea2942"
+    },
+    {
+      "version": 76,
+      "checksum": "32d5294effbd9ebbbea355034f9324156f97abf6e4d4e80915fd436c11398b24"
+    },
+    {
+      "version": 77,
+      "checksum": "ebcf2f6c28393e4f0b10f8704f42cc0e5a1b3666a5c33b55dad25b1a806edd73"
+    },
+    {
+      "version": 78,
+      "checksum": "d90256cc5d0a77dc44b3a487c81214672c8c1d30e3de2e92673ad4fbabe11f2f"
+    },
+    {
+      "version": 79,
+      "checksum": "0ffed5e9b976d6ba56e32998227f2ccec8486024daf527774974e92b8ec56828"
+    },
+    {
+      "version": 80,
+      "checksum": "0cba31599f4a4b18a4eb34f9a64a23f0f0585876cc7c1f6ade18a9caab90d681"
+    },
+    {
+      "version": 81,
+      "checksum": "78ad6d2a3f657a74540b9968906a933ad056f2b8441c49ac2cc151123d72873c"
+    },
+    {
+      "version": 82,
+      "checksum": "57c192f27482ccc2c9b2abc8be4bb21478452d72fcc4a8db842421b3e69cbfc4"
+    },
+    {
+      "version": 83,
+      "checksum": "a140d3202741832ed2927477f7fbf2120082fbe986e389c279327dcad1b0232b"
+    },
+    {
+      "version": 84,
+      "checksum": "23d276e42df2b06a988fde1c896f574bee54e3454f1da10b9082e9eef090ce1b"
+    },
+    {
+      "version": 85,
+      "checksum": "632573ac596e330e30e2a1df351f9ca7ea5e771ce97af4b7934fabcb92e193d7"
+    },
+    {
+      "version": 86,
+      "checksum": "511f1233e418aa82c2f63831e752d51cf32cae3029dccaf329be5429e22811d2"
+    },
+    {
+      "version": 87,
+      "checksum": "a89644726315ebf7fee96558dee4a8d427068c6f6eb031524b434dc0da93fd61"
+    },
+    {
+      "version": 88,
+      "checksum": "98182430d19308c3e03836c0dd090b48e3975a6fb4fbd2dc16c800671661ea42"
+    },
+    {
+      "version": 89,
+      "checksum": "086e5539682a818758ad5edab14a466df9cf76c6faaa5c340d461dff17690218"
+    },
+    {
+      "version": 90,
+      "checksum": "c4e8359b171f78bbd2ce638fa848b45306f2c1e4fd48c2bf2f76c78510112dcc"
+    },
+    {
+      "version": 91,
+      "checksum": "b4b88d86ed692ce319e0a91ac50e01ee1b348cff2b76ad8f20809da34bd691d5"
+    },
+    {
+      "version": 92,
+      "checksum": "6bb6398096d9326daa7afaf0686c43a01ba33157b49991df3f862a6383536121"
+    },
+    {
+      "version": 93,
+      "checksum": "e9b7255140b041caa6e0c6dd234d002e89b6df6030d99ca602a7cb1adceb1831"
+    },
+    {
+      "version": 94,
+      "checksum": "b45e1add5c4fdc93d7f158c7da997370086282065bcfa09912f9e942a4baf235"
+    },
+    {
+      "version": 95,
+      "checksum": "f48833577445aa3b368aa9f982111cf46a0b5231b0e52d5f9b30d02aa9719219"
+    }
+  ]
+}

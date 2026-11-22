@@ -196,7 +196,7 @@ func TestPlanInputMigrationExternalizesExistingRowsIdempotently(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, inline, taskID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE task_plan_input_migration SET completed=0 WHERE id=1`); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE task_plan_input_migration SET completed=0,tasks_done=0,revisions_done=0,task_cursor=0,revision_task_cursor=0,revision_cursor=0 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

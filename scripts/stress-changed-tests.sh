@@ -140,7 +140,13 @@ run_unit_stress() {
         remaining=$((unit_budget - elapsed))
         run_timeout=${timeout}
         case "$timeout" in *m) configured_minutes=${timeout%m}; configured_seconds=$((configured_minutes * 60)) ;; *s) configured_seconds=${timeout%s} ;; *) configured_seconds=$unit_budget ;; esac
-        [ "$configured_seconds" -le "$remaining" ] || run_timeout="${remaining}s"
+        if [ "$configured_seconds" -gt "$remaining" ]; then
+          if [ "$remaining" -lt 60 ]; then
+            run_timeout=60s
+          else
+            run_timeout="${remaining}s"
+          fi
+        fi
         flags="-race -count=1 -timeout=$run_timeout -v"
         [ "$tags" = - ] || flags="-tags=$tags $flags"
         printf 'Stress run %d/%d for %s: %s\n' "$run" "$count" "$pkg" "$pattern"
@@ -326,6 +332,7 @@ e2e e2e pkg TestB'
   mkdir -p "$scratch/bin"
   cat > "$scratch/bin/go" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$@" > "$POSSE_STRESS_TEST_ARGS"
 sleep 1
 exit 0
 EOF
@@ -338,13 +345,17 @@ func TestBudget(t *testing.T) {
 }
 EOF
   git commit -q -am budget
-  budget_output=$(PATH="$scratch/bin:$PATH" GITHUB_STEP_SUMMARY="$scratch/summary" POSSE_STRESS_COUNT=10 POSSE_STRESS_UNIT_BUDGET=1 "$script" --run unit "$base" 2>&1)
+  budget_output=$(PATH="$scratch/bin:$PATH" POSSE_STRESS_TEST_ARGS="$scratch/go-args" GITHUB_STEP_SUMMARY="$scratch/summary" POSSE_STRESS_COUNT=10 POSSE_STRESS_UNIT_BUDGET=1 "$script" --run unit "$base" 2>&1)
   case "$budget_output" in
     *'Stress budget exhausted'*) ;;
     *) echo "self-check failed: budget exhaustion was not reported distinctly: $budget_output" >&2; return 1 ;;
   esac
   if ! grep -q 'did not complete all 10 repetitions' "$scratch/summary"; then
     echo "self-check failed: budget exhaustion was absent from the job summary" >&2
+    return 1
+  fi
+  if ! grep -q -- '-timeout=60s' "$scratch/go-args"; then
+    echo "self-check failed: the unit stress budget clamped the test timeout below one minute" >&2
     return 1
   fi
   cat > "$scratch/bin/go" <<'EOF'
