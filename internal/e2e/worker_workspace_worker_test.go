@@ -91,6 +91,18 @@ func TestWorkspaceProjectWorkerUsesOrderedSubworkspaceAndTeardown(t *testing.T) 
 			}
 		}
 		workspaceFound := false
+		workspaceLabelFound := false
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == task.HerdrWorkspaceID {
+				workspaceLabelFound = true
+				if workspace.Label != "└ workspace-worker-t1" {
+					t.Fatalf("Workspace Worker label = %q, want %q", workspace.Label, "└ workspace-worker-t1")
+				}
+			}
+		}
+		if !workspaceLabelFound {
+			t.Fatalf("Workspace Worker workspace %s is missing", task.HerdrWorkspaceID)
+		}
 		for _, pane := range snapshot.Panes {
 			if pane.WorkspaceID == task.HerdrWorkspaceID && pane.CWD == task.WorktreePath {
 				workspaceFound = true
@@ -102,6 +114,48 @@ func TestWorkspaceProjectWorkerUsesOrderedSubworkspaceAndTeardown(t *testing.T) 
 	}
 	assertOrder()
 	originalWorkspaceID := task.HerdrWorkspaceID
+	secondBrief := filepath.Join(f.root, "workspace-worker-second.md")
+	if err := os.WriteFile(secondBrief, []byte("---\ntype: change\ntitle: Workspace worker second\ndone_when: workspace workers stay grouped\nrepos: [backend]\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output = runPosse(t, f.binary, workspaceRoot, leadEnv, "start", "--brief", secondBrief, "--name", "workspace-worker-second")
+	var secondTask store.Task
+	if !waitForCondition(20*time.Second, func() bool {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		secondTask, err = db.Task(context.Background(), workspaceProject.ID, "t2")
+		return err == nil && secondTask.State == store.StateWorking
+	}) {
+		t.Fatalf("second Workspace Project Worker did not start: %s", output)
+	}
+	assertGroupedOrder := func() {
+		t.Helper()
+		snapshot := f.snapshot(t)
+		ids := make([]string, len(snapshot.Workspaces))
+		for i, workspace := range snapshot.Workspaces {
+			ids[i] = workspace.WorkspaceID
+			if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Label != "└ workspace-worker-t1" {
+				t.Fatalf("first Workspace Worker label = %q", workspace.Label)
+			}
+			if workspace.WorkspaceID == secondTask.HerdrWorkspaceID && workspace.Label != "└ workspace-worker-second-t2" {
+				t.Fatalf("second Workspace Worker label = %q", workspace.Label)
+			}
+		}
+		leadIndex := -1
+		for i, id := range ids {
+			if id == lead.Workspace.WorkspaceID {
+				leadIndex = i
+				break
+			}
+		}
+		if leadIndex < 0 || leadIndex+2 >= len(ids) || ids[leadIndex+1] != task.HerdrWorkspaceID || ids[leadIndex+2] != secondTask.HerdrWorkspaceID {
+			t.Fatalf("Workspace Project sidebar order = %v, want Lead %s followed by %s, %s", ids, lead.Workspace.WorkspaceID, task.HerdrWorkspaceID, secondTask.HerdrWorkspaceID)
+		}
+	}
+	assertGroupedOrder()
 	db, err = store.Open(f.home)
 	if err != nil {
 		t.Fatal(err)
@@ -133,6 +187,41 @@ func TestWorkspaceProjectWorkerUsesOrderedSubworkspaceAndTeardown(t *testing.T) 
 		t.Fatalf("Workspace Worker relaunch did not reuse sub-workspace %s", originalWorkspaceID)
 	}
 	assertOrder()
+	assertGroupedOrder()
+	killServer(t, f.server)
+	f.server = startServer(t, f.client)
+	runPosse(t, f.binary, workspaceRoot, f.env, "up", "--all")
+	if !waitForCondition(30*time.Second, func() bool {
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		task, err = db.Task(context.Background(), workspaceProject.ID, "t1")
+		if err != nil || task.State != store.StateWorking {
+			return false
+		}
+		secondTask, err = db.Task(context.Background(), workspaceProject.ID, "t2")
+		return err == nil && secondTask.State == store.StateWorking
+	}) {
+		t.Fatalf("Workspace Project Workers did not restore after Herdr restart: t1=%#v t2=%#v", task, secondTask)
+	}
+	projectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceProject, err = projectDB.ProjectByID(context.Background(), workspaceProject.ID)
+	if closeErr := projectDB.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead.Workspace.WorkspaceID = workspaceProject.HerdrWorkspaceID
+	lead.RootPane.PaneID = workspaceProject.LeadPaneID
+	leadEnv = setEnv(leadEnv, "HERDR_PANE_ID", workspaceProject.LeadPaneID)
+	leadEnv = setEnv(leadEnv, "HERDR_WORKSPACE_ID", workspaceProject.HerdrWorkspaceID)
+	assertGroupedOrder()
 	runPosse(t, f.binary, workspaceRoot, leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the Workspace Project child teardown test")
 	for _, workspace := range f.snapshot(t).Workspaces {
 		if workspace.WorkspaceID == originalWorkspaceID {

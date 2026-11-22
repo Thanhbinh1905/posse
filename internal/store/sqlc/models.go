@@ -388,15 +388,18 @@ type ProjectRuntime struct {
 }
 
 type ProjectWatchRuntime struct {
-	ProjectID           int64
-	Pid                 int64
-	Token               string
-	StartedAt           int64
-	HeartbeatAt         int64
-	ExecutablePath      string
-	ExecutableDevice    int64
-	ExecutableInode     int64
-	FailureNoticeRaised int64
+	ProjectID            int64
+	Pid                  int64
+	Token                string
+	StartedAt            int64
+	HeartbeatAt          int64
+	ExecutablePath       string
+	ExecutableDevice     int64
+	ExecutableInode      int64
+	FailureNoticeRaised  int64
+	ExecutableSize       int64
+	ExecutableModifiedAt int64
+	ExecutableVersion    string
 }
 
 type ProjectWatchState struct {

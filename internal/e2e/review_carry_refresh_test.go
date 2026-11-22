@@ -120,7 +120,7 @@ func TestFullPipelinePassCarriesAcrossCleanTargetRefreshOfMergedCandidate(t *tes
 func TestFullPipelineAcceptHeadCarriesAcrossCleanTargetRefresh(t *testing.T) {
 	f := reviewIdentityFixture(t)
 	changePath, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")
-	recordBlockingReviewFinding(t, f, changeSeq)
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
 	if err := os.WriteFile(filepath.Join(candidatePath, "review-issue.txt"), []byte("changed after the final review\n"), 0o600); err != nil {
 		t.Fatal(err)

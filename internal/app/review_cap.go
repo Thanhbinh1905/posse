@@ -25,7 +25,7 @@ func taskUsesSharedReviewRepairCap(task store.Task) bool {
 
 func reviewCapUsed(task store.Task, usage store.ReviewCapUsage) int {
 	if taskUsesSharedReviewRepairCap(task) {
-		return usage.Total()
+		return usage.RepairRounds
 	}
 	return usage.ReviewRounds
 }
@@ -39,7 +39,20 @@ func reviewCapRule(task store.Task, max int) string {
 	if !taskUsesSharedReviewRepairCap(task) {
 		return fmt.Sprintf("only Review Rounds count toward max_rounds; %d allows %d Review Rounds", max, max)
 	}
-	return fmt.Sprintf("Review fix rounds share max_rounds with Review Rounds, CI fix rounds do not; %d allows at most %d Review Rounds with a Review fix round between each", max, (max+1)/2)
+	return fmt.Sprintf("only Review fix rounds caused by blocking findings count toward max_rounds; %d allows %d Review fix rounds, while target-merge re-reviews and CI-only fixes do not count", max, max)
+}
+
+func reviewCapUsageDescription(task store.Task, used, max int) string {
+	if taskUsesSharedReviewRepairCap(task) {
+		if used > max {
+			return fmt.Sprintf("%d of %d blocking-finding Review fix rounds used; the excess is from prior or User-authorized fixes (target-merge re-reviews and CI-only fixes do not count)", used, max)
+		}
+		return fmt.Sprintf("%d of %d blocking-finding Review fix rounds used (target-merge re-reviews and CI-only fixes do not count)", used, max)
+	}
+	if used > max {
+		return fmt.Sprintf("%d of %d Review rounds used; the excess is from rounds recorded before the cap was reached", used, max)
+	}
+	return fmt.Sprintf("%d of %d Review rounds used", used, max)
 }
 
 // reviewCapBinding is what a cap Decision binds: the one candidate head of a
@@ -97,7 +110,7 @@ func reviewCapExhausted(ctx context.Context, db *store.DB, project store.Project
 	if err := createReviewCapNotice(ctx, db, project, task, binding, used, max); err != nil {
 		return err
 	}
-	return axi.Failure("review_cap_reached", fmt.Sprintf("Review and repair cap reached for t%d at %s (%d of %d Review/repair rounds used)", task.Seq, binding.label(), used, max), false,
+	return axi.Failure("review_cap_reached", fmt.Sprintf("Review and repair cap reached for t%d at %s (%s)", task.Seq, binding.label(), reviewCapUsageDescription(task, used, max)), false,
 		"Wait for the User's `review_cap` Decision and apply its `accept-head`, `final-fix`, `rethink` or `discard` choice")
 }
 
@@ -125,7 +138,7 @@ func createReviewCapNotice(ctx context.Context, db *store.DB, project store.Proj
 	if exists {
 		return nil
 	}
-	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "review_cap_reached", Summary: fmt.Sprintf("%s: Review and repair cap reached at head %s (%d of %d Review/repair rounds)", task.Title, binding.label(), used, max), DataJSON: data})
+	_, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "review_cap_reached", Summary: fmt.Sprintf("%s: Review and repair cap reached at head %s (%s)", task.Title, binding.label(), reviewCapUsageDescription(task, used, max)), DataJSON: data})
 	return err
 }
 

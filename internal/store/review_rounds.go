@@ -129,14 +129,9 @@ WHERE rr.ship_task_id=? AND rr.status='admitted'
 	if active {
 		return ErrReviewRoundActive
 	}
-	var used, repairs int
+	var used int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT round) FROM review_rounds WHERE ship_task_id=? AND status='verdict'`, admission.ChangeTaskID).Scan(&used); err != nil {
 		return err
-	}
-	if admission.SharedRepairBudget {
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, admission.ChangeTaskID).Scan(&repairs); err != nil {
-			return err
-		}
 	}
 	if admission.Round != used+1 {
 		return ErrReviewRoundNumber
@@ -177,7 +172,7 @@ SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 	if !anyNewHead && !finalReview {
 		return ErrReviewRoundUnchanged
 	}
-	if used+repairs >= admission.MaxRounds && !finalReview {
+	if !admission.SharedRepairBudget && used >= admission.MaxRounds && !finalReview {
 		return ErrReviewRoundCap
 	}
 	return nil
