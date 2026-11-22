@@ -53,29 +53,52 @@ func planRoleSkills(plan *taskplan.Plan) []string {
 }
 
 func taskRoleSkills(task store.Task, skills []string) []string {
-	if task.Type == "change" && taskHasChanges(task) {
-		return skills
-	}
+	codeChanged := task.Type == "change" && taskHasCodeChanges(task)
 	var applicable []string
 	for _, skill := range skills {
-		if skill != "posse-deslop" && skill != "posse-no-comments" {
-			applicable = append(applicable, skill)
+		if task.Type == "change" && !codeChanged && (skill == "posse-tdd" || skill == "posse-deslop" || skill == "posse-no-comments") {
+			continue
 		}
+		if task.Type != "change" && (skill == "posse-deslop" || skill == "posse-no-comments") {
+			continue
+		}
+		applicable = append(applicable, skill)
 	}
 	return applicable
 }
 
-func taskHasChanges(task store.Task) bool {
+func taskHasCodeChanges(task store.Task) bool {
 	if task.WorktreePath == "" || task.BaseRef == "" {
 		return true
 	}
-	cmd := exec.Command("git", "-C", task.WorktreePath, "diff", "--quiet", task.BaseRef+"...HEAD")
-	if err := cmd.Run(); err != nil {
-		return true
+	commands := [][]string{
+		{"diff", "--name-only", "--no-renames", task.BaseRef + "...HEAD"},
+		{"diff", "--name-only"},
+		{"diff", "--cached", "--name-only"},
+		{"ls-files", "--others", "--exclude-standard"},
 	}
-	cmd = exec.Command("git", "-C", task.WorktreePath, "status", "--porcelain")
-	status, err := cmd.Output()
-	return err != nil || len(status) > 0
+	for _, args := range commands {
+		cmdArgs := append([]string{"-C", task.WorktreePath}, args...)
+		output, err := exec.Command("git", cmdArgs...).Output()
+		if err != nil {
+			return true
+		}
+		for _, path := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if path != "" && !prosePath(path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func prosePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".mdx", ".rst", ".adoc":
+		return true
+	default:
+		return false
+	}
 }
 
 func roleSkillWhen(name string) string {

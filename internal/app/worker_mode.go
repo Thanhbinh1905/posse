@@ -16,7 +16,11 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 
 // workerCommands are the only commands a Worker may run against its own posse
 // home.
+const workerAllowedCommands = "`posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse show <own-task>`, `posse review <own-task>`, `posse candidate abandon`, `posse _context`, `posse research <list|show|cancel|start|wait|follow-up>` for own children, `posse knowledge show` and `posse config <show|schema>`"
+
 var workerCommands = map[string]bool{
+	"show":               true,
+	"review":             true,
 	"brief":              true,
 	"status":             true,
 	"signal":             true,
@@ -69,10 +73,18 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 		name += " " + command
 	}
 	return axi.Failure("worker_forbidden",
-		"`"+name+"` cannot run from a Worker against the posse home "+home+"; Workers may run only `posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse research` for their own children, `posse knowledge show` and `posse config show|schema` there",
+		"`"+name+"` did not run against the posse home "+home+". Allowed Posse commands: "+workerAllowedCommands+".",
 		false,
 		"Experiment with posse under a temporary POSSE_HOME and an isolated Herdr server",
 		"Report what the Lead should do with `posse signal needs-decision`")
+}
+
+func (s *Service) requireWorkerOwnTask(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	current, err := s.workerTask(ctx, db)
+	if err != nil || current.ID != task.ID || current.ProjectID != project.ID {
+		return axi.Failure("worker_forbidden", "`posse show` and `posse review` did not run; Workers may inspect only their own Task. Allowed Posse commands: "+workerAllowedCommands, false)
+	}
+	return nil
 }
 
 // workerCaller reports whether this process runs on behalf of a Worker of

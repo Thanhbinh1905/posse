@@ -347,6 +347,15 @@ func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T)
 	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != "posse-technical-writing" {
 		t.Fatalf("unchanged Change Task skills = %v, want report skill only", got)
 	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("updated docs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, root, "add", "README.md")
+	gitTest(t, root, "commit", "-m", "docs")
+	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != "posse-technical-writing" {
+		t.Fatalf("docs-only Change Task skills = %v, want report skill only", got)
+	}
+	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-tdd"}, {Role: "skill", Source: "posse-deslop"}, {Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
 	if err := os.WriteFile(filepath.Join(root, "change.go"), []byte("package change\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +364,9 @@ func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T)
 	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != strings.Join(skills, ",") {
 		t.Fatalf("changed Change Task skills = %v, want %v", got, skills)
 	}
-	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
+	if got := roleSkillProtocol(plan, change); !strings.Contains(got, "posse-tdd") || !strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-deslop") {
+		t.Fatalf("code Change launch skill instructions omitted code skills = %q", got)
+	}
 	if got := roleSkillProtocol(plan, store.Task{Type: "review"}); strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
 		t.Fatalf("Review launch skill instructions = %q", got)
 	}
