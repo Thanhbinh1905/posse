@@ -66,6 +66,22 @@ func (db *DB) RecordGreenhouseVerdict(ctx context.Context, verdict Verdict, curr
 	return true, tx.Commit()
 }
 
+func (db *DB) GreenhouseFailureNoticeSummary(ctx context.Context, taskID int64, repository, head string) (string, bool, error) {
+	data, err := json.Marshal(struct {
+		Repository string `json:"repo"`
+		Head       string `json:"head"`
+	}{repository, head})
+	if err != nil {
+		return "", false, err
+	}
+	var summary string
+	err = db.QueryRowContext(ctx, `SELECT summary FROM notices WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=?`, taskID, string(data)).Scan(&summary)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return summary, err == nil, err
+}
+
 func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
 	data, err := json.Marshal(struct {
 		Repository string `json:"repo"`
@@ -75,6 +91,17 @@ func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, 
 		return false, err
 	}
 	summary := fmt.Sprintf("Greenhouse parallel review failed for %s at %s: %s", repository, head, reason)
+	updated, err := db.ExecContext(ctx, `UPDATE notices SET summary=? WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=? AND summary<>?`, summary, taskID, string(data), summary)
+	if err != nil {
+		return false, err
+	}
+	updatedRows, err := updated.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if updatedRows > 0 {
+		return false, db.PersistProject(ctx, projectID)
+	}
 	result, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
 		SELECT ?, ?, 'greenhouse_review_failed', ?, ?, ?
 		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=?)`,

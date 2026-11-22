@@ -1004,6 +1004,14 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 		return err
 	}
 	for _, target := range targets {
+		failures, _ := repeatedGreenhouseReviewFailures(requests, change.ID, target.Repository, target.Commit)
+		lastFailure, hasFailureNotice, err := db.GreenhouseFailureNoticeSummary(ctx, change.ID, target.Repository, target.Commit)
+		if err != nil {
+			return err
+		}
+		if failures >= greenhouseReviewFailureLimit || hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) || time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+			continue
+		}
 		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
 		if err != nil {
 			return err

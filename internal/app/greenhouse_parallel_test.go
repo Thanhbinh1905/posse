@@ -557,6 +557,32 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 	}
 }
 
+func TestRepeatedGreenhouseReviewFailuresAreBoundedByExactHead(t *testing.T) {
+	requests := []store.GreenhouseReviewRequest{
+		{TaskID: 1, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"},
+		{TaskID: 1, Repository: "shop", RequestedHead: "head-b", Outcome: "failed"},
+		{TaskID: 2, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"},
+	}
+	if got, _ := repeatedGreenhouseReviewFailures(requests, 1, "shop", "head-a"); got != 1 {
+		t.Fatalf("failed requests for exact Task head = %d, want 1", got)
+	}
+	requests = append(requests, store.GreenhouseReviewRequest{TaskID: 1, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"}, store.GreenhouseReviewRequest{TaskID: 1, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"})
+	if got, _ := repeatedGreenhouseReviewFailures(requests, 1, "shop", "head-a"); got < greenhouseReviewFailureLimit {
+		t.Fatalf("same-head failures = %d, want limit %d", got, greenhouseReviewFailureLimit)
+	}
+}
+
+func TestParallelReviewDoesNotRetryReviewerContextOverflow(t *testing.T) {
+	calls := 0
+	_, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Millisecond, func(time.Duration) (greenhouse.RoundResult, error) {
+		calls++
+		return greenhouse.RoundResult{}, errors.New("reviewer context overflow: prompt exceeds maximum context length")
+	})
+	if err == nil || calls != 1 || attempts != 1 {
+		t.Fatalf("context-overflow review made %d calls and %d attempts, err=%v; want one terminal attempt", calls, attempts, err)
+	}
+}
+
 func TestParallelReviewRetriesTransportAsOneRequestObservation(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	ctx := context.Background()

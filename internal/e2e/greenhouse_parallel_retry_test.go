@@ -3,13 +3,85 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestGreenhouseSameHeadReviewerOverflowStopsAfterHistoricalLoop(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse reviewer overflow", "greenhouse-overflow")
+	head := c.authorCommit(t)
+	c.hold(t)
+	task := c.f.task(t, "t1")
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 858 {
+		at := time.Now().Add(-time.Duration(858-attempt) * time.Minute).UnixMilli()
+		if err := db.RecordGreenhouseReviewRequest(context.Background(), store.GreenhouseReviewRequest{
+			ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: head, Provider: store.GreenhouseReviewProvider,
+			RequestedAt: at, SettledAt: at + 1, Outcome: "failed",
+		}); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.CreateGreenhouseFailureNoticeOnce(context.Background(), task.ProjectID, task.ID, "shop", head, "latest reviewer failure: prompt exceeds maximum context length"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(workerEnv, c.change.WorktreePath, "signal", "done", "Request Greenhouse review", "--head", head); err != nil {
+		t.Fatalf("Worker done Signal: %v\n%s", err, output)
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch: %v\n%s", err, output)
+	}
+	if got := c.invocations(t); got != 0 {
+		t.Fatalf("reviewer ran %d times after 858 same-head failures", got)
+	}
+	db, err = store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(context.Background(), task.ProjectID, false)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failureNotices := 0
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "greenhouse_review_failed" {
+			failureNotices++
+			if !strings.Contains(notice.Summary, "maximum context length") {
+				t.Errorf("failure Notice omitted latest reason: %s", notice.Summary)
+			}
+		}
+	}
+	if failureNotices != 1 {
+		t.Fatalf("same-head failure Notices = %d, want one", failureNotices)
+	}
+}
 
 func TestGreenhouseParallelRetryExhaustionCountsOnceAfterRecovery(t *testing.T) {
 	f := newWorkerTabsFixture(t)

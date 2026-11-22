@@ -264,6 +264,10 @@ func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("failure Notices = %d, %v; want one per head", count, err)
 	}
+	var summary string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT summary FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&summary); err != nil || !strings.Contains(summary, "protocol refusal") {
+		t.Fatalf("latest failure summary = %q, %v; want latest reason", summary, err)
+	}
 }
 
 func TestGreenhouseRecoveryNoticeOncePerRecovery(t *testing.T) {
