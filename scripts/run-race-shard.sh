@@ -334,7 +334,7 @@ started=$(date +%s)
 
 # -v prints each top-level test's duration for scripts/refresh-race-durations.sh.
 shard_commands "$shard_plan" | while IFS= read -r command; do
-  eval "go test -race -v -count=1 -timeout=25m $command" || exit 1
+  eval "python3 scripts/test-results.py record --shard $shard -- go test -race -json -v -count=1 -timeout=25m $command" || exit 1
 done
 
 elapsed=$(($(date +%s) - started))

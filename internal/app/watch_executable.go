@@ -18,5 +18,5 @@ func inspectWatchExecutable(pid int) (watchExecutableIdentity, bool) {
 	if !ok || stat.Ino == 0 {
 		return watchExecutableIdentity{}, false
 	}
-	return watchExecutableIdentity{Path: path, Device: uint64(stat.Dev), Inode: stat.Ino}, true
+	return watchExecutableIdentity{Path: path, Device: uint64(stat.Dev), Inode: stat.Ino, Size: info.Size(), ModifiedAt: info.ModTime().UnixNano()}, true
 }

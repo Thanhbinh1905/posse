@@ -77,8 +77,8 @@ func TestOpenRenumbersLegacyTaskPaneShellIdentityMigration(t *testing.T) {
 		`DROP INDEX tasks_project_workflow_idx`,
 		`ALTER TABLE tasks DROP COLUMN plan_revision`,
 		`ALTER TABLE tasks DROP COLUMN workflow_run_id`,
-		`DELETE FROM goose_db_version WHERE version_id >= 56`,
-		`DELETE FROM posse_migration_checksums WHERE version >= 56`,
+		`DELETE FROM goose_db_version WHERE version_id >= 56 AND version_id < 1000000`,
+		`DELETE FROM posse_migration_checksums WHERE version >= 56 AND version < 1000000`,
 		`INSERT INTO goose_db_version(version_id,is_applied) VALUES(56,1)`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

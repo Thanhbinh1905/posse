@@ -19,6 +19,8 @@ type openedTab struct {
 
 func leadWorkspaceLabel(project store.Project) string { return "Lead:" + project.Name }
 
+func workerWorkspaceLabel(task store.Task) string { return "└ " + workerTabLabel(task) }
+
 func leadWorkspace(snapshot herdr.Snapshot, project store.Project) (string, bool) {
 	if project.HerdrWorkspaceID == "" {
 		return "", false
@@ -99,7 +101,7 @@ func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, 
 	if project.IsWorkspace() && !reuseWorkerWorkspace {
 		method = "workspace.create"
 		params = map[string]any{
-			"cwd": path, "label": workerTabLabel(task), "focus": false, "no_focus": true,
+			"cwd": path, "label": workerWorkspaceLabel(task), "focus": false, "no_focus": true,
 			"env": map[string]string{workerHomeEnv: filepath.Clean(home)},
 		}
 	} else if !project.IsWorkspace() && !reuseWorkerWorkspace {
@@ -138,6 +140,12 @@ func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, 
 	opened := openedTab{WorkspaceID: workspaceID, TabID: result.RootPane.TabID, PaneID: result.RootPane.PaneID}
 	if opened.TabID == "" {
 		opened.TabID = result.Tab.TabID
+	}
+	if project.IsWorkspace() {
+		if _, err := s.herdrCall(ctx, "workspace.rename", map[string]any{"workspace_id": opened.WorkspaceID, "label": workerWorkspaceLabel(task)}); err != nil {
+			s.closeUnlabeledWorker(ctx, project, task, opened)
+			return openedTab{}, err
+		}
 	}
 	task.PaneID = opened.PaneID
 	metadata := workerDisplayMetadata(task, "", displayAgent)

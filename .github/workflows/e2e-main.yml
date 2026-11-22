@@ -115,7 +115,19 @@ jobs:
       - name: Run duplicate isolated Herdr E2E shard
         env:
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-pass2-shard-${{ matrix.shard }}-
+          POSSE_TEST_HEAD: ${{ github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
         run: scripts/run-e2e-shard.sh "${{ matrix.shard }}" "${{ strategy.job-total }}"
+      - name: Ensure per-test results file
+        if: ${{ always() }}
+        run: touch "$RUNNER_TEMP/test-results.jsonl"
+      - name: Upload per-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-main-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-results.jsonl
+          if-no-files-found: warn
       - name: Clean duplicate-pass Herdr processes, fixtures and caches
         if: ${{ always() }}
         run: |
@@ -191,7 +203,19 @@ jobs:
         env:
           POSSE_E2E_RELAUNCH_STRESS: "1"
           POSSE_E2E_TMP_PREFIX: posse-e2e-${{ github.run_id }}-${{ github.run_attempt }}-relaunch-stress-
-        run: go test -tags=e2e -count=1 -timeout=9m ./internal/e2e -run '^TestStoppedWorkerPaneCanBeRelaunched$'
+          POSSE_TEST_HEAD: ${{ github.sha }}
+          POSSE_TEST_RESULTS: ${{ runner.temp }}/test-results.jsonl
+        run: python3 scripts/test-results.py record --shard relaunch-stress -- go test -tags=e2e -json -count=1 -timeout=9m ./internal/e2e -run '^TestStoppedWorkerPaneCanBeRelaunched$'
+      - name: Ensure per-test results file
+        if: ${{ always() }}
+        run: touch "$RUNNER_TEMP/test-results.jsonl"
+      - name: Upload per-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-main-stress-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/test-results.jsonl
+          if-no-files-found: warn
       - name: Clean stopped Worker stress fixtures and caches
         if: ${{ always() }}
         run: |

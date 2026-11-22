@@ -30,6 +30,7 @@ timeout=${POSSE_STRESS_TIMEOUT:-20m}
 budget=${POSSE_STRESS_BUDGET:-900}
 default_seconds=60
 durations_file=${POSSE_STRESS_DURATIONS:-$(dirname "$0")/e2e-durations.txt}
+results_script=$(cd "$(dirname "$0")" && pwd)/test-results.py
 
 list_tests() {
   diff=$(git diff -U0 --diff-filter=AMR "$1"...HEAD -- '*_test.go') || return 1
@@ -115,7 +116,7 @@ run_kind() {
       [ "$tags" = - ] || flags="-tags=$tags $flags"
       printf 'Stressing %s: %s\n' "$pkg" "$pattern"
       # shellcheck disable=SC2086 # flags hold no spaces inside a word
-      go test $flags "./$pkg" -run "^($pattern)\$" || exit 1
+      python3 "$results_script" record --shard "${GITHUB_JOB:-local}" -- go test $flags -json "./$pkg" -run "^($pattern)\$" || exit 1
     done
 }
 
@@ -145,9 +146,9 @@ run_unit_stress() {
         printf 'Stress run %d/%d for %s: %s\n' "$run" "$count" "$pkg" "$pattern"
         # shellcheck disable=SC2086 # flags hold no spaces inside a word
         if [ "$pkg" = internal/app ]; then
-          systemd-run --user --scope -p TasksMax=400 -p MemoryMax=6G go test $flags "./$pkg" -run "^($pattern)\$" || exit 1
+          systemd-run --user --scope -p TasksMax=400 -p MemoryMax=6G python3 "$results_script" record --shard "${GITHUB_JOB:-local}" -- go test $flags -json "./$pkg" -run "^($pattern)\$" || exit 1
         else
-          go test $flags "./$pkg" -run "^($pattern)\$" || exit 1
+          python3 "$results_script" record --shard "${GITHUB_JOB:-local}" -- go test $flags -json "./$pkg" -run "^($pattern)\$" || exit 1
         fi
         run=$((run + 1))
       done

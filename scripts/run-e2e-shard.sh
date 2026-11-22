@@ -249,7 +249,7 @@ pattern=$(plan "$estimated" "$shard_count" | awk -v shard="$shard" '$1 == shard 
 printf 'Running E2E shard %s/%s\n' "$shard" "$shard_count"
 started=$(date +%s)
 # -v prints each top-level test's duration for scripts/refresh-e2e-durations.sh.
-go test -tags=e2e -v -count="$count" -timeout="$timeout" ./internal/e2e -run "^(${pattern})$"
+python3 scripts/test-results.py record --shard "$shard" -- go test -tags=e2e -json -v -count="$count" -timeout="$timeout" ./internal/e2e -run "^(${pattern})$"
 elapsed=$(($(date +%s) - started))
 limit=$((budget_seconds * 3 / 2))
 printf 'E2E shard %s/%s took %ss\n' "$shard" "$shard_count" "$elapsed"
