@@ -161,6 +161,10 @@ func TestGreenhousePartialDecisionAcceptsOnlyItsExactHead(t *testing.T) {
 	defer f.db.Close()
 	ctx := context.Background()
 	head := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "refs/heads/"+f.task.Branch))
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: head, Target: head, ReviewBase: head, Outcome: "inconclusive", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record partial gate Verdict: recorded=%t err=%v", recorded, err)
+	}
 	result := greenhouse.HostResult{Status: "partial-review", Verdict: "partial", Uncovered: []greenhouse.UncoveredPath{{Path: "large.sql", Reason: "hunk windows exceed 65536 bytes"}}}
 	if _, err := f.db.CreateGreenhousePartialNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, head, "Partial review", result); err != nil {
 		t.Fatal(err)
@@ -185,6 +189,51 @@ func TestGreenhousePartialDecisionAcceptsOnlyItsExactHead(t *testing.T) {
 	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.project.Name, head)
 	if err != nil || !accepted {
 		t.Fatalf("exact-head coverage disposition = %t, %v", accepted, err)
+	}
+}
+
+func TestGreenhouseCoverageAcceptanceDoesNotCoverNonGateVerdict(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	ctx := context.Background()
+	head := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "refs/heads/"+f.task.Branch))
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: head, Target: head, ReviewBase: head, Outcome: "inconclusive", Mode: "parallel"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record non-gate partial Verdict: recorded=%t err=%v", recorded, err)
+	}
+	result := greenhouse.HostResult{Status: "partial-review", Verdict: "partial", Uncovered: []greenhouse.UncoveredPath{{Path: "large.sql", Reason: "hunk windows exceed 65536 bytes"}}}
+	if _, err := f.db.CreateGreenhousePartialNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, head, "Partial review", result); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.raiseNoticeDecisions(ctx, f.db, f.project); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("partial review Decisions = %#v, %v", decisions, err)
+	}
+	decision, err := f.db.AnswerDecision(ctx, f.project.ID, decisions[0].ID, "accept-coverage-at-exact-head", "Accept the reviewed exact head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("apply", fmt.Sprint(decision.ID)); code != 0 {
+		t.Fatalf("apply non-gate coverage Decision: %s %s", output, stderr)
+	}
+	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.project.Name, head)
+	if err != nil || accepted {
+		t.Fatalf("non-gate Verdict coverage acceptance = %t, %v; want false", accepted, err)
+	}
+	evidence, err := f.db.ReviewEvidenceFor(ctx, f.task.ID, []store.ReviewTarget{{Repository: f.project.Name, Commit: head}})
+	if err != nil || evidence.Disposition {
+		t.Fatalf("non-gate Verdict was accepted as review evidence: evidence=%+v err=%v", evidence, err)
+	}
+	covered, err := f.db.ReviewTargetsCovered(ctx, f.task.ID, []store.ReviewTarget{{Repository: f.project.Name, Commit: head}})
+	if err != nil || covered {
+		t.Fatalf("non-gate Verdict covered review target: covered=%t err=%v", covered, err)
+	}
+	dispositionHeads, err := f.db.ReviewDispositionHeads(ctx, f.task.ID, f.project.Name)
+	if err != nil || len(dispositionHeads) != 0 {
+		t.Fatalf("non-gate Verdict disposition heads = %v, %v; want none", dispositionHeads, err)
 	}
 }
 

@@ -244,7 +244,7 @@ func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []Rev
 SELECT 1 FROM review_dispositions rd
 LEFT JOIN decisions d ON d.id=rd.decision_id
 JOIN tasks t ON t.id=rd.ship_task_id
-WHERE rd.ship_task_id=? AND rd.head_sha=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||?))`, taskID, target.Commit, target.Repository, target.Commit).Scan(&disposed[index]); err != nil {
+WHERE rd.ship_task_id=? AND rd.head_sha=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR (d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||? AND COALESCE((SELECT v.mode='gate' AND v.blocking=0 FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.repo=? AND v.provider='greenhouse' AND v.head_sha=? ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=1)))`, taskID, target.Commit, target.Repository, target.Commit, target.Repository, target.Commit).Scan(&disposed[index]); err != nil {
 			return evidence, err
 		}
 	}
@@ -315,8 +315,8 @@ func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64, reposito
 	rows, err := db.QueryContext(ctx, `SELECT rd.head_sha FROM review_dispositions rd
 LEFT JOIN decisions d ON d.id=rd.decision_id
 JOIN tasks t ON t.id=rd.ship_task_id
-WHERE rd.ship_task_id=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||rd.head_sha)
-ORDER BY rd.id DESC`, taskID, repository)
+WHERE rd.ship_task_id=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR (d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||rd.head_sha AND COALESCE((SELECT v.mode='gate' AND v.blocking=0 FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.repo=? AND v.provider='greenhouse' AND v.head_sha=rd.head_sha ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=1))
+ORDER BY rd.id DESC`, taskID, repository, repository)
 	if err != nil {
 		return nil, err
 	}

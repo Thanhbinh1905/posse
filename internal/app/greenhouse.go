@@ -572,7 +572,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				if err != nil {
 					return err
 				}
-				if accepted && latest.Blocking == 0 {
+				if accepted && latest.Mode == "gate" && latest.Blocking == 0 {
 					acceptedMembers[target.Repository] = true
 					continue
 				}
@@ -772,7 +772,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					return err
 				}
 			}
-			if (accepted && verdict.Blocking == 0) || (!partialReview && verdict.Qualifies(head)) {
+			if (accepted && verdict.Mode == "gate" && verdict.Blocking == 0) || (!partialReview && verdict.Qualifies(head)) {
 				message := fmt.Sprintf("Greenhouse passed Task head %s", shortSHA(head))
 				if accepted {
 					message = fmt.Sprintf("User accepted Greenhouse coverage at Task head %s", shortSHA(head))

@@ -89,10 +89,10 @@ SELECT 1 FROM review_rounds WHERE ship_task_id=? AND repository=? AND status='ve
 UNION ALL
 SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?
 UNION ALL
-SELECT 1 FROM review_dispositions rd LEFT JOIN decisions d ON d.id=rd.decision_id JOIN tasks t ON t.id=rd.ship_task_id WHERE rd.ship_task_id=? AND rd.head_sha=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||?))`,
+SELECT 1 FROM review_dispositions rd LEFT JOIN decisions d ON d.id=rd.decision_id JOIN tasks t ON t.id=rd.ship_task_id WHERE rd.ship_task_id=? AND rd.head_sha=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR (d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||? AND COALESCE((SELECT v.mode='gate' AND v.blocking=0 FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.repo=? AND v.provider='greenhouse' AND v.head_sha=rd.head_sha ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=1)))`,
 			changeTaskID, target.Repository, target.Commit,
 			changeTaskID, target.Repository, target.Commit,
-			changeTaskID, target.Commit, target.Repository, target.Commit).Scan(&covered); err != nil || !covered {
+			changeTaskID, target.Commit, target.Repository, target.Commit, target.Repository).Scan(&covered); err != nil || !covered {
 			return false, err
 		}
 	}
