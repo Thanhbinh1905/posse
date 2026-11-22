@@ -351,10 +351,6 @@ func TestPRWatchMakesGreenhouseVerdictedDoneTaskMergeReadyInOnePoll(t *testing.T
 		t.Fatal(err)
 	}
 	url := "https://github.com/acme/shop/pull/17"
-	token, err := fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +370,7 @@ func TestPRWatchMakesGreenhouseVerdictedDoneTaskMergeReadyInOnePoll(t *testing.T
 	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
 		t.Fatalf("working Task merge_ready notices=%+v err=%v", notices, err)
 	}
-	token, err = fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	token, err := fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
