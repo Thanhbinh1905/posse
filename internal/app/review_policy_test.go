@@ -40,6 +40,37 @@ func freezeReviewPolicy(t *testing.T, f *reviewVerdictFixture, policy string, ve
 	f.task.PlanJSON = data
 }
 
+func TestGreenhouseAcceptHeadEvidenceRequiresReviewCapDecision(t *testing.T) {
+	ctx := context.Background()
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	defer f.db.Close()
+	if err := f.db.RecordReviewHeadDisposition(ctx, f.task.ID, []string{f.headSHA}, "No blocking finding remains"); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.headSHA)
+	if err != nil || accepted {
+		t.Fatalf("system disposition qualifies as accept-head: accepted=%v err=%v", accepted, err)
+	}
+
+	f = newPRMergeFixture(t, "pr", store.StateWorking)
+	defer f.db.Close()
+	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, f.headSHA), Question: "Accept this exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err = f.db.AnswerDecision(ctx, f.project.ID, decision.ID, "accept-head", "I accept this exact head.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, decision.ID, []string{f.headSHA}, decision.UserQuote, "P1", "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err = greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.headSHA)
+	if err != nil || !accepted {
+		t.Fatalf("applied accept-head Decision not recognized: accepted=%v err=%v", accepted, err)
+	}
+}
+
 func TestSelectedReviewPolicyFrozenAndLegacyEvidenceVisible(t *testing.T) {
 	for _, tc := range []struct {
 		policy           string

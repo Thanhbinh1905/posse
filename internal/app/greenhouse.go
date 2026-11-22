@@ -668,6 +668,12 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					if err != nil {
 						return err
 					}
+					if !passed {
+						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, head)
+						if err != nil {
+							return err
+						}
+					}
 					if verified && passed {
 						continue
 					}
