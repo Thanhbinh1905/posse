@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func greenhouseVerdict(taskID int64, grant, head string) Verdict {
@@ -214,6 +215,30 @@ func TestProviderFindingsUseReviewFixQueueAndResolution(t *testing.T) {
 	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
 	if err != nil || len(findings) != 1 || findings[0].State != "fix_claimed" {
 		t.Fatalf("Greenhouse finding after resolution = %+v, %v", findings, err)
+	}
+}
+
+func TestGreenhouseGatePassReleasesVerdictRowsBeforeFindingQuery(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r-single-connection", reviewShaA)
+	verdict.Outcome, verdict.Mode, verdict.Blocking = "findings", "gate", 1
+	verdict.Findings = []ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "false finding", Head: reviewShaA}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, verdict, func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record P1 Verdict = %v, %v", recorded, err)
+	}
+	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("provider findings = %+v, %v", findings, err)
+	}
+	if err := f.db.WithdrawProviderFinding(f.ctx, f.change, int64(findings[0].FindingSeq), 17, strings.Repeat("a", 64), "User-approved dispute"); err != nil {
+		t.Fatal(err)
+	}
+	f.db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
+	defer cancel()
+	passed, err := f.db.GreenhouseGatePass(ctx, f.change, "shop", reviewShaA)
+	if err != nil || !passed {
+		t.Fatalf("single-connection withdrawn finding gate = passed %v, err %v; want pass without waiting for a second connection", passed, err)
 	}
 }
 

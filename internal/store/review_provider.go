@@ -100,16 +100,28 @@ func (verdict Verdict) Qualifies(head string) bool {
 }
 
 func (db *DB) GreenhouseGatePass(ctx context.Context, taskID int64, repository, head string, blockAt ...string) (bool, error) {
-	rows, err := db.QueryContext(ctx, `SELECT verdict,blocking,head_sha,mode FROM verdicts WHERE task_id=? AND repo=? AND provider=? ORDER BY recorded_at DESC,id DESC`, taskID, repository, GreenhouseReviewProvider)
+	verdictRows, err := db.QueryContext(ctx, `SELECT verdict,blocking,head_sha,mode FROM verdicts WHERE task_id=? AND repo=? AND provider=? ORDER BY recorded_at DESC,id DESC`, taskID, repository, GreenhouseReviewProvider)
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
-	if !rows.Next() {
-		return false, rows.Err()
+	if !verdictRows.Next() {
+		rowErr := verdictRows.Err()
+		closeErr := verdictRows.Close()
+		if rowErr != nil {
+			return false, rowErr
+		}
+		return false, closeErr
 	}
 	var verdict Verdict
-	if err := rows.Scan(&verdict.Outcome, &verdict.Blocking, &verdict.Head, &verdict.Mode); err != nil {
+	if err := verdictRows.Scan(&verdict.Outcome, &verdict.Blocking, &verdict.Head, &verdict.Mode); err != nil {
+		verdictRows.Close()
+		return false, err
+	}
+	if err := verdictRows.Err(); err != nil {
+		verdictRows.Close()
+		return false, err
+	}
+	if err := verdictRows.Close(); err != nil {
 		return false, err
 	}
 	qualifies := verdict.Qualifies(head)
@@ -119,7 +131,7 @@ func (db *DB) GreenhouseGatePass(ctx context.Context, taskID int64, repository, 
 			threshold = blockAt[0]
 		}
 		rank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
-		rows, err := db.QueryContext(ctx, `SELECT f.severity,EXISTS(SELECT 1 FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='withdrawn')
+		findingRows, err := db.QueryContext(ctx, `SELECT f.severity,EXISTS(SELECT 1 FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='withdrawn')
 FROM provider_findings f WHERE f.task_id=? AND f.repo=? AND f.head_sha=? AND f.verdict_id=(
  SELECT id FROM verdicts v WHERE v.task_id=f.task_id AND v.repo=f.repo AND v.provider=f.provider ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1)`, taskID, repository, head)
 		if err != nil {
@@ -127,12 +139,12 @@ FROM provider_findings f WHERE f.task_id=? AND f.repo=? AND f.head_sha=? AND f.v
 		}
 		thresholdRank := rank[threshold]
 		active, seen := false, false
-		for rows.Next() {
+		for findingRows.Next() {
 			seen = true
 			var severity string
 			var withdrawn bool
-			if err := rows.Scan(&severity, &withdrawn); err != nil {
-				rows.Close()
+			if err := findingRows.Scan(&severity, &withdrawn); err != nil {
+				findingRows.Close()
 				return false, err
 			}
 			severityRank, known := rank[severity]
@@ -140,16 +152,16 @@ FROM provider_findings f WHERE f.task_id=? AND f.repo=? AND f.head_sha=? AND f.v
 				active = true
 			}
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		if err := findingRows.Err(); err != nil {
+			findingRows.Close()
 			return false, err
 		}
-		if err := rows.Close(); err != nil {
+		if err := findingRows.Close(); err != nil {
 			return false, err
 		}
 		qualifies = seen && !active
 	}
-	return qualifies, rows.Err()
+	return qualifies, nil
 }
 
 func countBlockingReviewFindingsTx(ctx context.Context, tx *writeTx, taskID int64, repository, blockAt string) (int, error) {
