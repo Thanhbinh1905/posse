@@ -281,7 +281,8 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 			pollResult = nil
 			if err != nil {
 				failures = append(failures, fmt.Errorf("PR polling: %w", err))
-			} else if s.Herdr != nil {
+			}
+			if s.Herdr != nil {
 				queuedAfterPoll, queueErr := db.HasQueuedMessages(ctx, project.ID)
 				if queueErr != nil {
 					failures = append(failures, queueErr)

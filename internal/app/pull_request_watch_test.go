@@ -875,6 +875,33 @@ func TestPRWatchDeliversCIFixWithinTheFailurePoll(t *testing.T) {
 	}
 }
 
+func TestPRWatchDeliversCIFixWhenPollReturnsErrorAfterQueueing(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	freezeCILoop(t, fixture, 2, 0)
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=0 WHERE project_id=?`, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `CREATE TRIGGER fail_ci_queued_notice BEFORE INSERT ON notices WHEN NEW.kind='ci_fix_queued' BEGIN SELECT RAISE(ABORT, 'CI Notice persistence failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+
+	if err := fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project); err == nil || !strings.Contains(err.Error(), "CI Notice persistence failed") {
+		t.Fatalf("maintain Project Watch error=%v, want the CI Notice persistence failure", err)
+	}
+
+	var status string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&status); err != nil || status != "delivered" {
+		t.Fatalf("CI fix instruction status=%q err=%v, want delivered despite the poll error", status, err)
+	}
+}
+
 func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
