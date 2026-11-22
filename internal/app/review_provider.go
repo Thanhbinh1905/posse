@@ -185,7 +185,7 @@ func greenhouseWorkspacePendingHeads(ctx context.Context, db *store.DB, project 
 
 func workspaceGreenhouseHeadsNeedReview(ctx context.Context, db *store.DB, task store.Task, heads []greenhousePendingMember) (bool, error) {
 	for _, member := range heads {
-		passed, err := db.GreenhouseGatePass(ctx, task.ID, member.Repository, member.Head)
+		passed, err := db.GreenhouseGatePass(ctx, task.ID, member.Repository, member.Head, greenhouseBlockAt(task))
 		if err != nil {
 			return false, err
 		}
