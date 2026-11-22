@@ -112,25 +112,27 @@ func (db *DB) PendingIdleMigrations(ctx context.Context) ([]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := fs.ReadDir(migrationFiles, "migrations")
-	if err != nil {
-		return nil, err
-	}
 	idle := map[int64]bool{}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
-		}
-		data, err := migrationFiles.ReadFile(filepath.Join("migrations", entry.Name()))
+	for _, dir := range []string{"migrations", "upgrades"} {
+		entries, err := fs.ReadDir(migrationFiles, dir)
 		if err != nil {
 			return nil, err
 		}
-		if strings.Contains(string(data), "-- posse: requires-no-live-tasks") {
-			version, err := strconv.ParseInt(strings.SplitN(entry.Name(), "_", 2)[0], 10, 64)
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".sql") {
+				continue
+			}
+			data, err := migrationFiles.ReadFile(filepath.Join(dir, entry.Name()))
 			if err != nil {
 				return nil, err
 			}
-			idle[version] = true
+			if strings.Contains(string(data), "-- posse: requires-no-live-tasks") {
+				version, err := strconv.ParseInt(strings.SplitN(entry.Name(), "_", 2)[0], 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				idle[version] = true
+			}
 		}
 	}
 	pending := []int64{}
