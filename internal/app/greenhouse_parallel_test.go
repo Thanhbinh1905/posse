@@ -291,6 +291,88 @@ func TestGreenhouseFindingsWithoutCurrentDoneSignalPreserveMergeReadiness(t *tes
 	}
 }
 
+func TestGreenhouseCoverageAcceptanceDoesNotPublishBlockingFindings(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `INSERT OR REPLACE INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, f.task.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "review requested", map[string]string{"greenhouse_pending_head": f.headSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateDone, "worker", "review requested"); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	member := greenhouseMember{name: f.project.Name, root: f.task.WorktreePath, worktree: f.task.WorktreePath}
+	roundResult := greenhouse.RoundResult{Grant: "shop/t1/shop/r1", Result: &greenhouse.HostResult{Head: f.headSHA, Target: f.headSHA, Verdict: "findings", Uncovered: []greenhouse.UncoveredPath{{Path: "large.sql", Reason: "hunk windows exceed 65536 bytes"}}, Findings: []greenhouse.Finding{{ID: "blocking", Priority: "P1", Origin: "correctness", File: "main.go", Start: 1, End: 1, Explanation: "blocking issue", Action: "fix it", Head: f.headSHA}}}}
+	recorded, verdict, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, t.TempDir(), "P1", config.Config{}, roundResult)
+	if err != nil || !recorded || verdict.Outcome != "findings" || verdict.Blocking != 1 {
+		t.Fatalf("record partial findings Verdict: recorded=%v verdict=%+v err=%v", recorded, verdict, err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(ctx, f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	result := roundResult.Result
+	if _, err := f.db.CreateGreenhousePartialNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "Partial review", result); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.raiseNoticeDecisions(ctx, f.db, f.project); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("coverage Decisions = %#v, %v", decisions, err)
+	}
+	decision, err := f.db.AnswerDecision(ctx, f.project.ID, decisions[0].ID, "accept-coverage-at-exact-head", "Accept coverage of reviewed paths")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("apply", fmt.Sprint(decision.ID)); code != 0 {
+		t.Fatalf("apply coverage Decision: %s %s", output, stderr)
+	}
+	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.headSHA)
+	if err != nil || accepted {
+		t.Fatalf("coverage disposition with blocking findings = %t, %v; want false", accepted, err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(ctx, f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.db.UndeliveredTaskMessages(ctx, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if strings.Contains(message.Body, "Publish this exact head") {
+			t.Fatalf("blocking partial review queued publication: %+v", messages)
+		}
+	}
+	pending, err := f.db.ReviewFixInstructionPending(ctx, f.task.ID)
+	if err != nil || !pending {
+		t.Fatalf("blocking findings fix pending = %v, %v; want queued fix", pending, err)
+	}
+}
+
 func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")

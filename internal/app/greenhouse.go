@@ -747,7 +747,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					return err
 				}
 			}
-			if accepted || verdict.Qualifies(head) && !partialReview {
+			if (accepted && verdict.Blocking == 0) || (!partialReview && verdict.Qualifies(head)) {
 				message := fmt.Sprintf("Greenhouse passed Task head %s", shortSHA(head))
 				if accepted {
 					message = fmt.Sprintf("User accepted Greenhouse coverage at Task head %s", shortSHA(head))
@@ -968,7 +968,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 			Excerpt: finding.Explanation, Guidance: finding.Action, Rule: finding.Rule, Head: finding.Head,
 		})
 	}
-	if hr.Verdict == "partial" || len(hr.Uncovered) > 0 {
+	if hr.Verdict == "partial" || (len(hr.Uncovered) > 0 && hr.Verdict != "findings") {
 		verdict.Outcome = "inconclusive"
 	}
 	if hr.Verdict == "findings" {
