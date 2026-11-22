@@ -355,9 +355,6 @@ func TestPRWatchMakesGreenhouseVerdictedDoneTaskMergeReadyInOnePoll(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, output, stderr := fixture.run("signal", "done", "Worker completion summary", "--head", fixture.headSHA, "--turn", token); code != 0 {
-		t.Fatalf("done: code=%d output=%s stderr=%s", code, output, stderr)
-	}
 	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, url, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -365,8 +362,31 @@ func TestPRWatchMakesGreenhouseVerdictedDoneTaskMergeReadyInOnePoll(t *testing.T
 	if recorded, err := fixture.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return fixture.headSHA, nil }); err != nil || !recorded {
 		t.Fatalf("record exact-head clean Verdict: recorded=%v err=%v", recorded, err)
 	}
-	if notices := pollOpenPRNotices(t, fixture, fixture.headSHA, 1); len(notices["merge_ready"]) != 1 {
-		t.Fatalf("merge_ready after one PR observation = %v", notices)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
+		t.Fatalf("working Task merge_ready notices=%+v err=%v", notices, err)
+	}
+	token, err = fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("signal", "done", "Worker completion summary", "--head", fixture.headSHA, "--turn", token); code != 0 {
+		t.Fatalf("done: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("merge_ready after one Watch poll over green observation = notices=%+v err=%v", notices, err)
 	}
 }
 
