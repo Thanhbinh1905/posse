@@ -133,6 +133,37 @@ func TestHerdrRestartDoesNotRelaunchLead(t *testing.T) {
 	}
 }
 
+func TestHeldRestoreDoesNotRepeatOpenNoticeAcrossReconcileEpisodes(t *testing.T) {
+	ctx := context.Background()
+	home, db, project := restoreFixture(t)
+	fake := herdr.NewFake()
+	fake.SnapshotValue = restartedSnapshot(project)
+	service := testService(home, fake)
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generation := range []string{"generation-one", "generation-two"} {
+		fake.SnapshotValue.ServerStartedAt = generation
+		if _, err := service.reconcileProject(ctx, db, project, cfg, false); !errors.Is(err, errRecoveryHeld) {
+			t.Fatalf("reconcile after %s = %v, want errRecoveryHeld", generation, err)
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	for _, notice := range notices {
+		if notice.Kind == "restore_needed" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("open restore_needed Notices = %d, want one while the User has not acted: %#v", count, notices)
+	}
+}
+
 func TestUpAllSkipsParkedProjectAndNamesItsReason(t *testing.T) {
 	ctx := context.Background()
 	home, db, project := restoreFixture(t)
