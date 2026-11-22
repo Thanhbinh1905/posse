@@ -75,7 +75,7 @@ func (db *DB) GreenhouseFailureNoticeSummary(ctx context.Context, taskID int64, 
 		return "", false, err
 	}
 	var summary string
-	err = db.QueryRowContext(ctx, `SELECT summary FROM notices WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=?`, taskID, string(data)).Scan(&summary)
+	err = db.QueryRowContext(ctx, `SELECT summary FROM notices WHERE task_id=? AND kind IN ('greenhouse_review_failed','needs_decision') AND data_json=? ORDER BY id DESC LIMIT 1`, taskID, string(data)).Scan(&summary)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -83,6 +83,14 @@ func (db *DB) GreenhouseFailureNoticeSummary(ctx context.Context, taskID int64, 
 }
 
 func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
+	return db.createGreenhouseFailureNoticeOnce(ctx, projectID, taskID, repository, head, reason, "greenhouse_review_failed")
+}
+
+func (db *DB) CreateGreenhouseNeedsDecisionNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason string) (bool, error) {
+	return db.createGreenhouseFailureNoticeOnce(ctx, projectID, taskID, repository, head, reason, "needs_decision")
+}
+
+func (db *DB) createGreenhouseFailureNoticeOnce(ctx context.Context, projectID, taskID int64, repository, head, reason, kind string) (bool, error) {
 	data, err := json.Marshal(struct {
 		Repository string `json:"repo"`
 		Head       string `json:"head"`
@@ -91,7 +99,7 @@ func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, 
 		return false, err
 	}
 	summary := fmt.Sprintf("Greenhouse parallel review failed for %s at %s: %s", repository, head, reason)
-	updated, err := db.ExecContext(ctx, `UPDATE notices SET summary=? WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=? AND summary<>?`, summary, taskID, string(data), summary)
+	updated, err := db.ExecContext(ctx, `UPDATE notices SET kind=?,summary=? WHERE task_id=? AND kind IN ('greenhouse_review_failed',?) AND data_json=? AND (kind<>? OR summary<>?)`, kind, summary, taskID, kind, string(data), kind, summary)
 	if err != nil {
 		return false, err
 	}
@@ -103,9 +111,9 @@ func (db *DB) CreateGreenhouseFailureNoticeOnce(ctx context.Context, projectID, 
 		return false, db.PersistProject(ctx, projectID)
 	}
 	result, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
-		SELECT ?, ?, 'greenhouse_review_failed', ?, ?, ?
-		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_review_failed' AND data_json=?)`,
-		projectID, taskID, summary, string(data), time.Now().UnixMilli(), taskID, string(data))
+		SELECT ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind=? AND data_json=?)`,
+		projectID, taskID, kind, summary, string(data), time.Now().UnixMilli(), taskID, kind, string(data))
 	if err != nil {
 		return false, err
 	}

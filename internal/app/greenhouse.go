@@ -370,7 +370,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			}
 			if terminalFailure {
 				reason := fmt.Sprintf("Greenhouse review failed for %s at %s. Needs a decision: split the change or land it another way. Latest failure: %s", member.name, shortSHA(requestHead), failureReason)
-				if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx.Context, project.ID, task.ID, member.name, requestHead, reason); err != nil {
+				if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx.Context, project.ID, task.ID, member.name, requestHead, reason); err != nil {
 					return err
 				}
 				return axi.Failure("greenhouse_failed", failureReason, false)

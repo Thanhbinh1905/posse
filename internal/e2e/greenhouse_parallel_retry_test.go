@@ -42,7 +42,7 @@ func TestGreenhouseSameHeadReviewerOverflowStopsAfterHistoricalLoop(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.CreateGreenhouseFailureNoticeOnce(context.Background(), task.ProjectID, task.ID, "shop", head, "latest reviewer failure: prompt exceeds maximum context length"); err != nil {
+	if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(context.Background(), task.ProjectID, task.ID, "shop", head, "Greenhouse review failed after 858 attempts. Needs a decision: split the change or land it another way. Latest failure: prompt exceeds maximum context length"); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestGreenhouseSameHeadReviewerOverflowStopsAfterHistoricalLoop(t *testing.T
 	}
 	failureNotices := 0
 	for _, notice := range notices {
-		if notice.TaskID == task.ID && notice.Kind == "greenhouse_review_failed" {
+		if notice.TaskID == task.ID && notice.Kind == "needs_decision" {
 			failureNotices++
 			if !strings.Contains(notice.Summary, "maximum context length") {
 				t.Errorf("failure Notice omitted latest reason: %s", notice.Summary)
@@ -79,7 +79,7 @@ func TestGreenhouseSameHeadReviewerOverflowStopsAfterHistoricalLoop(t *testing.T
 		}
 	}
 	if failureNotices != 1 {
-		t.Fatalf("same-head failure Notices = %d, want one", failureNotices)
+		t.Fatalf("same-head needs-decision Notices = %d, want one", failureNotices)
 	}
 }
 

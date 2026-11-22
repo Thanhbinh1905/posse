@@ -268,6 +268,15 @@ func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	if err := f.db.QueryRowContext(f.ctx, `SELECT summary FROM notices WHERE task_id=? AND kind='greenhouse_review_failed'`, task.ID).Scan(&summary); err != nil || !strings.Contains(summary, "protocol refusal") {
 		t.Fatalf("latest failure summary = %q, %v; want latest reason", summary, err)
 	}
+	if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: latest context overflow"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind IN ('greenhouse_review_failed','needs_decision')`, task.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("failure and needs-decision Notices = %d, %v; want one Notice", count, err)
+	}
+	if err := f.db.QueryRowContext(f.ctx, `SELECT kind,summary FROM notices WHERE task_id=?`, task.ID).Scan(new(string), &summary); err != nil || !strings.Contains(summary, "context overflow") {
+		t.Fatalf("needs-decision summary = %q, %v", summary, err)
+	}
 }
 
 func TestGreenhouseRecoveryNoticeOncePerRecovery(t *testing.T) {
