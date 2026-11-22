@@ -14,7 +14,7 @@ import (
 )
 
 func (s *Service) prRelease(ctx *axi.Context, args []string) error {
-	return s.stewardCommand(ctx, "release", args, map[string]flagSpec{"policy": {}}, func(db *store.DB, target stewardTarget, parsed parsedArgs) error {
+	return s.stewardCommand(ctx, "release", args, map[string]flagSpec{"policy": {}}, func(db *store.DB, target stewardTarget, parsed parsedArgs) (returnErr error) {
 		if target.project.IsWorkspace() {
 			return prReleaseRefused("executor retention is Task-wide; workspace release requires preservation proof for every changed Member", false)
 		}
@@ -25,7 +25,7 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 		if target.task.State != store.StateDone && target.task.State != store.StateMerging {
 			return prReleaseRefused("executor policy can change only after the Worker signals done", false)
 		}
-		var withdrawnFreshness bool
+		var withdrawnFreshness, freshnessRequeued bool
 		if intent, intentErr := db.IntentByTask(ctx.Context, target.task.ID); intentErr == nil && intent.Command == "pr-release" && !intentProcessAlive(intent) {
 			retry := "posse pr release " + target.taskLabel() + " --policy release"
 			if policy != "release" {
@@ -36,6 +36,13 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 				return err
 			}
 			withdrawnFreshness = len(withdrawn) > 0
+			if withdrawnFreshness {
+				defer func() {
+					if returnErr != nil && !freshnessRequeued {
+						_ = s.pollProjectPullRequests(ctx.Context, db, target.project, target.cfg, true)
+					}
+				}()
+			}
 			if len(pendingMessages) > 0 {
 				help := make([]string, 0, len(pendingMessages))
 				for _, message := range pendingMessages {
@@ -120,6 +127,7 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 				if err := s.pollProjectPullRequests(ctx.Context, db, target.project, target.cfg, true); err != nil {
 					return axi.Failure("pr_release_incomplete", "Sandbox released, but the PR conflict refresh could not be re-raised: "+err.Error(), true, "Retry `posse pr inspect "+target.taskLabel()+"` to refresh the PR watch")
 				}
+				freshnessRequeued = true
 			}
 			return printExecutorPolicy(ctx, target, policy, true)
 		}
