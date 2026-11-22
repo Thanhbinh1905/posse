@@ -800,6 +800,114 @@ func TestTeardownPredecessorDependantsCanBeRepointed(t *testing.T) {
 	}
 }
 
+func TestTeardownRepointDoesNotPartiallyReviseDependants(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range []store.Task{
+		{Seq: 1, Type: "change", Title: "Predecessor", MergeMode: "local"},
+		{Seq: 2, Type: "change", Title: "Replacement", MergeMode: "local"},
+	} {
+		id, err := db.CreateTask(ctx, fixture.project.ID, task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.Seq == 1 {
+			for _, transition := range []struct {
+				from, to store.State
+				source   string
+			}{{store.StateSpawning, store.StateWorking, "cli"}, {store.StateWorking, store.StateDone, "worker"}} {
+				if err := db.Transition(ctx, id, transition.from, transition.to, transition.source, "fixture"); err != nil {
+					t.Fatal(err)
+				}
+			}
+		} else if err := db.Transition(ctx, id, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	for _, brief := range []string{
+		`---
+type: change
+title: First dependant
+done_when: all dependants are re-pointed atomically
+after: t1:landed
+---
+Wait for the predecessor.
+`,
+		`---
+type: change
+title: Second dependant
+done_when: all dependants are re-pointed atomically
+after: [t1:landed, t2:landed]
+---
+Wait for both prerequisites.
+`,
+	} {
+		if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output.Reset()
+		if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+			t.Fatalf("start dependant: code=%d output=%s", code, output.String())
+		}
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved predecessor teardown"}); code != 0 {
+		t.Fatalf("teardown predecessor: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "teardown_dependants" {
+		t.Fatalf("teardown dependant Decision=%#v err=%v", decisions, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	decisionID := fmt.Sprint(decisions[0].ID)
+	output.Reset()
+	if code := cli.Run([]string{"decide", decisionID, "re-point", "--to", "t2"}); code != 0 {
+		t.Fatalf("answer re-point: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"apply", decisionID}); code == 0 {
+		t.Fatalf("apply accepted a replacement already present in one dependant plan: %s", output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, taskRef := range []string{"t3", "t4"} {
+		dependant, err := db.Task(ctx, fixture.project.ID, taskRef)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := dependant.AdmittedPlan()
+		if err != nil || plan == nil {
+			t.Fatalf("load %s plan: plan=%#v err=%v", taskRef, plan, err)
+		}
+		var hasPredecessor bool
+		for _, dependency := range plan.Dependencies {
+			hasPredecessor = hasPredecessor || dependency.TaskID == "t1"
+		}
+		if !hasPredecessor || dependant.PlanRevision != 1 {
+			t.Fatalf("failed re-point partially revised %s: task=%+v dependencies=%#v err=%v", taskRef, dependant, plan.Dependencies, err)
+		}
+	}
+}
+
 func TestFailedPrerequisiteDecisionCanDropEdgeAndRunQueuedTask(t *testing.T) {
 	fixture := newStartFixture(t)
 	ctx := context.Background()

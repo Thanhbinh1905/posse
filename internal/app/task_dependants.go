@@ -156,6 +156,7 @@ func (s *Service) applyTeardownDependantsDecision(ctx context.Context, db *store
 	if err := validateTeardownRepoint(ctx, db, project, decision, replacement); err != nil {
 		return err
 	}
+	updates := make([]store.TaskPlanRevision, 0, len(dependants))
 	for _, dependant := range dependants {
 		plan, err := dependant.AdmittedPlan()
 		if err != nil {
@@ -174,9 +175,10 @@ func (s *Service) applyTeardownDependantsDecision(ctx context.Context, db *store
 				return err
 			}
 		}
-		if err := db.ReviseTaskPlan(ctx, dependant, revised); err != nil {
-			return err
-		}
+		updates = append(updates, store.TaskPlanRevision{Task: dependant, Plan: revised})
+	}
+	if err := db.ReviseTaskPlans(ctx, updates); err != nil {
+		return err
 	}
 	_, err = s.refillQueuedTasks(ctx, db, project, cfg, false)
 	return err
