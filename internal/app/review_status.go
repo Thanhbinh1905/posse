@@ -173,7 +173,7 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	validation, err := validationSummaryFor(ctx.Context, db, change)
+	validation, err := validationSummaryFor(ctx.Context, db, change, "")
 	if err != nil {
 		return err
 	}

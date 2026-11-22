@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -115,6 +116,31 @@ func stepHeads(step *store.ReviewPassNextStep) []string {
 // queueSettledReviewStep queues the validate-and-promote step for a done
 // full-pipeline Change Task whose current heads a disposition settled.
 func queueSettledReviewStep(ctx context.Context, db *store.DB, project store.Project, change store.Task, reason string) error {
+	if !project.IsWorkspace() {
+		plan, err := change.AdmittedPlan()
+		if err != nil {
+			return admittedPlanFailure(err)
+		}
+		if plan != nil && plan.Review == "full-pipeline" && taskUsesGreenhouseReviewProvider(change, config.Config{}, "") {
+			head, err := taskBranchAuthorHead(ctx, project.Root, change.Branch)
+			if err != nil {
+				return err
+			}
+			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, change, head)
+			if err != nil || !accepted {
+				return err
+			}
+			signals, err := db.TaskSignals(ctx, change.ID, 1)
+			if err != nil {
+				return err
+			}
+			body := fmt.Sprintf("%s The User accepted this exact Greenhouse-reviewed head at the Review cap. Publish it unchanged with `posse publish \"%s\"`, then report done with the PR URL. The PR description must preserve the accepted findings and User quote.", reason, change.Title)
+			if len(signals) > 0 {
+				_, _, err = db.QueueMessageOnceAfter(ctx, change.ID, body, true, signals[0].At-1)
+			}
+			return err
+		}
+	}
 	targets, err := changeCandidateTargets(ctx, db, project, change)
 	if err != nil {
 		var failure *axi.Error
