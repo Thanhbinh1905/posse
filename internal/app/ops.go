@@ -247,10 +247,6 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return errors.Join(failures...)
 	}
 	var failures []error
-	queuedBeforePoll, err := db.HasQueuedMessages(ctx, project.ID)
-	if err != nil {
-		return err
-	}
 	mergedTasks := make(chan struct{}, 1)
 	pollResult := make(chan error, 1)
 	go func() {
@@ -285,7 +281,7 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 			pollResult = nil
 			if err != nil {
 				failures = append(failures, fmt.Errorf("PR polling: %w", err))
-			} else if !queuedBeforePoll && s.Herdr != nil {
+			} else if s.Herdr != nil {
 				queuedAfterPoll, queueErr := db.HasQueuedMessages(ctx, project.ID)
 				if queueErr != nil {
 					failures = append(failures, queueErr)

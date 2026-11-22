@@ -849,6 +849,9 @@ func TestPRWatchDeliversCIFixWithinTheFailurePoll(t *testing.T) {
 			}
 			t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
 			t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+			if _, err := fixture.db.QueueCIFixInstruction(ctx, fixture.task.ID, fixture.headSHA, "https://github.com/acme/shop/pull/17", "ci:existing-round", "Earlier CI repair context", "", 2); err != nil {
+				t.Fatal(err)
+			}
 
 			if err := fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project); err != nil {
 				t.Fatalf("maintain Project Watch: %v", err)
