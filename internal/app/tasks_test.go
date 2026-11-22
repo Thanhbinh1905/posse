@@ -660,6 +660,59 @@ func TestTeardownPredecessorHoldsQueuedDependantsForOneDecision(t *testing.T) {
 	}
 }
 
+func TestTearingDownQueuedPredecessorRaisesDependantsDecision(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Queued predecessor", ShortName: "predecessor", State: store.StateQueued, MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := `---
+type: change
+title: Dependent change
+done_when: predecessor teardown is handled
+after: t1:landed
+---
+Wait for the predecessor.
+`
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("start dependent: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", "t1"}); code != 0 {
+		t.Fatalf("teardown queued predecessor: code=%d output=%s", code, output.String())
+	}
+	if !strings.Contains(output.String(), "t2") {
+		t.Fatalf("teardown did not name its queued dependant: %s", output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].Kind != "teardown_dependants" {
+		t.Fatalf("teardown dependant Decision=%#v err=%v", decisions, err)
+	}
+	dependent, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || dependent.State != store.StateQueued {
+		t.Fatalf("dependent was not held: task=%+v err=%v", dependent, err)
+	}
+}
+
 func TestTeardownPredecessorDependantsCanBeRepointed(t *testing.T) {
 	fixture := newStartFixture(t)
 	ctx := context.Background()
@@ -825,6 +878,86 @@ Wait for the prerequisite.
 	plan, planErr := updated.AdmittedPlan()
 	if err != nil || planErr != nil || updated.State != store.StateWorking || len(plan.Dependencies) != 0 || plan.Revision != 2 {
 		t.Fatalf("applied dependency Decision did not revise and dispatch Task: task=%+v plan=%+v err=%v planErr=%v output=%s", updated, plan, err, planErr, output.String())
+	}
+}
+
+func TestFailedPrerequisiteCanRaiseAnotherDecisionAfterRelaunchAndFailure(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", ShortName: "predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET launches=1 WHERE id=?`, predecessorID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := `---
+type: change
+title: Dependent change
+done_when: every prerequisite failure has an actionable Decision
+after: t1:landed
+---
+Wait for the prerequisite.
+`
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = &bytes.Buffer{}, &bytes.Buffer{}
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("dependent start exit=%d output=%s", code, cli.Out)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.refillQueuedTasks(ctx, db, fixture.project, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(first) != 1 || first[0].Kind != "dependency" {
+		t.Fatalf("first dependency Decision=%#v err=%v", first, err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateFailed, store.StateWorking, "cli", "relaunched"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET launches=2 WHERE id=?`, predecessorID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Decisions(ctx, fixture.project.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "failed after relaunch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.refillQueuedTasks(ctx, db, fixture.project, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(pending) != 1 || pending[0].Kind != "dependency" || pending[0].ID == first[0].ID {
+		t.Fatalf("later prerequisite failure has no fresh dependency Decision: first=%#v pending=%#v err=%v", first, pending, err)
+	}
+	old, err := db.Decision(ctx, fixture.project.ID, first[0].ID)
+	if err != nil || old.ObsoleteAt == 0 {
+		t.Fatalf("original dependency Decision history was not retained as obsolete: %#v err=%v", old, err)
 	}
 }
 

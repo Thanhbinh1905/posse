@@ -580,7 +580,16 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		if err := db.Transition(ctx.Context, task.ID, store.StateQueued, store.StateTornDown, "cli", "Canceled before Worker dispatch"); err != nil {
 			return err
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}, {Key: "help", Value: []any{"Queued Task canceled without allocating a Sandbox, pane or branch"}}})
+		dependants, err := s.holdQueuedDependants(ctx.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		fields := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: "torn-down"}}
+		if len(dependants) > 0 {
+			fields = append(fields, axi.Field{Key: "dependants", Value: dependants})
+		}
+		fields = append(fields, axi.Field{Key: "help", Value: []any{"Queued Task canceled without allocating a Sandbox, pane or branch"}})
+		return ctx.Print(fields)
 	}
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {

@@ -228,7 +228,7 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 					if len(ready) == 0 {
 						continue
 					}
-					origin := fmt.Sprintf("dependency:%s:%s:%s", taskIDString(queued.Seq), dependency.TaskID, dependency.Milestone)
+					origin := fmt.Sprintf("dependency:%s:%s:%s:launch-%d", taskIDString(queued.Seq), dependency.TaskID, dependency.Milestone, predecessor.Launches)
 					_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{
 						ProjectID: project.ID, TaskID: queued.ID, Origin: origin, Kind: "dependency",
 						Question: fmt.Sprintf("Prerequisite %s for queued Task %s is %s and cannot satisfy %s. Cancel the queued Task, or drop this prerequisite and run it?", dependency.TaskID, taskIDString(queued.Seq), predecessor.State, dependency.Milestone),

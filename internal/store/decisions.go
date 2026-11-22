@@ -565,7 +565,7 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "dependency" {
 		parts := strings.Split(decision.Origin, ":")
-		if len(parts) != 4 || parts[0] != "dependency" {
+		if len(parts) < 4 || parts[0] != "dependency" {
 			return "", nil
 		}
 		predecessorSeq := mustTaskSequence(parts[2])

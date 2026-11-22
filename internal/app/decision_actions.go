@@ -80,7 +80,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		case "drop-prerequisite-and-run":
 			parts := strings.Split(decision.Origin, ":")
-			if len(parts) != 4 || parts[0] != "dependency" || parts[1] != taskIDString(task.Seq) {
+			if len(parts) < 4 || parts[0] != "dependency" || parts[1] != taskIDString(task.Seq) {
 				return axi.Failure("decision_refused", "dependency Decision binding is invalid", false)
 			}
 			plan, err := task.AdmittedPlan()
