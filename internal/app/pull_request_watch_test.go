@@ -834,6 +834,44 @@ func TestPRWatchCIFixBudgetIgnoresHistoricalRepairsOutsideFullPipeline(t *testin
 	}
 }
 
+func TestPRWatchDeliversCIFixWithinTheFailurePoll(t *testing.T) {
+	for _, review := range []string{"none", "full-pipeline"} {
+		t.Run(review, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+			}
+			freezeCILoopWithReview(t, fixture, 2, 0, review)
+			fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+			if _, err := fixture.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=0 WHERE project_id=?`, fixture.project.ID); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+			t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+
+			if err := fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project); err != nil {
+				t.Fatalf("maintain Project Watch: %v", err)
+			}
+
+			var messageStatus string
+			if err := fixture.db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&messageStatus); err != nil || messageStatus != "delivered" {
+				t.Fatalf("CI fix instruction status=%q err=%v, want delivered in the failure poll", messageStatus, err)
+			}
+			var queued, exhausted int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, fixture.task.ID).Scan(&exhausted); err != nil {
+				t.Fatal(err)
+			}
+			if queued != 1 || exhausted != 0 {
+				t.Fatalf("CI fix outcome: queued=%d exhausted=%d, want one queued round", queued, exhausted)
+			}
+		})
+	}
+}
+
 func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()

@@ -247,6 +247,10 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 		return errors.Join(failures...)
 	}
 	var failures []error
+	queuedBeforePoll, err := db.HasQueuedMessages(ctx, project.ID)
+	if err != nil {
+		return err
+	}
 	mergedTasks := make(chan struct{}, 1)
 	pollResult := make(chan error, 1)
 	go func() {
@@ -281,6 +285,18 @@ func (s *Service) maintainProjectWatch(ctx context.Context, db *store.DB, projec
 			pollResult = nil
 			if err != nil {
 				failures = append(failures, fmt.Errorf("PR polling: %w", err))
+			} else if !queuedBeforePoll && s.Herdr != nil {
+				queuedAfterPoll, queueErr := db.HasQueuedMessages(ctx, project.ID)
+				if queueErr != nil {
+					failures = append(failures, queueErr)
+				} else if queuedAfterPoll {
+					snapshot, snapshotErr := s.snapshot(ctx)
+					if snapshotErr != nil {
+						failures = append(failures, fmt.Errorf("Worker instruction delivery snapshot: %w", snapshotErr))
+					} else if deliveryErr := s.deliverQueuedMessages(ctx, db, project, snapshot); deliveryErr != nil {
+						failures = append(failures, fmt.Errorf("Worker instruction delivery after PR polling: %w", deliveryErr))
+					}
+				}
 			}
 		case err := <-checkoutResult:
 			checkoutPending = false
