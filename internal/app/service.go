@@ -201,6 +201,7 @@ func (s *Service) commands() *axi.Command {
 			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
 			{Name: "carry", Usage: "$ review carry <change> <passed-head> <candidate-head>", Summary: "Record a Review-only carry for a tree-identical private candidate merge.", Handler: s.reviewCarry},
 			{Name: "dispose", Usage: "$ review dispose <change> <F-n|P-n>... <fix|accept|defer|withdraw|reclassify> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]", Summary: "Record a finding disposition or queue a whole-pattern fix.", Handler: s.reviewDispose},
+			{Name: "dispute", Usage: "$ review dispute <change> <F-n> --evidence <file>", Summary: "Request a User Decision to withdraw a disproved P0/P1 Greenhouse finding.", Handler: s.reviewDispute},
 			{Name: "merge", Usage: "$ review merge <change> <P-n> <P-n>...", Summary: "Merge duplicate Finding Patterns into the first pattern.", Handler: s.reviewMergePatterns},
 			{Name: "followups", Usage: "$ review followups", Summary: "List the Project's non-blocking findings with no follow-up issue, grouped by repository and directory.", Handler: s.reviewFollowups, Subcommands: []*axi.Command{
 				{Name: "defer", Usage: "$ review followups defer --area <dir> [--repo <repository>] --issue <url>", Summary: "Defer every listed finding of one area to its rolling follow-up issue.", Handler: s.reviewFollowupsDefer},

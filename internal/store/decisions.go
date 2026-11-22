@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ type DecisionRequest struct {
 	Kind      string
 	Question  string
 	Options   []string
+	Evidence  []byte
 }
 
 type Decision struct {
@@ -38,6 +41,8 @@ type Decision struct {
 	TaskLaunches   int      `json:"task_launches"`
 	ObsoleteAt     int64    `json:"obsolete_at"`
 	ObsoleteReason string   `json:"obsolete_reason"`
+	Evidence       []byte   `json:"evidence,omitempty"`
+	EvidenceDigest string   `json:"evidence_digest,omitempty"`
 }
 
 func BudgetDecisionStaleReason(decision Decision, task Task, localDay string) string {
@@ -67,9 +72,26 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 		return Decision{}, fmt.Errorf("decision requires a Project, Task, origin, question and at least one option")
 	}
 	switch request.Kind {
-	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "quota", "budget":
+	case "merge_ready", "recovery", "worker_exited", "review", "review_cap", "worker_question", "orphan", "pr_closed", "dependency", "quota", "budget", "review_dispute":
 	default:
 		return Decision{}, fmt.Errorf("invalid Decision kind %q", request.Kind)
+	}
+	if len(request.Evidence) > 64*1024 {
+		return Decision{}, fmt.Errorf("decision evidence exceeds the 64 KiB limit")
+	}
+	if request.Kind == "review_dispute" && (len(request.Evidence) == 0 || !slices.Equal(request.Options, []string{"withdraw", "keep"})) {
+		return Decision{}, fmt.Errorf("review dispute Decisions require evidence and the withdraw, keep options")
+	}
+	if request.Kind != "review_dispute" && len(request.Evidence) > 0 {
+		return Decision{}, fmt.Errorf("evidence is supported only for review dispute Decisions")
+	}
+	evidenceDigest := ""
+	if request.Evidence == nil {
+		request.Evidence = []byte{}
+	}
+	if len(request.Evidence) > 0 {
+		digest := sha256.Sum256(request.Evidence)
+		evidenceDigest = hex.EncodeToString(digest[:])
 	}
 	seen := map[string]bool{}
 	for _, option := range request.Options {
@@ -121,7 +143,7 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 			original.Question = request.Question
 			return original, nil
 		}
-		if original.TaskID != request.TaskID || original.Kind != request.Kind || original.Question != request.Question || !slices.Equal(original.Options, request.Options) {
+		if original.TaskID != request.TaskID || original.Kind != request.Kind || original.Question != request.Question || !slices.Equal(original.Options, request.Options) || !slices.Equal(original.Evidence, request.Evidence) {
 			return Decision{}, fmt.Errorf("decision origin %q already belongs to another question", request.Origin)
 		}
 		return original, nil
@@ -155,7 +177,13 @@ func (db *DB) RaiseDecision(ctx context.Context, request DecisionRequest) (Decis
 	if err != nil {
 		return Decision{}, err
 	}
-	if count == 0 && (decision.TaskID != request.TaskID || decision.Kind != request.Kind || decision.Question != request.Question || !slices.Equal(request.Options, decision.Options)) {
+	if count == 1 && len(request.Evidence) > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO decision_evidence(decision_id,evidence,digest) VALUES(?,?,?)`, decision.ID, request.Evidence, evidenceDigest); err != nil {
+			return Decision{}, err
+		}
+		decision.Evidence, decision.EvidenceDigest = request.Evidence, evidenceDigest
+	}
+	if count == 0 && (decision.TaskID != request.TaskID || decision.Kind != request.Kind || decision.Question != request.Question || !slices.Equal(request.Options, decision.Options) || !slices.Equal(request.Evidence, decision.Evidence)) {
 		return Decision{}, fmt.Errorf("decision origin %q already belongs to another question", request.Origin)
 	}
 	if err := tx.Commit(); err != nil {
@@ -181,6 +209,24 @@ WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0 AND or
 	}
 	changed, err := result.RowsAffected()
 	if err != nil || changed == 0 {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
+}
+
+func (db *DB) ObsoletePendingReviewCapDecisions(ctx context.Context, taskID, disputeDecisionID int64) error {
+	reason := fmt.Sprintf("Superseded by Greenhouse dispute Decision #%d", disputeDecisionID)
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=?
+WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, time.Now().UnixMilli(), reason, taskID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	var projectID int64
+	if err := db.QueryRowContext(ctx, `SELECT project_id FROM tasks WHERE id=?`, taskID).Scan(&projectID); err != nil {
 		return err
 	}
 	return db.PersistProject(ctx, projectID)
@@ -581,7 +627,7 @@ func (db *DB) Decisions(ctx context.Context, projectID int64, pendingOnly bool) 
 // PendingDecisions lists unanswered Decisions without first marking resolved
 // ones obsolete, so read commands work while the store is contended.
 func (db *DB) PendingDecisions(ctx context.Context, projectID int64) ([]Decision, error) {
-	query := decisionSelect + ` d
+	query := decisionSelect + `
 		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0
 		AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND NOT (` + resolvedDecisionPredicate + `))
 		ORDER BY d.id`
@@ -622,14 +668,14 @@ func (db *DB) listDecisions(ctx context.Context, projectID int64, pendingOnly bo
 	return decisions, rows.Err()
 }
 
-const decisionSelect = `SELECT id,project_id,task_id,origin,question,options_json,answer,user_quote,answer_actor,answer_reason,created_at,answered_at,kind,task_launches,obsolete_at,obsolete_reason FROM decisions`
+const decisionSelect = `SELECT d.id,d.project_id,d.task_id,d.origin,d.question,d.options_json,d.answer,d.user_quote,d.answer_actor,d.answer_reason,d.created_at,d.answered_at,d.kind,d.task_launches,d.obsolete_at,d.obsolete_reason,COALESCE(e.evidence,X''),COALESCE(e.digest,'') FROM decisions d LEFT JOIN decision_evidence e ON e.decision_id=d.id`
 
 type decisionScanner interface{ Scan(...any) error }
 
 func decisionRow(row decisionScanner) (Decision, error) {
 	var decision Decision
 	var options string
-	err := row.Scan(&decision.ID, &decision.ProjectID, &decision.TaskID, &decision.Origin, &decision.Question, &options, &decision.Answer, &decision.UserQuote, &decision.AnswerActor, &decision.AnswerReason, &decision.CreatedAt, &decision.AnsweredAt, &decision.Kind, &decision.TaskLaunches, &decision.ObsoleteAt, &decision.ObsoleteReason)
+	err := row.Scan(&decision.ID, &decision.ProjectID, &decision.TaskID, &decision.Origin, &decision.Question, &options, &decision.Answer, &decision.UserQuote, &decision.AnswerActor, &decision.AnswerReason, &decision.CreatedAt, &decision.AnsweredAt, &decision.Kind, &decision.TaskLaunches, &decision.ObsoleteAt, &decision.ObsoleteReason, &decision.Evidence, &decision.EvidenceDigest)
 	if err == nil {
 		err = json.Unmarshal([]byte(options), &decision.Options)
 	}
