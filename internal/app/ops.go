@@ -49,10 +49,10 @@ func (s *Service) deliverQueuedMessagesAfterPRPoll(ctx context.Context, db *stor
 	}
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("Worker instruction delivery snapshot: %w", err)
+		return fmt.Errorf("worker instruction delivery snapshot: %w", err)
 	}
 	if err := s.deliverQueuedMessages(ctx, db, project, snapshot); err != nil {
-		return fmt.Errorf("Worker instruction delivery after PR polling: %w", err)
+		return fmt.Errorf("worker instruction delivery after PR polling: %w", err)
 	}
 	return nil
 }
