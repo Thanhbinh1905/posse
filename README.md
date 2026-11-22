@@ -18,6 +18,10 @@ curl -fsSL https://raw.githubusercontent.com/Thanhbinh1905/posse/main/install.sh
 
 The installer downloads the `posse` binary to `~/.local/bin` by default. It asks where posse keeps its data (press Enter for `~/.posse`), then prepares your agents: hooks, the Herdr plugin and the recommended workflow skills. To install only the binary, add `--no-setup` after `sh -s --`; run `posse setup` later.
 
+## Updating
+
+Direct home upgrades are supported from v0.33.0. Update homes from an older release to v0.33.0 before upgrading further.
+
 ## Delegate your first task
 
 1. Create a new Herdr workspace: press `Ctrl+B`, then `Shift+N`.
