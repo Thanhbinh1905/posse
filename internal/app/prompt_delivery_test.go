@@ -508,6 +508,18 @@ func TestWaitAgentReadyReportsAgentBlockedAtDialog(t *testing.T) {
 	}
 }
 
+func TestWaitAgentReadyNamesCodexConversationOpenOnLabeledPane(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "blocked"}}}
+	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"blocked","interactive_ready":true,"launch_pending":false}}`)
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"This conversation is open in another app. Close it there and try again."}}`)
+	err := service.waitAgentReady(context.Background(), "w1:p1")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "codex_conversation_open" {
+		t.Fatalf("relaunch readiness error = %v, want codex_conversation_open", err)
+	}
+}
+
 func TestWaitAgentReadySurvivesTransientHerdrStall(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.ErrorQueue["agent.get"] = []error{&herdr.Error{Code: "herdr_unavailable", Message: "Herdr request failed"}, nil}
