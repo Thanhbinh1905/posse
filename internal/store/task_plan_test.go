@@ -101,6 +101,38 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	}
 }
 
+func TestPlanInputExternalizationExternalizesLargeBrief(t *testing.T) {
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	plan := admittedStorePlan(t, home).Bind("t1")
+	plan.Inputs[0].Bytes = append([]byte("---\ntype: change\ntitle: Large brief\ndone_when: externalized\n---\n"), bytes.Repeat([]byte("brief content "), 1<<13)...)
+	plan.Inputs[0] = taskplan.Select("brief", "selected brief", plan.Inputs[0].Bytes)
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalized, err := db.externalizePlanJSON(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got taskplan.Plan
+	if err := json.Unmarshal([]byte(externalized), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Inputs[0].Path == "" || len(got.Inputs[0].Bytes) != 0 {
+		t.Fatalf("large Brief was not externalized: path=%q bytes=%d", got.Inputs[0].Path, len(got.Inputs[0].Bytes))
+	}
+	loaded, err := db.loadAdmittedPlan(1, externalized)
+	if err != nil || loaded.SHA256() != plan.SHA256() {
+		t.Fatalf("externalized Brief changed its digest: loaded=%v err=%v", loaded, err)
+	}
+}
+
 func TestPlanInputExternalizationRepairsMixedInlineAndBlobInputs(t *testing.T) {
 	home := t.TempDir()
 	db, err := Open(home)
