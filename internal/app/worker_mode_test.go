@@ -81,8 +81,6 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 		{"teardown", "t1"},
 		{"accept", "t1"},
 		{"list"},
-		{"show", "t1"},
-		{"show", "t99"},
 		{},
 	}
 	for _, caller := range []struct {
@@ -106,7 +104,7 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 			caller.setup(t)
 			service := testService(fixture.home, herdr.NewFake())
 			for _, args := range forbidden {
-				if code, output := runCLI(t, service, args...); code == 0 || !strings.Contains(output, "worker_forbidden") || !strings.Contains(output, "temporary POSSE_HOME") {
+				if code, output := runCLI(t, service, args...); code == 0 || !strings.Contains(output, "worker_forbidden") || !strings.Contains(output, "did not run") || !strings.Contains(output, "posse show <own-task>") || !strings.Contains(output, "posse review <own-task>") {
 					t.Fatalf("Worker (%s) ran `posse %s`: code=%d output=%s", caller.name, strings.Join(args, " "), code, output)
 				}
 			}
@@ -114,6 +112,116 @@ func TestWorkerCannotRunStateChangingCommandsAgainstItsHome(t *testing.T) {
 				t.Fatalf("Worker (%s) could not read config: code=%d output=%s", caller.name, code, output)
 			}
 		})
+	}
+}
+
+func TestWorkerCanReadOwnTaskAndReviewButNotAnotherTask(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	otherSandbox := filepath.Join(fixture.home, "pool", "shop", "sandbox-2")
+	gitTest(t, fixture.repo, "worktree", "add", "--detach", otherSandbox)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Other", State: store.StateSpawning, MergeMode: "local", PaneID: "w3:p1", WorktreePath: otherSandbox}); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w2:p1")
+	t.Chdir(fixture.sandbox)
+	previousProcRoot := procRoot
+	procRoot = fakeProc(t, fixture.sandbox, []string{"PI_CODING_AGENT=1", workerHomeEnv + "=" + fixture.home, "HERDR_PANE_ID=w2:p1"})
+	t.Cleanup(func() { procRoot = previousProcRoot })
+	service := testService(fixture.home, herdr.NewFake())
+	for _, command := range [][]string{{"show", "t1"}, {"review", "t1"}} {
+		if code, output := runCLI(t, service, command...); code != 0 {
+			t.Fatalf("Worker could not run read-only `posse %s` on its Task: code=%d output=%s", strings.Join(command, " "), code, output)
+		}
+	}
+	for _, command := range [][]string{{"show", "t2"}, {"review", "t2"}, {"review", "start", "t1"}} {
+		if code, output := runCLI(t, service, command...); code == 0 || !strings.Contains(output, "worker_forbidden") || !strings.Contains(output, "did not run") || !strings.Contains(output, "Allowed Posse commands:") {
+			t.Fatalf("Worker could access out-of-scope `posse %s`: code=%d output=%s", strings.Join(command, " "), code, output)
+		}
+	}
+	t.Setenv("HERDR_PANE_ID", "w3:p1")
+	t.Chdir(otherSandbox)
+	for _, command := range [][]string{{"show", "t2"}, {"review", "t2"}} {
+		if code, output := runCLI(t, service, command...); code == 0 || !strings.Contains(output, "worker_forbidden") {
+			t.Fatalf("Worker read another Task after spoofing its pane id with `posse %s`: code=%d output=%s", strings.Join(command, " "), code, output)
+		}
+	}
+
+	procRoot = fakeProc(t, fixture.root, []string{"PATH=/usr/bin"})
+	t.Setenv("HERDR_PANE_ID", "w3:p1")
+	t.Chdir(fixture.root)
+	for _, command := range [][]string{{"show", "t2"}, {"review", "t2"}} {
+		if code, output := runCLI(t, service, command...); code == 0 || !strings.Contains(output, "worker_forbidden") {
+			t.Fatalf("Worker outside its Sandbox read another Task by spoofing HERDR_PANE_ID with `posse %s`: code=%d output=%s", strings.Join(command, " "), code, output)
+		}
+	}
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Chdir(fixture.sandbox)
+	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
+		t.Fatalf("Worker identified by its Sandbox could not read its Task: code=%d output=%s", code, output)
+	}
+}
+
+func TestStaleDoneSignalHelpNamesAnyCurrentTurnToken(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO task_turn_tokens(task_id,token,updated_at) VALUES(?,?,0)`, task.ID, "launch:1"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	refusal := staleWorkerTurnFailure(context.Background(), db, task.ID)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(refusal.Help, " "), "Current turn token: launch:1") {
+		t.Fatalf("stale Signal help omitted the current launch token: %#v", refusal.Help)
+	}
+}
+
+func TestStaleDoneSignalHelpPrioritizesDeliveredInstruction(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO task_turn_tokens(task_id,token,updated_at) VALUES(?,?,0)`, task.ID, "message:1"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO messages(task_id,body,created_at,delivered_at,status) VALUES(?,?,1,2,'delivered')`, task.ID, "Update the Task before completion"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	refusal := staleWorkerTurnFailure(context.Background(), db, task.ID)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	help := strings.Join(refusal.Help, " ")
+	if !strings.Contains(help, "Current turn token: message:1") || !strings.Contains(help, "Handle the delivered instruction before sending another done Signal") || strings.Contains(help, "Retry the same Signal") {
+		t.Fatalf("stale Signal help did not prioritize the delivered instruction: %#v", refusal.Help)
 	}
 }
 

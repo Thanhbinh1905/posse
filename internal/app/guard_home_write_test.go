@@ -114,7 +114,7 @@ func TestRunGuardRefusesWorkerFileToolWritesToTheLivePosseHome(t *testing.T) {
 		`{"tool_name":"Bash","tool_input":{"command":"printf %s /usr/bin > ` + live + `"}}`,
 	} {
 		var stderr bytes.Buffer
-		if code := service.RunGuard(strings.NewReader(input), &stderr); code != guardExitBlocked || !strings.Contains(stderr.String(), "by guard rule "+ruleWorkerHomeWrite+":") || !strings.Contains(stderr.String(), live) {
+		if code := service.RunGuard(strings.NewReader(input), &stderr); code != guardExitBlocked || !strings.Contains(stderr.String(), "by guard rule "+ruleWorkerHomeWrite+":") || !strings.Contains(stderr.String(), live) || !strings.Contains(stderr.String(), "Nothing ran") || !strings.Contains(stderr.String(), "Allowed Posse commands:") {
 			t.Errorf("guard let a Worker write the live posse home with %s: code=%d stderr=%s", input, code, stderr.String())
 		}
 	}
