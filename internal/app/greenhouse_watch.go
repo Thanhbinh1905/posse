@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -151,12 +152,16 @@ func greenhouseRunIDFromSignals(ctx context.Context, db *store.DB, task store.Ta
 	return ""
 }
 
-func inspectGreenhouseTask(ctx context.Context, projectRoot string) (greenhouseWatchSnapshot, error) {
+func inspectGreenhouseTask(ctx context.Context, home, projectRoot string) (greenhouseWatchSnapshot, error) {
 	request := []byte(`{"version":2,"op":"inspect"}`)
-	command := exec.CommandContext(ctx, "greenhouse", "axi")
+	binary, err := greenhouseBinary()
+	if err != nil {
+		return greenhouseWatchSnapshot{}, err
+	}
+	command := exec.CommandContext(ctx, binary, "axi")
 	command.Dir = projectRoot
 	command.Stdin = bytes.NewReader(request)
-	command.Env = os.Environ()
+	command.Env = (&greenhouse.Daemon{Binary: binary, Home: greenhouse.HomeFor(home), Env: os.Environ()}).Environment()
 	output, err := command.Output()
 	if err != nil {
 		return greenhouseWatchSnapshot{}, fmt.Errorf("inspect Greenhouse from %s: %w", projectRoot, err)
@@ -191,12 +196,12 @@ func (s *Service) observeGreenhouseTasks(ctx context.Context, db *store.DB, proj
 		}
 		var snapshot greenhouseWatchSnapshot
 		if runID != "" {
-			snapshot = inspectGreenhouseRun(ctx, project.Root, runID)
+			snapshot = inspectGreenhouseRun(ctx, s.Home, project.Root, runID)
 			if snapshot.RunID == "" {
 				snapshot.RunID = runID
 			}
 		} else {
-			snapshot, err = inspectGreenhouseTask(ctx, project.Root)
+			snapshot, err = inspectGreenhouseTask(ctx, s.Home, project.Root)
 			if err != nil || snapshot.RunID == "" {
 				continue
 			}
@@ -273,12 +278,16 @@ func raiseGreenhouseNotice(ctx context.Context, db *store.DB, project store.Proj
 	return err
 }
 
-func inspectGreenhouseRun(ctx context.Context, projectRoot, runID string) greenhouseWatchSnapshot {
+func inspectGreenhouseRun(ctx context.Context, home, projectRoot, runID string) greenhouseWatchSnapshot {
 	request, _ := json.Marshal(map[string]any{"version": 2, "op": "inspect", "run_id": runID})
-	command := exec.CommandContext(ctx, "greenhouse", "axi")
+	binary, err := greenhouseBinary()
+	if err != nil {
+		return greenhouseWatchSnapshot{}
+	}
+	command := exec.CommandContext(ctx, binary, "axi")
 	command.Dir = projectRoot
 	command.Stdin = bytes.NewReader(request)
-	command.Env = os.Environ()
+	command.Env = (&greenhouse.Daemon{Binary: binary, Home: greenhouse.HomeFor(home), Env: os.Environ()}).Environment()
 	output, err := command.Output()
 	if err != nil {
 		return greenhouseWatchSnapshot{}

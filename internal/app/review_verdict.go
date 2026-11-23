@@ -194,6 +194,14 @@ WHERE rd.ship_task_id=? AND rd.head_sha=? AND d.task_id=? AND d.kind='review_cap
 	return accepted, err
 }
 
+func greenhouseBlockAt(task store.Task) string {
+	plan, err := task.AdmittedPlan()
+	if err == nil && plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.BlockAt != "" {
+		return plan.ValidationLoops.Review.BlockAt
+	}
+	return "P1"
+}
+
 func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, repository string) error {
 	var targets []store.ReviewTarget
 	var err error
@@ -224,7 +232,7 @@ func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.
 		targets = []store.ReviewTarget{{Repository: project.Name, Commit: commit}}
 	}
 	for _, target := range targets {
-		passed, err := db.GreenhouseGatePass(ctx, task.ID, target.Repository, target.Commit)
+		passed, err := db.GreenhouseGatePass(ctx, task.ID, target.Repository, target.Commit, greenhouseBlockAt(task))
 		if err != nil {
 			return err
 		}

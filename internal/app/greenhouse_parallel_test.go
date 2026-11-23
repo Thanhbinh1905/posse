@@ -54,6 +54,62 @@ func TestGreenhouseStaleHeadInstructionRequestsReviewWithoutPR(t *testing.T) {
 	}
 }
 
+func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneReconcile(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed := f.advanceTarget(t, false, true)
+	if err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("signal", "working", "Refreshing the target"); code != 0 {
+		t.Fatalf("working before target refresh: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	gitTest(t, f.task.WorktreePath, "fetch", "origin", "main")
+	gitTest(t, f.task.WorktreePath, "merge", "--no-edit", "origin/main")
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE messages SET status='delivered' WHERE task_id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	newHead := strings.TrimSpace(gitTest(t, f.task.WorktreePath, "rev-parse", "HEAD"))
+	turn, err := f.db.TaskTurnToken(context.Background(), f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("signal", "done", "Reviewed refreshed head", "--head", newHead, "--turn", turn); code != 0 {
+		t.Fatalf("done on refreshed head: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: newHead, Target: refreshed, ReviewBase: refreshed, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return newHead, nil }); err != nil || !recorded {
+		t.Fatalf("record refreshed-head pass: recorded=%v err=%v", recorded, err)
+	}
+	if err := f.service.maintainProjectWatch(context.Background(), f.db, f.project); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.db.TaskMessagesAfter(context.Background(), f.task.ID, 0, 10)
+	published := false
+	for _, message := range messages {
+		published = published || message.Status == "delivered" && strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish")
+	}
+	if err != nil || !published {
+		t.Fatalf("refreshed-head publication message=%+v err=%v", messages, err)
+	}
+}
+
 func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
@@ -554,6 +610,94 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 	grant, err := parallelPendingGrant(pendingPath)
 	if err != nil || grant != "shop/t1/shop/r1" {
 		t.Fatalf("pending grant = %q, %v", grant, err)
+	}
+}
+
+func TestAutomaticGreenhouseReviewRespectsRetryBackoff(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{
+		ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA,
+		Provider: store.GreenhouseReviewProvider, RequestedAt: now - 1_000, SettledAt: now - 1, Outcome: "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "temporary Greenhouse failure"); err != nil {
+		t.Fatal(err)
+	}
+	started := false
+	if err := f.service.startParallelGreenhouseReviewsTracked(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}, &started, false); err != nil {
+		t.Fatal(err)
+	}
+	if started {
+		t.Fatal("automatic review started again before retry backoff expired")
+	}
+	requests, err := f.db.GreenhouseReviewRequests(ctx, f.project.ID)
+	if err != nil || len(requests) != 1 {
+		t.Fatalf("Greenhouse requests = %+v, %v; want only the original failed request", requests, err)
+	}
+}
+
+func TestGreenhouseFailureAtRetryLimitRaisesNeedsDecisionNotice(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	ctx := context.Background()
+	for attempt := range greenhouseReviewFailureLimit {
+		at := int64(100 + attempt*10)
+		if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{
+			ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA,
+			Provider: store.GreenhouseReviewProvider, RequestedAt: at, SettledAt: at + 1, Outcome: "failed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "Greenhouse binary is missing"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.startParallelGreenhouseReviews(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needsDecision, failure := 0, 0
+	for _, notice := range notices {
+		if notice.Kind == "needs_decision" && strings.Contains(notice.Summary, "Greenhouse binary is missing") {
+			needsDecision++
+		}
+		if notice.Kind == "greenhouse_review_failed" && notice.AckedAt > 0 {
+			failure++
+		}
+	}
+	if needsDecision != 1 || failure != 1 {
+		t.Fatalf("retry-limit Notices = %+v, want one actionable needs_decision and one acknowledged failure Notice", notices)
+	}
+}
+
+func TestRepeatedGreenhouseReviewFailuresAreBoundedByExactHead(t *testing.T) {
+	requests := []store.GreenhouseReviewRequest{
+		{TaskID: 1, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"},
+		{TaskID: 1, Repository: "shop", RequestedHead: "head-b", Outcome: "failed"},
+		{TaskID: 2, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"},
+	}
+	if got, _ := repeatedGreenhouseReviewFailures(requests, 1, "shop", "head-a"); got != 1 {
+		t.Fatalf("failed requests for exact Task head = %d, want 1", got)
+	}
+	requests = append(requests, store.GreenhouseReviewRequest{TaskID: 1, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"}, store.GreenhouseReviewRequest{TaskID: 1, Repository: "shop", RequestedHead: "head-a", Outcome: "failed"})
+	if got, _ := repeatedGreenhouseReviewFailures(requests, 1, "shop", "head-a"); got < greenhouseReviewFailureLimit {
+		t.Fatalf("same-head failures = %d, want limit %d", got, greenhouseReviewFailureLimit)
+	}
+}
+
+func TestParallelReviewDoesNotRetryReviewerContextOverflow(t *testing.T) {
+	calls := 0
+	_, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Millisecond, func(time.Duration) (greenhouse.RoundResult, error) {
+		calls++
+		return greenhouse.RoundResult{}, errors.New("reviewer context overflow: prompt exceeds maximum context length")
+	})
+	if err == nil || calls != 1 || attempts != 1 {
+		t.Fatalf("context-overflow review made %d calls and %d attempts, err=%v; want one terminal attempt", calls, attempts, err)
 	}
 }
 

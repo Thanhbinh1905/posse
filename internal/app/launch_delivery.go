@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -195,6 +196,31 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 					if predecessor.State != store.StateFailed && predecessor.State != store.StateLost && predecessor.State != store.StateTornDown {
 						continue
 					}
+					if predecessor.State == store.StateTornDown {
+						decisions, decisionsErr := db.Decisions(ctx, project.ID, false)
+						if decisionsErr != nil {
+							return admitted, decisionsErr
+						}
+						covered := false
+						for _, decision := range decisions {
+							parts := strings.Split(decision.Origin, ":")
+							if decision.Kind != "teardown_dependants" || decision.TaskID != predecessor.ID || decision.ObsoleteAt != 0 || len(parts) != 3 {
+								continue
+							}
+							for _, dependantRef := range strings.Split(parts[2], ",") {
+								if dependantRef == taskIDString(queued.Seq) {
+									covered = true
+									break
+								}
+							}
+							if covered {
+								break
+							}
+						}
+						if covered {
+							continue
+						}
+					}
 					ready, readyErr := db.UnmetTaskDependencies(ctx, project.ID, []dispatch.Dependency{dependency})
 					if readyErr != nil {
 						return admitted, readyErr
@@ -202,7 +228,7 @@ func (s *Service) refillQueuedTasks(ctx context.Context, db *store.DB, project s
 					if len(ready) == 0 {
 						continue
 					}
-					origin := fmt.Sprintf("dependency:%s:%s:%s", taskIDString(queued.Seq), dependency.TaskID, dependency.Milestone)
+					origin := fmt.Sprintf("dependency:%s:%s:%s:launch-%d", taskIDString(queued.Seq), dependency.TaskID, dependency.Milestone, predecessor.Launches)
 					_, decisionErr := db.RaiseDecision(ctx, store.DecisionRequest{
 						ProjectID: project.ID, TaskID: queued.ID, Origin: origin, Kind: "dependency",
 						Question: fmt.Sprintf("Prerequisite %s for queued Task %s is %s and cannot satisfy %s. Cancel the queued Task, or drop this prerequisite and run it?", dependency.TaskID, taskIDString(queued.Seq), predecessor.State, dependency.Milestone),
