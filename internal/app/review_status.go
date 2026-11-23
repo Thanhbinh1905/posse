@@ -25,11 +25,19 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.requireLeadOrUser(ctx.Context, db, project); err != nil {
-		return err
-	}
 	change, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
+		return err
+	}
+	home, err := s.homePath()
+	if err != nil {
+		return err
+	}
+	if s.workerCaller(ctx.Context, home) {
+		if err := s.requireWorkerOwnTask(ctx.Context, db, project, change); err != nil {
+			return err
+		}
+	} else if err := s.requireLeadOrUser(ctx.Context, db, project); err != nil {
 		return err
 	}
 	if change.Type != "change" {

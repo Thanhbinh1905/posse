@@ -71,7 +71,7 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	}
 	db, openErr := store.OpenReadOnly(home)
 	if openErr != nil {
-		fmt.Fprintf(stderr, "posse: refused Worker action because branch authorship could not be verified: %v\n", openErr)
+		fmt.Fprintf(stderr, "posse: refused Worker action because branch authorship could not be verified: %v. Nothing ran. Allowed Posse commands: %s.\n", openErr, workerAllowedCommands)
 		return guardExitBlocked
 	}
 	task, taskErr := s.workerTask(context.Background(), db)
@@ -95,7 +95,7 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 				}
 			}
 		}
-		fmt.Fprintf(stderr, "posse: refused Worker action because this attempt no longer holds the branch author claim: %v\n", taskErr)
+		fmt.Fprintf(stderr, "posse: refused Worker action because this attempt no longer holds the branch author claim: %v. Nothing ran. Allowed Posse commands: %s.\n", taskErr, workerAllowedCommands)
 		return guardExitBlocked
 	}
 	cwd := input.CWD
@@ -113,7 +113,7 @@ func (s *Service) RunGuard(stdin io.Reader, stderr io.Writer) int {
 	if !refused {
 		return 0
 	}
-	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker by guard rule %s: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `%s`, with your isolated Herdr binary on PATH.\n", reason.command, reason.rule, reason.why, guardIsolatedRecipe)
+	fmt.Fprintf(stderr, "posse: refused %s from a posse Worker by guard rule %s: %s. Nothing ran. Allowed Posse commands: %s. Workers never change the User's Herdr session or posse home. Run experiments against an isolated Herdr server and a temporary POSSE_HOME instead. Use a clean environment, for example `%s`, with your isolated Herdr binary on PATH.\n", reason.command, reason.rule, reason.why, workerAllowedCommands, guardIsolatedRecipe)
 	return guardExitBlocked
 }
 

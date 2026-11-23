@@ -81,6 +81,18 @@ func TestShippedSkillFrontmatter(t *testing.T) {
 	}
 }
 
+func TestPosseSkillDocumentsResearchRestrictions(t *testing.T) {
+	data, err := Skill("posse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"general-purpose", "`research.max_active`", "default: 2", "limit applies to Explore agents too"} {
+		if !strings.Contains(string(data), required) {
+			t.Errorf("posse skill does not explain research restrictions: missing %q", required)
+		}
+	}
+}
+
 func TestReviewRoleRecommendedSkillsArePinned(t *testing.T) {
 	recommended := RecommendedSkills()["review"]
 	for _, required := range []string{"posse-tdd", "posse-technical-writing"} {

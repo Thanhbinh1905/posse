@@ -16,7 +16,11 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 
 // workerCommands are the only commands a Worker may run against its own posse
 // home.
+const workerAllowedCommands = "`posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse show <own-task>`, `posse review <own-task>`, `posse candidate abandon`, `posse _context`, `posse research <list|show|cancel|start|wait|follow-up>` for own children, `posse knowledge show` and `posse config <show|schema>`"
+
 var workerCommands = map[string]bool{
+	"show":               true,
+	"review":             true,
 	"brief":              true,
 	"status":             true,
 	"signal":             true,
@@ -69,10 +73,104 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 		name += " " + command
 	}
 	return axi.Failure("worker_forbidden",
-		"`"+name+"` cannot run from a Worker against the posse home "+home+"; Workers may run only `posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse research` for their own children, `posse knowledge show` and `posse config show|schema` there",
+		"`"+name+"` did not run against the posse home "+home+". Allowed Posse commands: "+workerAllowedCommands+".",
 		false,
 		"Experiment with posse under a temporary POSSE_HOME and an isolated Herdr server",
 		"Report what the Lead should do with `posse signal needs-decision`")
+}
+
+func (s *Service) requireWorkerOwnTask(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	home, err := s.homePath()
+	if err != nil {
+		return workerOwnTaskRefusal()
+	}
+	current, err := workerIdentityTask(ctx, db, home)
+	if err != nil || current.ID != task.ID || current.ProjectID != project.ID {
+		return workerOwnTaskRefusal()
+	}
+	return nil
+}
+
+func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.Task, error) {
+	ancestorTask, hasAncestor, err := workerAncestorTask(ctx, db, home)
+	if err != nil {
+		return store.Task{}, err
+	}
+	dir, err := currentDir()
+	if err != nil {
+		return store.Task{}, err
+	}
+	sandboxTask, hasSandbox, err := workerSandboxTask(ctx, db, dir)
+	if err != nil {
+		return store.Task{}, err
+	}
+	if hasAncestor && hasSandbox && ancestorTask.ID != sandboxTask.ID {
+		return store.Task{}, store.ErrNotFound
+	}
+	if hasAncestor {
+		return ancestorTask, nil
+	}
+	if hasSandbox {
+		return sandboxTask, nil
+	}
+	return store.Task{}, store.ErrNotFound
+}
+
+func workerAncestorTask(ctx context.Context, db *store.DB, home string) (store.Task, bool, error) {
+	var identity *ancestorProcess
+	for _, process := range processAncestors(procRoot, os.Getpid()) {
+		if home == "" || process.env[workerHomeEnv] == "" || !samePath(process.env[workerHomeEnv], home) {
+			continue
+		}
+		agent := process.agent
+		for key, value := range process.env {
+			agent = agent || value != "" && agentEnvironmentKey(key)
+		}
+		if agent {
+			trusted := process
+			identity = &trusted
+		}
+	}
+	if identity == nil || identity.env["HERDR_PANE_ID"] == "" {
+		return store.Task{}, false, nil
+	}
+	task, err := db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
+	if store.IsNotFound(err) {
+		return store.Task{}, false, nil
+	}
+	return task, err == nil, err
+}
+
+func workerSandboxTask(ctx context.Context, db *store.DB, dir string) (store.Task, bool, error) {
+	projects, err := db.Projects(ctx)
+	if err != nil {
+		return store.Task{}, false, err
+	}
+	var match *store.Sandbox
+	for _, project := range projects {
+		sandboxes, err := db.Sandboxes(ctx, project.ID)
+		if err != nil {
+			return store.Task{}, false, err
+		}
+		for _, sandbox := range sandboxes {
+			if sandbox.State != "held" || sandbox.TaskID == 0 || !pathWithin(resolvedPath(sandbox.Path), dir) {
+				continue
+			}
+			if match != nil && (match.TaskID != sandbox.TaskID || match.ProjectID != sandbox.ProjectID) {
+				return store.Task{}, false, store.ErrNotFound
+			}
+			match = &sandbox
+		}
+	}
+	if match == nil {
+		return store.Task{}, false, nil
+	}
+	task, err := db.TaskByID(ctx, match.ProjectID, match.TaskID)
+	return task, err == nil, err
+}
+
+func workerOwnTaskRefusal() error {
+	return axi.Failure("worker_forbidden", "`posse show` and `posse review` did not run; Workers may inspect only their own Task. Allowed Posse commands: "+workerAllowedCommands, false)
 }
 
 // workerCaller reports whether this process runs on behalf of a Worker of
