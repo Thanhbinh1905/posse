@@ -561,5 +561,5 @@ func watchStopReason(home string, pid int) string {
 	if spawnedOK && runningOK && watchExecutableChanged(spawned, running) {
 		return "update"
 	}
-	return "signal"
+	return "external_signal"
 }

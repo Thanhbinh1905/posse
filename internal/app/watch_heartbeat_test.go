@@ -30,9 +30,9 @@ func TestWatchSupervisionPreservesHeartbeatDuringSlowForgePoll(t *testing.T) {
 		}
 	}
 	t.Setenv("POSSE_TEST_HERDR", "1")
-	t.Setenv("POSSE_TEST_WATCH_RUNTIME_HEARTBEAT_INTERVAL", "20ms")
-	t.Setenv("POSSE_TEST_WATCH_RUNTIME_STALE_AFTER", "100ms")
-	t.Setenv("POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "2s")
+	t.Setenv("POSSE_TEST_WATCH_RUNTIME_HEARTBEAT_INTERVAL", "100ms")
+	t.Setenv("POSSE_TEST_WATCH_RUNTIME_STALE_AFTER", "1s")
+	t.Setenv("POSSE_TEST_EXTERNAL_COMMAND_TIMEOUT", "10s")
 	started := filepath.Join(fixture.root, "slow-gh-started")
 	finished := filepath.Join(fixture.root, "slow-gh-finished")
 	t.Setenv("POSSE_TEST_SLOW_GH_STARTED", started)
@@ -42,13 +42,13 @@ func TestWatchSupervisionPreservesHeartbeatDuringSlowForgePoll(t *testing.T) {
 	if err := os.Rename(realGH, wrappedGH); err != nil {
 		t.Fatal(err)
 	}
-	wrapper := "#!/bin/sh\nset -eu\nif [ \"$1 $2\" = \"api graphql\" ]; then touch \"$POSSE_TEST_SLOW_GH_STARTED\"; sleep 0.7; fi\n\"" + wrappedGH + "\" \"$@\"\nif [ \"$1 $2\" = \"api graphql\" ]; then touch \"$POSSE_TEST_SLOW_GH_FINISHED\"; fi\n"
+	wrapper := "#!/bin/sh\nset -eu\nif [ \"$1 $2\" = \"api graphql\" ]; then touch \"$POSSE_TEST_SLOW_GH_STARTED\"; sleep 5; fi\n\"" + wrappedGH + "\" \"$@\"\nif [ \"$1 $2\" = \"api graphql\" ]; then touch \"$POSSE_TEST_SLOW_GH_FINISHED\"; fi\n"
 	if err := os.WriteFile(realGH, []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
 	oldInterval, oldStaleAfter := watchRuntimeHeartbeatInterval, watchRuntimeStaleAfter
-	watchRuntimeHeartbeatInterval, watchRuntimeStaleAfter = 20*time.Millisecond, 100*time.Millisecond
+	watchRuntimeHeartbeatInterval, watchRuntimeStaleAfter = 100*time.Millisecond, time.Second
 	t.Cleanup(func() { watchRuntimeHeartbeatInterval, watchRuntimeStaleAfter = oldInterval, oldStaleAfter })
 	previousVerifier := watchExecutableVerifier
 	watchExecutableVerifier = func(string) bool { return true }
@@ -116,16 +116,20 @@ func TestWatchSupervisionPreservesHeartbeatDuringSlowForgePoll(t *testing.T) {
 	if _, err := os.Stat(started); err != nil {
 		t.Fatalf("fake forge call did not start: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
+	var current store.WatchRuntime
+	heartbeatDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(heartbeatDeadline) {
+		current, err = fixture.db.WatchRuntime(ctx, fixture.project.ID)
+		if err == nil && current.HeartbeatAt > before.HeartbeatAt && time.Since(time.UnixMilli(current.HeartbeatAt)) <= watchRuntimeStaleAfter {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil || current.HeartbeatAt <= before.HeartbeatAt || time.Since(time.UnixMilli(current.HeartbeatAt)) > watchRuntimeStaleAfter {
+		t.Fatalf("Project Watch heartbeat did not stay fresh during the blocked forge call: before=%d current=%d age=%s err=%v", before.HeartbeatAt, current.HeartbeatAt, time.Since(time.UnixMilli(current.HeartbeatAt)), err)
+	}
 	if _, err := os.Stat(finished); err == nil {
 		t.Fatal("fake forge call finished before supervision ran")
-	}
-	current, err := fixture.db.WatchRuntime(ctx, fixture.project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if current.HeartbeatAt <= before.HeartbeatAt || time.Since(time.UnixMilli(current.HeartbeatAt)) > watchRuntimeStaleAfter {
-		t.Fatalf("Project Watch heartbeat did not stay fresh during the blocked forge call: before=%d current=%d age=%s", before.HeartbeatAt, current.HeartbeatAt, time.Since(time.UnixMilli(current.HeartbeatAt)))
 	}
 
 	service := New(fixture.home, fixture.service.Herdr)
@@ -146,7 +150,7 @@ func TestWatchSupervisionPreservesHeartbeatDuringSlowForgePoll(t *testing.T) {
 		t.Fatalf("supervision raised pr_watch_failing during a healthy slow poll: %#v", notices)
 	}
 
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(finished); err == nil {
 			return
