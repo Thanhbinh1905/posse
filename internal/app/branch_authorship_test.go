@@ -149,6 +149,9 @@ func TestResumedWorkerCanSignalWithInheritedAuthorGeneration(t *testing.T) {
 	if err := requireWorkerBranchAuthor(context.Background(), fixture.db, fixture.task); err != nil {
 		t.Fatalf("resumed Worker lost branch author claim: %v", err)
 	}
+	if err := requireCurrentTaskBranchAuthor(context.Background(), fixture.db, fixture.task); err != nil {
+		t.Fatalf("current Task lost its inherited branch author claim: %v", err)
+	}
 	if claim.Attempt != 1 || claim.Generation != 1 {
 		t.Fatalf("resumed branch author claim = %+v", claim)
 	}

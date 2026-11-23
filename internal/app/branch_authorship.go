@@ -285,7 +285,7 @@ func requireCurrentTaskBranchAuthor(ctx context.Context, db *store.DB, task stor
 	if err != nil {
 		return err
 	}
-	if claim.TaskID != task.ID || claim.Attempt != task.Launches {
+	if claim.TaskID != task.ID {
 		return store.ErrBranchAuthorStale
 	}
 	return db.RequireBranchAuthor(ctx, repository, task.Branch, task.ID, claim.Generation)
