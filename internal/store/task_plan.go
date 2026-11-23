@@ -84,84 +84,118 @@ func (db *DB) ReviseTaskPlanWithRepo(ctx context.Context, task Task, plan taskpl
 	return db.reviseTaskPlan(ctx, task, plan, &repo)
 }
 
+type TaskPlanRevision struct {
+	Task Task
+	Plan taskplan.Plan
+	Repo *TaskRepo
+}
+
 func (db *DB) reviseTaskPlan(ctx context.Context, task Task, plan taskplan.Plan, repo *TaskRepo) error {
-	previous, err := task.AdmittedPlan()
-	if err != nil {
-		return err
+	return db.ReviseTaskPlans(ctx, []TaskPlanRevision{{Task: task, Plan: plan, Repo: repo}})
+}
+
+func (db *DB) ReviseTaskPlans(ctx context.Context, revisions []TaskPlanRevision) error {
+	if len(revisions) == 0 {
+		return nil
 	}
-	if previous == nil || plan.Revision != previous.Revision+1 || plan.PreviousSHA256 != previous.SHA256() {
-		return fmt.Errorf("execution plan revision does not extend the admitted plan")
+	type preparedRevision struct {
+		Task     Task
+		Previous taskplan.Plan
+		Plan     taskplan.Plan
+		Data     string
+		Repo     *TaskRepo
 	}
-	plan.AdmittedSHA256 = ""
-	data, err := plan.Encode()
-	if err != nil {
-		return err
-	}
-	data, err = db.externalizePlanJSON(data)
-	if err != nil {
-		return err
+	prepared := make([]preparedRevision, 0, len(revisions))
+	for _, revision := range revisions {
+		previous, err := revision.Task.AdmittedPlan()
+		if err != nil {
+			return err
+		}
+		if previous == nil || revision.Plan.Revision != previous.Revision+1 || revision.Plan.PreviousSHA256 != previous.SHA256() {
+			return fmt.Errorf("execution plan revision does not extend the admitted plan")
+		}
+		plan := revision.Plan
+		plan.AdmittedSHA256 = ""
+		data, err := plan.Encode()
+		if err != nil {
+			return err
+		}
+		data, err = db.externalizePlanJSON(data)
+		if err != nil {
+			return err
+		}
+		prepared = append(prepared, preparedRevision{Task: revision.Task, Previous: *previous, Plan: plan, Data: data, Repo: revision.Repo})
 	}
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, workflow_run_id=?, plan_revision=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
-		data, plan.Launch.ProfileName, plan.Launch.DispatchRule, storedWorkflowRunID(data), storedPlanRevision(data), time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State)
-	if err != nil {
-		return err
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		return err
-	} else if count != 1 {
-		return ErrStateRace
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, task.ID, plan.Revision, data); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='' WHERE task_id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state<>'merging')`, task.ID, task.ID); err != nil {
-		return err
-	}
-	if repo != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,target_branch,landing_mode,state,updated_at) VALUES(?,?,?,?,?,?,'open',?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.MergeMode, time.Now().UnixMilli()); err != nil {
+	for _, revision := range prepared {
+		task, plan, data := revision.Task, revision.Plan, revision.Data
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, workflow_run_id=?, plan_revision=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
+			data, plan.Launch.ProfileName, plan.Launch.DispatchRule, storedWorkflowRunID(data), storedPlanRevision(data), time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State)
+		if err != nil {
 			return err
 		}
-	}
-	changedFields := plan.ChangedFields(*previous)
-	reviewRelevant := false
-	for _, field := range changedFields {
-		switch field {
-		case "review", "validation_loops", "inputs", "execution", "preferences", "grants", "user_choice", "member_admissions":
-			reviewRelevant = true
+		if count, err := result.RowsAffected(); err != nil {
+			return err
+		} else if count != 1 {
+			return ErrStateRace
 		}
-	}
-	invalidateReview := reviewRelevant && task.State != StateMerging
-	if invalidateReview {
-		if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='stale',observed_author_sha=submitted_sha,updated_at=? WHERE task_id=? AND state IN ('preparing','active')`, time.Now().UnixMilli(), task.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, task.ID, plan.Revision, data); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET invalidated_from_status=status,status='invalidated',invalidated_by_sha=(SELECT candidate_sha FROM validation_candidates WHERE id=validation_stage_results.candidate_id) WHERE task_id=? AND status IN ('passed','failed')`, task.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE task_repos SET gated_sha='' WHERE task_id=? AND EXISTS(SELECT 1 FROM tasks WHERE id=? AND state<>'merging')`, task.ID, task.ID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO branch_author_invalidated_verdicts(task_id,change_task_id,invalidated_at) SELECT v.task_id,t.reviews_task_id,? FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=?`, time.Now().UnixMilli(), task.ID); err != nil {
+		if revision.Repo != nil {
+			repo := revision.Repo
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_repos(task_id,repo,worktree_path,base_ref,target_branch,landing_mode,state,updated_at) VALUES(?,?,?,?,?,?,'open',?)`, task.ID, repo.Repo, repo.WorktreePath, repo.BaseRef, repo.TargetBranch, repo.MergeMode, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+		}
+		changedFields := plan.ChangedFields(revision.Previous)
+		reviewRelevant := false
+		for _, field := range changedFields {
+			switch field {
+			case "review", "validation_loops", "inputs", "execution", "preferences", "grants", "user_choice", "member_admissions":
+				reviewRelevant = true
+			}
+		}
+		invalidateReview := reviewRelevant && task.State != StateMerging
+		if invalidateReview {
+			if _, err := tx.ExecContext(ctx, `UPDATE validation_candidates SET state='stale',observed_author_sha=submitted_sha,updated_at=? WHERE task_id=? AND state IN ('preparing','active')`, time.Now().UnixMilli(), task.ID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE validation_stage_results SET invalidated_from_status=status,status='invalidated',invalidated_by_sha=(SELECT candidate_sha FROM validation_candidates WHERE id=validation_stage_results.candidate_id) WHERE task_id=? AND status IN ('passed','failed')`, task.ID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO branch_author_invalidated_verdicts(task_id,change_task_id,invalidated_at) SELECT v.task_id,t.reviews_task_id,? FROM review_verdicts v JOIN tasks t ON t.id=v.task_id WHERE t.reviews_task_id=?`, time.Now().UnixMilli(), task.ID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE review_rounds SET status='void',verdict=NULL WHERE ship_task_id=? AND status IN ('admitted','verdict')`, task.ID); err != nil {
+				return err
+			}
+		}
+		note := fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; prior revision evidence invalidated", revision.Previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
+		if invalidateReview {
+			note += "; Review evidence invalidated because review-relevant fields changed"
+		}
+		if task.State == StateMerging {
+			note = fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; merge gate retained", revision.Previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, task.State, task.State, "lead", note, time.Now().UnixMilli()); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE review_rounds SET status='void',verdict=NULL WHERE ship_task_id=? AND status IN ('admitted','verdict')`, task.ID); err != nil {
-			return err
-		}
-	}
-	note := fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; prior revision evidence invalidated", previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
-	if invalidateReview {
-		note += "; Review evidence invalidated because review-relevant fields changed"
-	}
-	if task.State == StateMerging {
-		note = fmt.Sprintf("Execution plan revised from %d to %d; changed fields: %s; merge gate retained", previous.Revision, plan.Revision, strings.Join(changedFields, ", "))
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO transitions(task_id,from_state,to_state,source,note,at) VALUES(?,?,?,?,?,?)`, task.ID, task.State, task.State, "lead", note, time.Now().UnixMilli()); err != nil {
-		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return db.PersistTask(ctx, task.ID)
+	for _, revision := range prepared {
+		if err := db.PersistTask(ctx, revision.Task.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

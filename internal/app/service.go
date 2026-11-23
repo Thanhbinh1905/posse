@@ -160,8 +160,8 @@ func (s *Service) commands() *axi.Command {
 		{Name: "accept", Usage: "$ accept <task> [--user-approved <quote>]", Summary: "Record User acceptance of a publication-bound Research Report after independent review.", Handler: s.acceptReport},
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Worker's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
-		{Name: "decide", Usage: "$ decide <decision> <option> [--user-approved <quote> | --lead-reason <reason>] [--recover]", Summary: "Record a User answer or YOLO Lead Review-cap resolution.", Handler: s.decide},
-		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Orphan or closed-PR Decision.", Handler: s.applyDecision},
+		{Name: "decide", Usage: "$ decide <decision> <option> [--to <task>] [--user-approved <quote> | --lead-reason <reason>] [--recover]", Summary: "Record a User answer or YOLO Lead Review-cap resolution.", Handler: s.decide},
+		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Decision action.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
 		{Name: "stats", Summary: "Show each Profile's landed rate, median time to done, tokens per landed Task and relaunches over the last 30 days.", Handler: s.stats},
 		{Name: "workflow", Summary: "Inspect and advance User-owned workflow runs.", Subcommands: []*axi.Command{
@@ -201,6 +201,7 @@ func (s *Service) commands() *axi.Command {
 			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
 			{Name: "carry", Usage: "$ review carry <change> <passed-head> <candidate-head>", Summary: "Record a Review-only carry for a tree-identical private candidate merge.", Handler: s.reviewCarry},
 			{Name: "dispose", Usage: "$ review dispose <change> <F-n|P-n>... <fix|accept|defer|withdraw|reclassify> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]", Summary: "Record a finding disposition or queue a whole-pattern fix.", Handler: s.reviewDispose},
+			{Name: "dispute", Usage: "$ review dispute <change> <F-n> --evidence <file>", Summary: "Request a User Decision to withdraw a disproved P0/P1 Greenhouse finding.", Handler: s.reviewDispute},
 			{Name: "merge", Usage: "$ review merge <change> <P-n> <P-n>...", Summary: "Merge duplicate Finding Patterns into the first pattern.", Handler: s.reviewMergePatterns},
 			{Name: "followups", Usage: "$ review followups", Summary: "List the Project's non-blocking findings with no follow-up issue, grouped by repository and directory.", Handler: s.reviewFollowups, Subcommands: []*axi.Command{
 				{Name: "defer", Usage: "$ review followups defer --area <dir> [--repo <repository>] --issue <url>", Summary: "Defer every listed finding of one area to its rolling follow-up issue.", Handler: s.reviewFollowupsDefer},

@@ -115,11 +115,9 @@ func baseFromTarget(cfg config.Config, brief dispatch.Brief, repo string, defaul
 	return selected && target != defaultBranch
 }
 
-// pinsBase reports whether admission freezes the start commit. A base taken
-// from the target stays live after a landed prerequisite, which lands later.
 func pinsBase(cfg config.Config, brief dispatch.Brief, repo string, defaultBranch string) bool {
 	if _, explicit := branchSelection(brief.Base, brief.BaseByRepo, repo, ""); explicit {
-		return true
+		return !hasLandedPrerequisite(brief.After)
 	}
 	return baseFromTarget(cfg, brief, repo, defaultBranch) && !hasLandedPrerequisite(brief.After)
 }

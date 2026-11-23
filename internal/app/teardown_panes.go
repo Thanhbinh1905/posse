@@ -34,6 +34,7 @@ type taskPaneTeardownPlan struct {
 
 type teardownResult struct {
 	Panes               teardownPanes
+	Dependants          []string
 	BranchRemoved       bool
 	RemoteBranchRemoved bool
 	StoppedProcesses    []string

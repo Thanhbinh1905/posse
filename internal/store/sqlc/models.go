@@ -111,6 +111,12 @@ type Decision struct {
 	AnswerReason   string
 }
 
+type DecisionEvidence struct {
+	DecisionID int64
+	Evidence   []byte
+	Digest     string
+}
+
 type DecisionNoticeCursor struct {
 	ProjectID    int64
 	LastNoticeID int64
