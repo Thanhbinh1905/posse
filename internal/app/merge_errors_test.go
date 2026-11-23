@@ -140,7 +140,7 @@ func TestPRMergeBaseBranchModifiedRefusalDoesNotRefreshWhenTargetRuleIsDisabled(
 	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "Pull request is not mergeable: the base branch was modified. Review and resolve the conflicts, then try again.")
 	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "merge it")
 	if code == 0 || !strings.Contains(output, "pr_merge_failed") || strings.Contains(output, "pr_branch_behind") {
-		t.Fatalf("unrelated merge refusal was misclassified: exit=%d output=%s error=%s", code, output, stderr)
+		t.Fatalf("base-branch-modified refusal bypassed target policy: exit=%d output=%s error=%s", code, output, stderr)
 	}
 	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
 	if err != nil || task.State != store.StateMerging || task.GatedSHA != fixture.headSHA {
