@@ -248,8 +248,13 @@ func workspaceDeliveryMode(mode string) string {
 	return mode
 }
 
+const maxInlineBriefSize = 64 << 10
+
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
 func Resolve(r Request) (Plan, error) {
+	if len(r.Brief.Bytes) > maxInlineBriefSize {
+		return Plan{}, &dispatch.BriefError{Field: "brief", Reason: "exceeds 64 KiB; Brief inputs remain inline in execution plans"}
+	}
 	brief, err := dispatch.ParseBriefText(string(r.Brief.Bytes))
 	if err != nil {
 		return Plan{}, err

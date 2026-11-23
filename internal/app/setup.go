@@ -108,8 +108,9 @@ type setupRun struct {
 
 func (s *Service) setup(ctx *axi.Context, args []string) error {
 	for _, arg := range args {
-		if arg == "--sidebar-layout" || arg == "--no-sidebar-layout" {
-			return axi.Usage(arg + " was removed; posse setup no longer configures the Herdr Agents sidebar")
+		flag := strings.SplitN(arg, "=", 2)[0]
+		if flag == "--sidebar-layout" || flag == "--no-sidebar-layout" {
+			return axi.Usage(flag + " was removed; posse setup no longer configures the Herdr Agents sidebar")
 		}
 	}
 	parsed, err := parseArgs("setup", args, map[string]flagSpec{"check": {boolean: true}, "uninstall": {boolean: true}, "human": {boolean: true}, "exit-code": {boolean: true}, "recommended-skills": {boolean: true}, "no-recommended-skills": {boolean: true}, "global-skills": {boolean: true}, "remove-global-skills": {boolean: true}, "binary": {}})
