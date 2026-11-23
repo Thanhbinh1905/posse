@@ -39,6 +39,83 @@ func TestPRMergeBehindTargetReportsQueuedTargetSyncInstruction(t *testing.T) {
 	}
 }
 
+func TestGreenhouseMergeGateRequiresRefreshWithoutCurrentTargetSetting(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	freezeCILoopWithReview(t, fixture, 0, 0, "full-pipeline")
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, "https://github.com/acme/shop/pull/17", ""); err != nil {
+		t.Fatal(err)
+	}
+	targetTip := fixture.advanceTarget(t, false, true)
+	err = fixture.service.requirePRTargetFresh(ctx, fixture.db, fixture.project, config.Config{}, fixture.task, "", fixture.task.MergeMode, fixture.headSHA)
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "pr_branch_behind" || !strings.Contains(failure.Message, targetTip) {
+		t.Fatalf("Greenhouse merge gate error = %v, want behind-target refusal for %s", err, targetTip)
+	}
+	var body string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, fixture.task.ID).Scan(&body); err != nil {
+		t.Fatalf("Greenhouse refresh instruction: %v", err)
+	}
+	for _, expected := range []string{"posse signal working", "posse signal done", "--head <sha>", "without --pr"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("Greenhouse refresh instruction lacks %q: %s", expected, body)
+		}
+	}
+}
+
+func TestPRMergeRefusalForBehindTargetQueuesWorkerRefresh(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	fixture.requireCurrentTarget(t)
+	ctx := context.Background()
+	prURL := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "PR ready"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGHHead(t, fixture.headSHA)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	observation := store.PRObservation{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, PRURL: prURL, HeadSHA: fixture.headSHA, State: "OPEN", Checks: marshalJSON(checkSnapshot{State: "SUCCESS"}), Review: "APPROVED", Mergeable: "MERGEABLE"}
+	if _, err := fixture.db.RecordPRObservation(ctx, observation, store.PRObservationEffect{}, fixture.task); err != nil {
+		t.Fatal(err)
+	}
+	targetTip := fixture.advanceTarget(t, false, false)
+	t.Setenv("POSSE_TEST_GH_MERGE_ADVANCE_SHA", targetTip)
+	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "head branch is not up to date with the base branch")
+	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "merge it")
+	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) || !strings.Contains(output, "Posse queued the Worker an instruction") {
+		t.Fatalf("behind-target merge refusal did not queue refresh: exit=%d output=%s error=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateWorking || task.GatedSHA != "" {
+		t.Fatalf("Task after behind-target refusal = %+v, %v; want working with no gated head", task, err)
+	}
+	var instructions int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND body LIKE '%missing current target commit%'`, fixture.task.ID).Scan(&instructions); err != nil || instructions != 1 {
+		t.Fatalf("refresh instructions = %d, %v; want one", instructions, err)
+	}
+}
+
 func TestPRMergeExecuteRaceWithQueuedTargetSyncNamesTheInstruction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	fixture.requireCurrentTarget(t)

@@ -293,8 +293,32 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 	return err
 }
 
+func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, task store.Task, mergeErr error) (bool, error) {
+	message := strings.ToLower(mergeErr.Error())
+	if !strings.Contains(message, "not up to date") && !strings.Contains(message, "branch is behind") {
+		return false, nil
+	}
+	freshness, err := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA)
+	if err != nil || freshness.Fresh {
+		return false, err
+	}
+	sync, err := s.queuePRTargetSyncInstruction(ctx, db, task, "", freshness, task.GatedSHA)
+	if err != nil {
+		return false, err
+	}
+	if task.State == store.StateMerging {
+		if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateWorking, "lead", "Pull request merge was refused because its target advanced"); err != nil {
+			return false, err
+		}
+		if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
+			return false, err
+		}
+	}
+	return true, prBranchBehindFailure(task.Seq, task.GatedSHA, freshness, sync)
+}
+
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member, mergeMode, headSHA string) error {
-	if !deliveredByPullRequest(mergeMode) || !cfg.Defaults.RequireCurrentTarget {
+	if !deliveredByPullRequest(mergeMode) || (!cfg.Defaults.RequireCurrentTarget && !greenhouseFullPipelineTask(task)) {
 		return nil
 	}
 	targetBranch := taskTargetBranch(project, task)

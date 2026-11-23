@@ -1677,7 +1677,10 @@ case "$1 $2" in
            printf '{"url":"%s","state":"%s","headRefOid":"%s","title":"fix: E2E PR title","headRefName":"%s","baseRefName":"%s","headRepository":%s}\n' "${POSSE_TEST_GH_VIEW_URL:-$POSSE_TEST_GH_URL}" "$state" "$(cat "$POSSE_TEST_GH_HEAD")" "${POSSE_TEST_GH_HEAD_BRANCH:-posse/t1}" "$base" "$repository"
          fi ;;
     esac ;;
-  "pr merge") printf 'Merged\n' ;;
+  "pr merge")
+    if [ -n "${POSSE_TEST_GH_MERGE_ADVANCE_SHA:-}" ]; then git -C "$POSSE_TEST_GH_ADVANCE_REPO" push origin "$POSSE_TEST_GH_MERGE_ADVANCE_SHA:refs/heads/main" >/dev/null; fi
+    if [ -n "${POSSE_TEST_GH_MERGE_ERROR:-}" ]; then printf '%s\n' "$POSSE_TEST_GH_MERGE_ERROR" >&2; exit 1; fi
+    printf 'Merged\n' ;;
   *) printf 'unexpected fake gh command: %s\n' "$*" >&2; exit 90 ;;
 esac
 `
