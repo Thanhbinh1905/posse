@@ -48,6 +48,100 @@ func TestValidationSummaryListsAcceptedFindingsForItsExactHead(t *testing.T) {
 	}
 }
 
+func TestValidationSummaryUsesAcceptedHeadAfterSeveralReviewRounds(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	defer f.db.Close()
+	ctx := context.Background()
+	oldHead, latestHead := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	for i, head := range []string{oldHead, latestHead} {
+		reviewID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 10 + i, Type: "review", Title: fmt.Sprintf("review %d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.ExecContext(ctx, `INSERT INTO review_rounds(ship_task_id,round,review_task_id,repository,scope_kind,scope_base_sha,head_sha,target_commit_sha,baseline_tree,delta_sha256,conflicted_paths_json,status,verdict,created_at) VALUES(?,?,?,?,'full',?,?,?,?,?,'[]','verdict','changes_requested',?)`, f.task.ID, i+1, reviewID, f.project.Name, head, head, head, head, strings.Repeat("c", 64), i+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,user_quote,at) VALUES(?,?,?,?)`, f.task.ID, latestHead, "Accept this exact head", 10); err != nil {
+		t.Fatal(err)
+	}
+	pattern, err := f.db.ExecContext(ctx, `INSERT INTO review_patterns(ship_task_id,seq,key,title,rule,root_cause,fix_guidance,created_round) VALUES(?,1,'P-1','Latest accepted finding','rule','cause','guidance',2)`, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patternID, err := pattern.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO review_findings(ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state) VALUES(?,1,?, ?,2,?,'internal/input.go','parseInput','excerpt',1,?,'P1','introduced',1,'accepted')`, f.task.ID, patternID, strings.Repeat("d", 64), f.project.Name, latestHead); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := validationSummaryFor(ctx, f.db, f.task, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := prDetails(ctx, f.db, f.project, f.task, f.service.homePath, f.project.Name, "Summary", "go test ./internal/app -> passed", "Proof", "Risk: low\nRollback: revert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{shortSHA(latestHead), "Latest accepted finding", "Accept this exact head"} {
+		if summary.Head != latestHead || !strings.Contains(body, expected) {
+			t.Fatalf("PR validation block omitted %q for accepted head: %s", expected, body)
+		}
+	}
+}
+
+func TestValidationSummaryReportsFrozenReviewAndGreenhouseVerdict(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	defer f.db.Close()
+	installFullPipelinePlan(t, f)
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider,
+		Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA,
+		ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate",
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record Greenhouse Verdict: recorded=%v err=%v", recorded, err)
+	}
+	summary, err := validationSummaryFor(context.Background(), f.db, f.task, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Review != "full-pipeline" || summary.LatestVerdict != "clean" || summary.LatestGreenhouseVerdict == nil {
+		t.Fatalf("summary review or Verdict = %+v", summary)
+	}
+	view := summary.view()
+	var greenhouse any
+	for _, field := range view {
+		switch field.Key {
+		case "latest_verdict":
+			if field.Value != "clean" {
+				t.Fatalf("latest_verdict = %#v", field.Value)
+			}
+		case "greenhouse_verdict":
+			greenhouse = field.Value
+		}
+	}
+	got, ok := greenhouse.(map[string]any)
+	if !ok || got["grant"] != verdict.Grant || got["head"] != verdict.Head || got["outcome"] != verdict.Outcome {
+		t.Fatalf("greenhouse_verdict = %#v", greenhouse)
+	}
+	code, output, stderr := f.run("show", "t1", "--format", "json")
+	if code != 0 {
+		t.Fatalf("show: %d %s %s", code, output, stderr)
+	}
+	var show struct {
+		Validation map[string]any `json:"validation"`
+	}
+	if err := json.Unmarshal([]byte(output), &show); err != nil {
+		t.Fatal(err)
+	}
+	showGreenhouse, ok := show.Validation["greenhouse_verdict"].(map[string]any)
+	if show.Validation["review"] != "full-pipeline" || show.Validation["latest_verdict"] != "clean" || !ok || showGreenhouse["grant"] != verdict.Grant || showGreenhouse["head"] != verdict.Head || showGreenhouse["outcome"] != verdict.Outcome {
+		t.Fatalf("show validation = %#v", show.Validation)
+	}
+}
+
 func TestReplaceValidationBlockTouchesOnlyOwnedBlock(t *testing.T) {
 	forged := managedPublishBody("Human note\n"+validationBlockStart+"\nkeep\n"+validationBlockEnd, "forged-token")
 	oldBlock := validationSummary{Head: "aaaaaaaaaaaa", Review: "full-pipeline", MaxRounds: 3, RoundsUsed: 1, Remaining: 2, Findings: map[string]int{"open": 2}, CI: "pending"}.markdown()
