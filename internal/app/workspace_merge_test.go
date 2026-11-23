@@ -15,6 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 type workspaceMergeFixture struct {
@@ -240,6 +241,79 @@ func TestWorkspacePRMergeChecksTargetFreshnessBeforeRecordingHead(t *testing.T) 
 	var instruction string
 	if err := f.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued' ORDER BY id DESC LIMIT 1`, f.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, targetTip) || !strings.Contains(instruction, "Workspace member worker") || !strings.Contains(instruction, "--repo worker") {
 		t.Fatalf("workspace Worker did not receive a member-specific sync instruction: body=%q err=%v", instruction, err)
+	}
+}
+
+func TestWorkspacePRMergeRefusalQueuesMemberRefreshWhenTargetAdvances(t *testing.T) {
+	f := newWorkspaceMergeFixture(t, "[defaults]\nmerge_mode = \"pr\"\nauto_teardown = \"never\"\n", []string{"worker"}, []string{"worker"})
+	ctx := context.Background()
+	members, err := workspaceMembers(ctx, f.db, f.project, f.task)
+	if err != nil || len(members) != 1 {
+		t.Fatalf("workspace members = %#v, %v", members, err)
+	}
+	member := members[0]
+	head := strings.TrimSpace(gitTest(t, member.task.WorktreePath, "rev-parse", "HEAD"))
+	repo := member.repo
+	repo.State, repo.GatedSHA, repo.PRURL = store.TaskRepoMerge, head, "https://github.com/acme/worker/pull/7"
+	member.task.GatedSHA, member.task.PRURL = head, repo.PRURL
+	member.task.State = store.StateMerging
+	if err := f.db.UpdateTaskRepo(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, f.task.ID, store.StateDone, store.StateMerging, "cli", "PR ready"); err != nil {
+		t.Fatal(err)
+	}
+	advanceTree := filepath.Join(f.root, "worker-target-advance")
+	gitTest(t, member.target.Root, "worktree", "add", "-b", "target-advance", advanceTree, "refs/heads/main")
+	if err := os.WriteFile(filepath.Join(advanceTree, "target-only.txt"), []byte("target update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, advanceTree, "add", "target-only.txt")
+	gitTest(t, advanceTree, "commit", "-m", "advance target")
+	targetTip := strings.TrimSpace(gitTest(t, advanceTree, "rev-parse", "HEAD"))
+	gitTest(t, advanceTree, "push", "origin", targetTip+":refs/heads/main")
+
+	brief := []byte("---\ntype: change\ntitle: Workspace freshness\ndone_when: target is current\nrepos: [worker]\n---\nRefresh the worker target.\n")
+	plan, err := taskplan.Resolve(taskplan.Request{
+		Brief: taskplan.Select("brief", "brief.md", brief),
+		Execution: taskplan.Execution{Scope: "workspace", Members: []taskplan.Member{{
+			Name: "worker", Path: "worker", Base: "main", Target: "main", Delivery: "pr",
+			Review: "full-pipeline", ReviewProvider: store.GreenhouseReviewProvider,
+		}}},
+		Launch: taskplan.Launch{ProfileName: "test", Profile: config.Profile{Kind: "pi"}},
+		Review: "full-pipeline", ReviewProvider: store.GreenhouseReviewProvider, Delivery: "pr",
+		Autonomy: config.Autonomy{Review: "ask", Merge: "ask"},
+		Paths:    taskplan.Paths{Scratch: filepath.Join(f.home, "scratch", "stack", "t1"), Output: filepath.Join(f.home, "projects", "stack", "tasks", "t1")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedPlan, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE id=?`, encodedPlan, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `INSERT INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,?,?)`, f.task.ID, plan.Revision, encodedPlan); err != nil {
+		t.Fatal(err)
+	}
+	member.task.PlanJSON = encodedPlan
+	cfg := f.config()
+	if !greenhouseFullPipelineTaskWithConfig(member.task, cfg, "worker") {
+		t.Fatal("workspace Member is not recognized as Greenhouse full-pipeline")
+	}
+	refreshed, refreshErr := f.service.refreshAfterPRMergeRefusal(ctx, f.db, member.project, cfg, member.task, "worker", errors.New("Pull request is not mergeable: the base branch was modified"))
+	var failure *axi.Error
+	if !refreshed || !errors.As(refreshErr, &failure) || failure.Code != "pr_branch_behind" || !strings.Contains(failure.Message, targetTip) {
+		t.Fatalf("workspace merge refusal refresh = %v, %v", refreshed, refreshErr)
+	}
+	if f.state() != store.StateDone || f.repos()["worker"].State != store.TaskRepoOpen || f.repos()["worker"].GatedSHA != "" {
+		t.Fatalf("workspace state after refresh = %s repos=%#v", f.state(), f.repos())
+	}
+	var instruction string
+	if err := f.db.QueryRowContext(ctx, `SELECT body FROM messages WHERE task_id=? AND status='queued'`, f.task.ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "Workspace member worker") || !strings.Contains(instruction, "Greenhouse-reviewed head") || !strings.Contains(instruction, targetTip) {
+		t.Fatalf("workspace member refresh instruction = %q, %v", instruction, err)
 	}
 }
 
