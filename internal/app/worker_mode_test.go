@@ -157,10 +157,12 @@ func TestWorkerCanReadOwnTaskAndReviewButNotAnotherTask(t *testing.T) {
 	}
 
 	procRoot = fakeProc(t, fixture.root, []string{"PATH=/usr/bin"})
-	t.Setenv("HERDR_PANE_ID", "w2:p1")
+	t.Setenv("HERDR_PANE_ID", "w3:p1")
 	t.Chdir(fixture.root)
-	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
-		t.Fatalf("Worker identified by its own pane and home marker could not read its Task: code=%d output=%s", code, output)
+	for _, command := range [][]string{{"show", "t2"}, {"review", "t2"}} {
+		if code, output := runCLI(t, service, command...); code == 0 || !strings.Contains(output, "worker_forbidden") {
+			t.Fatalf("Worker outside its Sandbox read another Task by spoofing HERDR_PANE_ID with `posse %s`: code=%d output=%s", strings.Join(command, " "), code, output)
+		}
 	}
 	t.Setenv(workerHomeEnv, "")
 	t.Setenv("HERDR_PANE_ID", "")

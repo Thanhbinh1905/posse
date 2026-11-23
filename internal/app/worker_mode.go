@@ -92,6 +92,31 @@ func (s *Service) requireWorkerOwnTask(ctx context.Context, db *store.DB, projec
 }
 
 func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.Task, error) {
+	ancestorTask, hasAncestor, err := workerAncestorTask(ctx, db, home)
+	if err != nil {
+		return store.Task{}, err
+	}
+	dir, err := currentDir()
+	if err != nil {
+		return store.Task{}, err
+	}
+	sandboxTask, hasSandbox, err := workerSandboxTask(ctx, db, dir)
+	if err != nil {
+		return store.Task{}, err
+	}
+	if hasAncestor && hasSandbox && ancestorTask.ID != sandboxTask.ID {
+		return store.Task{}, store.ErrNotFound
+	}
+	if hasAncestor {
+		return ancestorTask, nil
+	}
+	if hasSandbox {
+		return sandboxTask, nil
+	}
+	return store.Task{}, store.ErrNotFound
+}
+
+func workerAncestorTask(ctx context.Context, db *store.DB, home string) (store.Task, bool, error) {
 	var identity *ancestorProcess
 	for _, process := range processAncestors(procRoot, os.Getpid()) {
 		if home == "" || process.env[workerHomeEnv] == "" || !samePath(process.env[workerHomeEnv], home) {
@@ -106,27 +131,42 @@ func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.T
 			identity = &trusted
 		}
 	}
-	if identity != nil && identity.env["HERDR_PANE_ID"] != "" {
-		return db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
+	if identity == nil || identity.env["HERDR_PANE_ID"] == "" {
+		return store.Task{}, false, nil
 	}
-	dir, err := currentDir()
+	task, err := db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
+	if store.IsNotFound(err) {
+		return store.Task{}, false, nil
+	}
+	return task, err == nil, err
+}
+
+func workerSandboxTask(ctx context.Context, db *store.DB, dir string) (store.Task, bool, error) {
+	projects, err := db.Projects(ctx)
 	if err != nil {
-		return store.Task{}, err
+		return store.Task{}, false, err
 	}
-	byPath, pathErr := taskForPath(ctx, db, dir)
-	paneID := os.Getenv("HERDR_PANE_ID")
-	if pathErr == nil {
-		if paneID != "" {
-			if byPane, paneErr := db.TaskByPane(ctx, paneID); paneErr == nil && byPane.ID != byPath.ID {
-				return store.Task{}, store.ErrNotFound
-			}
+	var match *store.Sandbox
+	for _, project := range projects {
+		sandboxes, err := db.Sandboxes(ctx, project.ID)
+		if err != nil {
+			return store.Task{}, false, err
 		}
-		return byPath, nil
+		for _, sandbox := range sandboxes {
+			if sandbox.State != "held" || sandbox.TaskID == 0 || !pathWithin(resolvedPath(sandbox.Path), dir) {
+				continue
+			}
+			if match != nil && (match.TaskID != sandbox.TaskID || match.ProjectID != sandbox.ProjectID) {
+				return store.Task{}, false, store.ErrNotFound
+			}
+			match = &sandbox
+		}
 	}
-	if paneID != "" {
-		return db.TaskByPane(ctx, paneID)
+	if match == nil {
+		return store.Task{}, false, nil
 	}
-	return store.Task{}, pathErr
+	task, err := db.TaskByID(ctx, match.ProjectID, match.TaskID)
+	return task, err == nil, err
 }
 
 func workerOwnTaskRefusal() error {
