@@ -294,6 +294,69 @@ func (db *DB) NoticeDeliveryForDestinationRetry(ctx context.Context, projectID i
 	return delivery, true, err
 }
 
+func (db *DB) RequeueExpiredPrintedDeliveriesForOtherAdapters(ctx context.Context, projectID int64, destination string, at int64) (bool, error) {
+	adapter, _, ok := strings.Cut(destination, ":")
+	if !ok || strings.TrimSpace(adapter) == "" {
+		return false, errors.New("Notice delivery destination must name an adapter session")
+	}
+	adapterPrefix := adapter + ":"
+	var deliveryID string
+	err := db.QueryRowContext(ctx, `SELECT delivery_id FROM notice_delivery_receipts
+		WHERE project_id=? AND substr(destination,1,?)<>? AND state='printed' AND lease_until<=?
+		ORDER BY updated_at,delivery_id LIMIT 1`, projectID, len([]rune(adapterPrefix)), adapterPrefix, at).Scan(&deliveryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var delivery NoticeDelivery
+	var rawIDs string
+	if err := tx.QueryRowContext(ctx, `SELECT delivery_id,project_id,notice_ids_json,owner_token,state FROM notice_delivery_receipts WHERE delivery_id=?`, deliveryID).Scan(&delivery.DeliveryID, &delivery.ProjectID, &rawIDs, &delivery.OwnerToken, &delivery.State); err != nil {
+		return false, err
+	}
+	if delivery.State != "printed" {
+		return false, nil
+	}
+	if err := json.Unmarshal([]byte(rawIDs), &delivery.NoticeIDs); err != nil {
+		return false, fmt.Errorf("decode Notice delivery IDs: %w", err)
+	}
+	query := `UPDATE notices SET claim_token='',claimed_at=0 WHERE project_id=? AND claim_token=? AND delivered_at IS NULL AND id IN (` + sqlPlaceholders(len(delivery.NoticeIDs)) + `)`
+	args := []any{delivery.ProjectID, delivery.OwnerToken}
+	for _, id := range delivery.NoticeIDs {
+		args = append(args, id)
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != int64(len(delivery.NoticeIDs)) {
+		if err != nil {
+			return false, err
+		}
+		return false, ErrStateRace
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE notice_delivery_receipts SET state='rejected',owner_token='',lease_until=0,updated_at=? WHERE delivery_id=? AND state='printed' AND lease_until<=?`, at, deliveryID, at)
+	if err != nil {
+		return false, err
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		if err != nil {
+			return false, err
+		}
+		return false, ErrStateRace
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, db.PersistNoticeDeliverySnapshot(ctx, projectID)
+}
+
 func (db *DB) NoticeDeliveryForOtherSession(ctx context.Context, projectID int64, destination string, skipHeld bool) (NoticeDelivery, bool, error) {
 	adapter, _, ok := strings.Cut(destination, ":")
 	if !ok || strings.TrimSpace(adapter) == "" {
