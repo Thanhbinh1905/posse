@@ -80,11 +80,40 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 }
 
 func (s *Service) requireWorkerOwnTask(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
-	current, err := s.workerTask(ctx, db)
+	home, err := s.homePath()
+	if err != nil {
+		return workerOwnTaskRefusal()
+	}
+	current, err := workerIdentityTask(ctx, db, home)
 	if err != nil || current.ID != task.ID || current.ProjectID != project.ID {
-		return axi.Failure("worker_forbidden", "`posse show` and `posse review` did not run; Workers may inspect only their own Task. Allowed Posse commands: "+workerAllowedCommands, false)
+		return workerOwnTaskRefusal()
 	}
 	return nil
+}
+
+func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.Task, error) {
+	var identity *ancestorProcess
+	for _, process := range processAncestors(procRoot, os.Getpid()) {
+		if home == "" || process.env[workerHomeEnv] == "" || !samePath(process.env[workerHomeEnv], home) {
+			continue
+		}
+		agent := process.agent
+		for key, value := range process.env {
+			agent = agent || value != "" && agentEnvironmentKey(key)
+		}
+		if agent {
+			trusted := process
+			identity = &trusted
+		}
+	}
+	if identity == nil || identity.env["HERDR_PANE_ID"] == "" {
+		return store.Task{}, store.ErrNotFound
+	}
+	return db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
+}
+
+func workerOwnTaskRefusal() error {
+	return axi.Failure("worker_forbidden", "`posse show` and `posse review` did not run; Workers may inspect only their own Task. Allowed Posse commands: "+workerAllowedCommands, false)
 }
 
 // workerCaller reports whether this process runs on behalf of a Worker of
