@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
@@ -875,14 +876,46 @@ func TestRepeatedGreenhouseReviewFailuresAreBoundedByExactHead(t *testing.T) {
 	}
 }
 
-func TestParallelReviewDoesNotRetryReviewerContextOverflow(t *testing.T) {
-	calls := 0
-	_, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Millisecond, func(time.Duration) (greenhouse.RoundResult, error) {
-		calls++
-		return greenhouse.RoundResult{}, errors.New("reviewer context overflow: prompt exceeds maximum context length")
-	})
-	if err == nil || calls != 1 || attempts != 1 {
-		t.Fatalf("context-overflow review made %d calls and %d attempts, err=%v; want one terminal attempt", calls, attempts, err)
+func TestParallelReviewDoesNotRetryNonRetryableSizeErrors(t *testing.T) {
+	for _, message := range []string{
+		"intent_too_long: intent is 8193 bytes; maximum is 8192",
+		"prompt_exceeds_context (12000 tokens > 8192)",
+		"context_overflow (12000 tokens > 8192)",
+	} {
+		t.Run(message, func(t *testing.T) {
+			calls := 0
+			_, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Millisecond, func(time.Duration) (greenhouse.RoundResult, error) {
+				calls++
+				return greenhouse.RoundResult{}, errors.New(message)
+			})
+			if err == nil || calls != 1 || attempts != 1 {
+				t.Fatalf("size-error review made %d calls and %d attempts, err=%v; want one terminal attempt", calls, attempts, err)
+			}
+		})
+	}
+}
+
+func TestGreenhouseIntentFitsByteLimitAtUTF8Boundary(t *testing.T) {
+	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "brief", Bytes: []byte("---\ntype: change\ntitle: \"" + strings.Repeat("é", 5000) + "\"\ndone_when: \"" + strings.Repeat("界", 5000) + "\"\n---\n")}}}
+	intent := greenhouseIntent(store.Task{Title: "fallback"}, plan)
+	if !utf8.ValidString(intent) {
+		t.Fatalf("Greenhouse intent is not valid UTF-8")
+	}
+	if len(intent) > 8192 || !strings.Contains(intent, "[truncated]") {
+		t.Fatalf("Greenhouse intent is %d bytes and truncation marker present=%t", len(intent), strings.Contains(intent, "[truncated]"))
+	}
+	if strings.TrimSpace(intent) == "" {
+		t.Fatal("Greenhouse intent is blank")
+	}
+}
+
+func TestGreenhouseIntentRemovesControlCharactersAndFallsBack(t *testing.T) {
+	intent := greenhouseIntent(store.Task{Title: "A\x00B\rC\nD\tE"}, nil)
+	if intent != "ABC\nD\tE" {
+		t.Fatalf("sanitized Greenhouse intent = %q", intent)
+	}
+	if got := greenhouseIntent(store.Task{Title: "\x00\r\t\n"}, nil); got != "Greenhouse review" {
+		t.Fatalf("blank Greenhouse intent fallback = %q", got)
 	}
 }
 

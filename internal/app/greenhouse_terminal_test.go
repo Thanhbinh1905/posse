@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,6 +104,67 @@ func TestReviewStartPassesPinnedHeadAfterSandboxOwnershipRace(t *testing.T) {
 	}
 	if reviewedHead != head {
 		t.Fatalf("Greenhouse reviewed %s after Sandbox reuse, want Task head %s", reviewedHead, head)
+	}
+}
+
+func TestGreenhouseSizeErrorsRaiseNeedsDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason, measured string
+	}{
+		{name: "intent", reason: "intent_too_long: 8193 bytes exceeds 8192", measured: "8193 bytes"},
+		{name: "prompt", reason: "prompt_exceeds_context (12000 tokens > 8192)", measured: "12000 tokens > 8192"},
+		{name: "reviewer", reason: "context_overflow (12000 tokens > 8192)", measured: "12000 tokens > 8192"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateWorking)
+			freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+			plan, err := f.task.AdmittedPlan()
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.ReviewProvider = store.GreenhouseReviewProvider
+			encoded, err := plan.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.SetProjectLead(context.Background(), f.project.ID, "fixture", "lead-pane", "lead"); err != nil {
+				t.Fatal(err)
+			}
+			f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			f.service.greenhouseRound = func(context.Context, greenhouse.Round) (greenhouse.RoundResult, error) {
+				calls++
+				return greenhouse.RoundResult{}, errors.New(tc.reason)
+			}
+			binDir, err := os.MkdirTemp(os.Getenv("TMPDIR"), "gb")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(binDir) })
+			if err := os.Symlink("/usr/bin/true", filepath.Join(binDir, "greenhouse")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if code, output, stderr := f.run("_greenhouse", "review", "t1"); code == 0 {
+				t.Fatalf("size error unexpectedly succeeded: %s %s", output, stderr)
+			}
+			if calls != 1 {
+				t.Fatalf("Greenhouse called %d times, want one", calls)
+			}
+			notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(notices) != 1 || notices[0].Kind != "needs_decision" || !strings.Contains(notices[0].Summary, tc.reason) || !strings.Contains(notices[0].Summary, tc.measured) {
+				t.Fatalf("size-error Notices = %+v, want one needs_decision naming %q and %q", notices, tc.reason, tc.measured)
+			}
+		})
 	}
 }
 
