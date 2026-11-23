@@ -151,15 +151,15 @@ func greenhouseRunIDFromSignals(ctx context.Context, db *store.DB, task store.Ta
 	return ""
 }
 
-func inspectGreenhouseTask(ctx context.Context, task store.Task) (greenhouseWatchSnapshot, error) {
+func inspectGreenhouseTask(ctx context.Context, projectRoot string) (greenhouseWatchSnapshot, error) {
 	request := []byte(`{"version":2,"op":"inspect"}`)
 	command := exec.CommandContext(ctx, "greenhouse", "axi")
-	command.Dir = task.WorktreePath
+	command.Dir = projectRoot
 	command.Stdin = bytes.NewReader(request)
 	command.Env = os.Environ()
 	output, err := command.Output()
 	if err != nil {
-		return greenhouseWatchSnapshot{}, fmt.Errorf("inspect Greenhouse in %s: %w", task.WorktreePath, err)
+		return greenhouseWatchSnapshot{}, fmt.Errorf("inspect Greenhouse from %s: %w", projectRoot, err)
 	}
 	var snapshot greenhouseWatchSnapshot
 	if err := json.Unmarshal(output, &snapshot); err != nil {
@@ -191,12 +191,12 @@ func (s *Service) observeGreenhouseTasks(ctx context.Context, db *store.DB, proj
 		}
 		var snapshot greenhouseWatchSnapshot
 		if runID != "" {
-			snapshot = inspectGreenhouseRun(ctx, task, runID)
+			snapshot = inspectGreenhouseRun(ctx, project.Root, runID)
 			if snapshot.RunID == "" {
 				snapshot.RunID = runID
 			}
 		} else {
-			snapshot, err = inspectGreenhouseTask(ctx, task)
+			snapshot, err = inspectGreenhouseTask(ctx, project.Root)
 			if err != nil || snapshot.RunID == "" {
 				continue
 			}
@@ -273,10 +273,10 @@ func raiseGreenhouseNotice(ctx context.Context, db *store.DB, project store.Proj
 	return err
 }
 
-func inspectGreenhouseRun(ctx context.Context, task store.Task, runID string) greenhouseWatchSnapshot {
+func inspectGreenhouseRun(ctx context.Context, projectRoot, runID string) greenhouseWatchSnapshot {
 	request, _ := json.Marshal(map[string]any{"version": 2, "op": "inspect", "run_id": runID})
 	command := exec.CommandContext(ctx, "greenhouse", "axi")
-	command.Dir = task.WorktreePath
+	command.Dir = projectRoot
 	command.Stdin = bytes.NewReader(request)
 	command.Env = os.Environ()
 	output, err := command.Output()

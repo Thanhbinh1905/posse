@@ -159,6 +159,7 @@ func TestGreenhouseWatchFollowsDoneSignalRunAfterWorkerFinishes(t *testing.T) {
 	}
 	inspect := filepath.Join(bin, "greenhouse")
 	script := `#!/bin/sh
+printf '%s\n' "$PWD" > '` + filepath.Join(home, "greenhouse-probe-cwd") + `'
 request=$(cat)
 case "$request" in
   *run-1046*) printf '%s\n' '{"run_id":"run-1046","run":{"id":"run-1046","status":"ci-ready","stage":"ci"}}' ;;
@@ -172,6 +173,17 @@ esac
 	service := New(home, nil)
 	if err := service.observeGreenhouseTasks(ctx, db, project); err != nil {
 		t.Fatal(err)
+	}
+	probeCWD, err := os.ReadFile(filepath.Join(home, "greenhouse-probe-cwd"))
+	if err != nil || strings.TrimSpace(string(probeCWD)) != project.Root {
+		t.Fatalf("Greenhouse probe cwd = %q, %v; want Project root %q", probeCWD, err, project.Root)
+	}
+	if _, err := inspectGreenhouseTask(ctx, project.Root); err != nil {
+		t.Fatalf("inspect Greenhouse without a run ID: %v", err)
+	}
+	probeCWD, err = os.ReadFile(filepath.Join(home, "greenhouse-probe-cwd"))
+	if err != nil || strings.TrimSpace(string(probeCWD)) != project.Root {
+		t.Fatalf("Greenhouse probe without a run ID cwd = %q, %v; want Project root %q", probeCWD, err, project.Root)
 	}
 	watch, err := db.GreenhouseTaskWatch(ctx, taskID)
 	if err != nil || watch.RunID != "run-1046" || watch.Status != "ci-ready" || watch.Stage != "ci" {
