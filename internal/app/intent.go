@@ -167,6 +167,9 @@ func (s *Service) runTeardownHelperStopStep(ctx context.Context, db *store.DB, i
 	if err := json.Unmarshal([]byte(current.PayloadJSON), &payload); err != nil {
 		return err
 	}
+	if payload == nil {
+		payload = make(map[string]json.RawMessage)
+	}
 	var completed bool
 	if raw := payload["task_helpers_stopped"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &completed); err != nil {
