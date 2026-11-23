@@ -34,6 +34,15 @@ func prepareSupportedHomeAtVersion(t *testing.T, db *DB, version int64) {
 			t.Fatal(err)
 		}
 	}
+	var hasGreenhouseRequests bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='greenhouse_review_requests')`).Scan(&hasGreenhouseRequests); err != nil {
+		t.Fatal(err)
+	}
+	if hasGreenhouseRequests && version < 20261123132235 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE greenhouse_review_requests DROP COLUMN failure_count`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		t.Fatal(err)
@@ -58,8 +67,8 @@ func TestOpenAppliesBaselineAsOneMigration(t *testing.T) {
 	}
 	defer db.Close()
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 2 {
-		t.Fatalf("applied migration count = %d, %v; want baseline and review-dispute evidence", applied, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 3 {
+		t.Fatalf("applied migration count = %d, %v; want baseline, review-dispute evidence and greenhouse attempt migrations", applied, err)
 	}
 	var version int64
 	if err := db.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied=1 AND version_id=?`, baselineMigrationVersion).Scan(&version); err != nil || version != baselineMigrationVersion {

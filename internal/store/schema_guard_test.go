@@ -37,8 +37,8 @@ func TestOpenRecordsMigrationChecksums(t *testing.T) {
 	}
 	defer db.Close()
 	var count int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM posse_migration_checksums`).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("checksums recorded = %d, want baseline and review-dispute evidence checksums (%v)", count, err)
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM posse_migration_checksums`).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("checksums recorded = %d, want baseline, review-dispute evidence and greenhouse attempt checksums (%v)", count, err)
 	}
 }
 
@@ -82,8 +82,8 @@ func TestMigrationGateDecidesPendingMigrations(t *testing.T) {
 	}
 	_, err = Open(home)
 	requireSchemaError(t, err, "migration_refused")
-	if len(gotPending) != 10 || gotForced {
-		t.Fatalf("gate saw pending=%v forced=%v, want migrations 96-101, the baseline and review-dispute evidence", gotPending, gotForced)
+	if len(gotPending) != 11 || gotForced {
+		t.Fatalf("gate saw pending=%v forced=%v, want migrations 96-101, the baseline, review-dispute evidence and greenhouse attempts", gotPending, gotForced)
 	}
 	calls := 0
 	MigrationGate = func(string, []int64, bool) error { calls++; return nil }
