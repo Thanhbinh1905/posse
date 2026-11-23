@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -347,7 +349,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
-			terminalFailure := reviewerContextOverflow(err)
+			terminalFailure := reviewerSizeFailure(err)
 			if parallelMode {
 				requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
 				if err != nil {
@@ -988,10 +990,30 @@ func greenhouseIntent(task store.Task, plan *taskplan.Plan) string {
 			break
 		}
 	}
-	if doneWhen == "" {
-		return title
+	if doneWhen != "" {
+		title += "\n\nDone when: " + doneWhen
 	}
-	return title + "\n\nDone when: " + doneWhen
+	intent := strings.ToValidUTF8(title, "")
+	var clean strings.Builder
+	for _, r := range intent {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			clean.WriteRune(r)
+		}
+	}
+	intent = clean.String()
+	if strings.TrimSpace(intent) == "" {
+		intent = "Greenhouse review"
+	}
+	const maxBytes = 8192
+	const marker = "[truncated]"
+	if len(intent) > maxBytes {
+		end := maxBytes - len(marker)
+		for end > 0 && !utf8.RuneStart(intent[end]) {
+			end--
+		}
+		intent = intent[:end] + marker
+	}
+	return intent
 }
 
 func greenhouseTaskMember(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo string) (greenhouseMember, error) {
