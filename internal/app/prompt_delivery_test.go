@@ -147,6 +147,17 @@ func TestLaunchPromptDoesNotResendWhenAgentIsAlreadyWorking(t *testing.T) {
 	}
 }
 
+func TestLaunchPromptNamesCodexConversationOpenInAnotherApp(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"This conversation is open in another app. Close it there and try again."}}`)
+	err := service.deliverLaunchPrompt(context.Background(), "w1:p1", "Read relaunch.md and follow it.")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "codex_conversation_open" || !strings.Contains(strings.ToLower(strings.Join(failure.Help, " ")), "close") {
+		t.Fatalf("Codex conversation prompt error = %v, want named recovery", err)
+	}
+}
+
 func TestLaunchPromptNamesCodexUpdatePrompt(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}

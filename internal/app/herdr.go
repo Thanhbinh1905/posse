@@ -359,6 +359,9 @@ func (s *Service) confirmPrompt(ctx context.Context, paneID, text string, send f
 		if s.codexUpdatePrompt(ctx, paneID) {
 			return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
 		}
+		if s.codexConversationOpenPrompt(ctx, paneID) {
+			return axi.Failure("codex_conversation_open", "Codex reports that the conversation is open in another app", false, "Close the conversation in the other Codex app, then relaunch the Task")
+		}
 		if !isPromptStall(lastErr) {
 			return lastErr
 		}
@@ -416,6 +419,20 @@ func (s *Service) codexUpdatePrompt(ctx context.Context, paneID string) bool {
 	screen := strings.ToLower(s.visibleScreen(ctx, paneID))
 	return strings.Contains(screen, "codex is available") &&
 		(strings.Contains(screen, "update") || strings.Contains(screen, "upgrade"))
+}
+
+func (s *Service) codexConversationOpenPrompt(ctx context.Context, paneID string) bool {
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	pane, found := findAppPane(snapshot.Panes, paneID, "")
+	if !found || pane.Agent != "codex" {
+		return false
+	}
+	screen := strings.ToLower(s.visibleScreen(ctx, paneID))
+	return strings.Contains(screen, "open in another app") &&
+		(strings.Contains(screen, "conversation") || strings.Contains(screen, "thread"))
 }
 
 func isAgentBlocked(err error) bool {
