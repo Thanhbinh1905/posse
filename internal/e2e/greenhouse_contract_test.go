@@ -653,9 +653,9 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 
 func newGreenhouseContract(t *testing.T, f *workerTabsFixture) *greenhouseContract {
 	t.Helper()
-	if binary := os.Getenv("POSSE_T1237_GREENHOUSE_BIN"); binary != "" {
+	if binary := os.Getenv("POSSE_T1258_GREENHOUSE_BIN"); binary != "" {
 		if !filepath.IsAbs(binary) {
-			t.Fatalf("POSSE_T1237_GREENHOUSE_BIN must be absolute: %s", binary)
+			t.Fatalf("POSSE_T1258_GREENHOUSE_BIN must be absolute: %s", binary)
 		}
 		if err := os.Symlink(binary, filepath.Join(f.root, "bin", "greenhouse")); err != nil {
 			t.Fatalf("link real Greenhouse binary: %v", err)
