@@ -824,11 +824,12 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 	if err != nil {
 		return err
 	}
+	currentCycle := len(signals) > 0 && signals[0].Verb == "done"
 	readinessSince := int64(0)
-	if len(signals) > 0 && signals[0].Verb == "done" {
+	if currentCycle {
 		readinessSince = signals[0].At
 	}
-	readiness := current.State == store.StateMerging && current.GatedSHA == verdict.Head
+	readiness := currentCycle && current.State == store.StateMerging && current.GatedSHA == verdict.Head
 	if readiness && current.UpdatedAt > readinessSince {
 		readinessSince = current.UpdatedAt
 	}
@@ -837,7 +838,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		return err
 	}
 	for _, decision := range decisions {
-		if decision.TaskID == current.ID && decision.Kind == "merge_ready" && current.GatedSHA == verdict.Head && decision.CreatedAt >= readinessSince {
+		if currentCycle && decision.TaskID == current.ID && decision.Kind == "merge_ready" && current.GatedSHA == verdict.Head && decision.CreatedAt >= readinessSince {
 			readiness = true
 		}
 	}
@@ -864,7 +865,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		if workspaceHead := data.HeadSHAs[verdict.Repository]; workspaceHead != "" {
 			noticeHead = workspaceHead
 		}
-		if notice.Kind == "merge_ready" && noticeHead == verdict.Head && notice.CreatedAt >= readinessSince {
+		if currentCycle && notice.Kind == "merge_ready" && noticeHead == verdict.Head && notice.CreatedAt >= readinessSince {
 			readiness = true
 		}
 		withdrawalHead := data.HeadSHA
@@ -878,7 +879,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 			withdrawalAt = notice.CreatedAt
 		}
 	}
-	withdrawalRecorded := withdrawalAt >= readinessSince && withdrawalAt > 0
+	withdrawalRecorded := currentCycle && withdrawalAt >= readinessSince && withdrawalAt > 0
 	if readiness {
 		if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
 			return err
