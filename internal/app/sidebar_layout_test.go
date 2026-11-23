@@ -56,9 +56,9 @@ func TestSetupRemovesExactPosseSidebarLayoutAndLeavesCustomRows(t *testing.T) {
 
 func TestSetupRejectsRemovedSidebarFlagsClearly(t *testing.T) {
 	service, _, _ := humanSetupFixture(t)
-	for _, flag := range []string{"--sidebar-layout", "--no-sidebar-layout"} {
+	for _, flag := range []string{"--sidebar-layout", "--no-sidebar-layout", "--sidebar-layout=true", "--no-sidebar-layout=false"} {
 		_, output := runCLI(t, service, "setup", flag)
-		if !strings.Contains(output, flag+" was removed") {
+		if !strings.Contains(output, strings.SplitN(flag, "=", 2)[0]+" was removed") {
 			t.Errorf("%s error = %s", flag, output)
 		}
 	}
@@ -82,6 +82,19 @@ func TestDoctorNoLongerChecksHerdrSidebarLayout(t *testing.T) {
 		if check.Check == "Herdr Agents sidebar layout" {
 			t.Fatalf("doctor still checks the removed layout: %s", output)
 		}
+	}
+}
+
+func TestRemoveSidebarLayoutDoesNotConfuseAgentsxTableWithAgentsSubtable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	original := sidebarLayoutSnippet + "\n[ui.sidebar.agentsx]\nrows = [[\"mine\"]]\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := removeSidebarLayout(path, true)
+	data, readErr := os.ReadFile(path)
+	if err != nil || readErr != nil || result != "removed" || string(data) != "\n[ui.sidebar.agentsx]\nrows = [[\"mine\"]]\n" {
+		t.Fatalf("result = %q, err = %v, readErr = %v, config = %q", result, err, readErr, data)
 	}
 }
 

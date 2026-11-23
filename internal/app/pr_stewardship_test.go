@@ -366,13 +366,31 @@ func TestRelaunchAfterPublishedPRReleaseReacquiresSandbox(t *testing.T) {
 	}
 	gitTest(t, reused.Path, "add", "other-task.txt")
 	gitTest(t, reused.Path, "commit", "-m", "other Task head")
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance target before conflict")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "CONFLICTING", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("poll released PR conflict: %v", err)
+	}
+	var conflictInstructionID int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness' ORDER BY seq DESC LIMIT 1`, fixture.task.ID).Scan(&conflictInstructionID); err != nil {
+		t.Fatalf("read pr_conflict instruction: %v", err)
+	}
 	fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
 			fake.SnapshotValue.Panes = append(fake.SnapshotValue.Panes, herdr.Pane{PaneID: "fake:child:p1", WorkspaceID: "fake:child", Label: fixture.task.PaneLabel, Agent: "claude", AgentStatus: "working"})
 		}
 	}
 	if code, output, stderr := fixture.run("relaunch", "t1"); code != 0 {
-		t.Fatalf("relaunch after published PR release: %d %s %s", code, output, stderr)
+		t.Fatalf("relaunch released Task after pr_conflict: %d %s %s", code, output, stderr)
+	}
+	message, err := fixture.db.MessageByID(ctx, conflictInstructionID)
+	if err != nil || message.Status != "queued" && message.Status != "delivered" {
+		t.Fatalf("pr_conflict instruction was lost during relaunch: %#v err=%v", message, err)
 	}
 	sandbox, err := fixture.db.SandboxByTask(ctx, fixture.task.ID)
 	if err != nil || sandbox.State != "held" || sandbox.TaskID != fixture.task.ID {
@@ -670,6 +688,20 @@ func TestPRReleaseResumesAfterSandboxResetBeforeRelease(t *testing.T) {
 	attachPRFixtureSandbox(t, fixture)
 	removeFixtureTaskPane(fixture)
 	ctx := context.Background()
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "CONFLICTING", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("queue initial pr_conflict instruction: %v", err)
+	}
+	var oldMessageID int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness' ORDER BY seq DESC LIMIT 1`, fixture.task.ID).Scan(&oldMessageID); err != nil {
+		t.Fatalf("read initial freshness instruction: %v", err)
+	}
 	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "in_progress:sandbox.release", `{}`, deadIntentProcessID); err != nil {
 		t.Fatal(err)
 	}
@@ -680,8 +712,185 @@ func TestPRReleaseResumesAfterSandboxResetBeforeRelease(t *testing.T) {
 	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
 		t.Fatalf("resume release after Sandbox reset: %d %s %s", code, output, stderr)
 	}
+	message, err := fixture.db.MessageByID(ctx, oldMessageID)
+	if err != nil || message.Status != "withdrawn" {
+		t.Fatalf("superseded Posse freshness instruction = %#v err=%v, want withdrawn", message, err)
+	}
+	var newMessageID int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness' ORDER BY seq DESC LIMIT 1`, fixture.task.ID).Scan(&newMessageID); err != nil {
+		t.Fatalf("read re-raised freshness instruction: %v", err)
+	}
+	if newMessageID == oldMessageID {
+		t.Fatalf("pr_conflict was not re-raised after release: old message %d is still current", oldMessageID)
+	}
+	newMessage, err := fixture.db.MessageByID(ctx, newMessageID)
+	if err != nil || newMessage.Status != "queued" {
+		t.Fatalf("re-raised Posse freshness instruction = %#v err=%v", newMessage, err)
+	}
 	if sandbox, err := fixture.db.SandboxByTask(ctx, fixture.task.ID); !store.IsNotFound(err) {
 		t.Fatalf("resumed release left Task Sandbox owned: %#v err=%v", sandbox, err)
+	}
+}
+
+func TestPRReleaseKeepsRefreshIntentUntilConflictRequeueSucceeds(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	gitTest(t, fixture.repo, "commit", "--allow-empty", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "CONFLICTING", "", fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("queue pr_conflict instruction: %v", err)
+	}
+	var oldMessageID int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness' ORDER BY seq DESC LIMIT 1`, fixture.task.ID).Scan(&oldMessageID); err != nil {
+		t.Fatalf("read freshness instruction: %v", err)
+	}
+	messageBeforeRelease, err := fixture.db.MessageByID(ctx, oldMessageID)
+	if err != nil || messageBeforeRelease.Status != "queued" {
+		t.Fatalf("freshness instruction before release = %#v err=%v", messageBeforeRelease, err)
+	}
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "in_progress:sandbox.release", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetWorktree(ctx, fixture.worktree, projectRepoTarget(fixture.project), "warm", false); err != nil {
+		t.Fatal(err)
+	}
+	withdrawn, blockers, err := fixture.db.WithdrawQueuedFreshnessInstructions(ctx, fixture.task.ID)
+	if err != nil || len(withdrawn) != 1 || len(blockers) != 0 {
+		t.Fatalf("withdraw freshness before simulated refresh failure: withdrawn=%#v blockers=%#v err=%v", withdrawn, blockers, err)
+	}
+	target, err := fixture.service.resolveStewardTarget(ctx, fixture.db, fixture.project, "t1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.releaseExecutor(ctx, fixture.db, target, target.cfg, func() error { return errors.New("simulated PR refresh failure") }); err == nil || !strings.Contains(err.Error(), "simulated PR refresh failure") {
+		t.Fatalf("releaseExecutor error = %v, want simulated PR refresh failure", err)
+	}
+	intent, err := fixture.db.IntentByTask(ctx, fixture.task.ID)
+	if err != nil || intent.Command != "pr-release" {
+		t.Fatalf("release intent was not retained for retry: %#v err=%v", intent, err)
+	}
+	oldMessage, err := fixture.db.MessageByID(ctx, oldMessageID)
+	if err != nil || oldMessage.Status != "withdrawn" {
+		t.Fatalf("superseded freshness instruction = %#v err=%v", oldMessage, err)
+	}
+	if _, err := fixture.db.SandboxByTask(ctx, fixture.task.ID); !store.IsNotFound(err) {
+		t.Fatalf("failed refresh did not leave the Sandbox released: err=%v", err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE intents SET process_id=? WHERE task_id=? AND command='pr-release'`, deadIntentProcessID, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("retry release after PR refresh recovers: %d %s %s", code, output, stderr)
+	}
+	var newMessageID int64
+	if err := fixture.db.QueryRowContext(ctx, `SELECT message_id FROM validation_fix_rounds WHERE ship_task_id=? AND kind='freshness' ORDER BY seq DESC LIMIT 1`, fixture.task.ID).Scan(&newMessageID); err != nil {
+		t.Fatalf("read re-raised freshness instruction: %v", err)
+	}
+	if newMessageID == oldMessageID {
+		t.Fatalf("retry reused withdrawn instruction %d", oldMessageID)
+	}
+	newMessage, err := fixture.db.MessageByID(ctx, newMessageID)
+	if err != nil || newMessage.Status != "queued" {
+		t.Fatalf("re-raised freshness instruction = %#v err=%v", newMessage, err)
+	}
+}
+
+func TestPRReleaseResumeKeepsLeadInstructionsQueued(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "in_progress:sandbox.release", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	freshness, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", fixture.headSHA, "freshness:conflict", "Merge origin/main into the Task branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := fixture.db.QueueMessage(ctx, fixture.task.ID, "Lead instruction: preserve this message", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "posse unsend "+fmt.Sprint(messageID)) || !strings.Contains(combined, "posse pr release t1 --policy release") {
+		t.Fatalf("blocked release did not name exact recovery commands: exit=%d output=%s", code, combined)
+	}
+	message, err := fixture.db.MessageByID(ctx, messageID)
+	if err != nil || message.Status != "queued" {
+		t.Fatalf("Lead instruction changed during release recovery: %#v err=%v", message, err)
+	}
+	freshnessMessage, err := fixture.db.MessageByID(ctx, freshness.MessageID)
+	if err != nil || freshnessMessage.Status != "queued" {
+		t.Fatalf("Posse instruction was withdrawn while Lead instruction blocked recovery: %#v err=%v", freshnessMessage, err)
+	}
+}
+
+func TestPRReleaseResumePreservesOtherAutomaticValidationInstructions(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "in_progress:sandbox.release", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	gateHead, ciHead, reviewHead := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	gate, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "gate", gateHead, "gate:interrupted", "Fix the Gate failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescedFreshness, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", gateHead, "freshness:coalesced", "Refresh the target")
+	if err != nil || coalescedFreshness.MessageID != gate.MessageID {
+		t.Fatalf("coalesced freshness result = %#v err=%v", coalescedFreshness, err)
+	}
+	ci, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "ci", ciHead, "ci:interrupted", "Fix the CI failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "review", reviewHead, "review:interrupted", "Fix the Review findings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshness, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", fixture.headSHA, "freshness:interrupted", "Merge origin/main into the Task branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("automatic validation instructions blocked interrupted release: %d %s %s", code, output, stderr)
+	}
+	for label, id := range map[string]int64{"gate and coalesced freshness": gate.MessageID, "CI": ci.MessageID, "Review": review.MessageID} {
+		message, err := fixture.db.MessageByID(ctx, id)
+		if err != nil || message.Status != "queued" {
+			t.Errorf("%s instruction = %#v err=%v, want queued", label, message, err)
+		}
+	}
+	oldFreshness, err := fixture.db.MessageByID(ctx, freshness.MessageID)
+	if err != nil || oldFreshness.Status != "withdrawn" {
+		t.Fatalf("pure freshness instruction = %#v err=%v, want withdrawn", oldFreshness, err)
 	}
 }
 
