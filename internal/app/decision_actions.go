@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,6 +59,17 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		return axi.Failure("decision_refused", "budget Decision is obsolete: "+reason, false)
 	}
 	switch decision.Kind {
+	case "teardown_dependants":
+		if task.State != store.StateTornDown {
+			return axi.Failure("decision_refused", "teardown dependant Decision no longer applies", false)
+		}
+		if decision.Answer == "re-point" && !strings.HasPrefix(decision.AnswerReason, "to=") {
+			return axi.Failure("decision_refused", "re-point requires a replacement Task ID", false, "Answer with `posse decide <id> re-point --to tN`")
+		}
+		if err := s.applyTeardownDependantsDecision(out.Context, db, project, cfg, decision); err != nil {
+			return axi.Failure("decision_refused", err.Error(), false)
+		}
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: decision.Answer}})
 	case "dependency":
 		if task.State != store.StateQueued {
 			return axi.Failure("decision_refused", "dependency Decision no longer applies to this queued Task", false)
@@ -69,7 +82,7 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "torn-down"}})
 		case "drop-prerequisite-and-run":
 			parts := strings.Split(decision.Origin, ":")
-			if len(parts) != 4 || parts[0] != "dependency" || parts[1] != taskIDString(task.Seq) {
+			if len(parts) < 4 || parts[0] != "dependency" || parts[1] != taskIDString(task.Seq) {
 				return axi.Failure("decision_refused", "dependency Decision binding is invalid", false)
 			}
 			plan, err := task.AdmittedPlan()
@@ -203,6 +216,88 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 		default:
 			return axi.Failure("decision_refused", "unknown quota Decision answer", false)
 		}
+	case "review_dispute":
+		parts := strings.Split(decision.Origin, ":")
+		if len(parts) != 4 || parts[0] != "review_dispute" {
+			return axi.Failure("decision_refused", "Greenhouse dispute Decision binding is invalid", false)
+		}
+		taskID, taskErr := strconv.ParseInt(parts[1], 10, 64)
+		findingID, findingErr := strconv.Atoi(parts[2])
+		if taskErr != nil || findingErr != nil || taskID != task.ID || findingID < 1 || task.Type != "change" {
+			return axi.Failure("decision_refused", "Greenhouse dispute Decision binding is invalid", false)
+		}
+		digest := sha256.Sum256(decision.Evidence)
+		if len(decision.Evidence) == 0 || len(decision.Evidence) > 64*1024 || hex.EncodeToString(digest[:]) != decision.EvidenceDigest {
+			return axi.Failure("decision_refused", "stored Greenhouse dispute evidence failed its digest check", false)
+		}
+		finding, err := db.ProviderFindingForTask(out.Context, task.ID, findingID)
+		if err != nil || finding.Severity != "P0" && finding.Severity != "P1" {
+			return axi.Failure("decision_refused", "the Greenhouse finding no longer matches the dispute Decision", false)
+		}
+		targets, err := changeCandidateTargets(out.Context, db, project, task)
+		if err != nil {
+			return err
+		}
+		head := ""
+		for _, target := range targets {
+			if target.Repository == finding.Repository {
+				head = target.Commit
+				break
+			}
+		}
+		if head != parts[3] || finding.HeadSHA != head {
+			return axi.Failure("decision_refused", "the Task head changed after the Greenhouse dispute Decision was created", false)
+		}
+		if finding.State == "withdrawn" && decision.Answer != "withdraw" {
+			return axi.Failure("decision_refused", "the Greenhouse finding was already withdrawn", false)
+		}
+		switch decision.Answer {
+		case "withdraw":
+			if decision.AnswerActor != "user" || decision.UserQuote == "" {
+				return axi.Failure("decision_refused", "withdrawing a Greenhouse finding requires the User's Decision", false)
+			}
+			if err := db.WithdrawProviderFinding(out.Context, task.ID, int64(findingID), decision.ID, decision.EvidenceDigest, decision.UserQuote); err != nil {
+				return axi.Failure("decision_refused", err.Error(), false)
+			}
+			allPassed := len(targets) > 0
+			for _, target := range targets {
+				passed, err := db.GreenhouseGatePass(out.Context, task.ID, target.Repository, target.Commit, greenhouseBlockAt(task))
+				if err != nil {
+					return err
+				}
+				allPassed = allPassed && passed
+			}
+			if allPassed {
+				if err := db.ObsoletePendingReviewCapDecisions(out.Context, task.ID, decision.ID); err != nil {
+					return err
+				}
+				body := fmt.Sprintf("The User withdrew all blocking Greenhouse findings for Task head %s. Publish this exact head with `posse publish \"%s\"`; do not change the branch before publishing. Put `Fixes #1169` and `Fixes #1135` in `--proof` so both appear in the PR body.", shortSHA(head), task.Title)
+				signals, err := db.TaskSignals(out.Context, task.ID, 100)
+				if err != nil {
+					return err
+				}
+				var lastDone int64
+				for _, signal := range signals {
+					if signal.Verb == "done" {
+						lastDone = signal.At
+						break
+					}
+				}
+				_, queued, err := db.QueueMessageOnceAfter(out.Context, task.ID, body, true, lastDone)
+				if err != nil {
+					return err
+				}
+				if queued {
+					if _, err := db.CreateNotice(out.Context, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: User withdrew the blocking Greenhouse findings at %s; Posse queued publication", task.Title, shortSHA(head)), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
+						return err
+					}
+				}
+			}
+		case "keep":
+		default:
+			return axi.Failure("decision_refused", "unknown Greenhouse dispute Decision answer", false)
+		}
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "finding", Value: "F-" + strconv.Itoa(findingID)}, {Key: "state", Value: decision.Answer}})
 	case "review_cap":
 		taskRef, expectedHead, ok := parseReviewCapOrigin(decision.Origin)
 		if !ok || taskRef != taskIDString(task.Seq) || task.Type != "change" {

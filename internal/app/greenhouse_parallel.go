@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -39,6 +40,28 @@ func nextGreenhouseLedgerGrant(requests []store.GreenhouseReviewRequest, taskID 
 		}
 	}
 	return next
+}
+
+const greenhouseReviewFailureLimit = 3
+
+func repeatedGreenhouseReviewFailures(requests []store.GreenhouseReviewRequest, taskID int64, repository, head string) (int, int64) {
+	count, latestFailure := 0, int64(0)
+	for _, request := range requests {
+		if request.TaskID == taskID && request.Repository == repository && request.RequestedHead == head && request.Outcome == "failed" {
+			count++
+			latestFailure = max(latestFailure, request.SettledAt)
+		}
+	}
+	return count, latestFailure
+}
+
+func greenhouseReviewRetryAt(requests []store.GreenhouseReviewRequest, taskID int64, repository, head string) int64 {
+	count, latestFailure := repeatedGreenhouseReviewFailures(requests, taskID, repository, head)
+	if count == 0 {
+		return 0
+	}
+	delay := time.Duration(30*(1<<min(count-1, 3))) * time.Second
+	return latestFailure + delay.Milliseconds()
 }
 
 func nextParallelReviewAction(hasVerdict, hasPending bool) parallelReviewAction {

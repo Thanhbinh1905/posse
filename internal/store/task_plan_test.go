@@ -479,6 +479,60 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	}
 }
 
+func TestReviseTaskPlansRollsBackEveryRevisionWhenOneTaskRaces(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	basePlan := admittedStorePlan(t, home)
+	var tasks []Task
+	var revisions []TaskPlanRevision
+	for seq := 1; seq <= 2; seq++ {
+		plan := basePlan.Bind(fmt.Sprintf("t%d", seq))
+		data, err := plan.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: seq, Type: "change", Title: fmt.Sprintf("Task %d", seq), State: StateQueued, PlanJSON: data})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := db.TaskByID(ctx, project.ID, taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		launch := plan.Launch
+		launch.ProfileName = fmt.Sprintf("profile-%d", seq)
+		revision, err := plan.Reconfigure(launch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		revisions = append(revisions, TaskPlanRevision{Task: task, Plan: revision})
+		tasks = append(tasks, task)
+	}
+	if err := db.Transition(ctx, tasks[1].ID, StateQueued, StateTornDown, "cli", "raced plan revision"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlans(ctx, revisions); !errors.Is(err, ErrStateRace) {
+		t.Fatalf("batch revision error=%v, want state race", err)
+	}
+	unchanged, err := db.TaskByID(ctx, project.ID, tasks[0].ID)
+	if err != nil || unchanged.PlanRevision != 1 {
+		t.Fatalf("earlier plan revision was partially applied: task=%+v err=%v", unchanged, err)
+	}
+	plans, err := db.TaskPlanRevisions(ctx, tasks[0].ID)
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("rolled-back plan revision history=%#v err=%v", plans, err)
+	}
+}
+
 func TestPlanRevisionPreservesMergeGateForMergingTask(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

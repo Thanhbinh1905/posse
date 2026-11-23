@@ -491,7 +491,7 @@ func extensionOwnsNotices(delivery string) bool {
 
 // leadReceiverGrace is how long a Notice may wait for an idle Lead's extension
 // before Posse treats the extension's receiver as missing.
-var leadReceiverGrace = 30 * time.Second
+var leadReceiverGrace = 90 * time.Second
 
 var leadReceiverLive = func(home string, project store.Project) (bool, error) {
 	processes, err := systemWatchProcesses(home)

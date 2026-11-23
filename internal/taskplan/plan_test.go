@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
@@ -509,6 +510,19 @@ func TestMemberReviewSelectionAndScopedConsent(t *testing.T) {
 	plan, err = taskplan.Resolve(r)
 	if err != nil || plan.Execution.Members[0].Review != "quick" || plan.Execution.Members[0].ReviewSource != "User choice: start --user-approved" || plan.Grants[1].Value != "ask" {
 		t.Fatalf("member consent: %#v %v", plan, err)
+	}
+}
+
+func TestRepointDependencyRejectsExistingReplacementBeforeTarget(t *testing.T) {
+	r := request("change")
+	plan, err := taskplan.Resolve(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Dependencies = []dispatch.Dependency{{TaskID: "t2", Milestone: "landed"}, {TaskID: "t1", Milestone: "landed"}}
+	plan = plan.Bind("t3")
+	if _, err := plan.RepointDependency("t1", "t2", "landed"); err == nil || !strings.Contains(err.Error(), "already in the admitted plan") {
+		t.Fatalf("re-point accepted duplicate Task ID when replacement precedes target: %v", err)
 	}
 }
 

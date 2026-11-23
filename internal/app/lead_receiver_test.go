@@ -168,6 +168,30 @@ func TestDeliveredHandoffDoesNotCountAsMissingReceiver(t *testing.T) {
 	}
 }
 
+func TestHandoffRestartWithinNinetySecondsDoesNotAlertOnTwoNoticeBurst(t *testing.T) {
+	stubLeadReceiver(t, false, leadReceiverGrace)
+	fixture := newCodexLeadFixture(t, idlePiLead, "", "0")
+	ctx := context.Background()
+	createdAt := currentTime() - 89_000
+	firstID, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "pr_merged", Summary: "first burst Notice", CreatedAt: createdAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.CreateNotice(ctx, store.Notice{ProjectID: fixture.project.ID, Kind: "pr_merged", Summary: "second burst Notice", CreatedAt: createdAt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.MarkNoticesDelivered(ctx, fixture.project.ID, []int64{firstID}, currentTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.service.monitorLeadReceiver(ctx, fixture.db, fixture.project); err != nil {
+		t.Fatal(err)
+	}
+	if missing := fixture.receiverMissingNotices(t); len(missing) != 0 {
+		t.Fatalf("handoff restart during a two-Notice burst raised lead_receiver_missing: %#v", missing)
+	}
+}
+
 func TestReceiverRecoveryClosesTheMissingEpisode(t *testing.T) {
 	stubLeadReceiver(t, true, 0)
 	fixture := newCodexLeadFixture(t, idlePiLead, "", "0")
