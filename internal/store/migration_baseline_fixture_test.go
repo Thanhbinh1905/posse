@@ -125,6 +125,35 @@ func TestBaselineHomeAppliesLaterMigration(t *testing.T) {
 	}
 }
 
+func TestBaselineHomeGateSeesOnlyActiveMigrationsPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM goose_db_version WHERE version_id=20261122175108`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var pending []int64
+	MigrationGate = func(_ string, versions []int64, _ bool) error {
+		pending = versions
+		return nil
+	}
+	defer func() { MigrationGate = nil }()
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if len(pending) != 1 || pending[0] != 20261122175108 {
+		t.Fatalf("gate pending = %v, want [20261122175108]", pending)
+	}
+}
+
 func normalizedSchema(t *testing.T, db *DB) []string {
 	t.Helper()
 	rows, err := db.QueryContext(context.Background(), `SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','index','trigger','view') ORDER BY type,name`)
