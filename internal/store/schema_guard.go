@@ -149,7 +149,7 @@ func (db *DB) schemaCurrent(ctx context.Context, sources []migrationSource) bool
 // checkSchema refuses a database this build does not know or that another
 // build migrated differently, and asks MigrationGate before migrating an
 // existing database. It runs under the migration lock, before goose.
-func (db *DB) checkSchema(ctx context.Context, sources []migrationSource) error {
+func (db *DB) checkSchema(ctx context.Context, sources, active []migrationSource) error {
 	var hasTable int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='posse_migration_checksums'`).Scan(&hasTable); err != nil {
 		return err
@@ -212,7 +212,7 @@ func (db *DB) checkSchema(ctx context.Context, sources []migrationSource) error 
 			Help: "Run the posse build that applied them (the installed `posse`), or set " + ForceMigrationEnv + "=1 to use this build anyway"}
 	}
 	pending := []int64{}
-	for _, source := range sources {
+	for _, source := range active {
 		if !applied[source.version] {
 			pending = append(pending, source.version)
 		}

@@ -502,6 +502,11 @@ func (s *Service) wait(ctx *axi.Context, args []string) error {
 			if found && existing.State == "uncertain" {
 				return ctx.Print(noticeDeliveryUncertaintyResult(existing, "Inspect that Lead session before retrying"))
 			}
+			if requeued, err := db.RequeueExpiredPrintedDeliveriesForOtherAdapters(ctx.Context, project.ID, parsed.Flags["destination"], currentTime()); err != nil {
+				return err
+			} else if requeued {
+				continue
+			}
 			prior, priorFound, err := db.NoticeDeliveryForOtherSession(ctx.Context, project.ID, parsed.Flags["destination"], parsed.Bool("continue-fresh"))
 			if err != nil {
 				return err
