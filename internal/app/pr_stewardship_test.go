@@ -844,6 +844,56 @@ func TestPRReleaseResumeKeepsLeadInstructionsQueued(t *testing.T) {
 	}
 }
 
+func TestPRReleaseResumePreservesOtherAutomaticValidationInstructions(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "in_progress:sandbox.release", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	gateHead, ciHead, reviewHead := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	gate, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "gate", gateHead, "gate:interrupted", "Fix the Gate failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescedFreshness, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", gateHead, "freshness:coalesced", "Refresh the target")
+	if err != nil || coalescedFreshness.MessageID != gate.MessageID {
+		t.Fatalf("coalesced freshness result = %#v err=%v", coalescedFreshness, err)
+	}
+	ci, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "ci", ciHead, "ci:interrupted", "Fix the CI failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "review", reviewHead, "review:interrupted", "Fix the Review findings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshness, err := fixture.db.QueueValidationFixInstruction(ctx, fixture.task.ID, "freshness", fixture.headSHA, "freshness:interrupted", "Merge origin/main into the Task branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("automatic validation instructions blocked interrupted release: %d %s %s", code, output, stderr)
+	}
+	for label, id := range map[string]int64{"gate and coalesced freshness": gate.MessageID, "CI": ci.MessageID, "Review": review.MessageID} {
+		message, err := fixture.db.MessageByID(ctx, id)
+		if err != nil || message.Status != "queued" {
+			t.Errorf("%s instruction = %#v err=%v, want queued", label, message, err)
+		}
+	}
+	oldFreshness, err := fixture.db.MessageByID(ctx, freshness.MessageID)
+	if err != nil || oldFreshness.Status != "withdrawn" {
+		t.Fatalf("pure freshness instruction = %#v err=%v, want withdrawn", oldFreshness, err)
+	}
+}
+
 func TestPRReleaseRefusesWhenDeliveryPreservationIsUncertain(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()

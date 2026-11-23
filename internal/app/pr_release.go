@@ -25,8 +25,10 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 		if target.task.State != store.StateDone && target.task.State != store.StateMerging {
 			return prReleaseRefused("executor policy can change only after the Worker signals done", false)
 		}
-		var withdrawnFreshness bool
+		var interruptedRelease, withdrawnFreshness bool
+		var err error
 		if intent, intentErr := db.IntentByTask(ctx.Context, target.task.ID); intentErr == nil && intent.Command == "pr-release" && !intentProcessAlive(intent) {
+			interruptedRelease = true
 			retry := "posse pr release " + target.taskLabel() + " --policy release"
 			if policy != "release" {
 				return axi.Failure("pr_release_refused", "an interrupted release must resume with its original policy", true, "Retry with `"+retry+"`")
@@ -45,12 +47,17 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 						help = append(help, fmt.Sprintf("Wait for instruction #%d delivery to settle, then retry with `%s`", message.ID, retry))
 					}
 				}
-				return axi.Failure("pr_release_refused", "an interrupted release is blocked by a Lead- or User-written instruction", true, help...)
+				return axi.Failure("pr_release_refused", "an interrupted release is blocked by a pending Worker instruction", true, help...)
 			}
 		} else if intentErr != nil && !store.IsNotFound(intentErr) {
 			return intentErr
 		}
-		pending, err := db.HasPendingTaskInstructions(ctx.Context, target.task.ID)
+		var pending bool
+		if interruptedRelease {
+			pending, err = db.HasPendingReleaseBlockingInstructions(ctx.Context, target.task.ID)
+		} else {
+			pending, err = db.HasPendingTaskInstructions(ctx.Context, target.task.ID)
+		}
 		if err != nil {
 			return err
 		}
@@ -59,7 +66,12 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 			return err
 		}
 		if pending {
-			messages, err := db.PendingTaskInstructions(ctx.Context, target.task.ID)
+			var messages []store.Message
+			if interruptedRelease {
+				messages, err = db.PendingReleaseBlockingInstructions(ctx.Context, target.task.ID)
+			} else {
+				messages, err = db.PendingTaskInstructions(ctx.Context, target.task.ID)
+			}
 			if err != nil {
 				return err
 			}
