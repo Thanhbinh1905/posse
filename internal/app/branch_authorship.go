@@ -186,7 +186,7 @@ func requireWorkerBranchAuthor(ctx context.Context, db *store.DB, task store.Tas
 		return err
 	}
 	generation, err := strconv.ParseInt(os.Getenv("POSSE_TASK_GENERATION"), 10, 64)
-	if err != nil || generation < 1 || claim.TaskID != task.ID || claim.Attempt != task.Launches {
+	if err != nil || generation < 1 || claim.TaskID != task.ID {
 		return store.ErrBranchAuthorStale
 	}
 	return db.RequireBranchAuthor(ctx, repository, task.Branch, task.ID, generation)
@@ -205,7 +205,7 @@ func validateWorkerBranchAuthorHeadUpdate(ctx context.Context, db *store.DB, tas
 		return "", err
 	}
 	generation, err := strconv.ParseInt(os.Getenv("POSSE_TASK_GENERATION"), 10, 64)
-	if err != nil || generation < 1 || claim.TaskID != task.ID || claim.Attempt != task.Launches {
+	if err != nil || generation < 1 || claim.TaskID != task.ID {
 		return "", store.ErrBranchAuthorStale
 	}
 	if err := db.RequireBranchAuthor(ctx, repository, task.Branch, task.ID, generation); err != nil {
@@ -238,7 +238,7 @@ func recordWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.
 		return err
 	}
 	generation, err := strconv.ParseInt(os.Getenv("POSSE_TASK_GENERATION"), 10, 64)
-	if err != nil || generation < 1 || claim.TaskID != task.ID || claim.Attempt != task.Launches || claim.HeadSHA != expectedHead {
+	if err != nil || generation < 1 || claim.TaskID != task.ID || claim.HeadSHA != expectedHead {
 		return store.ErrBranchAuthorStale
 	}
 	if claim.Generation != generation {
@@ -285,7 +285,7 @@ func requireCurrentTaskBranchAuthor(ctx context.Context, db *store.DB, task stor
 	if err != nil {
 		return err
 	}
-	if claim.TaskID != task.ID || claim.Attempt != task.Launches {
+	if claim.TaskID != task.ID {
 		return store.ErrBranchAuthorStale
 	}
 	return db.RequireBranchAuthor(ctx, repository, task.Branch, task.ID, claim.Generation)

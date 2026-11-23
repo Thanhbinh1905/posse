@@ -17,6 +17,32 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func stopDiscardTaskHelpers(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) ([]string, error) {
+	roots, err := taskOwnedProcessRoots(ctx, db, home, project, task)
+	if err != nil {
+		return nil, err
+	}
+	helperTask := task
+	helperTask.ContainmentMode, helperTask.ContainmentPath = "marker", ""
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	if err := retainTaskContainmentProcesses(authorization, helperTask, roots); err != nil {
+		return nil, err
+	}
+	pids, err := markedTaskPIDs(task.ContainmentMarker)
+	if err != nil {
+		return nil, err
+	}
+	stopped := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		if taskContainsProcess(pid, helperTask, roots) {
+			stopped = append(stopped, strconv.Itoa(pid))
+		}
+	}
+	_, err = stopTaskProcessContainmentWithGuard(ctx, helperTask, authorization.guardSignal)
+	return stopped, err
+}
+
 func stopTaskProcessContainment(ctx context.Context, task store.Task) ([]taskProcessDetail, error) {
 	return stopTaskProcessContainmentWithGuard(ctx, task, nil)
 }

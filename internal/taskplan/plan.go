@@ -248,8 +248,13 @@ func workspaceDeliveryMode(mode string) string {
 	return mode
 }
 
+const maxInlineBriefSize = 64 << 10
+
 // Resolve interprets the admitted Brief contract after callers resolve repository facts.
 func Resolve(r Request) (Plan, error) {
+	if len(r.Brief.Bytes) > maxInlineBriefSize {
+		return Plan{}, &dispatch.BriefError{Field: "brief", Reason: "exceeds 64 KiB; Brief inputs remain inline in execution plans"}
+	}
 	brief, err := dispatch.ParseBriefText(string(r.Brief.Bytes))
 	if err != nil {
 		return Plan{}, err
@@ -863,6 +868,42 @@ func (p Plan) WithoutDependency(taskID, milestone string) (Plan, error) {
 		dependencies = append(dependencies, dependency)
 	}
 	if !removed {
+		return Plan{}, fmt.Errorf("prerequisite %s:%s is not in the admitted plan", taskID, milestone)
+	}
+	p.PreviousSHA256 = p.SHA256()
+	p.AdmittedSHA256 = ""
+	p.legacyJSON = ""
+	p.Revision++
+	p.Dependencies = dependencies
+	data, err := p.Encode()
+	if err != nil {
+		return Plan{}, err
+	}
+	return Decode(data)
+}
+
+// RepointDependency replaces one declared prerequisite as an explicit plan revision.
+func (p Plan) RepointDependency(taskID, replacementTaskID, milestone string) (Plan, error) {
+	if err := p.Validate(); err != nil {
+		return Plan{}, err
+	}
+	if replacementTaskID == "" || replacementTaskID == taskID {
+		return Plan{}, fmt.Errorf("replacement prerequisite must be a different Task")
+	}
+	dependencies := make([]dispatch.Dependency, 0, len(p.Dependencies))
+	replaced := false
+	for _, dependency := range p.Dependencies {
+		if dependency.TaskID == taskID && dependency.Milestone == milestone {
+			dependencies = append(dependencies, dispatch.Dependency{TaskID: replacementTaskID, Milestone: milestone})
+			replaced = true
+			continue
+		}
+		if dependency.TaskID == replacementTaskID {
+			return Plan{}, fmt.Errorf("replacement prerequisite %s is already in the admitted plan", replacementTaskID)
+		}
+		dependencies = append(dependencies, dependency)
+	}
+	if !replaced {
 		return Plan{}, fmt.Errorf("prerequisite %s:%s is not in the admitted plan", taskID, milestone)
 	}
 	p.PreviousSHA256 = p.SHA256()

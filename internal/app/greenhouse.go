@@ -146,22 +146,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve Greenhouse review head: %w", err)
 	}
-	target, err := greenhouseTarget(ctx.Context, member)
-	if err != nil {
-		if parallelMode {
-			grant, grantErr := parallelPendingGrant(pendingPath)
-			if grantErr != nil {
-				return grantErr
-			}
-			if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed", Grant: grant}); recordErr != nil {
-				return recordErr
-			}
-			if noticeErr := notifyFailure(requestedHead, err.Error()); noticeErr != nil {
-				return noticeErr
-			}
-		}
-		return err
-	}
 	recordInitialFailure := func(reason string) error {
 		if !parallelMode {
 			return nil
@@ -175,7 +159,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		}
 		return notifyFailure(requestedHead, reason)
 	}
-	binary, err := exec.LookPath("greenhouse")
+	binary, err := greenhouseBinary()
 	if err != nil {
 		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
 			return recordErr
@@ -206,7 +190,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	}
 	round := greenhouse.Round{
 		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID, MinimumGrantNumber: 1,
-		Intent: greenhouseIntent(task, plan), Target: target,
+		Intent:   greenhouseIntent(task, plan),
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
 		Checkpoint: func(step string) { crashIntentAt("greenhouse-review", "after", step) },
@@ -314,6 +298,10 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
 				round.Wait = attemptWait
+				round.Target, err = greenhouseTarget(ctx.Context, member)
+				if err != nil {
+					return greenhouse.RoundResult{}, err
+				}
 				if s.greenhouseRound != nil {
 					return s.greenhouseRound(ctx.Context, round)
 				}
@@ -358,6 +346,22 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			}
 			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
+			}
+			terminalFailure := reviewerContextOverflow(err)
+			if parallelMode {
+				requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
+				if err != nil {
+					return err
+				}
+				failures, _ := repeatedGreenhouseReviewFailures(requests, task.ID, member.name, requestHead)
+				terminalFailure = terminalFailure || failures >= greenhouseReviewFailureLimit
+			}
+			if terminalFailure {
+				reason := fmt.Sprintf("Greenhouse review failed for %s at %s. Needs a decision: split the change or land it another way. Latest failure: %s", member.name, shortSHA(requestHead), failureReason)
+				if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx.Context, project.ID, task.ID, member.name, requestHead, reason); err != nil {
+					return err
+				}
+				return axi.Failure("greenhouse_failed", failureReason, false)
 			}
 			if noticeErr := notifyFailure(requestHead, failureReason); noticeErr != nil {
 				return noticeErr
@@ -559,7 +563,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 					return err
 				}
 				if !pending {
-					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+					if _, err := s.queueGreenhouseReviewFix(ctx, db, project, task); err != nil {
 						return err
 					}
 				}
@@ -664,7 +668,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					if err != nil {
 						return err
 					}
-					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head)
+					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head, greenhouseBlockAt(task))
 					if err != nil {
 						return err
 					}
@@ -740,7 +744,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					return err
 				}
 				if !pending {
-					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+					if _, err := s.queueGreenhouseReviewFix(ctx, db, project, task); err != nil {
 						_, _ = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
 						return err
 					}
@@ -752,6 +756,15 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 	}
 	return nil
+}
+
+func (s *Service) queueGreenhouseReviewFix(ctx context.Context, db *store.DB, project store.Project, task store.Task) (reviewFixQueued, error) {
+	queued, err := s.queueReviewFix(ctx, db, project, task, nil, false)
+	var failure *axi.Error
+	if errors.As(err, &failure) && failure.Code == "review_fix_empty" {
+		return reviewFixQueued{}, nil
+	}
+	return queued, err
 }
 
 func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store.DB, project store.Project, task store.Task, verdict store.Verdict) error {
@@ -795,11 +808,80 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		}
 	}
 	reason := fmt.Sprintf("Greenhouse found %d blocking finding(s) for head %s. Findings: %s", verdict.Blocking, shortSHA(verdict.Head), verdict.FindingsPath)
-	if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+	signals, err := db.TaskSignals(ctx, current.ID, 1)
+	if err != nil {
 		return err
 	}
-	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
+	currentCycle := len(signals) > 0 && signals[0].Verb == "done"
+	readinessSince := int64(0)
+	if currentCycle {
+		readinessSince = signals[0].At
+	}
+	readiness := currentCycle && current.State == store.StateMerging && current.GatedSHA == verdict.Head
+	if readiness && current.UpdatedAt > readinessSince {
+		readinessSince = current.UpdatedAt
+	}
+	decisions, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil {
 		return err
+	}
+	for _, decision := range decisions {
+		if currentCycle && decision.TaskID == current.ID && decision.Kind == "merge_ready" && current.GatedSHA == verdict.Head && decision.CreatedAt >= readinessSince {
+			readiness = true
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		return err
+	}
+	withdrawalAt := int64(0)
+	for _, notice := range notices {
+		if notice.TaskID != current.ID {
+			continue
+		}
+		var data struct {
+			HeadSHA   string            `json:"head_sha"`
+			GatedHead string            `json:"gated_head"`
+			PRHead    string            `json:"pr_head"`
+			Repo      string            `json:"repository"`
+			ShortRepo string            `json:"repo"`
+			HeadSHAs  map[string]string `json:"head_shas"`
+		}
+		if json.Unmarshal([]byte(notice.DataJSON), &data) != nil {
+			continue
+		}
+		noticeHead := data.HeadSHA
+		if workspaceHead := data.HeadSHAs[verdict.Repository]; workspaceHead != "" {
+			noticeHead = workspaceHead
+		}
+		if currentCycle && notice.Kind == "merge_ready" && noticeHead == verdict.Head && notice.CreatedAt >= readinessSince {
+			readiness = true
+		}
+		withdrawalHead := data.HeadSHA
+		if data.GatedHead != "" {
+			withdrawalHead = data.GatedHead
+		}
+		if data.PRHead != "" && data.PRHead == verdict.Head {
+			withdrawalHead = data.PRHead
+		}
+		noticeRepository := data.Repo
+		if noticeRepository == "" {
+			noticeRepository = data.ShortRepo
+		}
+		if notice.Kind == "merge_readiness_withdrawn" && withdrawalHead == verdict.Head && (noticeRepository == verdict.Repository || noticeRepository == "" && (!project.IsWorkspace() || verdict.Repository == project.Name)) && notice.CreatedAt > withdrawalAt {
+			withdrawalAt = notice.CreatedAt
+		}
+	}
+	withdrawalRecorded := currentCycle && withdrawalAt >= readinessSince && withdrawalAt > 0
+	if readiness {
+		if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+			return err
+		}
+		if !withdrawalRecorded {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath, "repository": verdict.Repository})}); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, current.ID, verdict.Repository, verdict.Head, reason); err != nil {
 		return err
@@ -809,7 +891,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		return err
 	}
 	if !pending {
-		if _, err := s.queueReviewFix(ctx, db, project, current, nil, false); err != nil {
+		if _, err := s.queueGreenhouseReviewFix(ctx, db, project, current); err != nil {
 			return err
 		}
 	}
@@ -947,6 +1029,26 @@ func greenhouseTaskMember(ctx context.Context, db *store.DB, project store.Proje
 	return greenhouseMember{}, axi.Usage("Task " + taskIDString(task.Seq) + " has no Member " + repo)
 }
 
+func greenhouseBinary() (string, error) {
+	if binary, err := exec.LookPath("greenhouse"); err == nil {
+		return binary, nil
+	}
+	candidates := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "greenhouse"))
+	}
+	if executable, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "greenhouse"))
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("greenhouse is not installed on PATH or in ~/.local/bin")
+}
+
 func greenhouseTarget(ctx context.Context, member greenhouseMember) (string, error) {
 	ref := "refs/heads/" + member.targetBranch
 	if _, err := gitOutput(ctx, member.root, "remote", "get-url", "origin"); err == nil {
@@ -992,14 +1094,18 @@ func greenhouseDaemonCheck(home string) (name, status, detail, action string) {
 	if !live {
 		return name, "ok", "not running; Posse starts it in " + greenhouseHome + " when it requests a Greenhouse review", ""
 	}
+	binary := "unknown executable"
+	if running, err := greenhouse.RunningExecutable(pid); err == nil {
+		binary = running
+	}
 	state, err := greenhouse.ReadState(greenhouseHome)
 	if err != nil || state.PID != pid {
-		return name, "warn", fmt.Sprintf("PID %d serves %s, but Posse has no protocol record for it", pid, greenhouseHome), "Request a Greenhouse review to probe it again"
+		return name, "warn", fmt.Sprintf("PID %d runs %s and serves %s, but Posse has no protocol record for it", pid, binary, greenhouseHome), "Request a Greenhouse review to probe it again"
 	}
 	if !state.Range.Includes(greenhouse.Protocol) {
-		return name, "fail", fmt.Sprintf("PID %d speaks protocol %s; Posse needs protocol %s", pid, state.Range, greenhouse.PosseRange), "Let its work settle, stop it with SIGTERM to PID " + strconv.Itoa(pid) + " and install a Greenhouse that speaks protocol " + strconv.Itoa(greenhouse.Protocol)
+		return name, "fail", fmt.Sprintf("PID %d runs %s and speaks protocol %s; Posse needs protocol %s", pid, binary, state.Range, greenhouse.PosseRange), "Let its work settle, stop it with SIGTERM to PID " + strconv.Itoa(pid) + " and install a Greenhouse that speaks protocol " + strconv.Itoa(greenhouse.Protocol)
 	}
-	return name, "ok", fmt.Sprintf("PID %d speaks protocol %s; Posse uses %d", pid, state.Range, greenhouse.Protocol), ""
+	return name, "ok", fmt.Sprintf("PID %d runs %s and speaks protocol %s; Posse uses %d", pid, binary, state.Range, greenhouse.Protocol), ""
 }
 
 const greenhouseStopWait = 10 * time.Second

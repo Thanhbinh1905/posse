@@ -716,9 +716,6 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.requireLead(ctx.Context, db, project); err != nil {
-		return err
-	}
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		return configError(err)
@@ -727,10 +724,18 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	workerReadOnly := s.workerCaller(ctx.Context, home)
+	if workerReadOnly {
+		if err := s.requireWorkerOwnTask(ctx.Context, db, project, task); err != nil {
+			return err
+		}
+	} else if err := s.requireLead(ctx.Context, db, project); err != nil {
+		return err
+	}
 	var preparationErr error
-	if project.IsWorkspace() {
+	if !workerReadOnly && project.IsWorkspace() {
 		_, preparationErr = s.prepareProjectObservation(store.WithDeferrableWrites(ctx.Context), db, project)
-	} else {
+	} else if !workerReadOnly {
 		_, preparationErr = s.prepareTaskProjectInspection(store.WithDeferrableWrites(ctx.Context), db, project, task.ID)
 	}
 	if err := deferObservationContention(ctx, preparationErr, "Project observations were deferred; showing the last recorded state."); err != nil {
@@ -741,6 +746,21 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
+	if parsed.Bool("full") {
+		decisions, err := db.Decisions(ctx.Context, project.ID, false)
+		if err != nil {
+			return err
+		}
+		var disputes []any
+		for _, decision := range decisions {
+			if decision.TaskID == task.ID && decision.Kind == "review_dispute" {
+				disputes = append(disputes, decisionOutput(ctx.Context, db, project.ID, decision))
+			}
+		}
+		if len(disputes) > 0 {
+			view["review_disputes"] = disputes
+		}
+	}
 	adoptions, err := db.TaskAdoptions(ctx.Context, task.ID)
 	if err != nil {
 		return err

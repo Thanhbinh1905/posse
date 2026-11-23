@@ -560,8 +560,8 @@ func TestOpenAtAppliesGooseMigrations(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 1 {
-		t.Fatalf("fresh home applied %d migrations, want one baseline migration", applied)
+	if applied != 2 {
+		t.Fatalf("fresh home applied %d migrations, want the baseline and review-dispute evidence migration", applied)
 	}
 }
 

@@ -17,6 +17,10 @@ func setupTaskProcessContainment(context.Context, *Service, store.Project, store
 	return "marker", nil
 }
 
+func stopDiscardTaskHelpers(context.Context, *store.DB, string, store.Project, store.Task) ([]string, error) {
+	return nil, nil
+}
+
 func stopTaskProcessContainment(context.Context, store.Task) ([]taskProcessDetail, error) {
 	return nil, nil
 }

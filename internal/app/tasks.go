@@ -1249,8 +1249,10 @@ func (s *Service) waitAgent(ctx context.Context, paneID string, anyStatus bool) 
 			}
 			if json.Unmarshal(raw, &response) == nil {
 				lastStatus = response.Agent.AgentStatus
-				if anyStatus && lastStatus == "blocked" && s.codexUpdatePrompt(ctx, paneID) {
-					return axi.Failure("codex_update_prompt", "Codex is waiting at its interactive self-update prompt", false, "Dismiss the update prompt or update Codex, then relaunch the Task")
+				if lastStatus == "blocked" {
+					if failure := s.codexBlockingPrompt(ctx, paneID); failure != nil {
+						return failure
+					}
 				}
 				// Herdr keeps launch_pending set while a start prompt runs.
 				if anyStatus && lastStatus != "" && lastStatus != "unknown" {
@@ -4091,8 +4093,15 @@ func taskRelaunchable(ctx context.Context, db *store.DB, task store.Task) (bool,
 
 func staleWorkerTurnFailure(ctx context.Context, db *store.DB, taskID int64) *axi.Error {
 	current, err := db.TaskTurnToken(ctx, taskID)
-	if err != nil || !strings.HasPrefix(current, "signal:") {
+	if err != nil || current == "" {
 		return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Use the --turn token from the current launch file, latest instruction envelope or successful working Signal")
 	}
-	return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, "Current turn token: "+current, "Retry the same Signal with `--turn "+current+"`")
+	help := []string{"Current turn token: " + current}
+	messages, err := db.UnfinishedTaskMessages(ctx, taskID)
+	if err != nil || len(messages) > 0 {
+		help = append(help, "Handle the delivered instruction before sending another done Signal")
+	} else {
+		help = append(help, "Retry the same Signal with `--turn "+current+"`")
+	}
+	return axi.Failure("stale_worker_turn", "done Signal belongs to an older Worker instance or turn", false, help...)
 }

@@ -35,7 +35,7 @@ func TestClaudeWorkerRoleSkillsSurviveRefreshWithoutRecordingMarker(t *testing.T
 	}
 	for _, want := range []string{
 		"## Role skills",
-		"- `posse-tdd`: before changing code",
+		"- `posse-tdd`: before changing code; write the failing test first",
 		"- `posse-deslop`: when this Task changes code, before the `done` Signal",
 		"- `posse-no-comments`: when this Task changes code, before the `done` Signal and after `posse-deslop`",
 		"- `posse-unslop`: on PR text, commit messages and Reports, before `posse publish` and the `done` Signal",
@@ -344,8 +344,20 @@ func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T)
 		}
 	}
 	change := store.Task{Type: "change", WorktreePath: root, BaseRef: "main"}
+	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != strings.Join(skills, ",") {
+		t.Fatalf("unchanged Change Task skills = %v, want code and report skills", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("updated docs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, root, "add", "README.md")
+	gitTest(t, root, "commit", "-m", "docs")
 	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != "posse-technical-writing" {
-		t.Fatalf("unchanged Change Task skills = %v, want report skill only", got)
+		t.Fatalf("docs-only Change Task skills = %v, want report skill only", got)
+	}
+	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-tdd"}, {Role: "skill", Source: "posse-deslop"}, {Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
+	if got := roleSkillProtocol(plan, change); strings.Contains(got, "posse-tdd") || strings.Contains(got, "posse-deslop") || strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
+		t.Fatalf("docs-only Change launch protocol = %q", got)
 	}
 	if err := os.WriteFile(filepath.Join(root, "change.go"), []byte("package change\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -355,9 +367,49 @@ func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T)
 	if got := taskRoleSkills(change, skills); strings.Join(got, ",") != strings.Join(skills, ",") {
 		t.Fatalf("changed Change Task skills = %v, want %v", got, skills)
 	}
-	plan := &taskplan.Plan{Inputs: []taskplan.Input{{Role: "skill", Source: "posse-no-comments"}, {Role: "skill", Source: "posse-technical-writing"}}}
+	if got := roleSkillProtocol(plan, change); !strings.Contains(got, "posse-tdd") || !strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-deslop") {
+		t.Fatalf("code Change launch skill instructions omitted code skills = %q", got)
+	}
 	if got := roleSkillProtocol(plan, store.Task{Type: "review"}); strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
 		t.Fatalf("Review launch skill instructions = %q", got)
+	}
+
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	memberPath := filepath.Join(workspace, "member")
+	if err := os.MkdirAll(memberPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "init", "-b", "main")
+	gitTest(t, memberPath, "config", "user.email", "test@example.com")
+	gitTest(t, memberPath, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(memberPath, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "add", "README.md")
+	gitTest(t, memberPath, "commit", "-m", "base")
+	gitTest(t, memberPath, "switch", "-c", "posse/task")
+	workspaceChange := store.Task{Type: "change", WorktreePath: workspace}
+	workspacePlan := *plan
+	workspacePlan.Execution.Scope = "workspace"
+	workspacePlan.Execution.Members = []taskplan.Member{{Name: "member", Path: "member", Base: "main"}}
+	if got := roleSkillProtocol(&workspacePlan, workspaceChange); !strings.Contains(got, "posse-tdd") || !strings.Contains(got, "posse-deslop") || !strings.Contains(got, "posse-no-comments") {
+		t.Fatalf("clean workspace Change launch omitted code skills = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(memberPath, "README.md"), []byte("docs only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "add", "README.md")
+	gitTest(t, memberPath, "commit", "-m", "docs")
+	if got := roleSkillProtocol(&workspacePlan, workspaceChange); strings.Contains(got, "posse-tdd") || strings.Contains(got, "posse-deslop") || strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
+		t.Fatalf("docs-only workspace Change launch protocol = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(memberPath, "change.go"), []byte("package change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "add", "change.go")
+	gitTest(t, memberPath, "commit", "-m", "change")
+	if got := roleSkillProtocol(&workspacePlan, workspaceChange); !strings.Contains(got, "posse-tdd") || !strings.Contains(got, "posse-deslop") || !strings.Contains(got, "posse-no-comments") {
+		t.Fatalf("code workspace Change launch omitted code skills = %q", got)
 	}
 }
 

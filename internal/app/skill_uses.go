@@ -52,30 +52,74 @@ func planRoleSkills(plan *taskplan.Plan) []string {
 	return names
 }
 
-func taskRoleSkills(task store.Task, skills []string) []string {
-	if task.Type == "change" && taskHasChanges(task) {
-		return skills
-	}
+func taskRoleSkills(task store.Task, skills []string, members ...taskplan.Member) []string {
+	codeChanged := task.Type == "change" && taskHasCodeChanges(task, members...)
 	var applicable []string
 	for _, skill := range skills {
-		if skill != "posse-deslop" && skill != "posse-no-comments" {
-			applicable = append(applicable, skill)
+		if task.Type == "change" && !codeChanged && (skill == "posse-tdd" || skill == "posse-deslop" || skill == "posse-no-comments") {
+			continue
 		}
+		if task.Type != "change" && (skill == "posse-deslop" || skill == "posse-no-comments") {
+			continue
+		}
+		applicable = append(applicable, skill)
 	}
 	return applicable
 }
 
-func taskHasChanges(task store.Task) bool {
-	if task.WorktreePath == "" || task.BaseRef == "" {
+func taskHasCodeChanges(task store.Task, members ...taskplan.Member) bool {
+	if task.WorktreePath == "" {
 		return true
 	}
-	cmd := exec.Command("git", "-C", task.WorktreePath, "diff", "--quiet", task.BaseRef+"...HEAD")
-	if err := cmd.Run(); err != nil {
-		return true
+	if len(members) > 0 {
+		var hasChanges bool
+		for _, member := range members {
+			codeChanged, memberChanged, ok := repoChanges(filepath.Join(task.WorktreePath, member.Path), member.Base)
+			if !ok || codeChanged {
+				return true
+			}
+			hasChanges = hasChanges || memberChanged
+		}
+		return !hasChanges
 	}
-	cmd = exec.Command("git", "-C", task.WorktreePath, "status", "--porcelain")
-	status, err := cmd.Output()
-	return err != nil || len(status) > 0
+	codeChanged, hasChanges, ok := repoChanges(task.WorktreePath, task.BaseRef)
+	return !ok || codeChanged || !hasChanges
+}
+
+func repoChanges(worktreePath, baseRef string) (codeChanged, hasChanges, ok bool) {
+	if worktreePath == "" || baseRef == "" {
+		return false, false, false
+	}
+	commands := [][]string{
+		{"diff", "--name-only", "--no-renames", baseRef + "...HEAD"},
+		{"diff", "--name-only"},
+		{"diff", "--cached", "--name-only"},
+		{"ls-files", "--others", "--exclude-standard"},
+	}
+	for _, args := range commands {
+		cmdArgs := append([]string{"-C", worktreePath}, args...)
+		output, err := exec.Command("git", cmdArgs...).Output()
+		if err != nil {
+			return false, false, false
+		}
+		for _, path := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if path == "" {
+				continue
+			}
+			hasChanges = true
+			codeChanged = codeChanged || !prosePath(path)
+		}
+	}
+	return codeChanged, hasChanges, true
+}
+
+func prosePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".mdx", ".rst", ".adoc":
+		return true
+	default:
+		return false
+	}
 }
 
 func roleSkillWhen(name string) string {
@@ -87,10 +131,11 @@ func roleSkillWhen(name string) string {
 
 // roleSkillProtocol tells a Worker when to invoke each loaded role skill.
 func roleSkillProtocol(plan *taskplan.Plan, task store.Task) string {
-	skills := planRoleSkills(plan)
-	if task.Type != "change" {
-		skills = taskRoleSkills(task, skills)
+	var members []taskplan.Member
+	if plan != nil {
+		members = plan.Execution.Members
 	}
+	skills := taskRoleSkills(task, planRoleSkills(plan), members...)
 	if len(skills) == 0 {
 		return ""
 	}
@@ -142,7 +187,7 @@ func unusedRoleSkills(ctx context.Context, db *store.DB, home string, project st
 		return nil, err
 	}
 	var unused []string
-	for _, name := range taskRoleSkills(task, planRoleSkills(plan)) {
+	for _, name := range taskRoleSkills(task, planRoleSkills(plan), plan.Execution.Members...) {
 		if uses[name] == 0 {
 			unused = append(unused, name)
 		}
@@ -226,7 +271,7 @@ func taskSkillChecklist(ctx context.Context, db *store.DB, home string, project 
 		return nil, err
 	}
 	usesRecorded := skillUsesRecorded(plan, skillUseRecordingInstalled(home, project.Name, task.Seq)) || len(uses) > 0
-	checks := roleSkillChecklist(taskRoleSkills(task, planRoleSkills(plan)), step, uses, usesRecorded)
+	checks := roleSkillChecklist(taskRoleSkills(task, planRoleSkills(plan), plan.Execution.Members...), step, uses, usesRecorded)
 	if len(checks) == 0 {
 		return nil, nil
 	}

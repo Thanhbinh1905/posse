@@ -46,7 +46,7 @@ func TestFullPipelinePublishRefreshRewritesPullRequestTextAfterPromotion(t *test
 	if err := os.WriteFile(fixture.ghLog, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, output, stderr = fixture.run("publish", "--refresh", "Corrected summary", "--verify", "go test ./... -> 42 passed", "--proof", "Corrected proof", "--risk", "Risk: low\nRollback: revert")
+	code, output, stderr = fixture.run("publish", "--refresh")
 	if code != 0 || !strings.Contains(output, "refreshed: PR/MR text for promoted candidate t1") {
 		t.Fatalf("publish --refresh after promotion: code=%d output=%s stderr=%s", code, output, stderr)
 	}
@@ -56,7 +56,7 @@ func TestFullPipelinePublishRefreshRewritesPullRequestTextAfterPromotion(t *test
 	}
 	updated := readFileForPublishTest(t, os.Getenv("POSSE_TEST_GH_EDIT_BODY"))
 	managed, ok := managedPublishSection(updated, marker.Token)
-	if !strings.HasPrefix(updated, "Reviewer note\n\n") || !ok || !strings.Contains(managed, "Corrected summary") || !strings.Contains(managed, "42 passed") || strings.Contains(managed, "wrong test count") {
+	if !strings.HasPrefix(updated, "Reviewer note\n\n") || !ok || !strings.Contains(managed, "Candidate summary") || !strings.Contains(managed, "go test ./... -> passed") || !strings.Contains(managed, "Intent proof: verified") || !strings.Contains(managed, "Risk: low\nRollback: revert") || strings.Contains(managed, "wrong test count") {
 		t.Fatalf("refreshed body=%s", updated)
 	}
 	remoteHead := strings.TrimSpace(gitTest(t, fixture.remote, "show-ref", "--hash", "refs/heads/posse/t1"))

@@ -40,6 +40,19 @@ func freezeReviewPolicy(t *testing.T, f *reviewVerdictFixture, policy string, ve
 	f.task.PlanJSON = data
 }
 
+func TestMergeReadySummaryStatesWhenReviewIsNotRequired(t *testing.T) {
+	f := newReviewVerdictFixture(t)
+	freezeReviewPolicy(t, f, "none", taskplan.Version)
+	task, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := mergeReadySummary(task, f.headSHA)
+	if !strings.Contains(summary, "merging without review (review: none)") {
+		t.Fatalf("merge_ready summary = %q", summary)
+	}
+}
+
 func TestGreenhouseAcceptHeadEvidenceRequiresReviewCapDecision(t *testing.T) {
 	ctx := context.Background()
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
