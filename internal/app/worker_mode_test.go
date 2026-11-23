@@ -169,6 +169,35 @@ func TestStaleDoneSignalHelpNamesAnyCurrentTurnToken(t *testing.T) {
 	}
 }
 
+func TestStaleDoneSignalHelpPrioritizesDeliveredInstruction(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO task_turn_tokens(task_id,token,updated_at) VALUES(?,?,0)`, task.ID, "message:1"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO messages(task_id,body,created_at,delivered_at,status) VALUES(?,?,1,2,'delivered')`, task.ID, "Update the Task before completion"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	refusal := staleWorkerTurnFailure(context.Background(), db, task.ID)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	help := strings.Join(refusal.Help, " ")
+	if !strings.Contains(help, "Current turn token: message:1") || !strings.Contains(help, "Handle the delivered instruction before sending another done Signal") || strings.Contains(help, "Retry the same Signal") {
+		t.Fatalf("stale Signal help did not prioritize the delivered instruction: %#v", refusal.Help)
+	}
+}
+
 func TestNeedsDecisionWorkerCanSignalWorkingAndGetsUsableRefusalHelp(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	db, err := store.Open(fixture.home)
