@@ -39,7 +39,21 @@ func prepareSupportedHomeAtVersion(t *testing.T, db *DB, version int64) {
 		t.Fatal(err)
 	}
 	if hasGreenhouseRequests && version < 20261123132235 {
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER greenhouse_review_requests_immutable`); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := db.ExecContext(ctx, `ALTER TABLE greenhouse_review_requests DROP COLUMN failure_count`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER greenhouse_review_requests_immutable BEFORE UPDATE ON greenhouse_review_requests
+WHEN NOT (
+    OLD.outcome = 'failed' AND OLD.grant_id IS NOT NULL AND
+    NEW.id = OLD.id AND NEW.project_id = OLD.project_id AND NEW.task_id = OLD.task_id AND
+    NEW.repo = OLD.repo AND NEW.requested_head = OLD.requested_head AND NEW.provider = OLD.provider AND
+    NEW.requested_at = OLD.requested_at AND NEW.grant_id = OLD.grant_id AND
+    NEW.settled_at >= OLD.settled_at AND NEW.outcome IN ('failed', 'verdict', 'refused', 'head_mismatch')
+)
+BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END;`); err != nil {
 			t.Fatal(err)
 		}
 	}
