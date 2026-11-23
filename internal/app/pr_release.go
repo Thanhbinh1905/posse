@@ -25,7 +25,7 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 		if target.task.State != store.StateDone && target.task.State != store.StateMerging {
 			return prReleaseRefused("executor policy can change only after the Worker signals done", false)
 		}
-		var withdrawnFreshness, releaseCompleted, freshnessRequeued bool
+		var withdrawnFreshness bool
 		if intent, intentErr := db.IntentByTask(ctx.Context, target.task.ID); intentErr == nil && intent.Command == "pr-release" && !intentProcessAlive(intent) {
 			retry := "posse pr release " + target.taskLabel() + " --policy release"
 			if policy != "release" {
@@ -36,13 +36,6 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 				return err
 			}
 			withdrawnFreshness = len(withdrawn) > 0
-			if withdrawnFreshness {
-				defer func() {
-					if releaseCompleted && returnErr != nil && !freshnessRequeued {
-						_ = s.pollProjectPullRequests(ctx.Context, db, target.project, target.cfg, true)
-					}
-				}()
-			}
 			if len(pendingMessages) > 0 {
 				help := make([]string, 0, len(pendingMessages))
 				for _, message := range pendingMessages {
@@ -113,22 +106,24 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			if err := s.releaseExecutor(ctx.Context, db, target, target.cfg); err != nil {
+			afterRelease := func() error {
+				if !withdrawnFreshness {
+					return nil
+				}
+				if err := s.pollProjectPullRequests(ctx.Context, db, target.project, target.cfg, true); err != nil {
+					return axi.Failure("pr_release_incomplete", "Sandbox released, but the PR conflict refresh failed: "+err.Error(), true, "Retry `posse pr release "+target.taskLabel()+" --policy release` to resume the refresh")
+				}
+				return nil
+			}
+			if err := s.releaseExecutor(ctx.Context, db, target, target.cfg, afterRelease); err != nil {
 				var failure *axi.Error
-				if errors.As(err, &failure) && failure.Code == "pr_release_refused" {
+				if errors.As(err, &failure) && (failure.Code == "pr_release_refused" || failure.Code == "pr_release_incomplete") {
 					return err
 				}
 				return axi.Failure("pr_release_incomplete", "executor release did not finish: "+err.Error(), true, "Retry `posse pr release "+target.taskLabel()+" --policy release` after repairing the named resource")
 			}
-			releaseCompleted = true
 			if err := s.recordExecutorPolicy(ctx.Context, db, target, policy, "Executor stopped; Sandbox released after verifying PR head "+observation.HeadSHA); err != nil {
 				return err
-			}
-			if withdrawnFreshness {
-				if err := s.pollProjectPullRequests(ctx.Context, db, target.project, target.cfg, true); err != nil {
-					return axi.Failure("pr_release_incomplete", "Sandbox released, but the PR conflict refresh could not be re-raised: "+err.Error(), true, "Retry `posse pr inspect "+target.taskLabel()+"` to refresh the PR watch")
-				}
-				freshnessRequeued = true
 			}
 			return printExecutorPolicy(ctx, target, policy, true)
 		}
@@ -288,7 +283,7 @@ func (s *Service) suspendExecutor(ctx context.Context, task store.Task) error {
 	return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
 }
 
-func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stewardTarget, cfg config.Config) (returnErr error) {
+func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stewardTarget, cfg config.Config, afterRelease func() error) (returnErr error) {
 	project, task := target.project, target.task
 	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "pr-release", `{}`)
 	if err != nil {
@@ -373,6 +368,11 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 			_, err := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
 			return err
 		}); err != nil {
+			return err
+		}
+	}
+	if afterRelease != nil {
+		if err := afterRelease(); err != nil {
 			return err
 		}
 	}
