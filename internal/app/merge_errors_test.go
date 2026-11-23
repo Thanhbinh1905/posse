@@ -101,7 +101,7 @@ func TestPRMergeRefusalForBehindTargetQueuesWorkerRefresh(t *testing.T) {
 	}
 	targetTip := fixture.advanceTarget(t, false, false)
 	t.Setenv("POSSE_TEST_GH_MERGE_ADVANCE_SHA", targetTip)
-	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "head branch is not up to date with the base branch")
+	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "Pull request is not mergeable: the base branch was modified. Review and resolve the conflicts, then try again.")
 	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "merge it")
 	if code == 0 || !strings.Contains(output, "pr_branch_behind") || !strings.Contains(output, targetTip) || !strings.Contains(output, "Posse queued the Worker an instruction") {
 		t.Fatalf("behind-target merge refusal did not queue refresh: exit=%d output=%s error=%s", code, output, stderr)
