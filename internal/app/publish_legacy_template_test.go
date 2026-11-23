@@ -103,8 +103,9 @@ func TestT203LegacyHumanSectionsAppendWithoutDataLoss(t *testing.T) {
 func TestPublishRefreshKeepsOmittedDescriptionFields(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	fixture.setGHHead(t, fixture.headSHA)
-	initialRisk := "Risk: low\nRollback: revert this PR"
-	code, output, stderr := fixture.run("publish", "Initial summary", "--verify", "go test ./internal/app -> passed", "--proof", "Initial proof", "--risk", initialRisk)
+	initialRisk := "Risk: low\nRollback: revert this PR\n\n## Risk Details\n\nNested risk details.\n\n<!-- posse: authored risk note -->\nRisk comment."
+	initialProof := "Initial proof\n\n## Details\n\nNested proof details.\n\n<!-- posse: authored note -->\nProof comment."
+	code, output, stderr := fixture.run("publish", "Initial summary", "--verify", "go test ./internal/app -> passed", "--proof", initialProof, "--risk", initialRisk)
 	if code != 0 {
 		t.Fatalf("initial publish: %d %s %s", code, output, stderr)
 	}
@@ -112,7 +113,7 @@ func TestPublishRefreshKeepsOmittedDescriptionFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, initialBody, err := prDetails(context.Background(), fixture.db, fixture.project, fixture.task, fixture.service.homePath, "", "Initial summary", "go test ./internal/app -> passed", "Initial proof", initialRisk)
+	_, initialBody, err := prDetails(context.Background(), fixture.db, fixture.project, fixture.task, fixture.service.homePath, "", "Initial summary", "go test ./internal/app -> passed", initialProof, initialRisk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func TestPublishRefreshKeepsOmittedDescriptionFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("refreshed body has no managed section: %s", updated)
 	}
-	for _, expected := range []string{"Updated summary", "go test ./internal/app -> passed", "Initial proof", initialRisk} {
+	for _, expected := range []string{"Updated summary", "go test ./internal/app -> passed", initialProof, initialRisk} {
 		if !strings.Contains(managed, expected) {
 			t.Errorf("refreshed body omitted %q: %s", expected, managed)
 		}

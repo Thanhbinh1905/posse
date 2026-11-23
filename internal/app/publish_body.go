@@ -114,7 +114,7 @@ func publishSection(body, heading string) (string, bool) {
 					break
 				}
 				lineEnd := pos + nextEnd
-				if strings.HasPrefix(body[pos:lineEnd], "## ") || strings.HasPrefix(body[pos:lineEnd], "<!-- posse:") {
+				if publishSectionBoundary(body[pos:lineEnd]) {
 					contentEnd = pos
 					break
 				}
@@ -143,7 +143,7 @@ func replacePublishSection(body, heading, content string) string {
 					break
 				}
 				sectionEnd := pos + nextEnd
-				if strings.HasPrefix(body[pos:sectionEnd], "## ") || strings.HasPrefix(body[pos:sectionEnd], "<!-- posse:") {
+				if publishSectionBoundary(body[pos:sectionEnd]) {
 					contentEnd = pos
 					break
 				}
@@ -154,6 +154,16 @@ func replacePublishSection(body, heading, content string) string {
 		offset = lineEnd + 1
 	}
 	return body
+}
+
+func publishSectionBoundary(line string) bool {
+	line = strings.TrimSuffix(line, "\r")
+	for _, heading := range publishBodySections {
+		if line == heading {
+			return true
+		}
+	}
+	return line == validationBlockStart || line == validationBlockEnd
 }
 
 func markerIsWholeLine(value string, start int, marker string) bool {

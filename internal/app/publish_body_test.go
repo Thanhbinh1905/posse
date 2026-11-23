@@ -137,6 +137,54 @@ func TestPreserveOmittedPublishBodyFields(t *testing.T) {
 	}
 }
 
+func TestPreserveOmittedPublishBodyFieldsKeepsNestedContent(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		proof string
+	}{
+		{name: "markdown heading", proof: "Proof before details\n\n## Details\n\nNested proof details."},
+		{name: "marker-like comment", proof: "Proof before note\n\n<!-- posse: authored note -->\nProof comment."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			existing := managedPublishBody("## Verification\n\n[x] verified\n\n## Proof\n\n"+test.proof+"\n\n## Risk And Rollback\n\nRisk: low\nRollback: revert", testPublishToken)
+			next := "## Verification\n\n- [ ] Not run; reason: not supplied\n\n## Proof\n\n_No proof supplied._\n\n## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR"
+
+			got := preserveOmittedPublishBodyFields(existing, next, testPublishToken)
+			if !strings.Contains(got, test.proof) {
+				t.Fatalf("refresh truncated nested Proof content: got %q, want full content %q", got, test.proof)
+			}
+		})
+	}
+}
+
+func TestReplacePublishSectionUsesOnlyKnownSectionHeadingsAsBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name, body, stale string
+	}{
+		{
+			name:  "markdown heading",
+			body:  "## Proof\n\nplaceholder\n\n## Details\n\nNested details.\n\n## Risk And Rollback\n\nRisk: low",
+			stale: "Nested details.",
+		},
+		{
+			name:  "marker-like comment",
+			body:  "## Proof\n\nplaceholder\n\n<!-- posse: authored note -->\nProof comment.\n\n## Risk And Rollback\n\nRisk: low",
+			stale: "Proof comment.",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			replacement := "Proof text\n\n## Details\n\nReplacement details.\n\n<!-- posse: authored note -->\nReplacement comment."
+			got := replacePublishSection(test.body, "Proof", replacement)
+			if !strings.Contains(got, replacement) || !strings.Contains(got, "## Risk And Rollback\n\nRisk: low") {
+				t.Fatalf("replacement crossed or truncated a publish-section boundary: %q", got)
+			}
+			if strings.Contains(got, test.stale) {
+				t.Fatalf("replacement retained content from the previous Proof section: %q", got)
+			}
+		})
+	}
+}
+
 func isPublishBodyConflict(err error) bool {
 	var failure *axi.Error
 	return errors.As(err, &failure) && failure.Code == "pr_body_conflict"
