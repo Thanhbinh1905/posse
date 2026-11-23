@@ -121,6 +121,39 @@ func TestBranchAuthorTransferWaitsForActiveOperation(t *testing.T) {
 	}
 }
 
+func TestResumedWorkerCanSignalWithInheritedAuthorGeneration(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	repository, err := gitCommonDir(context.Background(), fixture.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := fixture.db.ClaimBranchAuthor(context.Background(), repository, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=2 WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task.Launches = 2
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("POSSE_TASK_GENERATION", "1")
+	t.Setenv("HERDR_PANE_ID", fixture.task.PaneID)
+	var guardErr strings.Builder
+	guardInput := `{"tool_name":"Shell","tool_input":{"command":"posse signal working resumed"}}`
+	if code := fixture.service.RunGuard(strings.NewReader(guardInput), &guardErr); code != 0 {
+		t.Fatalf("resumed Worker's Signal was refused by its inherited author generation: code=%d stderr=%s", code, guardErr.String())
+	}
+	if code, output, stderr := fixture.run("signal", "working", "Resumed after Herdr restart"); code != 0 {
+		t.Fatalf("resumed Worker's Signal was rejected: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if err := requireWorkerBranchAuthor(context.Background(), fixture.db, fixture.task); err != nil {
+		t.Fatalf("resumed Worker lost branch author claim: %v", err)
+	}
+	if claim.Attempt != 1 || claim.Generation != 1 {
+		t.Fatalf("resumed branch author claim = %+v", claim)
+	}
+}
+
 func TestDoneSignalRefusesStaleBranchAuthorGeneration(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	repository, err := gitCommonDir(context.Background(), fixture.worktree)
