@@ -147,6 +147,29 @@ func TestLaunchPromptDoesNotResendWhenAgentIsAlreadyWorking(t *testing.T) {
 	}
 }
 
+func TestLaunchPromptNamesCodexConversationOpenInAnotherApp(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"This conversation is open in another app. Close it there and try again."}}`)
+	err := service.deliverLaunchPrompt(context.Background(), "w1:p1", "Read relaunch.md and follow it.")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "codex_conversation_open" || !strings.Contains(strings.ToLower(strings.Join(failure.Help, " ")), "close") {
+		t.Fatalf("Codex conversation prompt error = %v, want named recovery", err)
+	}
+}
+
+func TestLaunchPromptNamesCodexConversationOpenOnLabeledPane(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "blocked"}}}
+	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"This conversation is open in another app. Close it there and try again."}}`)
+	err := service.deliverLaunchPrompt(context.Background(), "w1:p1", "Read relaunch.md and follow it.")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "codex_conversation_open" {
+		t.Fatalf("labeled Codex pane error = %v, want codex_conversation_open", err)
+	}
+}
+
 func TestLaunchPromptNamesCodexUpdatePrompt(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
@@ -482,6 +505,18 @@ func TestWaitAgentReadyReportsAgentBlockedAtDialog(t *testing.T) {
 	var failure *axi.Error
 	if !errors.As(err, &failure) || failure.Code != "agent_blocked" {
 		t.Fatalf("readiness error for an agent at a dialog = %v", err)
+	}
+}
+
+func TestWaitAgentReadyNamesCodexConversationOpenOnLabeledPane(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "blocked"}}}
+	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"blocked","interactive_ready":true,"launch_pending":false}}`)
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"This conversation is open in another app. Close it there and try again."}}`)
+	err := service.waitAgentReady(context.Background(), "w1:p1")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "codex_conversation_open" {
+		t.Fatalf("relaunch readiness error = %v, want codex_conversation_open", err)
 	}
 }
 
