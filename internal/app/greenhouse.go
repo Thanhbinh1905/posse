@@ -820,39 +820,71 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		}
 	}
 	reason := fmt.Sprintf("Greenhouse found %d blocking finding(s) for head %s. Findings: %s", verdict.Blocking, shortSHA(verdict.Head), verdict.FindingsPath)
-	readiness := current.State == store.StateMerging
+	signals, err := db.TaskSignals(ctx, current.ID, 1)
+	if err != nil {
+		return err
+	}
+	readinessSince := int64(0)
+	if len(signals) > 0 && signals[0].Verb == "done" {
+		readinessSince = signals[0].At
+	}
+	readiness := current.State == store.StateMerging && current.GatedSHA == verdict.Head
+	if readiness && current.UpdatedAt > readinessSince {
+		readinessSince = current.UpdatedAt
+	}
 	decisions, err := db.PendingDecisions(ctx, project.ID)
 	if err != nil {
 		return err
 	}
 	for _, decision := range decisions {
-		if decision.TaskID == current.ID && decision.Kind == "merge_ready" {
+		if decision.TaskID == current.ID && decision.Kind == "merge_ready" && current.GatedSHA == verdict.Head && decision.CreatedAt >= readinessSince {
 			readiness = true
-			break
 		}
 	}
 	notices, err := db.Notices(ctx, project.ID, false)
 	if err != nil {
 		return err
 	}
-	withdrawalRecorded := false
+	withdrawalAt := int64(0)
 	for _, notice := range notices {
 		if notice.TaskID != current.ID {
 			continue
 		}
-		if notice.Kind == "merge_ready" {
+		var data struct {
+			HeadSHA   string            `json:"head_sha"`
+			GatedHead string            `json:"gated_head"`
+			PRHead    string            `json:"pr_head"`
+			Repo      string            `json:"repository"`
+			HeadSHAs  map[string]string `json:"head_shas"`
+		}
+		if json.Unmarshal([]byte(notice.DataJSON), &data) != nil {
+			continue
+		}
+		noticeHead := data.HeadSHA
+		if workspaceHead := data.HeadSHAs[verdict.Repository]; workspaceHead != "" {
+			noticeHead = workspaceHead
+		}
+		if notice.Kind == "merge_ready" && noticeHead == verdict.Head && notice.CreatedAt >= readinessSince {
 			readiness = true
 		}
-		if notice.Kind == "merge_readiness_withdrawn" {
-			withdrawalRecorded = true
+		withdrawalHead := data.HeadSHA
+		if data.GatedHead != "" {
+			withdrawalHead = data.GatedHead
+		}
+		if data.PRHead != "" && data.PRHead == verdict.Head {
+			withdrawalHead = data.PRHead
+		}
+		if notice.Kind == "merge_readiness_withdrawn" && withdrawalHead == verdict.Head && (data.Repo == verdict.Repository || data.Repo == "" && (!project.IsWorkspace() || verdict.Repository == project.Name)) && notice.CreatedAt > withdrawalAt {
+			withdrawalAt = notice.CreatedAt
 		}
 	}
+	withdrawalRecorded := withdrawalAt >= readinessSince && withdrawalAt > 0
 	if readiness {
 		if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
 			return err
 		}
 		if !withdrawalRecorded {
-			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath, "repository": verdict.Repository})}); err != nil {
 				return err
 			}
 		}
