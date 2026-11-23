@@ -2,6 +2,7 @@
 DROP TRIGGER greenhouse_review_requests_immutable;
 ALTER TABLE greenhouse_review_requests ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0);
 UPDATE greenhouse_review_requests SET failure_count=1 WHERE outcome='failed';
+-- +goose StatementBegin
 CREATE TRIGGER greenhouse_review_requests_immutable BEFORE UPDATE ON greenhouse_review_requests
 WHEN NOT (
     OLD.outcome = 'failed' AND OLD.grant_id IS NOT NULL AND
@@ -11,6 +12,7 @@ WHEN NOT (
     NEW.settled_at >= OLD.settled_at AND NEW.outcome IN ('failed', 'verdict', 'refused', 'head_mismatch')
 )
 BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END;
+-- +goose StatementEnd
 
 -- +goose Down
 ALTER TABLE greenhouse_review_requests DROP COLUMN failure_count;
