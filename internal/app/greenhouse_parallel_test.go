@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -175,6 +176,120 @@ func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 	}
 }
 
+func TestGreenhouseFindingsWithoutPriorReadinessDoNotWithdrawReadiness(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2",
+		Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA,
+		Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{{Key: "blocking", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}},
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	oldReady, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "old head was ready", DataJSON: marshalJSON(map[string]string{"head_sha": f.headSHA})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE notices SET created_at=1 WHERE id=?`, oldReady); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "Task reopened and completed", map[string]string{"greenhouse_pending_head": f.headSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "merge_readiness_withdrawn") != 0 {
+		t.Fatalf("merge readiness withdrawal notices = %+v; want none for first-round findings", notices)
+	}
+	if countNoticeKind(notices, "greenhouse_review_failed") != 1 {
+		t.Fatalf("Greenhouse failure notices = %+v; want one findings notice", notices)
+	}
+}
+
+func TestGreenhouseFindingsWithoutCurrentDoneSignalPreserveMergeReadiness(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := f.db.RaiseDecision(context.Background(), store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Origin: "test:merge-ready-no-current-done", Kind: "merge_ready", Question: "Merge Task?", Options: []string{"merge", "wait"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldReady, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "earlier cycle was ready", DataJSON: marshalJSON(map[string]string{"head_sha": f.headSHA})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE notices SET created_at=1 WHERE id=?`, oldReady); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "working", "Task resumed without a new completion", map[string]string{}); err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate", Findings: []store.ProviderFinding{{Key: "blocking", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "merge_readiness_withdrawn") != 0 {
+		t.Fatalf("merge readiness withdrawal notices = %+v; want none without a current done Signal", notices)
+	}
+	pending, err := f.db.PendingDecisions(context.Background(), f.project.ID)
+	if err != nil || !hasPendingDecision(pending, decision.ID) {
+		t.Fatalf("merge-ready Decision after Verdict = %+v, %v; want it to remain pending", pending, err)
+	}
+}
+
 func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
@@ -208,6 +323,19 @@ func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing
 	if err != nil || !hasPendingDecision(pendingBefore, decision.ID) {
 		t.Fatalf("merge-ready Decision before Verdict = %+v, %v", pendingBefore, err)
 	}
+	oldWithdrawal, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_readiness_withdrawn", Summary: "withdrawal for an earlier readiness cycle", DataJSON: marshalJSON(map[string]string{"head_sha": f.headSHA, "repository": f.project.Name})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE notices SET created_at=1 WHERE id=?`, oldWithdrawal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "Task reopened and completed", map[string]string{"greenhouse_pending_head": f.headSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateNotice(context.Background(), store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "current head is ready", DataJSON: marshalJSON(map[string]string{"head_sha": f.headSHA})}); err != nil {
+		t.Fatal(err)
+	}
 	verdict := store.Verdict{
 		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2",
 		Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA,
@@ -228,13 +356,28 @@ func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	withdrawn, namedFindings := false, false
-	for _, notice := range notices {
-		withdrawn = withdrawn || notice.Kind == "merge_readiness_withdrawn"
-		namedFindings = namedFindings || strings.Contains(notice.Summary, "findings.md")
+	signals, err := f.db.TaskSignals(context.Background(), f.task.ID, 1)
+	if err != nil || len(signals) == 0 {
+		t.Fatalf("latest Task Signal = %+v, %v", signals, err)
 	}
-	if !withdrawn || !namedFindings {
-		t.Fatalf("notices = %+v, want withdrawal and findings file", notices)
+	withdrawn, namedFindings := 0, false
+	for _, notice := range notices {
+		if notice.Kind != "merge_readiness_withdrawn" {
+			continue
+		}
+		var data struct {
+			Head string `json:"head_sha"`
+		}
+		if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+			t.Fatal(err)
+		}
+		if data.Head == verdict.Head && notice.CreatedAt > signals[0].At {
+			withdrawn++
+			namedFindings = namedFindings || strings.Contains(notice.Summary, "findings.md")
+		}
+	}
+	if withdrawn != 1 || !namedFindings {
+		t.Fatalf("notices = %+v, want one current-head withdrawal and findings file", notices)
 	}
 	pendingAfter, err := f.db.PendingDecisions(context.Background(), f.project.ID)
 	if err != nil || hasPendingDecision(pendingAfter, decision.ID) {
@@ -254,6 +397,48 @@ func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing
 	code, output, _ := f.run("merge", "t1", "--execute", "--user-approved", "approved")
 	if code == 0 || !strings.Contains(output, "no current passing Greenhouse Verdict") {
 		t.Fatalf("merge --execute = %d %s; want refusal until a passing Verdict exists", code, output)
+	}
+}
+
+func TestGreenhouseBlockingVerdictWithDisposedFindingsDoesNotFail(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate", Findings: []store.ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE provider_findings SET state='fixed' WHERE task_id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
+		t.Fatalf("handle Verdict after finding disposition: %v", err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "pr_watch_failing") != 0 {
+		t.Fatalf("watch failure notices = %+v; want none", notices)
 	}
 }
 
@@ -873,6 +1058,12 @@ func TestWorkspaceGreenhouseRecordsExactHeadEvenWhenHostMarksItNonCurrent(t *tes
 	if _, err := f.db.AddSignal(ctx, f.task.ID, "done", "Workspace review requested", map[string]any{"greenhouse_pending_members": []greenhousePendingMember{{Repository: "worker", Head: head}}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "worker is ready", DataJSON: marshalJSON(map[string]any{"head_shas": map[string]string{"worker": head}})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_readiness_withdrawn", Summary: "prior workspace withdrawal", DataJSON: marshalJSON(map[string]string{"head_sha": head, "repo": "worker"})}); err != nil {
+		t.Fatal(err)
+	}
 	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{
 		ProjectID: f.project.ID, TaskID: f.task.ID, Origin: "test:workspace-merge-ready", Kind: "merge_ready",
 		Question: "Merge Task?", Options: []string{"merge", "wait"},
@@ -913,12 +1104,14 @@ func TestWorkspaceGreenhouseRecordsExactHeadEvenWhenHostMarksItNonCurrent(t *tes
 	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 {
 		t.Fatalf("workspace Greenhouse notices=%+v err=%v, want failure Notice", notices, err)
 	}
-	withdrawn := false
+	withdrawn := 0
 	for _, notice := range notices {
-		withdrawn = withdrawn || notice.Kind == "merge_readiness_withdrawn" && strings.Contains(notice.Summary, "findings")
+		if notice.Kind == "merge_readiness_withdrawn" {
+			withdrawn++
+		}
 	}
-	if !withdrawn {
-		t.Fatalf("workspace Greenhouse notices=%+v, want merge readiness withdrawal naming findings", notices)
+	if withdrawn != 1 {
+		t.Fatalf("workspace merge readiness withdrawal count=%d notices=%+v, want one", withdrawn, notices)
 	}
 	pendingDecisions, err := f.db.PendingDecisions(ctx, f.project.ID)
 	if err != nil || hasPendingDecision(pendingDecisions, decision.ID) {
