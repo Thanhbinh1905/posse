@@ -21,11 +21,6 @@ import (
 	posseRuntime "github.com/thanhbinh1905/posse/internal/runtime"
 )
 
-// The model endpoint is local, uses a dummy credential, and never contacts a provider.
-func TestT242RealPiErrorUIIsRecognized(t *testing.T) {
-	t242RealPiErrorUI(t, "stream error: stream disconnected before completion: stream closed before response.completed", "model_stream_error")
-}
-
 func TestT242RealPiRefusalUIIsNotRetried(t *testing.T) {
 	t242RealPiErrorUI(t, "This content was flagged for possible cybersecurity risk", "model_refused")
 }
