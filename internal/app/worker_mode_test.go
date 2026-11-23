@@ -155,6 +155,19 @@ func TestWorkerCanReadOwnTaskAndReviewButNotAnotherTask(t *testing.T) {
 			t.Fatalf("Worker read another Task after spoofing its pane id with `posse %s`: code=%d output=%s", strings.Join(command, " "), code, output)
 		}
 	}
+
+	procRoot = fakeProc(t, fixture.root, []string{"PATH=/usr/bin"})
+	t.Setenv("HERDR_PANE_ID", "w2:p1")
+	t.Chdir(fixture.root)
+	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
+		t.Fatalf("Worker identified by its own pane and home marker could not read its Task: code=%d output=%s", code, output)
+	}
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_PANE_ID", "")
+	t.Chdir(fixture.sandbox)
+	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
+		t.Fatalf("Worker identified by its Sandbox could not read its Task: code=%d output=%s", code, output)
+	}
 }
 
 func TestStaleDoneSignalHelpNamesAnyCurrentTurnToken(t *testing.T) {

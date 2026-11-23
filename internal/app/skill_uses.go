@@ -72,19 +72,23 @@ func taskHasCodeChanges(task store.Task, members ...taskplan.Member) bool {
 		return true
 	}
 	if len(members) > 0 {
+		var hasChanges bool
 		for _, member := range members {
-			if repoHasCodeChanges(filepath.Join(task.WorktreePath, member.Path), member.Base) {
+			codeChanged, memberChanged, ok := repoChanges(filepath.Join(task.WorktreePath, member.Path), member.Base)
+			if !ok || codeChanged {
 				return true
 			}
+			hasChanges = hasChanges || memberChanged
 		}
-		return false
+		return !hasChanges
 	}
-	return repoHasCodeChanges(task.WorktreePath, task.BaseRef)
+	codeChanged, hasChanges, ok := repoChanges(task.WorktreePath, task.BaseRef)
+	return !ok || codeChanged || !hasChanges
 }
 
-func repoHasCodeChanges(worktreePath, baseRef string) bool {
+func repoChanges(worktreePath, baseRef string) (codeChanged, hasChanges, ok bool) {
 	if worktreePath == "" || baseRef == "" {
-		return true
+		return false, false, false
 	}
 	commands := [][]string{
 		{"diff", "--name-only", "--no-renames", baseRef + "...HEAD"},
@@ -96,15 +100,17 @@ func repoHasCodeChanges(worktreePath, baseRef string) bool {
 		cmdArgs := append([]string{"-C", worktreePath}, args...)
 		output, err := exec.Command("git", cmdArgs...).Output()
 		if err != nil {
-			return true
+			return false, false, false
 		}
 		for _, path := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-			if path != "" && !prosePath(path) {
-				return true
+			if path == "" {
+				continue
 			}
+			hasChanges = true
+			codeChanged = codeChanged || !prosePath(path)
 		}
 	}
-	return false
+	return codeChanged, hasChanges, true
 }
 
 func prosePath(path string) bool {

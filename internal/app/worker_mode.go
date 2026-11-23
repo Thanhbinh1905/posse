@@ -106,10 +106,27 @@ func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.T
 			identity = &trusted
 		}
 	}
-	if identity == nil || identity.env["HERDR_PANE_ID"] == "" {
-		return store.Task{}, store.ErrNotFound
+	if identity != nil && identity.env["HERDR_PANE_ID"] != "" {
+		return db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
 	}
-	return db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
+	dir, err := currentDir()
+	if err != nil {
+		return store.Task{}, err
+	}
+	byPath, pathErr := taskForPath(ctx, db, dir)
+	paneID := os.Getenv("HERDR_PANE_ID")
+	if pathErr == nil {
+		if paneID != "" {
+			if byPane, paneErr := db.TaskByPane(ctx, paneID); paneErr == nil && byPane.ID != byPath.ID {
+				return store.Task{}, store.ErrNotFound
+			}
+		}
+		return byPath, nil
+	}
+	if paneID != "" {
+		return db.TaskByPane(ctx, paneID)
+	}
+	return store.Task{}, pathErr
 }
 
 func workerOwnTaskRefusal() error {
