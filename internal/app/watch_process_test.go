@@ -377,6 +377,13 @@ func TestWatchLogLinesCarryTimestamps(t *testing.T) {
 	}
 }
 
+func TestWatchStopReasonReportsExternalSignal(t *testing.T) {
+	home := t.TempDir()
+	if got := watchStopReason(home, os.Getpid()); got != "external_signal" {
+		t.Fatalf("Watch stop reason = %q, want external_signal when no Posse stop marker exists", got)
+	}
+}
+
 func TestProcessHomeFollowsTheHomePointer(t *testing.T) {
 	userHome := t.TempDir()
 	data := filepath.Join(userHome, "data")
