@@ -1061,6 +1061,9 @@ func TestWorkspaceGreenhouseRecordsExactHeadEvenWhenHostMarksItNonCurrent(t *tes
 	if _, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "worker is ready", DataJSON: marshalJSON(map[string]any{"head_shas": map[string]string{"worker": head}})}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_readiness_withdrawn", Summary: "prior workspace withdrawal", DataJSON: marshalJSON(map[string]string{"head_sha": head, "repo": "worker"})}); err != nil {
+		t.Fatal(err)
+	}
 	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{
 		ProjectID: f.project.ID, TaskID: f.task.ID, Origin: "test:workspace-merge-ready", Kind: "merge_ready",
 		Question: "Merge Task?", Options: []string{"merge", "wait"},
@@ -1101,12 +1104,14 @@ func TestWorkspaceGreenhouseRecordsExactHeadEvenWhenHostMarksItNonCurrent(t *tes
 	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 {
 		t.Fatalf("workspace Greenhouse notices=%+v err=%v, want failure Notice", notices, err)
 	}
-	withdrawn := false
+	withdrawn := 0
 	for _, notice := range notices {
-		withdrawn = withdrawn || notice.Kind == "merge_readiness_withdrawn" && strings.Contains(notice.Summary, "findings")
+		if notice.Kind == "merge_readiness_withdrawn" {
+			withdrawn++
+		}
 	}
-	if !withdrawn {
-		t.Fatalf("workspace Greenhouse notices=%+v, want merge readiness withdrawal naming findings", notices)
+	if withdrawn != 1 {
+		t.Fatalf("workspace merge readiness withdrawal count=%d notices=%+v, want one", withdrawn, notices)
 	}
 	pendingDecisions, err := f.db.PendingDecisions(ctx, f.project.ID)
 	if err != nil || hasPendingDecision(pendingDecisions, decision.ID) {

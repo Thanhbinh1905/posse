@@ -856,6 +856,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 			GatedHead string            `json:"gated_head"`
 			PRHead    string            `json:"pr_head"`
 			Repo      string            `json:"repository"`
+			ShortRepo string            `json:"repo"`
 			HeadSHAs  map[string]string `json:"head_shas"`
 		}
 		if json.Unmarshal([]byte(notice.DataJSON), &data) != nil {
@@ -875,7 +876,11 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		if data.PRHead != "" && data.PRHead == verdict.Head {
 			withdrawalHead = data.PRHead
 		}
-		if notice.Kind == "merge_readiness_withdrawn" && withdrawalHead == verdict.Head && (data.Repo == verdict.Repository || data.Repo == "" && (!project.IsWorkspace() || verdict.Repository == project.Name)) && notice.CreatedAt > withdrawalAt {
+		noticeRepository := data.Repo
+		if noticeRepository == "" {
+			noticeRepository = data.ShortRepo
+		}
+		if notice.Kind == "merge_readiness_withdrawn" && withdrawalHead == verdict.Head && (noticeRepository == verdict.Repository || noticeRepository == "" && (!project.IsWorkspace() || verdict.Repository == project.Name)) && notice.CreatedAt > withdrawalAt {
 			withdrawalAt = notice.CreatedAt
 		}
 	}
