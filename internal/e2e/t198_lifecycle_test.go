@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -32,8 +33,10 @@ func runTeardownOwnershipLifecycle(t *testing.T, mode string) {
 	switch mode {
 	case "scratch-child":
 		processNames = []string{"background", "global-child", "other-task-child"}
-	case "local-ordering", "failed-discard-ordering":
+	case "local-ordering":
 		processNames = []string{"background"}
+	case "failed-discard-ordering":
+		processNames = []string{"background", "helper"}
 	}
 	processes := map[string]teardownFixtureProcess{}
 	// Register before launch so a refused Signal or failed readiness check
@@ -76,7 +79,9 @@ case "$PWD/" in
     echo $! > "$POSSE_TEST_ROOT/background-pid";;
    failed-discard-ordering)
     setsid /bin/sh -c 'printf ready > "$POSSE_TEST_ROOT/background-ready"; while [ ! -f "$POSSE_TEST_ROOT/allow-background-exit" ]; do sleep 0.1; done; mkdir -p "$TMPDIR"; printf "cache recreated during shutdown\n" > "$TMPDIR/shutdown-cache"; printf "shutdown handler ran\n" > "$POSSE_TEST_ROOT/shutdown-marker"' </dev/null >/dev/null 2>&1 &
-    echo $! > "$POSSE_TEST_ROOT/background-pid";;
+    echo $! > "$POSSE_TEST_ROOT/background-pid"
+    setsid /bin/sh -c 'cd "$PWD"; printf ready > "$POSSE_TEST_ROOT/helper-ready"; while :; do sleep 0.1; done' </dev/null >/dev/null 2>&1 &
+    echo $! > "$POSSE_TEST_ROOT/helper-pid";;
   esac
   printf ready > "$POSSE_TEST_ROOT/worker-ready"
   while [ ! -f "$POSSE_TEST_ROOT/task-working" ]; do sleep 0.02; done
@@ -293,6 +298,16 @@ while IFS= read -r line; do :; done
 	workerTmp := strings.TrimSpace(string(tmpContents))
 	if wanted := filepath.Join(home, "scratch", "shop", "t1"); workerTmp != wanted {
 		t.Fatalf("Worker TMPDIR=%q, want Task scratch %q", workerTmp, wanted)
+	}
+	if mode == "failed-discard-ordering" {
+		pid := processes["helper"].PID
+		environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+		if err != nil || !strings.Contains(string(environ), "POSSE_TASK_ID="+task.ContainmentMarker) {
+			t.Fatalf("Task helper lost its POSSE_TASK_ID marker: %q, %v", environ, err)
+		}
+		if filepath.Clean(processCWD(pid)) != filepath.Clean(task.WorktreePath) {
+			t.Fatalf("Task helper cwd = %q, want %q", processCWD(pid), task.WorktreePath)
+		}
 	}
 	if mode == "scratch-child" {
 		if ok, reason := waitForEvent(t, exists(filepath.Join(root, "signal-finished")), nil); !ok {

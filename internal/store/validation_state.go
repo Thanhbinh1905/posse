@@ -302,7 +302,24 @@ func (db *DB) queueValidationFixInstruction(ctx context.Context, taskID int64, k
 	var existingExpected string
 	var existingSeq int
 	var existingRoundID int64
-	err = tx.QueryRowContext(ctx, `SELECT expected_base_head,message_id,seq,id FROM validation_fix_rounds WHERE ship_task_id=? AND kind=? AND dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID, &existingSeq, &existingRoundID)
+	var existingStatus string
+	err = tx.QueryRowContext(ctx, `SELECT r.expected_base_head,r.message_id,r.seq,r.id,m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind=? AND r.dedupe_key=?`, taskID, kind, dedupeKey).Scan(&existingExpected, &existingMessageID, &existingSeq, &existingRoundID, &existingStatus)
+	if err == nil && kind == "freshness" && existingStatus == "withdrawn" {
+		prefix := dedupeKey + ":retry:"
+		retryErr := tx.QueryRowContext(ctx, `SELECT r.expected_base_head,r.message_id,r.seq,r.id,m.status FROM validation_fix_rounds r JOIN messages m ON m.id=r.message_id WHERE r.ship_task_id=? AND r.kind=? AND substr(r.dedupe_key,1,?)=? ORDER BY r.seq DESC LIMIT 1`, taskID, kind, len(prefix), prefix).Scan(&existingExpected, &existingMessageID, &existingSeq, &existingRoundID, &existingStatus)
+		if retryErr == nil && existingStatus != "withdrawn" {
+			err = nil
+		} else if retryErr != nil && !errors.Is(retryErr, sql.ErrNoRows) {
+			return QueueValidationFixResult{}, retryErr
+		} else {
+			var maxSeq int
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM validation_fix_rounds WHERE ship_task_id=? AND kind=?`, taskID, kind).Scan(&maxSeq); err != nil {
+				return QueueValidationFixResult{}, err
+			}
+			dedupeKey = fmt.Sprintf("%s:retry:%d", dedupeKey, maxSeq+1)
+			err = sql.ErrNoRows
+		}
+	}
 	if err == nil {
 		if existingExpected != expectedBaseHead {
 			return QueueValidationFixResult{}, fmt.Errorf("validation fix dedupe key %q was reused for another head", dedupeKey)

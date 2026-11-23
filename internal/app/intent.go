@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -115,7 +116,7 @@ func (s *Service) beginIntentStep(ctx context.Context, db *store.DB, intent stor
 }
 
 func teardownStepIndex(step string) int {
-	steps := []string{"worker.stop", "approval.record", "discard.capture", "process.stop", "panes.close", "sandbox.stop", "orphan.snapshot", "report.attachments", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"}
+	steps := []string{"worker.stop", "task.helpers.stop", "approval.record", "discard.capture", "process.stop", "panes.close", "sandbox.stop", "orphan.snapshot", "report.attachments", "scratch.remove", "sandbox.release", "branch.remove", "task.torn_down"}
 	for index, candidate := range steps {
 		if candidate == step {
 			return index
@@ -125,6 +126,9 @@ func teardownStepIndex(step string) int {
 }
 
 func (s *Service) runIntentStep(ctx context.Context, db *store.DB, intent store.Intent, step string, action func() error) error {
+	if intent.Command == "teardown" && intent.TaskID > 0 && step == "task.helpers.stop" {
+		return s.runTeardownHelperStopStep(ctx, db, intent, action)
+	}
 	if intent.Command == "teardown" && intent.TaskID > 0 {
 		current, err := db.IntentByTask(ctx, intent.TaskID)
 		if err != nil {
@@ -152,6 +156,67 @@ func (s *Service) runIntentStep(ctx context.Context, db *store.DB, intent store.
 		return err
 	}
 	return s.completeIntentStep(ctx, db, intent, step)
+}
+
+func (s *Service) runTeardownHelperStopStep(ctx context.Context, db *store.DB, intent store.Intent, action func() error) error {
+	current, err := db.IntentByTask(ctx, intent.TaskID)
+	if err != nil {
+		return err
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(current.PayloadJSON), &payload); err != nil {
+		return err
+	}
+	if payload == nil {
+		payload = make(map[string]json.RawMessage)
+	}
+	var completed bool
+	if raw := payload["task_helpers_stopped"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &completed); err != nil {
+			return err
+		}
+	}
+	if completed {
+		return nil
+	}
+	priorStep := strings.TrimPrefix(current.Step, "resuming:")
+	priorDone := strings.HasPrefix(priorStep, "done:")
+	priorName := strings.TrimPrefix(strings.TrimPrefix(priorStep, "done:"), "in_progress:")
+	if priorDone && priorName == "task.helpers.stop" {
+		payload["task_helpers_stopped"] = json.RawMessage("true")
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return db.UpdateIntentPayload(ctx, current.ID, current.ProcessID, string(encoded))
+	}
+	complete := func() error {
+		if err := action(); err != nil {
+			return err
+		}
+		payload["task_helpers_stopped"] = json.RawMessage("true")
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return db.UpdateIntentPayload(ctx, current.ID, current.ProcessID, string(encoded))
+	}
+	if teardownStepIndex(priorName) > teardownStepIndex("task.helpers.stop") {
+		crashIntentAt(current.Command, "before", "task.helpers.stop")
+		if err := complete(); err != nil {
+			return err
+		}
+		crashIntentAt(current.Command, "after", "task.helpers.stop")
+		return nil
+	}
+	if err := s.beginIntentStep(ctx, db, current, "task.helpers.stop"); err != nil {
+		return err
+	}
+	crashIntentAt(current.Command, "before", "task.helpers.stop")
+	if err := complete(); err != nil {
+		return err
+	}
+	return s.completeIntentStep(ctx, db, current, "task.helpers.stop")
 }
 
 func (s *Service) completeIntentStep(ctx context.Context, db *store.DB, intent store.Intent, step string) error {

@@ -101,6 +101,36 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	}
 }
 
+func TestPlanInputExternalizationKeepsLargeHistoricalBriefInline(t *testing.T) {
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	plan := admittedStorePlan(t, home).Bind("t1")
+	plan.Inputs[0] = taskplan.Select("brief", "selected brief", append([]byte("---\ntype: change\ntitle: Large brief\ndone_when: preserved inline\n---\n"), bytes.Repeat([]byte("brief content "), 1<<13)...))
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.externalizePlanJSON(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got taskplan.Plan
+	if err := json.Unmarshal([]byte(stored), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Inputs[0].Path != "" || !bytes.Equal(got.Inputs[0].Bytes, plan.Inputs[0].Bytes) {
+		t.Fatalf("large Brief was not kept inline: path=%q bytes=%d", got.Inputs[0].Path, len(got.Inputs[0].Bytes))
+	}
+	if _, err := taskplan.Decode(stored); err != nil {
+		t.Fatalf("decode stored plan with inline Brief: %v", err)
+	}
+}
+
 func TestPlanInputExternalizationRepairsMixedInlineAndBlobInputs(t *testing.T) {
 	home := t.TempDir()
 	db, err := Open(home)
@@ -446,6 +476,60 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	identities, err := recoveredDB.TaskLaunchIdentities(ctx, id)
 	if err != nil || len(identities) != 2 || identities[0].ModelKnown || identities[0].ConfiguredModel != "" || identities[0].PlanRevision != 1 || identities[1].PlanRevision != 2 {
 		t.Fatalf("rebuild inferred unknown identity or lost revisions: %#v %v", identities, err)
+	}
+}
+
+func TestReviseTaskPlansRollsBackEveryRevisionWhenOneTaskRaces(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	basePlan := admittedStorePlan(t, home)
+	var tasks []Task
+	var revisions []TaskPlanRevision
+	for seq := 1; seq <= 2; seq++ {
+		plan := basePlan.Bind(fmt.Sprintf("t%d", seq))
+		data, err := plan.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: seq, Type: "change", Title: fmt.Sprintf("Task %d", seq), State: StateQueued, PlanJSON: data})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := db.TaskByID(ctx, project.ID, taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		launch := plan.Launch
+		launch.ProfileName = fmt.Sprintf("profile-%d", seq)
+		revision, err := plan.Reconfigure(launch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		revisions = append(revisions, TaskPlanRevision{Task: task, Plan: revision})
+		tasks = append(tasks, task)
+	}
+	if err := db.Transition(ctx, tasks[1].ID, StateQueued, StateTornDown, "cli", "raced plan revision"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlans(ctx, revisions); !errors.Is(err, ErrStateRace) {
+		t.Fatalf("batch revision error=%v, want state race", err)
+	}
+	unchanged, err := db.TaskByID(ctx, project.ID, tasks[0].ID)
+	if err != nil || unchanged.PlanRevision != 1 {
+		t.Fatalf("earlier plan revision was partially applied: task=%+v err=%v", unchanged, err)
+	}
+	plans, err := db.TaskPlanRevisions(ctx, tasks[0].ID)
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("rolled-back plan revision history=%#v err=%v", plans, err)
 	}
 }
 

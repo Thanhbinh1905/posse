@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -126,31 +125,21 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 		if _, err := client.Call(context.Background(), "workspace.close", map[string]any{"workspace_id": task.HerdrWorkspaceID}); err != nil {
 			t.Fatalf("close the exited Worker workspace before discard: %v", err)
 		}
-		command := exec.Command(binary, "teardown", "t1", "--discard", "--user-approved", "User approved the isolated failed Worker discard")
-		command.Dir, command.Env = repo, leadEnv
-		output, err := command.CombinedOutput()
-		if err == nil || !strings.Contains(string(output), "refusing approved discard while processes remain in Task-owned paths") {
-			t.Fatalf("discard did not refuse the live Task-owned process: err=%v output=%s", err, output)
+		discardOutput := runPosse(t, binary, repo, leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the isolated failed Worker discard")
+		if !strings.Contains(discardOutput, "torn-down") {
+			t.Fatalf("approved discard did not stop Task helpers: %s", discardOutput)
 		}
-		if !teardownFixtureProcessRunning(processes["background"]) {
-			t.Fatal("approved discard stopped the Task-owned background process")
+		for _, name := range []string{"background", "helper"} {
+			if teardownFixtureProcessRunning(processes[name]) {
+				t.Fatalf("approved discard left Task-marked %s helper running", name)
+			}
+			if !strings.Contains(discardOutput, strconv.Itoa(processes[name].PID)) {
+				t.Fatalf("approved discard did not list stopped %s helper PID %d: %s", name, processes[name].PID, discardOutput)
+			}
 		}
 		if _, err := os.Stat(filepath.Join(root, "shutdown-marker")); !os.IsNotExist(err) {
-			t.Fatalf("approved discard invoked the process shutdown handler: %v", err)
+			t.Fatalf("approved discard ran the helper shutdown handler: %v", err)
 		}
-		if _, err := os.Stat(scratch); err != nil {
-			t.Fatalf("refused discard removed Task scratch: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "allow-background-exit"), []byte("exit\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if !waitForCondition(10*time.Second, func() bool {
-			_, markerErr := os.Stat(filepath.Join(root, "shutdown-marker"))
-			return !teardownFixtureProcessRunning(processes["background"]) && markerErr == nil
-		}) {
-			t.Fatal("Task-owned background process did not exit naturally")
-		}
-		runPosse(t, binary, repo, leadEnv, "teardown", "t1", "--discard", "--user-approved", "User approved the isolated failed Worker discard")
 		bundles, err := filepath.Glob(filepath.Join(home, "projects", "shop", "tasks", "t1", "discard", "*.bundle"))
 		if err != nil || len(bundles) != 1 {
 			t.Fatalf("failed discard lost approved tip bundle: %v %v", bundles, err)
@@ -186,7 +175,7 @@ func finishTeardownOwnershipLifecycle(t *testing.T, mode, binary, repo, home, ro
 	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
 		t.Fatalf("successful %s kept or recreated Task scratch: %v", mode, err)
 	}
-	if mode == "local-ordering" || mode == "failed-discard-ordering" {
+	if mode == "local-ordering" {
 		if !waitForCondition(7*time.Second, func() bool { return !teardownFixtureProcessRunning(processes["background"]) }) {
 			t.Fatalf("shutdown writer survived Teardown: pid=%d cwd=%q", processes["background"].PID, processCWD(processes["background"].PID))
 		}

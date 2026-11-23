@@ -331,6 +331,61 @@ func TestPRWatchDequeuesRedMergeQueueHead(t *testing.T) {
 	}
 }
 
+func TestPRWatchMakesGreenhouseVerdictedDoneTaskMergeReadyInOnePoll(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	freezeCILoopWithReview(t, fixture, 0, 0, "full-pipeline")
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(context.Background(), fixture.task.ID, url, ""); err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: fixture.task.ID, Repository: fixture.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: fixture.headSHA, Target: fixture.headSHA, ReviewBase: fixture.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := fixture.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return fixture.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record exact-head clean Verdict: recorded=%v err=%v", recorded, err)
+	}
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 0 {
+		t.Fatalf("working Task merge_ready notices=%+v err=%v", notices, err)
+	}
+	token, err := fixture.db.TaskTurnToken(context.Background(), fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("signal", "done", "Worker completion summary", "--head", fixture.headSHA, "--turn", token); code != 0 {
+		t.Fatalf("done: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	if err := fixture.service.pollProjectPullRequests(context.Background(), fixture.db, fixture.project, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil || countNoticeKind(notices, "merge_ready") != 1 {
+		t.Fatalf("merge_ready after one Watch poll over green observation = notices=%+v err=%v", notices, err)
+	}
+}
+
 func TestPRWatchRaisesMergeReadyWhenTaskEntersMergeAfterPRIsGreen(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
 	ctx := context.Background()
@@ -834,6 +889,74 @@ func TestPRWatchCIFixBudgetIgnoresHistoricalRepairsOutsideFullPipeline(t *testin
 	}
 }
 
+func TestPRWatchDeliversCIFixWithinTheFailurePoll(t *testing.T) {
+	for _, review := range []string{"none", "full-pipeline"} {
+		t.Run(review, func(t *testing.T) {
+			fixture := newPRMergeFixture(t, "pr", store.StateDone)
+			ctx := context.Background()
+			if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+				t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+			}
+			freezeCILoopWithReview(t, fixture, 2, 0, review)
+			fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+			if _, err := fixture.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=0 WHERE project_id=?`, fixture.project.ID); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+			t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+			if _, err := fixture.db.QueueCIFixInstruction(ctx, fixture.task.ID, fixture.headSHA, "https://github.com/acme/shop/pull/17", "ci:existing-round", "Earlier CI repair context", "", 2); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project); err != nil {
+				t.Fatalf("maintain Project Watch: %v", err)
+			}
+
+			var messageStatus string
+			if err := fixture.db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&messageStatus); err != nil || messageStatus != "delivered" {
+				t.Fatalf("CI fix instruction status=%q err=%v, want delivered in the failure poll", messageStatus, err)
+			}
+			var queued, exhausted int
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_exhausted'`, fixture.task.ID).Scan(&exhausted); err != nil {
+				t.Fatal(err)
+			}
+			if queued != 1 || exhausted != 0 {
+				t.Fatalf("CI fix outcome: queued=%d exhausted=%d, want one queued round", queued, exhausted)
+			}
+		})
+	}
+}
+
+func TestPRWatchDeliversCIFixWhenPollReturnsErrorAfterQueueing(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	freezeCILoop(t, fixture, 2, 0)
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE project_watch_state SET pr_polled_at=0 WHERE project_id=?`, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `CREATE TRIGGER fail_ci_queued_notice BEFORE INSERT ON notices WHEN NEW.kind='ci_fix_queued' BEGIN SELECT RAISE(ABORT, 'CI Notice persistence failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+
+	if err := fixture.service.maintainProjectWatch(ctx, fixture.db, fixture.project); err == nil || !strings.Contains(err.Error(), "CI Notice persistence failed") {
+		t.Fatalf("maintain Project Watch error=%v, want the CI Notice persistence failure", err)
+	}
+
+	var status string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT status FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, fixture.task.ID).Scan(&status); err != nil || status != "delivered" {
+		t.Fatalf("CI fix instruction status=%q err=%v, want delivered despite the poll error", status, err)
+	}
+}
+
 func TestPRWatchRaisesCIExhaustedOnceAfterFixBudget(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
@@ -974,6 +1097,41 @@ func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
 		if err := fixture.db.QueryRowContext(ctx, query, fixture.task.ID).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("stale observation side effect count=%d for %q err=%v", count, query, err)
 		}
+	}
+}
+
+func TestPRWatchMergesReleasedTaskWhenItsPRIsMerged(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	ctx := context.Background()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release executor: %d %s %s", code, output, stderr)
+	}
+	mergeCommit := strings.Repeat("9", 40)
+	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeCommit, fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("poll released Task PR: %v", err)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerged || task.MergedRef != mergeCommit {
+		t.Fatalf("released Task did not settle as merged: %#v err=%v", task, err)
+	}
+	if code, output, stderr := fixture.run("teardown", "t1"); code != 0 {
+		t.Fatalf("teardown released merged Task: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	task, err = fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown || task.MergedRef != mergeCommit {
+		t.Fatalf("released merged Task did not land: %#v err=%v", task, err)
 	}
 }
 
