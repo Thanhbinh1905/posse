@@ -45,6 +45,7 @@ type discardIntentPayload struct {
 	Worker                   *discardWorkerPlan `json:"worker,omitempty"`
 	DiscardApprovalRecorded  bool               `json:"discard_approval_recorded,omitempty"`
 	DiscardApprovalBranchSHA string             `json:"discard_approval_branch_sha,omitempty"`
+	TaskHelpersStopped       bool               `json:"task_helpers_stopped,omitempty"`
 }
 
 // UnmarshalJSON retains the exact-instance authority recorded before the
