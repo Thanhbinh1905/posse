@@ -175,6 +175,53 @@ func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 	}
 }
 
+func TestGreenhouseFindingsWithoutPriorReadinessDoNotWithdrawReadiness(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2",
+		Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA,
+		Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{{Key: "blocking", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}},
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "merge_readiness_withdrawn") != 0 {
+		t.Fatalf("merge readiness withdrawal notices = %+v; want none for first-round findings", notices)
+	}
+	if countNoticeKind(notices, "greenhouse_review_failed") != 1 {
+		t.Fatalf("Greenhouse failure notices = %+v; want one findings notice", notices)
+	}
+}
+
 func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
@@ -254,6 +301,48 @@ func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing
 	code, output, _ := f.run("merge", "t1", "--execute", "--user-approved", "approved")
 	if code == 0 || !strings.Contains(output, "no current passing Greenhouse Verdict") {
 		t.Fatalf("merge --execute = %d %s; want refusal until a passing Verdict exists", code, output)
+	}
+}
+
+func TestGreenhouseBlockingVerdictWithDisposedFindingsDoesNotFail(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate", Findings: []store.ProviderFinding{{Key: "G-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}}}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE provider_findings SET state='fixed' WHERE task_id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
+		t.Fatalf("handle Verdict after finding disposition: %v", err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "pr_watch_failing") != 0 {
+		t.Fatalf("watch failure notices = %+v; want none", notices)
 	}
 }
 

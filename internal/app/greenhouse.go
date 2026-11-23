@@ -575,7 +575,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 					return err
 				}
 				if !pending {
-					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+					if _, err := s.queueGreenhouseReviewFix(ctx, db, project, task); err != nil {
 						return err
 					}
 				}
@@ -756,7 +756,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					return err
 				}
 				if !pending {
-					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+					if _, err := s.queueGreenhouseReviewFix(ctx, db, project, task); err != nil {
 						_, _ = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
 						return err
 					}
@@ -768,6 +768,15 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 	}
 	return nil
+}
+
+func (s *Service) queueGreenhouseReviewFix(ctx context.Context, db *store.DB, project store.Project, task store.Task) (reviewFixQueued, error) {
+	queued, err := s.queueReviewFix(ctx, db, project, task, nil, false)
+	var failure *axi.Error
+	if errors.As(err, &failure) && failure.Code == "review_fix_empty" {
+		return reviewFixQueued{}, nil
+	}
+	return queued, err
 }
 
 func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store.DB, project store.Project, task store.Task, verdict store.Verdict) error {
@@ -811,11 +820,42 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		}
 	}
 	reason := fmt.Sprintf("Greenhouse found %d blocking finding(s) for head %s. Findings: %s", verdict.Blocking, shortSHA(verdict.Head), verdict.FindingsPath)
-	if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+	readiness := current.State == store.StateMerging
+	decisions, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil {
 		return err
 	}
-	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
+	for _, decision := range decisions {
+		if decision.TaskID == current.ID && decision.Kind == "merge_ready" {
+			readiness = true
+			break
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
 		return err
+	}
+	withdrawalRecorded := false
+	for _, notice := range notices {
+		if notice.TaskID != current.ID {
+			continue
+		}
+		if notice.Kind == "merge_ready" {
+			readiness = true
+		}
+		if notice.Kind == "merge_readiness_withdrawn" {
+			withdrawalRecorded = true
+		}
+	}
+	if readiness {
+		if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+			return err
+		}
+		if !withdrawalRecorded {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, current.ID, verdict.Repository, verdict.Head, reason); err != nil {
 		return err
@@ -825,7 +865,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		return err
 	}
 	if !pending {
-		if _, err := s.queueReviewFix(ctx, db, project, current, nil, false); err != nil {
+		if _, err := s.queueGreenhouseReviewFix(ctx, db, project, current); err != nil {
 			return err
 		}
 	}
