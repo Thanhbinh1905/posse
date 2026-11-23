@@ -293,7 +293,32 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 	return err
 }
 
-func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, task store.Task) (bool, error) {
+func mergeRefusalIndicatesTargetMovement(err error) bool {
+	message := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"not up to date",
+		"branch is behind",
+		"base branch was modified",
+		"base branch has been modified",
+		"base branch has changed",
+		"base branch changed",
+		"base branch is out of date",
+		"target branch was modified",
+		"target branch has changed",
+		"target branch changed",
+		"target branch is out of date",
+	} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, task store.Task, mergeErr error) (bool, error) {
+	if !mergeRefusalIndicatesTargetMovement(mergeErr) {
+		return false, nil
+	}
 	freshness, err := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA)
 	if err != nil {
 		return false, err

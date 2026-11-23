@@ -116,6 +116,42 @@ func TestPRMergeRefusalForBehindTargetQueuesWorkerRefresh(t *testing.T) {
 	}
 }
 
+func TestPRMergeUnrelatedRefusalDoesNotRefreshBehindPRWhenTargetRuleIsDisabled(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	prURL := "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(ctx, fixture.task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateDone, store.StateMerging, "cli", "PR ready"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGHHead(t, fixture.headSHA)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	observation := store.PRObservation{ProjectID: fixture.project.ID, TaskID: fixture.task.ID, PRURL: prURL, HeadSHA: fixture.headSHA, State: "OPEN", Checks: marshalJSON(checkSnapshot{State: "SUCCESS"}), Review: "APPROVED", Mergeable: "MERGEABLE"}
+	if _, err := fixture.db.RecordPRObservation(ctx, observation, store.PRObservationEffect{}, fixture.task); err != nil {
+		t.Fatal(err)
+	}
+	targetTip := fixture.advanceTarget(t, false, false)
+	t.Setenv("POSSE_TEST_GH_MERGE_ADVANCE_SHA", targetTip)
+	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "permission denied")
+	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "merge it")
+	if code == 0 || !strings.Contains(output, "pr_merge_failed") || strings.Contains(output, "pr_branch_behind") {
+		t.Fatalf("unrelated merge refusal was misclassified: exit=%d output=%s error=%s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerging || task.GatedSHA != fixture.headSHA {
+		t.Fatalf("Task after unrelated merge refusal = %+v, %v; want gated merging state", task, err)
+	}
+	var instructions int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND body LIKE '%missing current target commit%'`, fixture.task.ID).Scan(&instructions); err != nil || instructions != 0 {
+		t.Fatalf("refresh instructions = %d, %v; want none", instructions, err)
+	}
+}
+
 func TestPRMergeExecuteRaceWithQueuedTargetSyncNamesTheInstruction(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	fixture.requireCurrentTarget(t)
