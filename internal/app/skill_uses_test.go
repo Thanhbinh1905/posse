@@ -375,6 +375,36 @@ func TestTaskRoleSkillsRequireCodeCleanupOnlyWhenChangeTaskChanged(t *testing.T)
 	if got := roleSkillProtocol(plan, store.Task{Type: "review"}); strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
 		t.Fatalf("Review launch skill instructions = %q", got)
 	}
+
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	memberPath := filepath.Join(workspace, "member")
+	if err := os.MkdirAll(memberPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "init", "-b", "main")
+	gitTest(t, memberPath, "config", "user.email", "test@example.com")
+	gitTest(t, memberPath, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(memberPath, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "add", "README.md")
+	gitTest(t, memberPath, "commit", "-m", "base")
+	gitTest(t, memberPath, "switch", "-c", "posse/task")
+	workspaceChange := store.Task{Type: "change", WorktreePath: workspace}
+	workspacePlan := *plan
+	workspacePlan.Execution.Scope = "workspace"
+	workspacePlan.Execution.Members = []taskplan.Member{{Name: "member", Path: "member", Base: "main"}}
+	if got := roleSkillProtocol(&workspacePlan, workspaceChange); strings.Contains(got, "posse-tdd") || strings.Contains(got, "posse-deslop") || strings.Contains(got, "posse-no-comments") || !strings.Contains(got, "posse-technical-writing") {
+		t.Fatalf("docs-only workspace Change launch protocol = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(memberPath, "change.go"), []byte("package change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, memberPath, "add", "change.go")
+	gitTest(t, memberPath, "commit", "-m", "change")
+	if got := roleSkillProtocol(&workspacePlan, workspaceChange); !strings.Contains(got, "posse-tdd") || !strings.Contains(got, "posse-deslop") || !strings.Contains(got, "posse-no-comments") {
+		t.Fatalf("code workspace Change launch omitted code skills = %q", got)
+	}
 }
 
 func TestRoleSkillChecklistNamesOnlyTheSkillsOfThatStep(t *testing.T) {
