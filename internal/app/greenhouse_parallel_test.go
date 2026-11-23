@@ -799,6 +799,43 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 	}
 }
 
+func TestAutomaticGreenhouseReviewDoesNotRetrySizeFailures(t *testing.T) {
+	for _, reason := range []string{
+		"intent_too_long: intent is 8193 bytes; maximum is 8192",
+		"prompt_exceeds_context (12000 tokens > 8192)",
+		"context_overflow (12000 tokens > 8192)",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			f := newPRMergeFixture(t, "local", store.StateDone)
+			ctx := context.Background()
+			now := time.Now().UnixMilli()
+			if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{
+				ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA,
+				Provider: store.GreenhouseReviewProvider, RequestedAt: now - 1_000, SettledAt: now - 1, Outcome: "failed",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, reason); err != nil {
+				t.Fatal(err)
+			}
+			starts := 0
+			previous := selfExecCommand
+			selfExecCommand = func(...string) (*exec.Cmd, error) {
+				starts++
+				return exec.Command("true"), nil
+			}
+			t.Cleanup(func() { selfExecCommand = previous })
+			started := false
+			if err := f.service.startParallelGreenhouseReviewsTracked(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}, &started, true); err != nil {
+				t.Fatal(err)
+			}
+			if started || starts != 0 {
+				t.Fatalf("size-failure scheduler started=%t, child starts=%d; want no retry", started, starts)
+			}
+		})
+	}
+}
+
 func TestAutomaticGreenhouseReviewRespectsRetryBackoff(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	ctx := context.Background()

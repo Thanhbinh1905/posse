@@ -1098,7 +1098,7 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			}
 			continue
 		}
-		if hasFailureNotice && reviewerContextOverflow(errors.New(lastFailure)) {
+		if hasFailureNotice && reviewerSizeFailure(errors.New(lastFailure)) {
 			continue
 		}
 		if !explicitStart && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
