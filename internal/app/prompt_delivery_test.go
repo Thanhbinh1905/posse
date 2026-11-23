@@ -158,6 +158,18 @@ func TestLaunchPromptNamesCodexConversationOpenInAnotherApp(t *testing.T) {
 	}
 }
 
+func TestLaunchPromptNamesCodexConversationOpenOnLabeledPane(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:t1", Agent: "codex", AgentStatus: "blocked"}}}
+	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}
+	fake.Results["pane.read"] = json.RawMessage(`{"read":{"text":"This conversation is open in another app. Close it there and try again."}}`)
+	err := service.deliverLaunchPrompt(context.Background(), "w1:p1", "Read relaunch.md and follow it.")
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "codex_conversation_open" {
+		t.Fatalf("labeled Codex pane error = %v, want codex_conversation_open", err)
+	}
+}
+
 func TestLaunchPromptNamesCodexUpdatePrompt(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.Errors["agent.prompt"] = &herdr.Error{Code: "agent_blocked", Message: "agent is waiting at a dialog"}

@@ -412,7 +412,7 @@ func (s *Service) codexUpdatePrompt(ctx context.Context, paneID string) bool {
 	if err != nil {
 		return false
 	}
-	pane, found := findAppPane(snapshot.Panes, paneID, "")
+	pane, found := paneByID(snapshot.Panes, paneID)
 	if !found || pane.Agent != "codex" {
 		return false
 	}
@@ -426,7 +426,7 @@ func (s *Service) codexConversationOpenPrompt(ctx context.Context, paneID string
 	if err != nil {
 		return false
 	}
-	pane, found := findAppPane(snapshot.Panes, paneID, "")
+	pane, found := paneByID(snapshot.Panes, paneID)
 	if !found || pane.Agent != "codex" {
 		return false
 	}
@@ -459,6 +459,16 @@ func (s *Service) agentActive(ctx context.Context, paneID string) bool {
 		return false
 	}
 	return response.Agent.AgentStatus == "working" || response.Agent.AgentStatus == "blocked"
+}
+
+// paneByID matches the pane id in a fresh snapshot, labeled or not.
+func paneByID(panes []herdr.Pane, paneID string) (herdr.Pane, bool) {
+	for _, pane := range panes {
+		if pane.PaneID == paneID {
+			return pane, true
+		}
+	}
+	return herdr.Pane{}, false
 }
 
 func findAppPane(panes []herdr.Pane, paneID, label string) (herdr.Pane, bool) {
