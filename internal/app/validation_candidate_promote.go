@@ -327,6 +327,18 @@ func (s *Service) refreshPromotedPullRequest(out *axi.Context, db *store.DB, lan
 	if err := validateWorkerPullRequest(ctx, project, promotedTask, forge, prURL, candidate.PromotedSHA); err != nil {
 		return err
 	}
+	if summary == "" {
+		summary = candidate.Summary
+	}
+	if verification == "" {
+		verification = candidate.Verification
+	}
+	if proof == "" {
+		proof = candidate.Proof
+	}
+	if risk == "" {
+		risk = candidate.Risk
+	}
 	if err := s.refreshExistingPullRequest(ctx, db, intent, project, promotedTask, forge, prURL, lane.repo, summary, verification, proof, risk, true); err != nil {
 		return err
 	}
