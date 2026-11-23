@@ -107,6 +107,70 @@ func TestReviewStartPassesPinnedHeadAfterSandboxOwnershipRace(t *testing.T) {
 	}
 }
 
+func TestGreenhouseReviewRefreshesTargetAfterTaskBranchRefresh(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	plan.ValidationLoops.ReviewParallel = "greenhouse"
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("review_provider = \"greenhouse\"\n[review_loop]\ngreenhouse_timeout = \"1s\"\n[defaults]\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTarget, err := gitOutput(context.Background(), f.repo, "rev-parse", "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	var refreshedTarget string
+	f.service.greenhouseRound = func(ctx context.Context, round greenhouse.Round) (greenhouse.RoundResult, error) {
+		calls++
+		if calls == 1 {
+			refreshedTarget = f.advanceTarget(t, false, true)
+			largeFile := filepath.Join(f.root, "target-advance", "large-target-change.txt")
+			if err := os.WriteFile(largeFile, []byte(strings.Repeat("large target change\n", 5000)), 0o600); err != nil {
+				return greenhouse.RoundResult{}, err
+			}
+			gitTest(t, filepath.Join(f.root, "target-advance"), "add", "large-target-change.txt")
+			gitTest(t, filepath.Join(f.root, "target-advance"), "commit", "-m", "add large target change")
+			refreshedTarget = strings.TrimSpace(gitTest(t, filepath.Join(f.root, "target-advance"), "rev-parse", "HEAD"))
+			gitTest(t, filepath.Join(f.root, "target-advance"), "push", "origin", "HEAD:refs/heads/main")
+			gitTest(t, f.task.WorktreePath, "fetch", "origin", "main")
+			gitTest(t, f.task.WorktreePath, "merge", "--no-edit", "origin/main")
+			if round.Target != oldTarget {
+				t.Errorf("initial Greenhouse target = %s, want %s", round.Target, oldTarget)
+			}
+		} else if round.Target != refreshedTarget {
+			t.Errorf("Greenhouse request %d target = %s, want refreshed target %s", calls, round.Target, refreshedTarget)
+		}
+		return greenhouse.RoundResult{Outcome: greenhouse.Stale}, nil
+	}
+	binDir := t.TempDir()
+	if err := os.Symlink("/usr/bin/true", filepath.Join(binDir, "greenhouse")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if code, output, stderr := f.run("_greenhouse", "review", "t1"); code != 0 {
+		t.Fatalf("Greenhouse review after target refresh: %d %s %s", code, output, stderr)
+	}
+	if calls != greenhouseStaleRounds {
+		t.Fatalf("Greenhouse request count = %d, want %d", calls, greenhouseStaleRounds)
+	}
+}
+
 func TestGreenhouseSizeErrorsRaiseNeedsDecision(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason, measured string

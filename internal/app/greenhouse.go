@@ -148,22 +148,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve Greenhouse review head: %w", err)
 	}
-	target, err := greenhouseTarget(ctx.Context, member)
-	if err != nil {
-		if parallelMode {
-			grant, grantErr := parallelPendingGrant(pendingPath)
-			if grantErr != nil {
-				return grantErr
-			}
-			if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed", Grant: grant}); recordErr != nil {
-				return recordErr
-			}
-			if noticeErr := notifyFailure(requestedHead, err.Error()); noticeErr != nil {
-				return noticeErr
-			}
-		}
-		return err
-	}
 	recordInitialFailure := func(reason string) error {
 		if !parallelMode {
 			return nil
@@ -208,7 +192,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	}
 	round := greenhouse.Round{
 		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID, MinimumGrantNumber: 1,
-		Intent: greenhouseIntent(task, plan), Target: target,
+		Intent:   greenhouseIntent(task, plan),
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
 		Checkpoint: func(step string) { crashIntentAt("greenhouse-review", "after", step) },
@@ -316,6 +300,10 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
 				round.Wait = attemptWait
+				round.Target, err = greenhouseTarget(ctx.Context, member)
+				if err != nil {
+					return greenhouse.RoundResult{}, err
+				}
 				if s.greenhouseRound != nil {
 					return s.greenhouseRound(ctx.Context, round)
 				}
