@@ -315,7 +315,10 @@ func mergeRefusalIndicatesTargetMovement(err error) bool {
 	return false
 }
 
-func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, task store.Task, mergeErr error) (bool, error) {
+func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, mergeErr error) (bool, error) {
+	if !cfg.Defaults.RequireCurrentTarget && !greenhouseFullPipelineTask(task) {
+		return false, nil
+	}
 	if !mergeRefusalIndicatesTargetMovement(mergeErr) {
 		return false, nil
 	}

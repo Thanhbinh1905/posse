@@ -796,7 +796,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		}
 		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge", forge.Root, "glab", args...)
 		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already been merged") {
-			refreshed, refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, project, task, mergeErr)
+			refreshed, refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, project, cfg, task, mergeErr)
 			if refreshed || refreshErr != nil {
 				return refreshErr
 			}
@@ -826,7 +826,7 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		}
 		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", args...)
 		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already merged") {
-			refreshed, refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, project, task, mergeErr)
+			refreshed, refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, project, cfg, task, mergeErr)
 			if refreshed || refreshErr != nil {
 				return refreshErr
 			}

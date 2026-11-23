@@ -116,7 +116,7 @@ func TestPRMergeRefusalForBehindTargetQueuesWorkerRefresh(t *testing.T) {
 	}
 }
 
-func TestPRMergeUnrelatedRefusalDoesNotRefreshBehindPRWhenTargetRuleIsDisabled(t *testing.T) {
+func TestPRMergeBaseBranchModifiedRefusalDoesNotRefreshWhenTargetRuleIsDisabled(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
 	prURL := "https://github.com/acme/shop/pull/17"
@@ -137,7 +137,7 @@ func TestPRMergeUnrelatedRefusalDoesNotRefreshBehindPRWhenTargetRuleIsDisabled(t
 	}
 	targetTip := fixture.advanceTarget(t, false, false)
 	t.Setenv("POSSE_TEST_GH_MERGE_ADVANCE_SHA", targetTip)
-	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "permission denied")
+	t.Setenv("POSSE_TEST_GH_MERGE_ERROR", "Pull request is not mergeable: the base branch was modified. Review and resolve the conflicts, then try again.")
 	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "merge it")
 	if code == 0 || !strings.Contains(output, "pr_merge_failed") || strings.Contains(output, "pr_branch_behind") {
 		t.Fatalf("unrelated merge refusal was misclassified: exit=%d output=%s error=%s", code, output, stderr)
