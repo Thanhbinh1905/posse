@@ -17,7 +17,7 @@ func reviewGreenhouseWithRetries(ctx context.Context, parallel bool, wait time.D
 		}
 		var protocolErr *greenhouse.ProtocolError
 		var terminalErr *greenhouse.TerminalReviewError
-		if !parallel || errors.As(err, &protocolErr) || errors.As(err, &terminalErr) || reviewerContextOverflow(err) || retries >= 3 {
+		if !parallel || errors.As(err, &protocolErr) || errors.As(err, &terminalErr) || reviewerSizeFailure(err) || retries >= 3 {
 			return result, retries + 1, err
 		}
 		timer := time.NewTimer(time.Duration(1<<retries) * time.Second)
@@ -28,6 +28,19 @@ func reviewGreenhouseWithRetries(ctx context.Context, parallel bool, wait time.D
 		case <-timer.C:
 		}
 	}
+}
+
+func reviewerSizeFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	reason := strings.ToLower(err.Error())
+	for _, marker := range []string{"intent_too_long", "prompt_exceeds_context", "context_overflow"} {
+		if strings.Contains(reason, marker) {
+			return true
+		}
+	}
+	return reviewerContextOverflow(err)
 }
 
 func reviewerContextOverflow(err error) bool {

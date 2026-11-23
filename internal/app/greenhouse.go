@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -146,22 +148,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve Greenhouse review head: %w", err)
 	}
-	target, err := greenhouseTarget(ctx.Context, member)
-	if err != nil {
-		if parallelMode {
-			grant, grantErr := parallelPendingGrant(pendingPath)
-			if grantErr != nil {
-				return grantErr
-			}
-			if recordErr := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestedHead, Provider: store.GreenhouseReviewProvider, RequestedAt: requestStartedAt, SettledAt: time.Now().UnixMilli(), Outcome: "failed", Grant: grant}); recordErr != nil {
-				return recordErr
-			}
-			if noticeErr := notifyFailure(requestedHead, err.Error()); noticeErr != nil {
-				return noticeErr
-			}
-		}
-		return err
-	}
 	recordInitialFailure := func(reason string) error {
 		if !parallelMode {
 			return nil
@@ -206,7 +192,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	}
 	round := greenhouse.Round{
 		Worktree: member.worktree, Host: greenhouse.Host{Name: "posse", ID: hostID}, GrantPrefix: hostID, MinimumGrantNumber: 1,
-		Intent: greenhouseIntent(task, plan), Target: target,
+		Intent:   greenhouseIntent(task, plan),
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
 		Checkpoint: func(step string) { crashIntentAt("greenhouse-review", "after", step) },
@@ -314,6 +300,10 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
 				round.Wait = attemptWait
+				round.Target, err = greenhouseTarget(ctx.Context, member)
+				if err != nil {
+					return greenhouse.RoundResult{}, err
+				}
 				if s.greenhouseRound != nil {
 					return s.greenhouseRound(ctx.Context, round)
 				}
@@ -359,7 +349,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
-			terminalFailure := reviewerContextOverflow(err)
+			terminalFailure := reviewerSizeFailure(err)
 			if parallelMode {
 				requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
 				if err != nil {
@@ -575,7 +565,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 					return err
 				}
 				if !pending {
-					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+					if _, err := s.queueGreenhouseReviewFix(ctx, db, project, task); err != nil {
 						return err
 					}
 				}
@@ -756,7 +746,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					return err
 				}
 				if !pending {
-					if _, err := s.queueReviewFix(ctx, db, project, task, nil, false); err != nil {
+					if _, err := s.queueGreenhouseReviewFix(ctx, db, project, task); err != nil {
 						_, _ = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
 						return err
 					}
@@ -768,6 +758,15 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 	}
 	return nil
+}
+
+func (s *Service) queueGreenhouseReviewFix(ctx context.Context, db *store.DB, project store.Project, task store.Task) (reviewFixQueued, error) {
+	queued, err := s.queueReviewFix(ctx, db, project, task, nil, false)
+	var failure *axi.Error
+	if errors.As(err, &failure) && failure.Code == "review_fix_empty" {
+		return reviewFixQueued{}, nil
+	}
+	return queued, err
 }
 
 func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store.DB, project store.Project, task store.Task, verdict store.Verdict) error {
@@ -811,11 +810,80 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		}
 	}
 	reason := fmt.Sprintf("Greenhouse found %d blocking finding(s) for head %s. Findings: %s", verdict.Blocking, shortSHA(verdict.Head), verdict.FindingsPath)
-	if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+	signals, err := db.TaskSignals(ctx, current.ID, 1)
+	if err != nil {
 		return err
 	}
-	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath})}); err != nil {
+	currentCycle := len(signals) > 0 && signals[0].Verb == "done"
+	readinessSince := int64(0)
+	if currentCycle {
+		readinessSince = signals[0].At
+	}
+	readiness := currentCycle && current.State == store.StateMerging && current.GatedSHA == verdict.Head
+	if readiness && current.UpdatedAt > readinessSince {
+		readinessSince = current.UpdatedAt
+	}
+	decisions, err := db.PendingDecisions(ctx, project.ID)
+	if err != nil {
 		return err
+	}
+	for _, decision := range decisions {
+		if currentCycle && decision.TaskID == current.ID && decision.Kind == "merge_ready" && current.GatedSHA == verdict.Head && decision.CreatedAt >= readinessSince {
+			readiness = true
+		}
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		return err
+	}
+	withdrawalAt := int64(0)
+	for _, notice := range notices {
+		if notice.TaskID != current.ID {
+			continue
+		}
+		var data struct {
+			HeadSHA   string            `json:"head_sha"`
+			GatedHead string            `json:"gated_head"`
+			PRHead    string            `json:"pr_head"`
+			Repo      string            `json:"repository"`
+			ShortRepo string            `json:"repo"`
+			HeadSHAs  map[string]string `json:"head_shas"`
+		}
+		if json.Unmarshal([]byte(notice.DataJSON), &data) != nil {
+			continue
+		}
+		noticeHead := data.HeadSHA
+		if workspaceHead := data.HeadSHAs[verdict.Repository]; workspaceHead != "" {
+			noticeHead = workspaceHead
+		}
+		if currentCycle && notice.Kind == "merge_ready" && noticeHead == verdict.Head && notice.CreatedAt >= readinessSince {
+			readiness = true
+		}
+		withdrawalHead := data.HeadSHA
+		if data.GatedHead != "" {
+			withdrawalHead = data.GatedHead
+		}
+		if data.PRHead != "" && data.PRHead == verdict.Head {
+			withdrawalHead = data.PRHead
+		}
+		noticeRepository := data.Repo
+		if noticeRepository == "" {
+			noticeRepository = data.ShortRepo
+		}
+		if notice.Kind == "merge_readiness_withdrawn" && withdrawalHead == verdict.Head && (noticeRepository == verdict.Repository || noticeRepository == "" && (!project.IsWorkspace() || verdict.Repository == project.Name)) && notice.CreatedAt > withdrawalAt {
+			withdrawalAt = notice.CreatedAt
+		}
+	}
+	withdrawalRecorded := currentCycle && withdrawalAt >= readinessSince && withdrawalAt > 0
+	if readiness {
+		if err := db.ObsoletePendingMergeReadyDecisions(ctx, current.ID, reason); err != nil {
+			return err
+		}
+		if !withdrawalRecorded {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: current.ID, Kind: "merge_readiness_withdrawn", Summary: current.Title + ": merge readiness withdrawn because Greenhouse found blocking findings at " + shortSHA(verdict.Head) + "; findings: " + verdict.FindingsPath, DataJSON: marshalJSON(map[string]string{"head_sha": verdict.Head, "findings": verdict.FindingsPath, "repository": verdict.Repository})}); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, current.ID, verdict.Repository, verdict.Head, reason); err != nil {
 		return err
@@ -825,7 +893,7 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		return err
 	}
 	if !pending {
-		if _, err := s.queueReviewFix(ctx, db, project, current, nil, false); err != nil {
+		if _, err := s.queueGreenhouseReviewFix(ctx, db, project, current); err != nil {
 			return err
 		}
 	}
@@ -922,10 +990,30 @@ func greenhouseIntent(task store.Task, plan *taskplan.Plan) string {
 			break
 		}
 	}
-	if doneWhen == "" {
-		return title
+	if doneWhen != "" {
+		title += "\n\nDone when: " + doneWhen
 	}
-	return title + "\n\nDone when: " + doneWhen
+	intent := strings.ToValidUTF8(title, "")
+	var clean strings.Builder
+	for _, r := range intent {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			clean.WriteRune(r)
+		}
+	}
+	intent = clean.String()
+	if strings.TrimSpace(intent) == "" {
+		intent = "Greenhouse review"
+	}
+	const maxBytes = 8192
+	const marker = "[truncated]"
+	if len(intent) > maxBytes {
+		end := maxBytes - len(marker)
+		for end > 0 && !utf8.RuneStart(intent[end]) {
+			end--
+		}
+		intent = intent[:end] + marker
+	}
+	return intent
 }
 
 func greenhouseTaskMember(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo string) (greenhouseMember, error) {
