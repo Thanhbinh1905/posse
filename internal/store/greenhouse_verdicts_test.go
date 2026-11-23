@@ -14,6 +14,42 @@ func greenhouseVerdict(taskID int64, grant, head string) Verdict {
 		Head: head, Target: reviewShaA, ReviewBase: reviewShaA, Outcome: "clean", Mode: "parallel"}
 }
 
+func TestGreenhouseFailureCountMigrationBackfillsGrantlessFailures(t *testing.T) {
+	f := newReviewVerdictFixture(t, nil)
+	projectID := f.task(t, f.change).ProjectID
+	request := GreenhouseReviewRequest{
+		ProjectID: projectID, TaskID: f.change, Repository: "shop", RequestedHead: reviewShaA,
+		Provider: GreenhouseReviewProvider, RequestedAt: 10, SettledAt: 20, Outcome: "failed",
+	}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `ALTER TABLE greenhouse_review_requests DROP COLUMN failure_count`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM goose_db_version WHERE version_id=20261123132235`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM posse_migration_checksums WHERE version=20261123132235`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(f.home)
+	if err != nil {
+		t.Fatalf("open home with a grant-less failed request: %v", err)
+	}
+	defer db.Close()
+	requests, err := db.GreenhouseReviewRequests(f.ctx, projectID)
+	if err != nil || len(requests) != 1 || requests[0].FailureCount != 1 {
+		t.Fatalf("backfilled request = %+v, %v; want one failed attempt", requests, err)
+	}
+	if _, err := db.ExecContext(f.ctx, `UPDATE greenhouse_review_requests SET outcome='head_mismatch' WHERE id=?`, requests[0].ID); err == nil {
+		t.Fatal("updated a grant-less request after migration")
+	}
+}
+
 func TestGreenhouseReviewRequestLinksGateModeVerdict(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r1", reviewShaA)
