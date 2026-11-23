@@ -1100,6 +1100,41 @@ func TestPRWatchDoesNotStartCILoopForStaleGatedHead(t *testing.T) {
 	}
 }
 
+func TestPRWatchMergesReleasedTaskWhenItsPRIsMerged(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	ctx := context.Background()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release executor: %d %s %s", code, output, stderr)
+	}
+	mergeCommit := strings.Repeat("9", 40)
+	fixture.setGraphQLState(t, "MERGED", "SUCCESS", "APPROVED", "MERGEABLE", mergeCommit, fixture.headSHA)
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("poll released Task PR: %v", err)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateMerged || task.MergedRef != mergeCommit {
+		t.Fatalf("released Task did not settle as merged: %#v err=%v", task, err)
+	}
+	if code, output, stderr := fixture.run("teardown", "t1"); code != 0 {
+		t.Fatalf("teardown released merged Task: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+	task, err = fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown || task.MergedRef != mergeCommit {
+		t.Fatalf("released merged Task did not land: %#v err=%v", task, err)
+	}
+}
+
 func TestPRWatchMergesDoneTaskWhenItsPRIsMerged(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\nauto_teardown = \"finished\"\n"), 0o600); err != nil {
