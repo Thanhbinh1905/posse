@@ -297,6 +297,14 @@ func TestBindingTouchesOnlyTheDeclaredTaskComponent(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsBriefsLargerThanInlinePlanLimit(t *testing.T) {
+	r := request("change")
+	r.Brief = taskplan.Select("brief", "brief.md", append(r.Brief.Bytes, bytes.Repeat([]byte("x"), (64<<10)+1-len(r.Brief.Bytes))...))
+	if _, err := taskplan.Resolve(r); err == nil || !strings.Contains(err.Error(), "exceeds 64 KiB") {
+		t.Fatalf("Resolve large Brief error = %v, want 64 KiB limit", err)
+	}
+}
+
 func TestDecodeAcceptsContentAddressedInputReferences(t *testing.T) {
 	plan, err := taskplan.Resolve(request("change"))
 	if err != nil {
