@@ -93,7 +93,8 @@ func wholeSnippetIndex(text, snippet string) int {
 		for _, line := range strings.Split(rest, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "[") {
-				whole = !strings.HasPrefix(strings.ReplaceAll(trimmed, " ", ""), "[ui.sidebar.agents")
+				table := strings.ReplaceAll(trimmed, " ", "")
+				whole = table != "[ui.sidebar.agents]" && !strings.HasPrefix(table, "[ui.sidebar.agents.")
 				break
 			}
 			if trimmed != "" {

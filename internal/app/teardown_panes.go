@@ -29,6 +29,7 @@ type taskPaneTeardownPlan struct {
 	paneIDs           map[string]bool
 	tabs              map[string]bool
 	workspaces        map[string]bool
+	workspaceLabels   map[string]string
 	returnFocusToLead bool
 }
 
@@ -975,7 +976,7 @@ func (s *Service) verifyTaskPanesGone(ctx context.Context, project store.Project
 // Task. Teardown uses the plan only to verify that Herdr removes those panes
 // when their retained processes exit; it never closes a pane by id alone.
 func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Project, task store.Task) (taskPaneTeardownPlan, error) {
-	plan := taskPaneTeardownPlan{paneIDs: map[string]bool{}, tabs: map[string]bool{}, workspaces: map[string]bool{}}
+	plan := taskPaneTeardownPlan{paneIDs: map[string]bool{}, tabs: map[string]bool{}, workspaces: map[string]bool{}, workspaceLabels: map[string]string{}}
 	if task.PaneLabel == "" && task.HerdrWorkspaceID == "" && task.PaneID == "" {
 		return plan, nil
 	}
@@ -990,15 +991,12 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 	childID := ""
 	if project.IsWorkspace() {
 		for _, workspace := range snapshot.Workspaces {
-			if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID {
+			if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID || workspace.Label != workerWorkspaceLabel(task) {
 				continue
 			}
-			for _, pane := range snapshot.Panes {
-				if pane.WorkspaceID == workspace.WorkspaceID && pane.Label == task.PaneLabel && ownsTaskPane(snapshot, project, task, plan.tabs, pane) {
-					childID = workspace.WorkspaceID
-					plan.workspaces[childID] = true
-				}
-			}
+			childID = workspace.WorkspaceID
+			plan.workspaces[childID] = true
+			plan.workspaceLabels[childID] = workspace.Label
 		}
 	} else if !project.IsDirectory() {
 		for _, workspace := range snapshot.Workspaces {
@@ -1103,10 +1101,10 @@ func (s *Service) verifyTaskPanesClosed(ctx context.Context, project store.Proje
 	result.Closed = uniqueSorted(result.Closed)
 	result.Foreign = uniqueSorted(result.Foreign)
 	if project.IsWorkspace() {
-		for workspaceID := range plan.workspaces {
+		for workspaceID, expectedLabel := range plan.workspaceLabels {
 			workspaceExists := false
 			for _, workspace := range snapshot.Workspaces {
-				if workspace.WorkspaceID == workspaceID {
+				if workspace.WorkspaceID == workspaceID && workspace.Label == expectedLabel {
 					workspaceExists = true
 					break
 				}

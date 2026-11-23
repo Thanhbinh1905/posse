@@ -101,6 +101,36 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	}
 }
 
+func TestPlanInputExternalizationKeepsLargeHistoricalBriefInline(t *testing.T) {
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	plan := admittedStorePlan(t, home).Bind("t1")
+	plan.Inputs[0] = taskplan.Select("brief", "selected brief", append([]byte("---\ntype: change\ntitle: Large brief\ndone_when: preserved inline\n---\n"), bytes.Repeat([]byte("brief content "), 1<<13)...))
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.externalizePlanJSON(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got taskplan.Plan
+	if err := json.Unmarshal([]byte(stored), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Inputs[0].Path != "" || !bytes.Equal(got.Inputs[0].Bytes, plan.Inputs[0].Bytes) {
+		t.Fatalf("large Brief was not kept inline: path=%q bytes=%d", got.Inputs[0].Path, len(got.Inputs[0].Bytes))
+	}
+	if _, err := taskplan.Decode(stored); err != nil {
+		t.Fatalf("decode stored plan with inline Brief: %v", err)
+	}
+}
+
 func TestPlanInputExternalizationRepairsMixedInlineAndBlobInputs(t *testing.T) {
 	home := t.TempDir()
 	db, err := Open(home)
