@@ -83,6 +83,48 @@ func TestV033HomeUpgradesToBaselineSchema(t *testing.T) {
 	}
 }
 
+func TestBaselineHomeAppliesLaterMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "posse.db")
+	db, err := OpenAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, err := embeddedMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range sources {
+		if source.version <= 95 || source.version >= baselineMigrationVersion {
+			continue
+		}
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO goose_db_version(version_id,is_applied) VALUES(?,1)`, source.version); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO posse_migration_checksums(version,sha256) VALUES(?,?)`, source.version, source.checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM goose_db_version WHERE version_id=20261122175108`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM posse_migration_checksums WHERE version=20261122175108`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenAt(path)
+	if err != nil {
+		t.Fatalf("open baseline home with a later migration: %v", err)
+	}
+	defer db.Close()
+	var applied int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM goose_db_version WHERE version_id=20261122175108 AND is_applied=1`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("later migration applied rows = %d, %v; want 1", applied, err)
+	}
+}
+
 func normalizedSchema(t *testing.T, db *DB) []string {
 	t.Helper()
 	rows, err := db.QueryContext(context.Background(), `SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','index','trigger','view') ORDER BY type,name`)

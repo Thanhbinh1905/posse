@@ -285,7 +285,7 @@ func (db *DB) MigrateIfNeeded(ctx context.Context) (migrationErr error) {
 			return err
 		}
 	}
-	if err := db.checkSchema(ctx, activeSources); err != nil {
+	if err := db.checkSchema(ctx, sources); err != nil {
 		return err
 	}
 	dirs := []string{"migrations"}
