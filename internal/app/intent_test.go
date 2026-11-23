@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -85,6 +86,60 @@ func TestTaskIntentClaimWaitsForSandboxStateLock(t *testing.T) {
 	}
 	if _, err := db.IntentByTask(ctx, taskID); err != nil {
 		t.Fatalf("serialized Task intent was not recorded: %v", err)
+	}
+}
+
+func TestTeardownHelperStopRunsOnceWithoutRewindingLegacyIntent(t *testing.T) {
+	ctx := context.Background()
+	for _, step := range []string{"done:approval.record", "done:sandbox.stop"} {
+		t.Run(step, func(t *testing.T) {
+			db, err := store.OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Legacy teardown"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.StartIntent(ctx, project.ID, taskID, "teardown", step, marshalJSON(discardIntentPayload{Discard: true}), os.Getpid()); err != nil {
+				t.Fatal(err)
+			}
+			intent, err := db.IntentByTask(ctx, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := 0
+			service := &Service{}
+			stop := func() error { called++; return nil }
+			if err := service.runIntentStep(ctx, db, intent, "task.helpers.stop", stop); err != nil {
+				t.Fatal(err)
+			}
+			current, err := db.IntentByTask(ctx, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called != 1 || current.Step != step {
+				t.Fatalf("helper stop called %d times and intent step became %q; want once and preserved %q", called, current.Step, step)
+			}
+			var payload discardIntentPayload
+			if err := json.Unmarshal([]byte(current.PayloadJSON), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if !payload.TaskHelpersStopped {
+				t.Fatal("legacy intent did not record completed helper shutdown")
+			}
+			if err := service.runIntentStep(ctx, db, intent, "task.helpers.stop", stop); err != nil {
+				t.Fatal(err)
+			}
+			if called != 1 {
+				t.Fatalf("helper stop ran %d times after replay, want once", called)
+			}
+		})
 	}
 }
 

@@ -804,6 +804,13 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			return result, discardIdentityRefused("Task changed launch, PR identity or custody during Worker shutdown")
 		}
 		task = stoppedTask
+		if err := s.runIntentStep(ctx, db, intent, "task.helpers.stop", func() error {
+			processes, err := stopDiscardTaskHelpers(ctx, db, home, project, task)
+			stopped = append(stopped, processes...)
+			return err
+		}); err != nil {
+			return result, s.teardownDiscardIncomplete(ctx, db, project, task, "Task process shutdown", err)
+		}
 		branchSHA := ""
 		if project.IsWorkspace() {
 			var tipsErr error
