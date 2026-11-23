@@ -57,7 +57,7 @@ func TestTeardownVerifiesHerdrRemovedOnlyTheLinkedChild(t *testing.T) {
 func TestWorkspaceProjectTeardownClosesAnEmptyWorkerWorkspace(t *testing.T) {
 	project, task, adapter := linkedWorkerSession(t)
 	project.Kind = store.ProjectKindWorkspace
-	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerTabLabel(task)}
+	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task)}
 	adapter.snapshot.Panes[2].Label = task.PaneLabel
 	service := testService(t.TempDir(), adapter)
 	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
@@ -84,7 +84,7 @@ func TestWorkspaceProjectTeardownClosesAnEmptyWorkerWorkspace(t *testing.T) {
 func TestWorkspaceProjectTeardownFindsOrphanedEmptyWorkerWorkspace(t *testing.T) {
 	project, task, adapter := linkedWorkerSession(t)
 	project.Kind = store.ProjectKindWorkspace
-	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerTabLabel(task)}
+	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task)}
 	adapter.removePanes(task.PaneID)
 	service := testService(t.TempDir(), adapter)
 	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
@@ -105,7 +105,7 @@ func TestWorkspaceProjectTeardownFindsOrphanedEmptyWorkerWorkspace(t *testing.T)
 func TestWorkspaceProjectTeardownDoesNotCloseReusedWorkspaceID(t *testing.T) {
 	project, task, adapter := linkedWorkerSession(t)
 	project.Kind = store.ProjectKindWorkspace
-	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerTabLabel(task)}
+	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task)}
 	adapter.snapshot.Panes[2].Label = task.PaneLabel
 	service := testService(t.TempDir(), adapter)
 	plan, err := service.planTaskPaneTeardown(context.Background(), project, task)
@@ -125,7 +125,7 @@ func TestWorkspaceProjectTeardownDoesNotCloseReusedWorkspaceID(t *testing.T) {
 func TestWorkspaceProjectTeardownPreservesForeignPaneInWorkerWorkspace(t *testing.T) {
 	project, task, adapter := linkedWorkerSession(t)
 	project.Kind = store.ProjectKindWorkspace
-	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerTabLabel(task)}
+	adapter.snapshot.Workspaces[1] = herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task)}
 	adapter.snapshot.Panes[2].Label = task.PaneLabel
 	adapter.addPane(herdr.Pane{PaneID: "w2:p2", WorkspaceID: "w2", TabID: "w2:t1", Label: "user-shell", CWD: task.WorktreePath})
 	service := testService(t.TempDir(), adapter)

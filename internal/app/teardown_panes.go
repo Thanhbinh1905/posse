@@ -990,7 +990,7 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 	childID := ""
 	if project.IsWorkspace() {
 		for _, workspace := range snapshot.Workspaces {
-			if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID || workspace.Label != workerTabLabel(task) {
+			if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID || workspace.Label != workerWorkspaceLabel(task) {
 				continue
 			}
 			childID = workspace.WorkspaceID
