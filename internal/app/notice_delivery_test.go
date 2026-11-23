@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +213,78 @@ func TestWatchReplacementSessionSurfacesPrintedUncertainty(t *testing.T) {
 	notices, err := observer.NoticesByIDs(ctx, project.ID, []int64{noticeID})
 	if err != nil || notices[0].DeliveredAt != 0 {
 		t.Fatalf("replacement marked unconfirmed Notice delivered: %#v, %v", notices, err)
+	}
+}
+
+func TestWatchDifferentHarnessRequeuesPrintedUnacceptedBatch(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	noticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "report ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "already accepted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{acceptedID}, "claude:old-session", "server-generation-1", "accepted-owner", 1000, 100)
+	if err != nil || !claimed {
+		t.Fatalf("accepted receiver claim = %#v, %v, %v", accepted, claimed, err)
+	}
+	if err := db.MarkNoticeDeliveryPrinted(ctx, accepted.DeliveryID, "accepted-owner", 1001); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ResolveNoticeDelivery(ctx, project.ID, accepted.DeliveryID, "accepted-owner", "accepted", 1002); err != nil {
+		t.Fatal(err)
+	}
+	delivery, claimed, err := db.ClaimNoticeDelivery(ctx, project.ID, []int64{noticeID}, "claude:old-session", "server-generation-1", "old-owner", 1010, 100)
+	if err != nil || !claimed {
+		t.Fatalf("old receiver claim = %#v, %v, %v", delivery, claimed, err)
+	}
+	if err := db.MarkNoticeDeliveryPrinted(ctx, delivery.DeliveryID, "old-owner", 1010); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(repo)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w1")
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{ServerStartedAt: "server-generation-1", Panes: []herdr.Pane{{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "pi", AgentStatus: "idle"}}}
+	service := testService(home, fake)
+	code, output := runCLI(t, service, "watch", "--json", "--quiet-routine", "--handoff", "--destination", "pi:new-session", "--timeout", "1")
+	if code != 0 || !strings.Contains(output, fmt.Sprintf(`"id":%d`, noticeID)) || strings.Contains(output, fmt.Sprintf(`"id":%d`, acceptedID)) {
+		t.Fatalf("new harness did not receive the printed, unaccepted Notice: code=%d output=%s", code, output)
+	}
+	observer, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+	acceptedReceipt, err := observer.NoticeDelivery(ctx, accepted.DeliveryID)
+	if err != nil || acceptedReceipt.State != "accepted" {
+		t.Fatalf("accepted old-harness receipt = %#v, %v", acceptedReceipt, err)
+	}
+	acceptedNotice, err := observer.NoticesByIDs(ctx, project.ID, []int64{acceptedID})
+	if err != nil || len(acceptedNotice) != 1 || acceptedNotice[0].DeliveredAt == 0 {
+		t.Fatalf("accepted Notice was redelivered: %#v, %v", acceptedNotice, err)
 	}
 }
 
