@@ -847,6 +847,31 @@ func TestPinGreenhouseReviewCheckoutIsScopedByRepository(t *testing.T) {
 	}
 }
 
+func TestGreenhouseVerdictReplayReturnsPersistedHeadForPartialNotice(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	member := greenhouseMember{name: f.project.Name, root: f.task.WorktreePath, worktree: f.task.WorktreePath}
+	result := greenhouse.RoundResult{Grant: "shop/t1/shop/r1", RunID: "replayed-partial", Result: &greenhouse.HostResult{
+		Head: f.headSHA, Target: f.headSHA, Verdict: "clean",
+	}}
+	ctx := context.Background()
+	if recorded, _, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, t.TempDir(), "P1", config.Config{}, result); err != nil || !recorded {
+		t.Fatalf("record initial Verdict: recorded=%t err=%v", recorded, err)
+	}
+	result.Result.Verdict = "partial"
+	result.Result.Uncovered = []greenhouse.UncoveredPath{{Path: "large.sql", Reason: "hunk windows exceed 65536 bytes"}}
+	recorded, verdict, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, t.TempDir(), "P1", config.Config{}, result)
+	if err != nil || recorded || verdict.Head != f.headSHA || verdict.Outcome != "clean" {
+		t.Fatalf("replayed partial Verdict = recorded:%t verdict:%+v err:%v; want persisted clean Verdict for head %s", recorded, verdict, err, f.headSHA)
+	}
+	if _, err := f.db.CreateGreenhousePartialNoticeOnce(ctx, f.project.ID, f.task.ID, member.name, result.Result.Head, "Partial review", result.Result); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil || len(notices) != 1 || !strings.Contains(notices[0].DataJSON, f.headSHA) {
+		t.Fatalf("partial notice for replayed Verdict = %+v, %v; want reviewed head %s", notices, err, f.headSHA)
+	}
+}
+
 func TestGreenhouseVerdictComputesBaseAndChecksProviderBase(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	member := greenhouseMember{name: f.project.Name, root: f.task.WorktreePath, worktree: f.task.WorktreePath}

@@ -425,8 +425,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				return err
 			}
 			if len(result.Result.Uncovered) > 0 {
-				summary := greenhousePartialDecisionQuestion(member.name, shortSHA(verdict.Head), *result.Result)
-				if _, err := db.CreateGreenhousePartialNoticeOnce(ctx.Context, project.ID, task.ID, member.name, verdict.Head, summary, result.Result); err != nil {
+				reviewedHead := result.Result.Head
+				summary := greenhousePartialDecisionQuestion(member.name, shortSHA(reviewedHead), *result.Result)
+				if _, err := db.CreateGreenhousePartialNoticeOnce(ctx.Context, project.ID, task.ID, member.name, reviewedHead, summary, result.Result); err != nil {
 					return err
 				}
 			}
@@ -442,7 +443,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if len(result.Result.Uncovered) > 0 && outputVerdict == "clean" {
 				outputVerdict = "partial"
 			}
-			output = append(output, axi.Field{Key: "head", Value: verdict.Head}, axi.Field{Key: "verdict", Value: outputVerdict},
+			output = append(output, axi.Field{Key: "head", Value: result.Result.Head}, axi.Field{Key: "verdict", Value: outputVerdict},
 				axi.Field{Key: "blocking", Value: verdict.Blocking}, axi.Field{Key: "findings", Value: verdict.FindingsPath}, axi.Field{Key: "recorded", Value: recorded}, axi.Field{Key: "replayed", Value: result.Replayed})
 		case greenhouse.Stale:
 			if err := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); err != nil {
@@ -1002,7 +1003,19 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	recorded, err := db.RecordGreenhouseVerdict(ctx, verdict, func(ctx context.Context) (string, error) {
 		return taskBranchAuthorHead(ctx, member.root, task.Branch)
 	})
-	return recorded, verdict, err
+	if err != nil || recorded {
+		return recorded, verdict, err
+	}
+	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	if err != nil {
+		return false, store.Verdict{}, err
+	}
+	for _, persisted := range verdicts {
+		if persisted.Grant == result.Grant && persisted.Repository == member.name && persisted.Provider == store.GreenhouseReviewProvider {
+			return false, persisted, nil
+		}
+	}
+	return false, store.Verdict{}, fmt.Errorf("Greenhouse Verdict for already-recorded grant %s was not found", result.Grant)
 }
 
 // greenhouseBlocking counts findings at or above blockAt. An unknown priority blocks.
