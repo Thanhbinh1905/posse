@@ -108,6 +108,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	startServer(t, otherClient)
 	foreignRepo := filepath.Join(otherRoot, "checkout")
 	foreignRemote := filepath.Join(otherRoot, "remote.git")
+	aliasedWorktree := filepath.Join(otherRoot, "aliased-worktree")
 	for _, args := range [][]string{{"init", "--bare", foreignRemote}, {"init", "-b", "main", foreignRepo}} {
 		command := exec.Command("git", args...)
 		if output, err := command.CombinedOutput(); err != nil {
@@ -135,6 +136,10 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(foreignRepo, "tracked.txt"), []byte("local change\n"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	alias := exec.Command("git", "-C", workerSandbox, "config", "alias.foreign", "worktree add "+aliasedWorktree)
+	if output, err := alias.CombinedOutput(); err != nil {
+		t.Fatalf("set fixture Git alias: %v %s", err, output)
 	}
 	foreignRef := exec.Command("git", "-C", foreignRepo, "rev-parse", "refs/remotes/origin/main")
 	foreignRefBefore, err := foreignRef.Output()
@@ -204,6 +209,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"other Project checkout fetch", "git -C " + foreignRepo + " fetch origin", true},
 		{"other Project checkout file change", "git -C " + foreignRepo + " checkout -- tracked.txt", true},
 		{"other Project checkout after relative -C", "cd " + filepath.Join(workerSandbox, "sub") + " && git -C .. --work-tree=../../foreign checkout -- tracked.txt", true},
+		{"other Project checkout through alias", "git foreign", true},
 		{"other Project checkout after cd", "cd " + foreignRepo + " && git fetch origin", true},
 		{"other Project checkout through GIT_DIR", "GIT_DIR=" + foreignRepo + "/.git git fetch origin", true},
 		{"other Project checkout through GIT_WORK_TREE", "GIT_WORK_TREE=" + foreignRepo + " git checkout -- tracked.txt", true},
@@ -261,7 +267,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 				}
 			}
 			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" {
-				for _, destination := range []string{outsideInit, outsideClone, outsideWorktree} {
+				for _, destination := range []string{outsideInit, outsideClone, outsideWorktree, aliasedWorktree} {
 					if _, err := os.Stat(destination); !os.IsNotExist(err) {
 						t.Errorf("Git command created foreign destination %s: %v", destination, err)
 					}

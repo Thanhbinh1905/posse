@@ -767,6 +767,13 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 }
 
 func gitTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable []string) string {
+	return gitTargetOutsideWorkerDepth(e, args, literal, writable, 0)
+}
+
+func gitTargetOutsideWorkerDepth(e *shellEnv, args []string, literal []bool, writable []string, depth int) string {
+	if depth >= 6 {
+		return "unresolved Git alias"
+	}
 	if target := gitPathOutsideWorker(e.cwd, writable); target != "" {
 		return target
 	}
@@ -832,7 +839,7 @@ func gitTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable
 			return target
 		}
 	}
-	return ""
+	return gitAliasTargetOutsideWorker(e, args, literal, writable, depth)
 }
 
 func gitEffectiveCWD(e *shellEnv, args []string, literal []bool) string {
@@ -866,6 +873,102 @@ func gitEffectiveCWD(e *shellEnv, args []string, literal []bool) string {
 		cwd = path
 	}
 	return cwd
+}
+
+func gitAliasTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable []string, depth int) string {
+	aliases := map[string]string{}
+	cwd := e.cwd
+	command := -1
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !literal[i] {
+			return "unresolved Git alias"
+		}
+		if arg == "--" {
+			i++
+			command = i
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			command = i
+			break
+		}
+		switch {
+		case oneOfString(arg, "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"):
+			if i+1 >= len(args) {
+				return "unresolved Git alias"
+			}
+			i++
+			value := args[i]
+			if arg == "-c" {
+				recordGitAlias(aliases, value)
+			}
+			if arg == "-C" {
+				pathEnv := e.clone()
+				pathEnv.cwd = cwd
+				cwd = pathEnv.path(value)
+			}
+			if arg == "--config-env" {
+				recordGitConfigEnvAlias(aliases, e, value)
+			}
+		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
+			recordGitAlias(aliases, arg[2:])
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			pathEnv := e.clone()
+			pathEnv.cwd = cwd
+			cwd = pathEnv.path(arg[2:])
+		case strings.HasPrefix(arg, "--config-env="):
+			recordGitConfigEnvAlias(aliases, e, strings.TrimPrefix(arg, "--config-env="))
+		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") || strings.HasPrefix(arg, "--namespace=") || strings.HasPrefix(arg, "--exec-path=") || strings.HasPrefix(arg, "--list-cmds=") ||
+			oneOfString(arg, "-P", "-p", "--no-pager", "--paginate", "--bare", "--version", "--help", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--exec-path", "--html-path", "--man-path", "--info-path", "--no-lazy-fetch", "--no-advice"):
+		default:
+			return "unresolved Git alias"
+		}
+	}
+	if command < 0 || command >= len(args) {
+		return ""
+	}
+	subcommand := args[command]
+	count := 0
+	if raw := e.values["GIT_CONFIG_COUNT"]; raw != "" {
+		var err error
+		count, err = strconv.Atoi(raw)
+		if err != nil {
+			return "unresolved Git alias"
+		}
+	}
+	if count < 0 || count > 128 || e.unknown["GIT_CONFIG_COUNT"] {
+		return "unresolved Git alias"
+	}
+	for n := 0; n < count; n++ {
+		keyName, valueName := "GIT_CONFIG_KEY_"+strconv.Itoa(n), "GIT_CONFIG_VALUE_"+strconv.Itoa(n)
+		if e.unknown[keyName] || e.unknown[valueName] {
+			return "unresolved Git alias"
+		}
+		if e.values[keyName] == "alias."+subcommand {
+			aliases[subcommand] = e.values[valueName]
+		}
+	}
+	alias := aliases[subcommand]
+	if alias == "" {
+		output, err := exec.Command("git", "-C", cwd, "config", "--get", "alias."+subcommand).Output()
+		if err == nil {
+			alias = strings.TrimSpace(string(output))
+		}
+	}
+	if alias == "" {
+		return ""
+	}
+	if strings.HasPrefix(alias, "!") {
+		return "unresolved Git alias"
+	}
+	fields := strings.Fields(alias)
+	if len(fields) == 0 {
+		return "unresolved Git alias"
+	}
+	expanded := append(append([]string(nil), args[:command]...), fields...)
+	expanded = append(expanded, args[command+1:]...)
+	return gitTargetOutsideWorkerDepth(e, expanded, allLiteral(len(expanded)), writable, depth+1)
 }
 
 func gitConfigWorktreeTarget(e *shellEnv, args []string, literal []bool, writable []string) string {
