@@ -13,6 +13,47 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestResearchReportExcludesFilesChangedOnMainAfterSandboxBase(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	if err := os.WriteFile(filepath.Join(f.repo, "source.txt"), []byte("commit A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "add", "source.txt")
+	gitTest(t, f.env, f.repo, "commit", "-m", "Commit A")
+	brief := filepath.Join(f.root, "research.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: research\ntitle: Research report\ndone_when: report.md is complete\n---\nWrite a concise Report.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "research"); !strings.Contains(output, "t1") {
+		t.Fatalf("research start: %s", output)
+	}
+	f.waitState(t, "t1", store.StateWorking)
+	task := f.task(t, "t1")
+	if err := os.WriteFile(filepath.Join(f.repo, "source.txt"), []byte("commit B\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, f.repo, "add", "source.txt")
+	gitTest(t, f.env, f.repo, "commit", "-m", "Commit B")
+	if err := os.WriteFile(filepath.Join(task.WorktreePath, "report.md"), []byte("Research complete.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPosse(t, f.binary, task.WorktreePath, workerSignalEnv(f, task), "signal", "done", "Report ready", "--report", "report.md")
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1"); !strings.Contains(output, "torn-down") {
+		t.Fatalf("research teardown: %s", output)
+	}
+	manifestPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "report-manifest.json")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read Report manifest: %v", err)
+	}
+	if strings.Contains(string(manifest), "source.txt") {
+		t.Fatalf("Report manifest includes main's post-acquisition change: %s", manifest)
+	}
+	if !strings.Contains(string(manifest), "report.md") {
+		t.Fatalf("Report manifest omitted report.md: %s", manifest)
+	}
+}
+
 func TestResearchNoticeAcknowledgementTearsDownUnbornRepository(t *testing.T) {
 	f := newWorkerTabsFixtureWithOptions(t, workerTabsOptions{emptyFolder: true})
 	gitTest(t, f.env, f.repo, "init", "-b", "main")
