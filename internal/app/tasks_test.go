@@ -778,7 +778,7 @@ func TestTeardownPredecessorDependantsCanBeRepointed(t *testing.T) {
 		t.Fatalf("re-point without --to was not refused: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"decide", decisionID, "re-point", "--to", "t2"}); code != 0 {
+	if code := cli.Run([]string{"decide", decisionID, "re-point", "--to", " t2 "}); code != 0 {
 		t.Fatalf("answer re-point: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
@@ -2411,6 +2411,152 @@ func TestTornDownFailedPrerequisiteKeepsAdmissionPassWorking(t *testing.T) {
 		t.Fatalf("cascade did not tear down the queued dependant: task=%+v err=%v", dependentTask, err)
 	}
 	run("list")
+}
+
+func TestTeardownCascadeRaceKeepsDependantDecisions(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.brief, []byte("---\ntype: change\ntitle: Dependent\ndone_when: concurrent dispatch keeps its Decisions\nafter: t1:landed\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("start dependent: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved predecessor teardown"}); code != 0 {
+		t.Fatalf("teardown predecessor: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) == 0 {
+		t.Fatalf("teardown Decisions=%#v err=%v", decisions, err)
+	}
+	decision, err := db.AnswerDecision(ctx, fixture.project.ID, decisions[len(decisions)-1].ID, "cascade", "cascade the dependent Task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependent, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER force_cascade_state_race BEFORE UPDATE OF state ON tasks WHEN OLD.id = %d BEGIN SELECT RAISE(IGNORE); END", dependent.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"apply", fmt.Sprint(decision.ID)}); code == 0 {
+		t.Fatalf("cascade hid the state race: %s", output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	all, err := db.Decisions(ctx, fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pending := range all {
+		if pending.TaskID == dependent.ID && pending.AnsweredAt == 0 && pending.ObsoleteAt != 0 {
+			t.Fatalf("raced dependant Decision was obsoleted: %#v", pending)
+		}
+	}
+}
+
+func TestTeardownCascadeIncludesTransitiveQueuedDependants(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Predecessor", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "fixture Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateFailed, "worker", "fixture failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	for _, brief := range []string{
+		"---\ntype: change\ntitle: First dependent\ndone_when: cascade closure is torn down\nafter: t1:landed\n---\nWait.\n",
+		"---\ntype: change\ntitle: Second dependent\ndone_when: cascade closure is torn down\nafter: t2:landed\n---\nWait.\n",
+	} {
+		if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output.Reset()
+		if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+			t.Fatalf("start dependent: code=%d output=%s", code, output.String())
+		}
+	}
+	output.Reset()
+	if code := cli.Run([]string{"teardown", "t1", "--discard", "--user-approved", "User approved predecessor teardown"}); code != 0 {
+		t.Fatalf("teardown predecessor: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("teardown Decisions=%#v err=%v", decisions, err)
+	}
+	decision, err := db.AnswerDecision(ctx, fixture.project.ID, decisions[0].ID, "cascade", "cascade the dependent Tasks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"apply", fmt.Sprint(decision.ID)}); code != 0 {
+		t.Fatalf("apply cascade: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, ref := range []string{"t2", "t3"} {
+		task, err := db.Task(ctx, fixture.project.ID, ref)
+		if err != nil || task.State != store.StateTornDown {
+			t.Fatalf("cascade did not tear down %s: task=%+v err=%v", ref, task, err)
+		}
+	}
 }
 
 func TestTearingDownQueuedTaskObsoletesItsOpenDecisions(t *testing.T) {

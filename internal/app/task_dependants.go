@@ -7,6 +7,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 func queuedTaskDependants(ctx context.Context, db *store.DB, projectID int64, predecessor store.Task) ([]store.Task, error) {
@@ -135,13 +136,68 @@ func (s *Service) applyTeardownDependantsDecision(ctx context.Context, db *store
 		return nil
 	}
 	if decision.Answer == "cascade" {
-		for _, dependant := range dependants {
-			if err := db.Transition(ctx, dependant.ID, store.StateQueued, store.StateTornDown, "cli", "Cascade teardown approved for predecessor "+taskIDString(predecessor.Seq)); err != nil && err != store.ErrStateRace {
-				return err
+		allQueued, err := db.Tasks(ctx, project.ID, true)
+		if err != nil {
+			return err
+		}
+		plans := make(map[int64]*taskplan.Plan, len(allQueued))
+		for _, task := range allQueued {
+			if task.State != store.StateQueued {
+				continue
 			}
-			if err := db.ObsoleteTaskDecisions(ctx, dependant.ID); err != nil {
-				return err
+			plan, err := task.AdmittedPlan()
+			if err != nil {
+				return admittedPlanFailure(err)
 			}
+			plans[task.ID] = plan
+		}
+		byRef := make(map[string]store.Task, len(allQueued))
+		for _, task := range allQueued {
+			byRef[taskIDString(task.Seq)] = task
+		}
+		closure := make([]store.Task, 0, len(dependants))
+		seen := make(map[int64]bool, len(dependants))
+		frontier := dependants
+		for len(frontier) > 0 {
+			next := make([]store.Task, 0)
+			for _, current := range frontier {
+				if seen[current.ID] {
+					continue
+				}
+				seen[current.ID] = true
+				closure = append(closure, current)
+				for _, candidate := range allQueued {
+					if seen[candidate.ID] || candidate.State != store.StateQueued || plans[candidate.ID] == nil {
+						continue
+					}
+					for _, dependency := range plans[candidate.ID].Dependencies {
+						if dependency.TaskID == taskIDString(current.Seq) {
+							next = append(next, byRef[taskIDString(candidate.Seq)])
+							break
+						}
+					}
+				}
+			}
+			frontier = next
+		}
+		ids := make([]int64, 0, len(closure))
+		for _, dependant := range closure {
+			ids = append(ids, dependant.ID)
+		}
+		raced, err := db.CascadeTeardownQueued(ctx, ids, "Cascade teardown approved for predecessor "+taskIDString(predecessor.Seq))
+		if err != nil {
+			return err
+		}
+		if len(raced) > 0 {
+			taskRefs := make([]string, 0, len(raced))
+			for _, taskID := range raced {
+				task, err := db.TaskByID(ctx, project.ID, taskID)
+				if err != nil {
+					return err
+				}
+				taskRefs = append(taskRefs, taskIDString(task.Seq))
+			}
+			return fmt.Errorf("cascade skipped dependants after concurrent state changes: %s", strings.Join(taskRefs, ", "))
 		}
 		return nil
 	}

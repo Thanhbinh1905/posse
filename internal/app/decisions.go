@@ -432,7 +432,7 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	} // User's own shell input is their quote.
 	reason := ""
 	if decisionBefore.Kind == "teardown_dependants" && parsed.Positionals[1] == "re-point" {
-		reason = "to=" + parsed.Flags["to"]
+		reason = "to=" + strings.TrimSpace(parsed.Flags["to"])
 	}
 	decision, err := db.AnswerDecisionAs(ctx.Context, project.ID, id, parsed.Positionals[1], "user", quote, reason)
 	if store.IsNotFound(err) {
