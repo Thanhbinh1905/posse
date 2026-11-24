@@ -680,6 +680,24 @@ func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
 			t.Errorf("guard did not refuse git targeting another Project checkout for %q: refused=%v reason=%#v", command, refused, reason)
 		}
 	}
+	sub := filepath.Join(sandbox, "sub")
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	subScope := scope
+	subScope.cwd = sub
+	effectiveWorktree := filepath.Join(filepath.Dir(sandbox), "foreign")
+	for _, command := range []string{
+		"cd " + sub + " && git -C .. --work-tree=../foreign checkout -- tracked.txt",
+		"git -C .. --work-tree=../foreign checkout -- tracked.txt",
+		"git -C .. --git-dir=../foreign/.git fetch origin",
+		"GIT_WORK_TREE=../foreign git -C .. checkout -- tracked.txt",
+		"GIT_DIR=../foreign/.git git -C .. fetch origin",
+	} {
+		if refused, reason := guardCommand(command, subScope); !refused || !strings.Contains(reason.why, effectiveWorktree) {
+			t.Errorf("guard did not resolve Git paths after -C from Git's effective directory for %q: refused=%v reason=%#v", command, refused, reason)
+		}
+	}
 	if refused, reason := guardCommand("GIT_DIR=$(printf %s "+foreign+"/.git) git fetch origin", scope); !refused || !strings.Contains(reason.why, "unresolved GIT_DIR") {
 		t.Errorf("guard did not refuse an unresolved GIT_DIR: refused=%v reason=%#v", refused, reason)
 	}

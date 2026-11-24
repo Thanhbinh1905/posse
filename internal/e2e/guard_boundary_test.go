@@ -69,6 +69,13 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.MkdirAll(workerSandbox, 0700); err != nil {
 		t.Fatal(err)
 	}
+	workerForeignSibling := filepath.Join(workerHome, "foreign")
+	if err := os.MkdirAll(workerForeignSibling, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(workerSandbox, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, args := range [][]string{{"init", "-b", "main", workerSandbox}, {"-C", workerSandbox, "config", "user.name", "Fixture"}, {"-C", workerSandbox, "config", "user.email", "fixture@example.invalid"}} {
 		command := exec.Command("git", args...)
 		if output, err := command.CombinedOutput(); err != nil {
@@ -196,6 +203,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"direct Worker push", "git push origin HEAD", true},
 		{"other Project checkout fetch", "git -C " + foreignRepo + " fetch origin", true},
 		{"other Project checkout file change", "git -C " + foreignRepo + " checkout -- tracked.txt", true},
+		{"other Project checkout after relative -C", "cd " + filepath.Join(workerSandbox, "sub") + " && git -C .. --work-tree=../../foreign checkout -- tracked.txt", true},
 		{"other Project checkout after cd", "cd " + foreignRepo + " && git fetch origin", true},
 		{"other Project checkout through GIT_DIR", "GIT_DIR=" + foreignRepo + "/.git git fetch origin", true},
 		{"other Project checkout through GIT_WORK_TREE", "GIT_WORK_TREE=" + foreignRepo + " git checkout -- tracked.txt", true},

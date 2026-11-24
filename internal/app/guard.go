@@ -770,30 +770,38 @@ func gitTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable
 	if target := gitPathOutsideWorker(e.cwd, writable); target != "" {
 		return target
 	}
+	gitEnv := e.clone()
+	gitEnv.cwd = gitEffectiveCWD(e, args, literal)
+	if gitEnv.cwd == "" {
+		return "unresolved Git directory"
+	}
 	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"} {
 		if e.unknown[name] {
 			return "unresolved " + name
 		}
 		if path := e.values[name]; path != "" && e.exported[name] {
-			if target := gitPathOutsideWorker(e.path(path), writable); target != "" {
+			if target := gitPathOutsideWorker(gitEnv.path(path), writable); target != "" {
 				return target
 			}
 		}
 	}
-	if target := gitConfigWorktreeTarget(e, args, literal, writable); target != "" {
+	if target := gitConfigWorktreeTarget(gitEnv, args, literal, writable); target != "" {
 		return target
 	}
 	if target := gitDestinationOutsideWorker(e, args, literal, writable); target != "" {
 		return target
 	}
+	cwd := e.cwd
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		path := ""
+		isChangeDir := false
 		switch {
 		case arg == "-C" || arg == "--git-dir" || arg == "--work-tree":
 			if i+1 >= len(args) {
 				return "unresolved Git directory"
 			}
+			isChangeDir = arg == "-C"
 			i++
 			path = args[i]
 		case strings.HasPrefix(arg, "--git-dir="):
@@ -801,24 +809,63 @@ func gitTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable
 		case strings.HasPrefix(arg, "--work-tree="):
 			path = strings.TrimPrefix(arg, "--work-tree=")
 		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			isChangeDir = true
 			path = arg[2:]
 		}
 		if path == "" {
 			continue
 		}
+		pathEnv := e.clone()
+		pathEnv.cwd = cwd
 		if !literal[i] {
-			path = e.path(path)
-			if path == "" || resolvedNewPath(path) != resolvedNewPath(e.cwd) {
+			path = pathEnv.path(path)
+			if path == "" || resolvedNewPath(path) != resolvedNewPath(cwd) {
 				return "unresolved Git directory"
 			}
 		} else {
-			path = e.path(path)
+			path = pathEnv.path(path)
+		}
+		if isChangeDir {
+			cwd = path
 		}
 		if target := gitPathOutsideWorker(path, writable); target != "" {
 			return target
 		}
 	}
 	return ""
+}
+
+func gitEffectiveCWD(e *shellEnv, args []string, literal []bool) string {
+	cwd := e.cwd
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		path := ""
+		switch {
+		case arg == "-C":
+			if i+1 >= len(args) {
+				return ""
+			}
+			i++
+			path = args[i]
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			path = arg[2:]
+		}
+		if path == "" {
+			continue
+		}
+		pathEnv := e.clone()
+		pathEnv.cwd = cwd
+		if !literal[i] {
+			path = pathEnv.path(path)
+			if path == "" || resolvedNewPath(path) != resolvedNewPath(cwd) {
+				return ""
+			}
+		} else {
+			path = pathEnv.path(path)
+		}
+		cwd = path
+	}
+	return cwd
 }
 
 func gitConfigWorktreeTarget(e *shellEnv, args []string, literal []bool, writable []string) string {
