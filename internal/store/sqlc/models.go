@@ -173,6 +173,7 @@ type GreenhouseReviewRequest struct {
 	Outcome       string
 	VerdictID     sql.NullInt64
 	GrantID       sql.NullString
+	FailureCount  int64
 }
 
 type GreenhouseTaskWatch struct {
