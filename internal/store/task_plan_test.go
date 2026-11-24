@@ -16,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store/sqlc"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -476,6 +477,76 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	identities, err := recoveredDB.TaskLaunchIdentities(ctx, id)
 	if err != nil || len(identities) != 2 || identities[0].ModelKnown || identities[0].ConfiguredModel != "" || identities[0].PlanRevision != 1 || identities[1].PlanRevision != 2 {
 		t.Fatalf("rebuild inferred unknown identity or lost revisions: %#v %v", identities, err)
+	}
+}
+
+func TestCascadeTeardownSkipsTaskWhosePlanChangedAfterClosureSelection(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := admittedStorePlan(t, home).Bind("t1")
+	data, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Dependent", State: StateQueued, PlanJSON: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPlan := admittedStorePlan(t, home).Bind("t2")
+	childPlan.Dependencies = []dispatch.Dependency{{TaskID: "t1", Milestone: "landed"}}
+	childData, err := childPlan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Transitive dependant", State: StateQueued, PlanJSON: childData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childDecision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: childID, Origin: "dependency:test", Kind: "dependency", Question: "Resolve the dependency", Options: []string{"continue"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := plan.Launch
+	launch.ProfileName = "revised"
+	revision, err := plan.Reconfigure(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlan(ctx, selected, revision); err != nil {
+		t.Fatal(err)
+	}
+	child, err := db.TaskByID(ctx, project.ID, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raced, err := db.CascadeTeardownQueued(ctx, []Task{selected, child}, "cascade")
+	if err != nil || len(raced) != 1 || raced[0] != id {
+		t.Fatalf("cascade result raced=%v err=%v, want Task %d skipped", raced, err, id)
+	}
+	current, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil || current.State != StateQueued || current.PlanRevision != 2 {
+		t.Fatalf("changed-plan Task was torn down: task=%+v err=%v", current, err)
+	}
+	currentChild, err := db.TaskByID(ctx, project.ID, childID)
+	if err != nil || currentChild.State != StateQueued {
+		t.Fatalf("transitive Task was torn down after its predecessor raced: task=%+v err=%v", currentChild, err)
+	}
+	decisions, err := db.Decisions(ctx, project.ID, true)
+	if err != nil || len(decisions) != 1 || decisions[0].ID != childDecision.ID {
+		t.Fatalf("transitive Task Decision was retired after its predecessor raced: decisions=%#v err=%v", decisions, err)
 	}
 }
 
