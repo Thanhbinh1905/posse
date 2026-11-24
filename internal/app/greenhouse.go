@@ -1007,11 +1007,12 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 		}
 		if acceptedHead != "" && acceptedHead != verdict.Head {
 			var followups []store.ProviderFinding
-			for _, finding := range verdict.Findings {
+			for index, finding := range verdict.Findings {
 				if !greenhouseFindingBlocks(finding.Severity, blockAt) {
 					continue
 				}
-				changed, err := greenhouseFindingChangedSinceAccepted(ctx, member.root, acceptedHead, verdict.Head, finding.Path, finding.Line)
+				rangeFinding := hr.Findings[index]
+				changed, err := greenhouseFindingChangedSinceAccepted(ctx, member.root, acceptedHead, verdict.Head, finding.Path, rangeFinding.Start, rangeFinding.End)
 				if err != nil {
 					return false, store.Verdict{}, err
 				}
@@ -1160,9 +1161,12 @@ func createAcceptedFindingFollowup(ctx context.Context, member greenhouseMember,
 	return nil
 }
 
-func greenhouseFindingChangedSinceAccepted(ctx context.Context, repository, accepted, current, file string, line int) (bool, error) {
-	if accepted == "" || current == "" || file == "" || filepath.IsAbs(file) || line < 1 {
+func greenhouseFindingChangedSinceAccepted(ctx context.Context, repository, accepted, current, file string, start, end int) (bool, error) {
+	if accepted == "" || current == "" || file == "" || filepath.IsAbs(file) || start < 1 {
 		return true, nil
+	}
+	if end < start {
+		end = start
 	}
 	for _, part := range strings.Split(filepath.ToSlash(file), "/") {
 		if part == ".." {
@@ -1183,7 +1187,7 @@ func greenhouseFindingChangedSinceAccepted(ctx context.Context, repository, acce
 		return false, fmt.Errorf("diff accepted Greenhouse head %s against %s: %w", accepted, current, err)
 	}
 	for _, match := range greenhouseDiffHunk.FindAllSubmatch(output, -1) {
-		start, err := strconv.Atoi(string(match[1]))
+		hunkStart, err := strconv.Atoi(string(match[1]))
 		if err != nil {
 			return false, fmt.Errorf("parse Greenhouse diff hunk: %w", err)
 		}
@@ -1194,7 +1198,7 @@ func greenhouseFindingChangedSinceAccepted(ctx context.Context, repository, acce
 				return false, fmt.Errorf("parse Greenhouse diff hunk: %w", err)
 			}
 		}
-		if count > 0 && line >= start && line < start+count {
+		if count > 0 && hunkStart <= end && hunkStart+count-1 >= start || count == 0 && hunkStart >= start && hunkStart <= end+1 {
 			return true, nil
 		}
 	}

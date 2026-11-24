@@ -54,9 +54,19 @@ func TestGreenhouseFindingOnUnchangedAcceptedLineDoesNotBlock(t *testing.T) {
 	gitRun("add", ".")
 	gitRun("commit", "-qm", "target merge")
 	current := gitRun("rev-parse", "HEAD")
-	changed, err := greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 3)
+	changed, err := greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 3, 3)
 	if err != nil || changed {
 		t.Fatalf("unchanged accepted line changed=%t err=%v; want unchanged", changed, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("target line\nfirst\naccepted line\nchanged last\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "change line inside finding range")
+	current = gitRun("rev-parse", "HEAD")
+	changed, err = greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 2, 4)
+	if err != nil || !changed {
+		t.Fatalf("multi-line finding changed=%t err=%v; want changed when an end line changed", changed, err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("target line\nfirst\nchanged line\nlast\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -64,7 +74,7 @@ func TestGreenhouseFindingOnUnchangedAcceptedLineDoesNotBlock(t *testing.T) {
 	gitRun("add", ".")
 	gitRun("commit", "-qm", "change accepted line")
 	current = gitRun("rev-parse", "HEAD")
-	changed, err = greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 3)
+	changed, err = greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 3, 3)
 	if err != nil || !changed {
 		t.Fatalf("changed accepted line changed=%t err=%v; want changed", changed, err)
 	}
