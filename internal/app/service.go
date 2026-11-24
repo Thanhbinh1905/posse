@@ -189,7 +189,7 @@ func (s *Service) commands() *axi.Command {
 		}},
 		{Name: "brief", Summary: "Reprint this Worker's launch Brief.", Handler: s.brief},
 		{Name: "status", Summary: "Read this Worker's recorded status, admitted plan and open Review findings without maintenance.", Handler: s.status},
-		{Name: "send", Usage: "$ send <task> <message> [--queue] [--reason <text>] | send <task> --file <path.md> [--queue] [--reason <text>] | send <task> --interrupt <message> [--reason <text>]", Summary: "Send a message or a Markdown instruction file, optionally queueing it or interrupting and redirecting a busy Worker.", Handler: s.send},
+		{Name: "send", Usage: "$ send <task> <message> [--queue] [--reason <text>] | send <task> --file <path.md> [--queue] [--reason <text>] | send <task> --interrupt <message> [--reason <text>]", Summary: "Send a message or a Markdown instruction file, optionally queueing it or interrupting and redirecting a busy Worker. Withdraw a queued message with `posse unsend <message-id>`.", Handler: s.send},
 		{Name: "unsend", Usage: "$ unsend <message-id>", Summary: "Withdraw a queued Worker message before delivery begins.", Handler: s.unsend},
 		{Name: "peek", Usage: "$ peek <task> [--lines n]", Summary: "Read the Worker's visible screen; --lines n reads n recent lines and scrolls a fullscreen Worker to the top and back.", Handler: s.peek},
 		{Name: "keys", Usage: "$ keys <task> <key...>", Summary: "Send logical keys to a blocked Worker.", Handler: s.keys},

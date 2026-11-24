@@ -46,7 +46,7 @@ func TestHelpHidesInternalContextAndUsesCanonicalCommandSummaries(t *testing.T) 
 		t.Fatalf("relaunch help omitted the Profile option: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
-	if code := cli.Run([]string{"send", "--help"}); code != 0 || !strings.Contains(output.String(), "send <task> --interrupt <message>") || !strings.Contains(output.String(), "send <task> --file <path.md>") || !strings.Contains(output.String(), "--queue") {
+	if code := cli.Run([]string{"send", "--help"}); code != 0 || !strings.Contains(output.String(), "send <task> --interrupt <message>") || !strings.Contains(output.String(), "send <task> --file <path.md>") || !strings.Contains(output.String(), "--queue") || !strings.Contains(output.String(), "posse unsend <message-id>") {
 		t.Fatalf("send help omitted interrupt or queue usage: code=%d output=%s", code, output.String())
 	}
 	output.Reset()
