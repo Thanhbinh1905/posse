@@ -240,7 +240,11 @@ func (db *DB) ReviewEvidenceFor(ctx context.Context, taskID int64, targets []Rev
 		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_carries WHERE ship_task_id=? AND repository=? AND to_head=?)`, taskID, target.Repository, target.Commit).Scan(&carried[index]); err != nil {
 			return evidence, err
 		}
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=?)`, taskID, target.Commit).Scan(&disposed[index]); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM review_dispositions rd
+LEFT JOIN decisions d ON d.id=rd.decision_id
+JOIN tasks t ON t.id=rd.ship_task_id
+WHERE rd.ship_task_id=? AND rd.head_sha=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR (d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||? AND COALESCE((SELECT v.mode='gate' AND v.blocking=0 FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.repo=? AND v.provider='greenhouse' AND v.head_sha=? ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=1)))`, taskID, target.Commit, target.Repository, target.Commit, target.Repository, target.Commit).Scan(&disposed[index]); err != nil {
 			return evidence, err
 		}
 	}
@@ -306,9 +310,13 @@ func (db *DB) ReviewCarrySource(ctx context.Context, taskID int64, repository, h
 	return from, err == nil, err
 }
 
-// ReviewDispositionHeads lists the heads a User accepted, newest first.
-func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT head_sha FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC`, taskID)
+// ReviewDispositionHeads lists User-accepted heads applicable to one repository, newest first.
+func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64, repository string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT rd.head_sha FROM review_dispositions rd
+LEFT JOIN decisions d ON d.id=rd.decision_id
+JOIN tasks t ON t.id=rd.ship_task_id
+WHERE rd.ship_task_id=? AND (d.kind IS NULL OR d.kind!='greenhouse_coverage' OR (d.origin='greenhouse-coverage:t'||t.seq||':'||?||':'||rd.head_sha AND COALESCE((SELECT v.mode='gate' AND v.blocking=0 FROM verdicts v WHERE v.task_id=rd.ship_task_id AND v.repo=? AND v.provider='greenhouse' AND v.head_sha=rd.head_sha ORDER BY v.recorded_at DESC,v.id DESC LIMIT 1),0)=1))
+ORDER BY rd.id DESC`, taskID, repository, repository)
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +330,35 @@ func (db *DB) ReviewDispositionHeads(ctx context.Context, taskID int64) ([]strin
 		heads = append(heads, head)
 	}
 	return heads, rows.Err()
+}
+
+// RecordGreenhouseCoverageDisposition records an applied, repository-bound coverage acceptance.
+func (db *DB) RecordGreenhouseCoverageDisposition(ctx context.Context, taskID, decisionID int64, head, origin, quote, actor, reason string) error {
+	if taskID < 1 || decisionID < 1 || !validValidationSHA(head) || strings.TrimSpace(origin) == "" || !strings.HasSuffix(origin, ":"+head) ||
+		(actor == "user" && strings.TrimSpace(quote) == "") || (actor == "lead" && strings.TrimSpace(reason) == "") || !oneOf(actor, "user", "lead") {
+		return fmt.Errorf("invalid Greenhouse coverage disposition")
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var authorized bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE id=? AND task_id=? AND kind='greenhouse_coverage' AND origin=? AND answer='accept-coverage-at-exact-head' AND answered_at>0 AND obsolete_at=0)`, decisionID, taskID, origin).Scan(&authorized); err != nil {
+		return err
+	}
+	if !authorized {
+		return fmt.Errorf("invalid Greenhouse coverage disposition")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO review_dispositions(ship_task_id,head_sha,decision_id,user_quote,at,actor,reason)
+SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM review_dispositions WHERE ship_task_id=? AND head_sha=? AND decision_id=?)`,
+		taskID, head, decisionID, quote, time.Now().UnixMilli(), actor, reason, taskID, head, decisionID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
 }
 
 // RecordReviewDisposition binds an authorized acceptance to exact heads,
