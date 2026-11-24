@@ -99,14 +99,8 @@ func (d *Daemon) Review(ctx context.Context, round Round) (RoundResult, error) {
 		}
 		result := inspected.HostResult
 		if result != nil && result.Grant == pending.Grant {
-			if result.Verdict == "" && terminalReviewStatus(result.Status) {
-				if clearErr := ClearPending(round.Pending); clearErr != nil {
-					return RoundResult{}, clearErr
-				}
-				return RoundResult{Grant: pending.Grant, RunID: inspected.RunID, Result: result}, &TerminalReviewError{Status: result.Status, Reason: result.Reason}
-			}
 			if settled, found, settledErr := settledInspection(ctx, round, pending.Grant, inspected); settledErr != nil {
-				return RoundResult{}, settledErr
+				return settled, settledErr
 			} else if found {
 				return settled, nil
 			}
@@ -247,16 +241,10 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 			}
 			settled, found, inspectErr := settledInspection(ctx, round, grant, inspected)
 			if inspectErr != nil {
-				return RoundResult{}, inspectErr
+				return settled, inspectErr
 			}
 			if found {
 				return settled, nil
-			}
-			if result := inspected.HostResult; result != nil && result.Grant == grant && result.Verdict == "" && terminalReviewStatus(result.Status) {
-				if clearErr := ClearPending(round.Pending); clearErr != nil {
-					return RoundResult{}, clearErr
-				}
-				return RoundResult{Grant: grant, RunID: inspected.RunID, Result: result}, &TerminalReviewError{Status: result.Status, Reason: result.Reason}
 			}
 			if inspectErr := inspected.refusal("inspect"); inspectErr != nil {
 				return RoundResult{}, inspectErr
@@ -301,9 +289,9 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 			return result, nil
 		}
 		if hr := v.reviewResult(); hr != nil && hr.Grant == grant {
-			if hr.Verdict == "" && terminalReviewStatus(hr.Status) {
+			if terminalErr := terminalReviewError(hr); terminalErr != nil {
 				_ = ClearPending(round.Pending)
-				return result, &TerminalReviewError{Status: hr.Status, Reason: hr.Reason}
+				return result, terminalErr
 			}
 			switch {
 			case !hr.Current && hr.Status == "running":
@@ -348,7 +336,16 @@ func (d *Daemon) wait(ctx context.Context, round Round, grant string) (RoundResu
 
 func settledInspection(ctx context.Context, round Round, grant string, inspected response) (RoundResult, bool, error) {
 	result := inspected.reviewResult()
-	if result == nil || result.Grant != grant || !result.Current || result.Verdict == "" {
+	if result == nil || result.Grant != grant {
+		return RoundResult{}, false, nil
+	}
+	if terminalErr := terminalReviewError(result); terminalErr != nil {
+		if err := ClearPending(round.Pending); err != nil {
+			return RoundResult{}, false, err
+		}
+		return RoundResult{Grant: grant, RunID: inspected.RunID, Result: result}, false, terminalErr
+	}
+	if !result.Current || result.Verdict == "" {
 		return RoundResult{}, false, nil
 	}
 	head, err := worktreeHead(ctx, round.Worktree)
@@ -359,6 +356,13 @@ func settledInspection(ctx context.Context, round Round, grant string, inspected
 		return RoundResult{}, false, nil
 	}
 	return RoundResult{Outcome: Settled, Grant: result.Grant, RunID: inspected.RunID, Result: result}, true, nil
+}
+
+func terminalReviewError(result *HostResult) error {
+	if result != nil && terminalReviewStatus(result.Status) {
+		return &TerminalReviewError{Status: result.Status, Reason: result.Reason}
+	}
+	return nil
 }
 
 func grantWasUsed(refusal error, inspected response, grant string) bool {
