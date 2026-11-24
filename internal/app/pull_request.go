@@ -796,6 +796,9 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		}
 		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge", forge.Root, "glab", args...)
 		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already been merged") {
+			if refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, project, cfg, task, "", mergeErr); refreshErr != nil {
+				return refreshErr
+			}
 			return axi.Failure("pr_merge_failed", "GitLab did not merge the merge request", true, mergeErr.Error())
 		}
 		confirmed, confirmErr := s.reconcileMergedPullRequest(ctx, db, project, cfg, task, forge, number)
@@ -822,6 +825,9 @@ func (s *Service) mergePullRequest(out *axi.Context, db *store.DB, project store
 		}
 		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge", project.Root, "gh", args...)
 		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already merged") {
+			if refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, project, cfg, task, "", mergeErr); refreshErr != nil {
+				return refreshErr
+			}
 			return axi.Failure("pr_merge_failed", "GitHub did not merge the pull request", true, mergeErr.Error())
 		}
 		confirmed, confirmErr := s.reconcileMergedPullRequest(ctx, db, project, cfg, task, forge, number)
