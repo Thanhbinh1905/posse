@@ -47,8 +47,15 @@ const greenhouseReviewFailureLimit = 3
 func repeatedGreenhouseReviewFailures(requests []store.GreenhouseReviewRequest, taskID int64, repository, head string) (int, int64) {
 	count, latestFailure := 0, int64(0)
 	for _, request := range requests {
-		if request.TaskID == taskID && request.Repository == repository && request.RequestedHead == head && request.Outcome == "failed" {
-			count++
+		if request.TaskID != taskID || request.Repository != repository || request.RequestedHead != head {
+			continue
+		}
+		failures := request.FailureCount
+		if failures == 0 && request.Outcome == "failed" {
+			failures = 1
+		}
+		count += failures
+		if failures > 0 {
 			latestFailure = max(latestFailure, request.SettledAt)
 		}
 	}

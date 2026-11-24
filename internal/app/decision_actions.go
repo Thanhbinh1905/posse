@@ -298,6 +298,55 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return axi.Failure("decision_refused", "unknown Greenhouse dispute Decision answer", false)
 		}
 		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "finding", Value: "F-" + strconv.Itoa(findingID)}, {Key: "state", Value: decision.Answer}})
+	case "greenhouse_coverage":
+		if decision.Answer == "hold" {
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "held"}})
+		}
+		repository, head, ok := parseGreenhouseCoverageDecisionOrigin(decision.Origin, task.Seq)
+		if !ok || len(head) != 40 && len(head) != 64 || decision.Answer != "accept-coverage-at-exact-head" {
+			return axi.Failure("decision_refused", "Greenhouse coverage Decision binding is invalid", false)
+		}
+		actual := ""
+		if project.IsWorkspace() {
+			members, err := greenhouseWorkspacePendingHeads(out.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			for _, member := range members {
+				if member.Repository == repository {
+					actual = member.Head
+					break
+				}
+			}
+		} else {
+			if repository != project.Name {
+				return axi.Failure("decision_refused", "Greenhouse coverage Decision repository does not match this Project", false)
+			}
+			actual, err = taskBranchAuthorHead(out.Context, project.Root, task.Branch)
+			if err != nil {
+				return err
+			}
+		}
+		if actual == "" {
+			return axi.Failure("decision_refused", "Greenhouse coverage Decision no longer names a changed Member", false)
+		}
+		if actual != head {
+			return axi.Failure("decision_refused", "Task head changed after the partial Greenhouse review; request a new exact-head review", false)
+		}
+		var reviewedPartial bool
+		if err := db.QueryRowContext(out.Context, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=? AND json_array_length(json_extract(data_json,'$.result.uncovered'))>0)`, task.ID, repository, head).Scan(&reviewedPartial); err != nil {
+			return err
+		}
+		if !reviewedPartial {
+			return axi.Failure("decision_refused", "no partial Greenhouse review covers this exact head", false)
+		}
+		if err := db.RecordGreenhouseCoverageDisposition(out.Context, task.ID, decision.ID, head, decision.Origin, decision.UserQuote, decision.AnswerActor, decision.AnswerReason); err != nil {
+			return err
+		}
+		if err := queueSettledReviewStep(out.Context, db, project, task, "Accepted Greenhouse coverage for Member "+repository+" at exact head "+shortSHA(head)); err != nil {
+			return err
+		}
+		return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-coverage"}, {Key: "repository", Value: repository}, {Key: "head", Value: head}})
 	case "review_cap":
 		taskRef, expectedHead, ok := parseReviewCapOrigin(decision.Origin)
 		if !ok || taskRef != taskIDString(task.Seq) || task.Type != "change" {
