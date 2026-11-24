@@ -180,11 +180,7 @@ func (s *Service) applyTeardownDependantsDecision(ctx context.Context, db *store
 			}
 			frontier = next
 		}
-		ids := make([]int64, 0, len(closure))
-		for _, dependant := range closure {
-			ids = append(ids, dependant.ID)
-		}
-		raced, err := db.CascadeTeardownQueued(ctx, ids, "Cascade teardown approved for predecessor "+taskIDString(predecessor.Seq))
+		raced, err := db.CascadeTeardownQueued(ctx, closure, "Cascade teardown approved for predecessor "+taskIDString(predecessor.Seq))
 		if err != nil {
 			return err
 		}

@@ -479,6 +479,50 @@ func TestExplicitPlanRevisionInvalidatesEvidenceAndSurvivesRebuild(t *testing.T)
 	}
 }
 
+func TestCascadeTeardownSkipsTaskWhosePlanChangedAfterClosureSelection(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := admittedStorePlan(t, home).Bind("t1")
+	data, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Dependent", State: StateQueued, PlanJSON: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := plan.Launch
+	launch.ProfileName = "revised"
+	revision, err := plan.Reconfigure(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlan(ctx, selected, revision); err != nil {
+		t.Fatal(err)
+	}
+	raced, err := db.CascadeTeardownQueued(ctx, []Task{selected}, "cascade")
+	if err != nil || len(raced) != 1 || raced[0] != id {
+		t.Fatalf("cascade result raced=%v err=%v, want Task %d skipped", raced, err, id)
+	}
+	current, err := db.TaskByID(ctx, project.ID, id)
+	if err != nil || current.State != StateQueued || current.PlanRevision != 2 {
+		t.Fatalf("changed-plan Task was torn down: task=%+v err=%v", current, err)
+	}
+}
+
 func TestReviseTaskPlansRollsBackEveryRevisionWhenOneTaskRaces(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
