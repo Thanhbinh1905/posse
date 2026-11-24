@@ -192,7 +192,7 @@ func requireWorkerBranchAuthor(ctx context.Context, db *store.DB, task store.Tas
 	return db.RequireBranchAuthor(ctx, repository, task.Branch, task.ID, generation)
 }
 
-func validateWorkerBranchAuthorHeadUpdate(ctx context.Context, db *store.DB, task store.Task, requiredHead, nextHead string, authorizedRewrite bool) (string, error) {
+func validateWorkerBranchAuthorHeadUpdate(ctx context.Context, db *store.DB, task store.Task, requiredHead, nextHead string, authorizedRewrite, allowUnpublishedRebase bool) (string, error) {
 	repository, err := gitCommonDir(ctx, task.WorktreePath)
 	if err != nil {
 		return "", err
@@ -215,7 +215,7 @@ func validateWorkerBranchAuthorHeadUpdate(ctx context.Context, db *store.DB, tas
 		return "", store.ErrBranchAuthorHeadChanged
 	}
 	if claim.HeadSHA != "" && claim.HeadSHA != nextHead && !authorizedRewrite {
-		if err := requireBranchHeadAncestor(ctx, task.WorktreePath, claim.HeadSHA, nextHead); err != nil {
+		if err := requireBranchHeadAncestor(ctx, task.WorktreePath, claim.HeadSHA, nextHead); err != nil && !allowUnpublishedRebase {
 			return "", err
 		}
 	}
@@ -225,7 +225,7 @@ func validateWorkerBranchAuthorHeadUpdate(ctx context.Context, db *store.DB, tas
 	return claim.HeadSHA, nil
 }
 
-func recordWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.Task, expectedHead, nextHead string, authorizedRewrite bool) error {
+func recordWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.Task, expectedHead, nextHead string, authorizedRewrite, allowUnpublishedRebase bool) error {
 	repository, err := gitCommonDir(ctx, task.WorktreePath)
 	if err != nil {
 		return err
@@ -244,7 +244,7 @@ func recordWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.
 	if claim.Generation != generation {
 		return store.ErrBranchAuthorStale
 	}
-	if claim.HeadSHA != "" && claim.HeadSHA != nextHead && !authorizedRewrite {
+	if claim.HeadSHA != "" && claim.HeadSHA != nextHead && !authorizedRewrite && !allowUnpublishedRebase {
 		if err := requireBranchHeadAncestor(ctx, task.WorktreePath, claim.HeadSHA, nextHead); err != nil {
 			return err
 		}
@@ -256,11 +256,11 @@ func recordWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.
 }
 
 func updateWorkerBranchAuthorHead(ctx context.Context, db *store.DB, task store.Task, nextHead string) error {
-	expectedHead, err := validateWorkerBranchAuthorHeadUpdate(ctx, db, task, "", nextHead, false)
+	expectedHead, err := validateWorkerBranchAuthorHeadUpdate(ctx, db, task, "", nextHead, false, false)
 	if err != nil {
 		return err
 	}
-	return recordWorkerBranchAuthorHead(ctx, db, task, expectedHead, nextHead, false)
+	return recordWorkerBranchAuthorHead(ctx, db, task, expectedHead, nextHead, false, false)
 }
 
 func requireCurrentTaskBranchAuthor(ctx context.Context, db *store.DB, task store.Task) error {
