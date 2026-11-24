@@ -315,36 +315,36 @@ func mergeRefusalIndicatesTargetMovement(err error) bool {
 	return false
 }
 
-func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member string, mergeErr error) (bool, error) {
+func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member string, mergeErr error) error {
 	if !cfg.Defaults.RequireCurrentTarget && !greenhouseFullPipelineTaskWithConfig(task, cfg, member) {
-		return false, nil
+		return nil
 	}
 	if !mergeRefusalIndicatesTargetMovement(mergeErr) {
-		return false, nil
+		return nil
 	}
 	freshness, err := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if freshness.Fresh {
-		return false, nil
+		return nil
 	}
 	sync, err := s.queuePRTargetSyncInstruction(ctx, db, task, member, freshness, task.GatedSHA)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if task.State == store.StateMerging {
 		if member == "" {
 			if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateWorking, "lead", "Pull request merge was refused because its target advanced"); err != nil {
-				return false, err
+				return err
 			}
 			if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
-				return false, err
+				return err
 			}
 		} else {
 			repos, err := db.TaskRepos(ctx, task.ID)
 			if err != nil {
-				return false, err
+				return err
 			}
 			var repo store.TaskRepo
 			for _, candidate := range repos {
@@ -354,14 +354,14 @@ func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, 
 				}
 			}
 			if repo.Repo == "" {
-				return false, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
+				return fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
 			}
 			if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Pull request merge in "+member+" was refused because its target advanced"); err != nil {
-				return false, err
+				return err
 			}
 		}
 	}
-	return true, prBranchBehindFailure(task.Seq, task.GatedSHA, freshness, sync)
+	return prBranchBehindFailure(task.Seq, task.GatedSHA, freshness, sync)
 }
 
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member, mergeMode, headSHA string) error {

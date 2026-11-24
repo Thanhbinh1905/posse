@@ -303,10 +303,10 @@ func TestWorkspacePRMergeRefusalQueuesMemberRefreshWhenTargetAdvances(t *testing
 	if !greenhouseFullPipelineTaskWithConfig(member.task, cfg, "worker") {
 		t.Fatal("workspace Member is not recognized as Greenhouse full-pipeline")
 	}
-	refreshed, refreshErr := f.service.refreshAfterPRMergeRefusal(ctx, f.db, member.project, cfg, member.task, "worker", errors.New("Pull request is not mergeable: the base branch was modified"))
+	refreshErr := f.service.refreshAfterPRMergeRefusal(ctx, f.db, member.project, cfg, member.task, "worker", errors.New("Pull request is not mergeable: the base branch was modified"))
 	var failure *axi.Error
-	if !refreshed || !errors.As(refreshErr, &failure) || failure.Code != "pr_branch_behind" || !strings.Contains(failure.Message, targetTip) {
-		t.Fatalf("workspace merge refusal refresh = %v, %v", refreshed, refreshErr)
+	if !errors.As(refreshErr, &failure) || failure.Code != "pr_branch_behind" || !strings.Contains(failure.Message, targetTip) {
+		t.Fatalf("workspace merge refusal refresh error = %v", refreshErr)
 	}
 	if f.state() != store.StateDone || f.repos()["worker"].State != store.TaskRepoOpen || f.repos()["worker"].GatedSHA != "" {
 		t.Fatalf("workspace state after refresh = %s repos=%#v", f.state(), f.repos())
