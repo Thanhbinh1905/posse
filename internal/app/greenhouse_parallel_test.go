@@ -159,7 +159,12 @@ func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T)
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	accepted := f.headSHA
+	if err := os.WriteFile(filepath.Join(f.worktree, "change.txt"), []byte("worker line 1\nworker line 2\nworker line 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.worktree, "add", "change.txt")
+	gitTest(t, f.worktree, "commit", "-m", "prepare multi-line accepted finding")
+	accepted := strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
 	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, accepted), Question: "Accept this exact head?", Options: []string{"accept-head"}})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +194,7 @@ func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	result := greenhouse.RoundResult{Grant: "shop/t1/shop/r1", Result: &greenhouse.HostResult{
 		Head: current, Target: accepted, Verdict: "findings",
-		Findings: []greenhouse.Finding{{ID: "G-1", Priority: "P1", File: "change.txt", Start: 1, Explanation: "Previously accepted issue", Action: "Track follow-up", Head: current}},
+		Findings: []greenhouse.Finding{{ID: "G-1", Priority: "P1", File: "change.txt", Start: 1, End: 3, Explanation: "Previously accepted issue", Action: "Track follow-up", Head: current}},
 	}}
 	member := greenhouseMember{name: f.project.Name, root: f.repo, worktree: f.worktree}
 	recorded, verdict, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, f.root, "P1", config.Config{}, result)
@@ -208,7 +213,7 @@ func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T)
 	if err != nil || !strings.Contains(string(issue), "Follow up Greenhouse findings") || !strings.Contains(string(issue), "change.txt:1") {
 		t.Fatalf("follow-up issue command=%q err=%v", issue, err)
 	}
-	if err := os.WriteFile(filepath.Join(f.worktree, "change.txt"), []byte("changed after acceptance\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.worktree, "change.txt"), []byte("worker line 1\nworker line 2\nchanged line 3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitTest(t, f.worktree, "add", "change.txt")
