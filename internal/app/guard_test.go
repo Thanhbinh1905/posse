@@ -654,10 +654,10 @@ func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(sandbox, ".git"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sandbox, ".git", "config"), []byte("[core]\n\tworktree = "+foreign+"\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(sandbox, ".git", "config"), []byte("[core]\n\tworktree = "+sandbox+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	scope := guardScope{env: guardEnv, cwd: sandbox, workerHome: home, writable: []string{sandbox, filepath.Join(home, "scratch", "project-a", "t1")}}
+	scope := guardScope{env: append(append([]string(nil), guardEnv...), "FOREIGN_WORKTREE="+foreign), cwd: sandbox, workerHome: home, writable: []string{sandbox, filepath.Join(home, "scratch", "project-a", "t1")}}
 	for _, command := range []string{
 		"git -C " + foreign + " fetch origin",
 		"git --git-dir=" + foreign + "/.git fetch origin",
@@ -667,6 +667,14 @@ func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
 		"GIT_WORK_TREE=" + foreign + " git checkout -- tracked.txt",
 		"git -c core.worktree=" + foreign + " fetch origin",
 		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=" + foreign + " git fetch origin",
+		"git init " + foreign + "/new-repo",
+		"git clone " + foreign + " " + foreign + "/new-checkout",
+		"git worktree add " + foreign + "/worktree",
+		"git worktree add -b branch " + foreign + "/branch-worktree",
+		"git worktree move " + sandbox + " " + foreign + "/moved-worktree",
+		"git submodule add " + foreign + " " + foreign + "/submodule",
+		"git init --separate-git-dir=" + foreign + "/metadata " + sandbox + "/nested",
+		"git --config-env=CORE.WORKTREE=FOREIGN_WORKTREE fetch origin",
 	} {
 		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, foreign) {
 			t.Errorf("guard did not refuse git targeting another Project checkout for %q: refused=%v reason=%#v", command, refused, reason)
@@ -674,6 +682,9 @@ func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
 	}
 	if refused, reason := guardCommand("GIT_DIR=$(printf %s "+foreign+"/.git) git fetch origin", scope); !refused || !strings.Contains(reason.why, "unresolved GIT_DIR") {
 		t.Errorf("guard did not refuse an unresolved GIT_DIR: refused=%v reason=%#v", refused, reason)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox, ".git", "config"), []byte("[core]\n\tworktree = "+foreign+"\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	if refused, reason := guardCommand("git status --short", scope); !refused {
 		t.Errorf("guard allowed Git with an external core.worktree: %#v", reason)

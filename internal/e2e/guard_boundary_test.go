@@ -62,8 +62,28 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.WriteFile(foreignBinary, binaryData, 0700); err != nil {
 		t.Fatal(err)
 	}
-	workerEnv := setEnv(env, "POSSE_WORKER_HOME", filepath.Join(root, "posse"))
+	workerHome := filepath.Join(root, "posse")
+	workerEnv := setEnv(env, "POSSE_WORKER_HOME", workerHome)
 	workerEnv = setEnv(workerEnv, "HERDR_SOCKET_PATH", socket)
+	workerSandbox := filepath.Join(workerHome, "pool", "sandbox")
+	if err := os.MkdirAll(workerSandbox, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-b", "main", workerSandbox}, {"-C", workerSandbox, "config", "user.name", "Fixture"}, {"-C", workerSandbox, "config", "user.email", "fixture@example.invalid"}} {
+		command := exec.Command("git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workerSandbox, "tracked.txt"), []byte("worker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", workerSandbox, "add", "tracked.txt"}, {"-C", workerSandbox, "commit", "-m", "fixture"}} {
+		command := exec.Command("git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
 	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", "w-test:p-test")
 	other := filepath.Join(root, "other")
 	if err := os.MkdirAll(other, 0700); err != nil {
@@ -140,6 +160,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		currentSocketCase = "current socket"
 	}
 	otherSocketEnv := "HERDR_SOCKET_PATH=" + shellQuote(herdr.SocketPath(otherEnv)) + " "
+	outsideInit := filepath.Join(foreignRepo, "new-repo")
+	outsideClone := filepath.Join(foreignRepo, "new-checkout")
+	outsideWorktree := filepath.Join(otherRoot, "worktree")
 	cases := []struct {
 		name, command string
 		blocked       bool
@@ -176,6 +199,10 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"other Project checkout after cd", "cd " + foreignRepo + " && git fetch origin", true},
 		{"other Project checkout through GIT_DIR", "GIT_DIR=" + foreignRepo + "/.git git fetch origin", true},
 		{"other Project checkout through GIT_WORK_TREE", "GIT_WORK_TREE=" + foreignRepo + " git checkout -- tracked.txt", true},
+		{"Git destination init", "git init " + outsideInit, true},
+		{"Git destination clone", "git clone " + foreignRemote + " " + outsideClone, true},
+		{"Git destination worktree", "git worktree add " + outsideWorktree, true},
+		{"Git config-env uppercase key", "FOREIGN_WORKTREE=" + foreignRepo + " git --config-env=CORE.WORKTREE=FOREIGN_WORKTREE status", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},
@@ -188,6 +215,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": tc.command}})
 			guard := exec.Command(bin, "_guard")
 			guard.Dir = root
+			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" {
+				guard.Dir = workerSandbox
+			}
 			guard.Env = workerEnv
 			guard.Stdin = strings.NewReader(string(payload))
 			output, err := guard.CombinedOutput()
@@ -222,7 +252,12 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 					t.Errorf("isolated shell failed: %v %s", err, result)
 				}
 			}
-			if strings.HasPrefix(tc.name, "other Project checkout") {
+			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" {
+				for _, destination := range []string{outsideInit, outsideClone, outsideWorktree} {
+					if _, err := os.Stat(destination); !os.IsNotExist(err) {
+						t.Errorf("Git command created foreign destination %s: %v", destination, err)
+					}
+				}
 				foreignRef := exec.Command("git", "-C", foreignRepo, "rev-parse", "refs/remotes/origin/main")
 				foreignRefAfter, err := foreignRef.Output()
 				if err != nil || string(foreignRefAfter) != string(foreignRefBefore) {
