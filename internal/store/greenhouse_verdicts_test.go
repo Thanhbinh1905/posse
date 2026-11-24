@@ -14,6 +14,61 @@ func greenhouseVerdict(taskID int64, grant, head string) Verdict {
 		Head: head, Target: reviewShaA, ReviewBase: reviewShaA, Outcome: "clean", Mode: "parallel"}
 }
 
+func TestGreenhouseFailureCountMigrationBackfillsGrantlessFailures(t *testing.T) {
+	f := newReviewVerdictFixture(t, nil)
+	projectID := f.task(t, f.change).ProjectID
+	request := GreenhouseReviewRequest{
+		ProjectID: projectID, TaskID: f.change, Repository: "shop", RequestedHead: reviewShaA,
+		Provider: GreenhouseReviewProvider, RequestedAt: 10, SettledAt: 20, Outcome: "failed",
+	}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	grantRequest := request
+	grantRequest.RequestedAt, grantRequest.Grant = 11, "shop/t1/shop/r1"
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, grantRequest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DROP TRIGGER greenhouse_review_requests_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `CREATE TRIGGER greenhouse_review_requests_immutable BEFORE UPDATE ON greenhouse_review_requests
+WHEN NOT (
+    OLD.outcome = 'failed' AND OLD.grant_id IS NOT NULL AND
+    NEW.id = OLD.id AND NEW.project_id = OLD.project_id AND NEW.task_id = OLD.task_id AND
+    NEW.repo = OLD.repo AND NEW.requested_head = OLD.requested_head AND NEW.provider = OLD.provider AND
+    NEW.requested_at = OLD.requested_at AND NEW.grant_id = OLD.grant_id AND
+    NEW.settled_at >= OLD.settled_at AND NEW.outcome IN ('failed', 'verdict', 'refused', 'head_mismatch')
+)
+BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `ALTER TABLE greenhouse_review_requests DROP COLUMN failure_count`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM goose_db_version WHERE version_id=20261123132235`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM posse_migration_checksums WHERE version=20261123132235`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(f.home)
+	if err != nil {
+		t.Fatalf("open home with a grant-less failed request: %v", err)
+	}
+	defer db.Close()
+	requests, err := db.GreenhouseReviewRequests(f.ctx, projectID)
+	if err != nil || len(requests) != 2 || requests[0].FailureCount != 1 || requests[1].FailureCount != 3 {
+		t.Fatalf("backfilled requests = %+v, %v; want one grant-less failure and a limit-count granted failure", requests, err)
+	}
+	if _, err := db.ExecContext(f.ctx, `UPDATE greenhouse_review_requests SET outcome='head_mismatch' WHERE id=?`, requests[0].ID); err == nil {
+		t.Fatal("updated a grant-less request after migration")
+	}
+}
+
 func TestGreenhouseReviewRequestLinksGateModeVerdict(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r1", reviewShaA)
@@ -294,6 +349,14 @@ func TestGreenhouseReviewLedgerKeepsResumeOutcomeForSameGrant(t *testing.T) {
 	failed := GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 200, Outcome: "failed", Grant: grant}
 	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, failed); err != nil {
 		t.Fatal(err)
+	}
+	for _, update := range []string{
+		`UPDATE greenhouse_review_requests SET settled_at=201,outcome='failed',failure_count=99 WHERE task_id=? AND grant_id=?`,
+		`UPDATE greenhouse_review_requests SET settled_at=201,outcome='verdict',failure_count=0 WHERE task_id=? AND grant_id=?`,
+	} {
+		if _, err := f.db.ExecContext(f.ctx, update, task.ID, grant); err == nil {
+			t.Fatalf("trigger accepted an invalid failure-count update: %s", update)
+		}
 	}
 	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, greenhouseVerdict(task.ID, grant, reviewShaA), func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
 		t.Fatalf("record resumed Verdict = %v, %v", recorded, err)

@@ -1035,6 +1035,33 @@ func TestAutomaticGreenhouseReviewRespectsRetryBackoff(t *testing.T) {
 	}
 }
 
+func TestResumedGreenhouseGrantFailuresReachRetryLimit(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	ctx := context.Background()
+	for attempt := range greenhouseReviewFailureLimit {
+		at := int64(100 + attempt*10)
+		if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{
+			ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA,
+			Provider: store.GreenhouseReviewProvider, RequestedAt: 90, SettledAt: at, Outcome: "failed", Grant: "shop/t1/shop/r1",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "temporary Greenhouse failure"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.startParallelGreenhouseReviews(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countNoticeKind(notices, "needs_decision"); got != 1 {
+		t.Fatalf("needs_decision Notices = %d, want one after %d failed resumed attempts: %+v", got, greenhouseReviewFailureLimit, notices)
+	}
+}
+
 func TestGreenhouseFailureAtRetryLimitRaisesNeedsDecisionNotice(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	ctx := context.Background()

@@ -34,6 +34,29 @@ func prepareSupportedHomeAtVersion(t *testing.T, db *DB, version int64) {
 			t.Fatal(err)
 		}
 	}
+	var hasGreenhouseRequests bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='greenhouse_review_requests')`).Scan(&hasGreenhouseRequests); err != nil {
+		t.Fatal(err)
+	}
+	if hasGreenhouseRequests && version < 20261123132235 {
+		if _, err := db.ExecContext(ctx, `DROP TRIGGER greenhouse_review_requests_immutable`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `ALTER TABLE greenhouse_review_requests DROP COLUMN failure_count`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `CREATE TRIGGER greenhouse_review_requests_immutable BEFORE UPDATE ON greenhouse_review_requests
+WHEN NOT (
+    OLD.outcome = 'failed' AND OLD.grant_id IS NOT NULL AND
+    NEW.id = OLD.id AND NEW.project_id = OLD.project_id AND NEW.task_id = OLD.task_id AND
+    NEW.repo = OLD.repo AND NEW.requested_head = OLD.requested_head AND NEW.provider = OLD.provider AND
+    NEW.requested_at = OLD.requested_at AND NEW.grant_id = OLD.grant_id AND
+    NEW.settled_at >= OLD.settled_at AND NEW.outcome IN ('failed', 'verdict', 'refused', 'head_mismatch')
+)
+BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END;`); err != nil {
+			t.Fatal(err)
+		}
+	}
 	sources, err := embeddedMigrations()
 	if err != nil {
 		t.Fatal(err)
@@ -58,8 +81,8 @@ func TestOpenAppliesBaselineAsOneMigration(t *testing.T) {
 	}
 	defer db.Close()
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 2 {
-		t.Fatalf("applied migration count = %d, %v; want baseline and review-dispute evidence", applied, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 3 {
+		t.Fatalf("applied migration count = %d, %v; want baseline, review-dispute evidence and greenhouse attempt migrations", applied, err)
 	}
 	var version int64
 	if err := db.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied=1 AND version_id=?`, baselineMigrationVersion).Scan(&version); err != nil || version != baselineMigrationVersion {
