@@ -3,11 +3,11 @@ package app
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1001,7 +1001,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	}
 	if hr.Verdict == "findings" {
 		verdict.Blocking = greenhouseBlocking(hr.Findings, blockAt)
-		acceptedHead, err := acceptedGreenhouseHead(ctx, db, task.ID)
+		acceptedHead, err := acceptedGreenhouseHead(ctx, db, task.ID, member.root, verdict.Head)
 		if err != nil {
 			return false, store.Verdict{}, err
 		}
@@ -1047,13 +1047,43 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	return false, store.Verdict{}, fmt.Errorf("greenhouse verdict for already-recorded grant %s was not found", result.Grant)
 }
 
-func acceptedGreenhouseHead(ctx context.Context, db *store.DB, taskID int64) (string, error) {
-	var head string
-	err := db.QueryRowContext(ctx, `SELECT rd.head_sha FROM review_dispositions rd JOIN decisions d ON d.id=rd.decision_id WHERE rd.ship_task_id=? AND d.kind='review_cap' AND d.answer='accept-head' AND d.answer_actor='user' AND d.answered_at>0 AND d.obsolete_at=0 ORDER BY rd.id DESC LIMIT 1`, taskID).Scan(&head)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+func acceptedGreenhouseHead(ctx context.Context, db *store.DB, taskID int64, repository, current string) (string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT rd.head_sha FROM review_dispositions rd JOIN decisions d ON d.id=rd.decision_id WHERE rd.ship_task_id=? AND d.kind='review_cap' AND d.answer='accept-head' AND d.answer_actor='user' AND d.answered_at>0 AND d.obsolete_at=0 ORDER BY rd.id DESC`, taskID)
+	if err != nil {
+		return "", err
 	}
-	return head, err
+	var heads []string
+	for rows.Next() {
+		var head string
+		if err := rows.Scan(&head); err != nil {
+			rows.Close()
+			return "", err
+		}
+		heads = append(heads, head)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+	for _, head := range heads {
+		if _, err := exec.CommandContext(ctx, "git", "-C", repository, "cat-file", "-e", head+"^{commit}").Output(); err != nil {
+			continue
+		}
+		command := exec.CommandContext(ctx, "git", "-C", repository, "merge-base", "--is-ancestor", head, current)
+		if err := command.Run(); err == nil {
+			return head, nil
+		} else {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 1 {
+				continue
+			}
+			return "", fmt.Errorf("check accepted Greenhouse head %s ancestry in repository: %w", head, err)
+		}
+	}
+	return "", nil
 }
 
 func greenhouseFindingBlocks(severity, blockAt string) bool {
@@ -1068,37 +1098,62 @@ func createAcceptedFindingFollowup(ctx context.Context, member greenhouseMember,
 	if err != nil {
 		return fmt.Errorf("resolve forge for accepted Greenhouse findings: %w", err)
 	}
-	if forge.Kind != "github" {
-		return fmt.Errorf("accepted Greenhouse findings require a GitHub repository to file a follow-up issue")
-	}
 	title := fmt.Sprintf("Follow up Greenhouse findings from Task t%d accepted at %s", task.Seq, shortSHA(acceptedHead))
 	var body strings.Builder
 	fmt.Fprintf(&body, "Blocking Greenhouse findings were reported on lines unchanged since the User accepted head `%s` for Task t%d. They do not block this target-merge re-review.\n\n", acceptedHead, task.Seq)
 	for _, finding := range findings {
 		fmt.Fprintf(&body, "- **%s** `%s:%d` (%s): %s\n  - %s\n", finding.Severity, finding.Path, finding.Line, finding.Key, finding.Excerpt, finding.Guidance)
 	}
-	args := []string{"issue", "list", "--repo", forge.Host + "/" + forge.Path, "--state", "open", "--search", "in:title " + title, "--json", "number,title", "--limit", "100"}
-	output, err := commandOutputArgs(ctx, member.root, "gh", args...)
+	if forge.Kind == "github" {
+		args := []string{"issue", "list", "--repo", forge.Host + "/" + forge.Path, "--state", "open", "--search", "in:title " + title, "--json", "number,title", "--limit", "100"}
+		output, err := commandOutputArgs(ctx, member.root, "gh", args...)
+		if err != nil {
+			return fmt.Errorf("find follow-up issue for accepted Greenhouse findings: %w", err)
+		}
+		var issues []struct {
+			Number int    `json:"number"`
+			Title  string `json:"title"`
+		}
+		if err := json.Unmarshal([]byte(output), &issues); err != nil {
+			return fmt.Errorf("decode follow-up issues for accepted Greenhouse findings: %w", err)
+		}
+		for _, issue := range issues {
+			if issue.Title == title {
+				_, err = commandOutputArgs(ctx, member.root, "gh", "issue", "edit", strconv.Itoa(issue.Number), "--body", body.String())
+				if err != nil {
+					return fmt.Errorf("update follow-up issue for accepted Greenhouse findings: %w", err)
+				}
+				return nil
+			}
+		}
+		_, err = commandOutputArgs(ctx, member.root, "gh", "issue", "create", "--repo", forge.Host+"/"+forge.Path, "--title", title, "--body", body.String())
+		if err != nil {
+			return fmt.Errorf("file follow-up issue for accepted Greenhouse findings: %w", err)
+		}
+		return nil
+	}
+	endpoint := "projects/" + url.PathEscape(forge.Path) + "/issues?state=opened&search=" + url.QueryEscape(title)
+	output, err := commandOutputArgs(ctx, member.root, "glab", "api", "--hostname", forge.Host, "--paginate", endpoint)
 	if err != nil {
 		return fmt.Errorf("find follow-up issue for accepted Greenhouse findings: %w", err)
 	}
 	var issues []struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
+		IID   int    `json:"iid"`
+		Title string `json:"title"`
 	}
 	if err := json.Unmarshal([]byte(output), &issues); err != nil {
 		return fmt.Errorf("decode follow-up issues for accepted Greenhouse findings: %w", err)
 	}
 	for _, issue := range issues {
 		if issue.Title == title {
-			_, err = commandOutputArgs(ctx, member.root, "gh", "issue", "edit", strconv.Itoa(issue.Number), "--body", body.String())
+			_, err = commandOutputArgs(ctx, member.root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--raw-field", "description="+body.String(), "projects/"+url.PathEscape(forge.Path)+"/issues/"+strconv.Itoa(issue.IID))
 			if err != nil {
 				return fmt.Errorf("update follow-up issue for accepted Greenhouse findings: %w", err)
 			}
 			return nil
 		}
 	}
-	_, err = commandOutputArgs(ctx, member.root, "gh", "issue", "create", "--repo", forge.Host+"/"+forge.Path, "--title", title, "--body", body.String())
+	_, err = commandOutputArgs(ctx, member.root, "glab", "api", "--hostname", forge.Host, "--method", "POST", "--raw-field", "title="+title, "--raw-field", "description="+body.String(), "projects/"+url.PathEscape(forge.Path)+"/issues")
 	if err != nil {
 		return fmt.Errorf("file follow-up issue for accepted Greenhouse findings: %w", err)
 	}

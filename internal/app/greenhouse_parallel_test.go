@@ -70,6 +70,65 @@ func TestGreenhouseFindingOnUnchangedAcceptedLineDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestAcceptedGreenhouseHeadUsesTheMatchingRepositoryHistory(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	accepted := f.headSHA
+	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, accepted), Question: "Accept this exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err = f.db.AnswerDecision(ctx, f.project.ID, decision.ID, "accept-head", "Accept this exact head.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, decision.ID, []string{accepted}, decision.UserQuote, "P1", "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	foreignHead := strings.Repeat("b", 40)
+	foreignDecision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, foreignHead), Question: "Accept another exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignDecision, err = f.db.AnswerDecision(ctx, f.project.ID, foreignDecision.ID, "accept-head", "Accept this other repository head.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, foreignDecision.ID, []string{foreignHead}, foreignDecision.UserQuote, "P1", "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "cat-file", "-e", accepted+"^{commit}")
+	gitTest(t, f.repo, "merge-base", "--is-ancestor", accepted, accepted)
+	got, err := acceptedGreenhouseHead(ctx, f.db, f.task.ID, f.repo, accepted)
+	if err != nil || got != accepted {
+		t.Fatalf("accepted head for %s=%q err=%v; want repository head %s", f.project.Name, got, err, accepted)
+	}
+}
+
+func TestAcceptedFindingFollowupSupportsGitLab(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	gitTest(t, f.repo, "config", "remote.origin.url", "https://gitlab.com/acme/shop.git")
+	fakeBin := filepath.Join(f.root, "gitlab-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	apiLog := filepath.Join(f.root, "glab.log")
+	fakeGlab := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> \"%s\"\ncase \"$*\" in\n  *'/issues?state=opened'*) printf '[]\\n' ;;\n  *'/issues') printf '{\\\"iid\\\":99}\\n' ;;\n  *) exit 1 ;;\nesac\n", apiLog)
+	if err := os.WriteFile(filepath.Join(fakeBin, "glab"), []byte(fakeGlab), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	findings := []store.ProviderFinding{{Key: "G-2", Severity: "P1", Path: "worker.go", Line: 17, Excerpt: "accepted finding", Guidance: "fix later"}}
+	err := createAcceptedFindingFollowup(context.Background(), greenhouseMember{name: "shop", root: f.repo}, f.task, f.headSHA, findings, config.Config{})
+	if err != nil {
+		t.Fatalf("file GitLab follow-up issue: %v", err)
+	}
+	calls, err := os.ReadFile(apiLog)
+	if err != nil || !strings.Contains(string(calls), "--method POST") || !strings.Contains(string(calls), "/issues") || !strings.Contains(string(calls), "worker.go:17") {
+		t.Fatalf("GitLab issue API calls=%q err=%v", calls, err)
+	}
+}
+
 func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
