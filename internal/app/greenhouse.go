@@ -1015,7 +1015,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 			return false, persisted, nil
 		}
 	}
-	return false, store.Verdict{}, fmt.Errorf("Greenhouse Verdict for already-recorded grant %s was not found", result.Grant)
+	return false, store.Verdict{}, fmt.Errorf("greenhouse verdict for already-recorded grant %s was not found", result.Grant)
 }
 
 // greenhouseBlocking counts findings at or above blockAt. An unknown priority blocks.
