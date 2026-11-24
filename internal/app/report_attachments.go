@@ -146,7 +146,7 @@ func workspaceMemberPaths(targets []taskMember) (map[string]bool, error) {
 func reportAttachmentGitArgs(baseRef, head string) [][]string {
 	args := make([][]string, 0, 3)
 	if baseRef != "" {
-		args = append(args, []string{"diff", "--name-only", "-z", baseRef, head})
+		args = append(args, []string{"diff", "--name-only", "-z", "--merge-base", baseRef, head})
 	}
 	return append(args,
 		[]string{"diff", "--name-only", "-z", head},
@@ -361,7 +361,7 @@ func validateReportAttachmentPath(name string) error {
 func reportDeletedGitArgs(baseRef string) [][]string {
 	args := make([][]string, 0, 2)
 	if baseRef != "" {
-		args = append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", baseRef, "HEAD"})
+		args = append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", "--merge-base", baseRef, "HEAD"})
 	}
 	return append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", "HEAD"})
 }

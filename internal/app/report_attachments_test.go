@@ -22,6 +22,10 @@ func TestReportAttachmentGitArgsOmitEmptyBaseRef(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Git argv = %#v, want %#v", got, want)
 	}
+	withBase := reportAttachmentGitArgs("main", "HEAD")
+	if !reflect.DeepEqual(withBase[0], []string{"diff", "--name-only", "-z", "--merge-base", "main", "HEAD"}) {
+		t.Fatalf("base-relative Git argv = %#v", withBase[0])
+	}
 	for _, command := range got {
 		for _, arg := range command {
 			if arg == "" {
