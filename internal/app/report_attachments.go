@@ -122,6 +122,17 @@ func readWorkspaceRootBaseline(home string, project store.Project, task store.Ta
 	return baseline, nil
 }
 
+func revisionIsCommit(ctx context.Context, root, revision string) (bool, error) {
+	_, err := gitOutput(ctx, root, "rev-parse", "--verify", "--quiet", revision+"^{commit}")
+	if err == nil {
+		return true, nil
+	}
+	if gitRefMissing(err) {
+		return false, nil
+	}
+	return false, err
+}
+
 func validGitObjectID(value string) bool {
 	if len(value) != 40 && len(value) != 64 {
 		return false
@@ -143,10 +154,14 @@ func workspaceMemberPaths(targets []taskMember) (map[string]bool, error) {
 
 // reportAttachmentGitArgs lists changes without treating an absent base ref as
 // an empty pathspec. The head diff includes staged and unstaged changes.
-func reportAttachmentGitArgs(baseRef, head string) [][]string {
+func reportAttachmentGitArgs(baseRef, head string, mergeBase bool) [][]string {
 	args := make([][]string, 0, 3)
 	if baseRef != "" {
-		args = append(args, []string{"diff", "--name-only", "-z", baseRef, head})
+		diffArgs := []string{"diff", "--name-only", "-z"}
+		if mergeBase {
+			diffArgs = append(diffArgs, "--merge-base")
+		}
+		args = append(args, append(diffArgs, baseRef, head))
 	}
 	return append(args,
 		[]string{"diff", "--name-only", "-z", head},
@@ -229,7 +244,19 @@ func preserveReportAttachmentsWithOptions(ctx context.Context, db *store.DB, hom
 				return fmt.Errorf("list Report attachments in %s: %w", repository.path, err)
 			}
 		}
-		attachmentArgs := reportAttachmentGitArgs(baseRef, head)
+		mergeBase := false
+		if baseRef != "" {
+			baseIsCommit, err := revisionIsCommit(ctx, repository.path, baseRef)
+			if err != nil {
+				return fmt.Errorf("resolve Report attachment base in %s: %w", repository.path, err)
+			}
+			headIsCommit, err := revisionIsCommit(ctx, repository.path, head)
+			if err != nil {
+				return fmt.Errorf("resolve Report attachment HEAD in %s: %w", repository.path, err)
+			}
+			mergeBase = baseIsCommit && headIsCommit
+		}
+		attachmentArgs := reportAttachmentGitArgs(baseRef, head, mergeBase)
 		if preserveIgnored {
 			attachmentArgs = append(attachmentArgs, []string{"ls-files", "--others", "--ignored", "--exclude-standard", "-z"})
 		}
@@ -260,7 +287,7 @@ func preserveReportAttachmentsWithOptions(ctx context.Context, db *store.DB, hom
 			}
 		}
 		if preserveIgnored {
-			for _, args := range reportDeletedGitArgs(repository.baseRef) {
+			for _, args := range reportDeletedGitArgs(baseRef, mergeBase) {
 				output, err := gitOutputRaw(ctx, repository.path, args...)
 				if err != nil {
 					return fmt.Errorf("list tracked deletions in %s: %w", repository.path, err)
@@ -358,10 +385,14 @@ func validateReportAttachmentPath(name string) error {
 	return nil
 }
 
-func reportDeletedGitArgs(baseRef string) [][]string {
+func reportDeletedGitArgs(baseRef string, mergeBase bool) [][]string {
 	args := make([][]string, 0, 2)
 	if baseRef != "" {
-		args = append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", baseRef, "HEAD"})
+		diffArgs := []string{"diff", "--diff-filter=D", "--name-only", "-z"}
+		if mergeBase {
+			diffArgs = append(diffArgs, "--merge-base")
+		}
+		args = append(args, append(diffArgs, baseRef, "HEAD"))
 	}
 	return append(args, []string{"diff", "--diff-filter=D", "--name-only", "-z", "HEAD"})
 }
