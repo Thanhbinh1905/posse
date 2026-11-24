@@ -20,6 +20,7 @@ func TestWorkerGitGuardBlocksRemoteWritesThroughAliasesAndPlumbing(t *testing.T)
 	scope, _ := guardFixture(t)
 	repo := t.TempDir()
 	scope.cwd = repo
+	scope.writable = append(scope.writable, repo)
 	gitTest(t, repo, "init")
 	gitTest(t, repo, "config", "alias.p", "push")
 	for _, command := range []string{
