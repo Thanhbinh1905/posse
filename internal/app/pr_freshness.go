@@ -241,7 +241,7 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 		memberLabel = "Workspace member " + member + ": "
 	}
 	var instruction string
-	if greenhouseFullPipelineTask(task) {
+	if greenhouseFullPipelineTaskWithConfig(task, config.Config{}, member) {
 		target := "origin/" + freshness.Branch
 		if freshness.Local {
 			target = freshness.Branch
@@ -293,8 +293,79 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 	return err
 }
 
+func mergeRefusalIndicatesTargetMovement(err error) bool {
+	message := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"not up to date",
+		"branch is behind",
+		"base branch was modified",
+		"base branch has been modified",
+		"base branch has changed",
+		"base branch changed",
+		"base branch is out of date",
+		"target branch was modified",
+		"target branch has changed",
+		"target branch changed",
+		"target branch is out of date",
+	} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) refreshAfterPRMergeRefusal(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member string, mergeErr error) error {
+	if !cfg.Defaults.RequireCurrentTarget && !greenhouseFullPipelineTaskWithConfig(task, cfg, member) {
+		return nil
+	}
+	if !mergeRefusalIndicatesTargetMovement(mergeErr) {
+		return nil
+	}
+	freshness, err := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), task.GatedSHA)
+	if err != nil {
+		return err
+	}
+	if freshness.Fresh {
+		return nil
+	}
+	sync, err := s.queuePRTargetSyncInstruction(ctx, db, task, member, freshness, task.GatedSHA)
+	if err != nil {
+		return err
+	}
+	if task.State == store.StateMerging {
+		if member == "" {
+			if err := db.Transition(ctx, task.ID, store.StateMerging, store.StateWorking, "lead", "Pull request merge was refused because its target advanced"); err != nil {
+				return err
+			}
+			if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
+				return err
+			}
+		} else {
+			repos, err := db.TaskRepos(ctx, task.ID)
+			if err != nil {
+				return err
+			}
+			var repo store.TaskRepo
+			for _, candidate := range repos {
+				if candidate.Repo == member {
+					repo = candidate
+					break
+				}
+			}
+			if repo.Repo == "" {
+				return fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
+			}
+			if err := s.reopenWorkspaceTask(ctx, db, task, repo, "Pull request merge in "+member+" was refused because its target advanced"); err != nil {
+				return err
+			}
+		}
+	}
+	return prBranchBehindFailure(task.Seq, task.GatedSHA, freshness, sync)
+}
+
 func (s *Service) requirePRTargetFresh(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, member, mergeMode, headSHA string) error {
-	if !deliveredByPullRequest(mergeMode) || !cfg.Defaults.RequireCurrentTarget {
+	if !deliveredByPullRequest(mergeMode) || (!cfg.Defaults.RequireCurrentTarget && !greenhouseFullPipelineTaskWithConfig(task, cfg, member)) {
 		return nil
 	}
 	targetBranch := taskTargetBranch(project, task)
