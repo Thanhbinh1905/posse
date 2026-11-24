@@ -16,6 +16,7 @@ type prTargetFreshness struct {
 	Tip    string
 	Fresh  bool
 	Local  bool
+	Root   string
 }
 
 func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA string) (prTargetFreshness, error) {
@@ -28,7 +29,7 @@ func inspectPRTargetFreshness(ctx context.Context, root, targetBranch, headSHA s
 
 // fetchPRTargetTip refreshes origin/<target> and records its tip.
 func fetchPRTargetTip(ctx context.Context, root, targetBranch string) (prTargetFreshness, error) {
-	freshness := prTargetFreshness{Branch: targetBranch}
+	freshness := prTargetFreshness{Branch: targetBranch, Root: root}
 	targetRef := "refs/remotes/origin/" + targetBranch
 	refspec := "+refs/heads/" + targetBranch + ":" + targetRef
 	output, err := gitFetch(ctx, root, "origin", refspec)
@@ -236,6 +237,15 @@ func hasCurrentTargetWork(ctx context.Context, db *store.DB, task store.Task, me
 }
 
 func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
+	if freshness.Root != "" {
+		checked, err := freshness.of(ctx, freshness.Root, headSHA)
+		if err != nil {
+			return err
+		}
+		if checked.Fresh {
+			return nil
+		}
+	}
 	memberLabel := ""
 	if member != "" {
 		memberLabel = "Workspace member " + member + ": "

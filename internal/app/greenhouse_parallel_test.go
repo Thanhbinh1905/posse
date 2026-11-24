@@ -28,6 +28,18 @@ func hasPendingDecision(decisions []store.Decision, id int64) bool {
 	return false
 }
 
+func TestGreenhouseTargetRefreshSkipsHeadThatAlreadyContainsTarget(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	if err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("target refresh instructions = %+v, %v; want none for a head that contains target %s", instructions, err, target)
+	}
+}
+
 func TestGreenhouseStaleHeadInstructionRequestsReviewWithoutPR(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")

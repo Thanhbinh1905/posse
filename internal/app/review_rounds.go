@@ -332,13 +332,17 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 		if err != nil {
 			return err
 		}
-		if candidate.State != store.ValidationCandidateStale && candidate.TargetSHA == targetHead {
-			continue
-		}
 		if targetHead == "" {
 			return axi.Failure("candidate_target_missing", lane.memberLabel("the frozen target branch is missing"), false)
 		}
-		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Local: lane.localDelivery()}
+		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Local: lane.localDelivery(), Root: lane.task.WorktreePath}
+		checked, err := freshness.of(ctx.Context, freshness.Root, candidate.CandidateSHA)
+		if err != nil {
+			return err
+		}
+		if checked.Fresh {
+			continue
+		}
 		if err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA); err != nil {
 			return err
 		}
@@ -415,7 +419,12 @@ func (s *Service) prepareReviewCandidateCheckouts(ctx context.Context, db *store
 		if err != nil {
 			return err
 		}
-		if targetHead == "" || targetHead != candidate.TargetSHA {
+		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Root: lane.task.WorktreePath}
+		checked, err := freshness.of(ctx, freshness.Root, candidate.CandidateSHA)
+		if err != nil {
+			return err
+		}
+		if targetHead == "" || !checked.Fresh {
 			if candidate.State == store.ValidationCandidateActive && targetHead != "" {
 				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
 					return err
