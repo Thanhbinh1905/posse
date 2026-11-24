@@ -95,6 +95,89 @@ func (f *prMergeFixture) rewriteNotices(t *testing.T) []map[string]string {
 	return rewrites
 }
 
+func TestPublishAfterRebasingUnpublishedBranch(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateWorking)
+	briefPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "brief.md")
+	if err := os.WriteFile(briefPath, []byte("---\ntype: change\ntitle: E2E Brief title\ndone_when: unpublished rebase publishes\nissues: [1185]\n---\nE2E intent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := gitCommonDir(context.Background(), f.worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1 WHERE id=?`, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task.Launches = 1
+	if _, err := f.db.ClaimBranchAuthor(context.Background(), repository, f.task.Branch, f.task.ID, 1, f.headSHA, f.headSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_GENERATION", "1")
+	base := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	gitTest(t, f.repo, "checkout", "--detach", base)
+	gitTest(t, f.repo, "commit", "--allow-empty", "-m", "upstream change")
+	gitTest(t, f.repo, "push", "origin", "HEAD:main")
+	gitTest(t, f.worktree, "fetch", "origin")
+	gitTest(t, f.worktree, "rebase", "--onto", "origin/main", base)
+	f.headSHA = strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	f.setGHHead(t, f.headSHA)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `INSERT OR REPLACE INTO task_plan_revisions(task_id,revision,plan_json) VALUES(?,1,?)`, f.task.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := f.run("signal", "done", "Greenhouse-reviewed rebased head", "--head", f.headSHA); code != 0 {
+		t.Fatalf("signal reviewed rebase: %d %s %s", code, output, stderr)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r-rebase", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record Greenhouse pass: %v %v", recorded, err)
+	}
+
+	if code, output, stderr := f.run("publish", "Fixes #1185: Worker completion summary"); code != 0 {
+		t.Fatalf("publish rebased unpublished branch: %d %s %s", code, output, stderr)
+	}
+	if got := f.originHead(t); got != f.headSHA {
+		t.Fatalf("origin head = %s, want rebased head %s", got, f.headSHA)
+	}
+	if log, err := os.ReadFile(f.ghLog); err != nil || !strings.Contains(string(log), "Fixes #1185") {
+		t.Fatalf("PR body does not fix #1185: %s %v", log, err)
+	}
+	publishedHead := f.headSHA
+	latestMain := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "origin/main"))
+	gitTest(t, f.repo, "checkout", "--detach", latestMain)
+	gitTest(t, f.repo, "commit", "--allow-empty", "-m", "another upstream change")
+	gitTest(t, f.repo, "push", "origin", "HEAD:main")
+	gitTest(t, f.worktree, "fetch", "origin")
+	gitTest(t, f.worktree, "rebase", "--onto", "origin/main", latestMain)
+	f.headSHA = strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	f.setGHHead(t, f.headSHA)
+	if code, output, _ := f.run("publish", "Worker completion summary"); code == 0 || !strings.Contains(output, "publish_rewrite_required") {
+		t.Fatalf("publish after rebasing published branch: %d %s", code, output)
+	}
+	if got := f.originHead(t); got != publishedHead {
+		t.Fatalf("refused published rebase moved origin to %s, want %s", got, publishedHead)
+	}
+}
+
 func TestPublishRefusesRewriteWithoutApprovalAndRecordsApprovedRewrite(t *testing.T) {
 	f := newPublishedRewriteFixture(t)
 	oldHead := f.headSHA
