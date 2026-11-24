@@ -28,10 +28,30 @@ func hasPendingDecision(decisions []store.Decision, id int64) bool {
 	return false
 }
 
+func TestPRTargetSyncDoesNotLeaveFreshTaskInMergeQueue(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	sync, err := f.service.queuePRTargetSyncInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sync.Queued || sync.Place.Queued() {
+		t.Fatalf("target sync = %+v; want no queue entry for a head that contains target", sync)
+	}
+	places, err := f.db.MergeQueuePlaces(context.Background(), f.project.ID)
+	if err != nil || len(places[f.task.ID]) != 0 {
+		t.Fatalf("merge queue places = %+v, %v; want no entry", places[f.task.ID], err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("target refresh instructions = %+v, %v; want none", instructions, err)
+	}
+}
+
 func TestGreenhouseTargetRefreshSkipsHeadThatAlreadyContainsTarget(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
-	if err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+	if _, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
 		t.Fatal(err)
 	}
 	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
@@ -59,7 +79,7 @@ func TestGreenhouseStaleHeadInstructionRequestsReviewWithoutPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: strings.Repeat("a", 40)}, f.headSHA); err != nil {
+	if _, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: strings.Repeat("a", 40)}, f.headSHA); err != nil {
 		t.Fatal(err)
 	}
 	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
@@ -88,7 +108,7 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 		t.Fatal(err)
 	}
 	refreshed := f.advanceTarget(t, false, true)
-	if err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed}, f.headSHA); err != nil {
+	if _, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed}, f.headSHA); err != nil {
 		t.Fatal(err)
 	}
 	if code, output, stderr := f.run("signal", "working", "Refreshing the target"); code != 0 {

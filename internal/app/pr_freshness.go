@@ -155,8 +155,15 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 	if !place.Head() {
 		return targetSync{Place: place}, nil
 	}
-	if err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA); err != nil {
+	queued, err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA)
+	if err != nil {
 		return targetSync{}, err
+	}
+	if !queued {
+		if err := db.DequeueMergeQueue(ctx, task.ID, member, "target_already_current", time.Now().UnixMilli()); err != nil {
+			return targetSync{}, err
+		}
+		return targetSync{}, nil
 	}
 	if err := s.relaunchReleasedFullPipelineWorker(ctx, db, task, member); err != nil {
 		return targetSync{}, err
@@ -172,7 +179,8 @@ func (s *Service) queueConflictTargetSyncInstruction(ctx context.Context, db *st
 	if task.State != store.StateDone && task.State != store.StateMerging {
 		return nil
 	}
-	if err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA); err != nil {
+	queued, err := queueTargetMergeInstruction(ctx, db, task, member, freshness, headSHA)
+	if err != nil || !queued {
 		return err
 	}
 	return s.relaunchReleasedFullPipelineWorker(ctx, db, task, member)
@@ -236,14 +244,14 @@ func hasCurrentTargetWork(ctx context.Context, db *store.DB, task store.Task, me
 	return false, nil
 }
 
-func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) error {
+func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) (bool, error) {
 	if freshness.Root != "" {
 		checked, err := freshness.of(ctx, freshness.Root, headSHA)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if checked.Fresh {
-			return nil
+			return false, nil
 		}
 	}
 	memberLabel := ""
@@ -293,14 +301,14 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 	after := task.CreatedAt
 	signals, err := db.TaskSignals(ctx, task.ID, 1)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(signals) > 0 && signals[0].Verb == "done" {
 		after = signals[0].At
 	}
 	dedupeKey := fmt.Sprintf("freshness:%s:%s:%s:%d", member, headSHA, freshness.Tip, after)
 	_, err = db.QueueValidationFixInstruction(ctx, task.ID, "freshness", headSHA, dedupeKey, instruction)
-	return err
+	return err == nil, err
 }
 
 func mergeRefusalIndicatesTargetMovement(err error) bool {

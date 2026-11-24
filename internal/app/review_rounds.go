@@ -345,8 +345,13 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 			candidateTargetPinMoved = candidateTargetPinMoved || candidate.TargetSHA != targetHead
 			continue
 		}
-		if err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA); err != nil {
+		instructionQueued, err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA)
+		if err != nil {
 			return err
+		}
+		if !instructionQueued {
+			candidateTargetPinMoved = candidateTargetPinMoved || candidate.TargetSHA != targetHead
+			continue
 		}
 		queued = true
 	}
