@@ -351,7 +351,16 @@ func waitForSandboxProcessExit(pid int, root string, handle *sandboxProcessHandl
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("short-lived process %d remained in the Sandbox after retained pane processes stopped; preserving its work", pid)
+			pids, err := sandboxProcessIDs(root)
+			if err != nil {
+				return err
+			}
+			for _, current := range pids {
+				if current == pid {
+					return fmt.Errorf("short-lived process %d remained in the Sandbox after retained pane processes stopped; preserving its work", pid)
+				}
+			}
+			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
