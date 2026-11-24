@@ -60,7 +60,7 @@ func TestGreenhouseAcceptHeadEvidenceRequiresReviewCapDecision(t *testing.T) {
 	if err := f.db.RecordReviewHeadDisposition(ctx, f.task.ID, []string{f.headSHA}, "No blocking finding remains"); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.headSHA)
+	accepted, err := greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.project.Name, f.headSHA)
 	if err != nil || accepted {
 		t.Fatalf("system disposition qualifies as accept-head: accepted=%v err=%v", accepted, err)
 	}
@@ -78,7 +78,7 @@ func TestGreenhouseAcceptHeadEvidenceRequiresReviewCapDecision(t *testing.T) {
 	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, decision.ID, []string{f.headSHA}, decision.UserQuote, "P1", "user", ""); err != nil {
 		t.Fatal(err)
 	}
-	accepted, err = greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.headSHA)
+	accepted, err = greenhouseAcceptHeadDisposition(ctx, f.db, f.task, f.project.Name, f.headSHA)
 	if err != nil || !accepted {
 		t.Fatalf("applied accept-head Decision not recognized: accepted=%v err=%v", accepted, err)
 	}
