@@ -1210,6 +1210,7 @@ func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Tas
 }
 
 const completedPaneCloseProof = "completed_worker_idle_shell"
+const taskPaneOwnershipTokenKey = "posse_task_identity"
 
 func completedPaneProofFailure(code, message string, retryable bool, details ...string) *axi.Error {
 	help := append([]string{"proof: " + completedPaneCloseProof}, details...)
@@ -1366,7 +1367,7 @@ func snapshotStillMatchesCompletedPane(ctx context.Context, s *Service, project 
 }
 
 func restoredIdleTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
-	if !completedWorkerHasNoReplacement(task, project) || pane.Label != task.PaneLabel || pane.Label == "" || pane.PaneID != task.PaneID || pane.WorkspaceID != task.HerdrWorkspaceID {
+	if !completedWorkerHasNoReplacement(task, project) || task.ContainmentMarker == "" || pane.Tokens[taskPaneOwnershipTokenKey] != task.ContainmentMarker || pane.Label != task.PaneLabel || pane.Label == "" || pane.PaneID != task.PaneID || pane.WorkspaceID != task.HerdrWorkspaceID {
 		return false
 	}
 	if pane.AgentStatus != "idle" && pane.AgentStatus != "exited" {

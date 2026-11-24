@@ -522,16 +522,40 @@ func TestTeardownChecksReAdoptedWorkspaceAgainstSandboxBeforeClosing(t *testing.
 	}
 }
 
+func TestRestoredIdleTaskPaneRequiresTaskOwnershipToken(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	defer fixture.db.Close()
+	const marker = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=?, containment_marker=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), marker, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := fixture.service.Herdr.(*herdr.Fake).SnapshotValue.Panes[1]
+	pane.AgentStatus = "idle"
+	if restoredIdleTaskPane(herdr.Snapshot{Panes: []herdr.Pane{pane}}, fixture.project, task, pane) {
+		t.Fatal("idle shell without the Task ownership token was accepted as the restored Worker")
+	}
+	pane.Tokens = map[string]string{taskPaneOwnershipTokenKey: marker}
+	if !restoredIdleTaskPane(herdr.Snapshot{Panes: []herdr.Pane{pane}}, fixture.project, task, pane) {
+		t.Fatal("idle shell with the Task ownership token was rejected")
+	}
+}
+
 func TestCompletedRestoredPaneUsesIdleShellOwnershipProof(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateDone)
 	defer fixture.db.Close()
-	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), fixture.task.ID); err != nil {
+	const marker = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=?, containment_marker=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), marker, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	fixture.task, _ = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
 	adapter := fixture.service.Herdr.(*herdr.Fake)
 	snapshot := adapter.SnapshotValue
 	snapshot.Panes[1].AgentStatus = "idle"
+	snapshot.Panes[1].Tokens = map[string]string{taskPaneOwnershipTokenKey: marker}
 	adapter.SnapshotValue = snapshot
 	proofs, err := fixture.service.planCompletedWorkerPaneProofs(context.Background(), fixture.db, fixture.project, fixture.task)
 	if err != nil || proofs[fixture.task.PaneID] != "completed_worker_idle_shell" {
@@ -542,14 +566,15 @@ func TestCompletedRestoredPaneUsesIdleShellOwnershipProof(t *testing.T) {
 func TestRestoredIdleTaskPaneRequiresRecordedPaneIdentity(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateDone)
 	defer fixture.db.Close()
-	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), fixture.task.ID); err != nil {
+	const marker = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=?, containment_marker=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), marker, fixture.task.ID); err != nil {
 		t.Fatal(err)
 	}
 	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pane := herdr.Pane{PaneID: "replacement:p1", WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, CWD: task.WorktreePath, Agent: "claude", AgentStatus: "idle"}
+	pane := herdr.Pane{PaneID: "replacement:p1", WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, CWD: task.WorktreePath, Agent: "claude", AgentStatus: "idle", Tokens: map[string]string{taskPaneOwnershipTokenKey: marker}}
 	if restoredIdleTaskPane(herdr.Snapshot{Panes: []herdr.Pane{pane}}, fixture.project, task, pane) {
 		t.Fatal("idle pane with the Task label but a different recorded pane ID was accepted as restored Task pane")
 	}

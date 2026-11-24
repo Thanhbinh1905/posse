@@ -41,6 +41,29 @@ func TestTeardownClosesRestoredCompletedPaneE2E(t *testing.T) {
 	}
 }
 
+func TestTeardownRefusesRestoredIdleShellWithoutTaskOwnershipTokenE2E(t *testing.T) {
+	fixture, task := newCompletedTaskPaneTeardownFixture(t)
+	adapter := restoredCompletedPaneAdapter(t, fixture, task)
+	snapshot := adapter.SnapshotValue
+	snapshot.Panes[1].Tokens = nil
+	adapter.SnapshotValue = snapshot
+	fixture.test.Chdir(fixture.repo)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p1")
+
+	code, output, stderr := fixture.run("teardown", "t1")
+	if code == 0 {
+		t.Fatalf("teardown accepted an idle shell without the Task ownership token: output=%s stderr=%s", output, stderr)
+	}
+	if !containsPane(adapter.SnapshotValue, task.PaneID) {
+		t.Fatal("teardown closed the unverified idle shell")
+	}
+	sandbox, err := fixture.db.SandboxByTask(context.Background(), task.ID)
+	if err != nil || sandbox.State != "held" {
+		t.Fatalf("Sandbox after unverified idle shell refusal = %#v, %v", sandbox, err)
+	}
+}
+
 func TestApprovedDiscardClosesRestoredCompletedPaneE2E(t *testing.T) {
 	fixture, task := newCompletedTaskPaneTeardownFixture(t)
 	adapter := restoredCompletedPaneAdapter(t, fixture, task)
@@ -86,7 +109,8 @@ func TestTeardownRefusesRestoredPaneWithCanonicalReplacementWorkerE2E(t *testing
 
 func restoredCompletedPaneAdapter(t *testing.T, fixture *prMergeFixture, task store.Task) *restoredPaneTeardownAdapter {
 	t.Helper()
-	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, task.Seq, 1), task.ID); err != nil {
+	const marker = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=?, containment_marker=? WHERE id=?`, agentName(fixture.project.Name, task.Seq, 1), marker, task.ID); err != nil {
 		t.Fatal(err)
 	}
 	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, task.ID)
@@ -103,6 +127,7 @@ func restoredCompletedPaneAdapter(t *testing.T, fixture *prMergeFixture, task st
 		if snapshot.Panes[index].PaneID == task.PaneID {
 			snapshot.Panes[index].Agent = "claude"
 			snapshot.Panes[index].AgentStatus = "idle"
+			snapshot.Panes[index].Tokens = map[string]string{taskPaneOwnershipTokenKey: marker}
 		}
 	}
 	fake.SnapshotValue = snapshot
