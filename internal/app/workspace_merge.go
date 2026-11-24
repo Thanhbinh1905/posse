@@ -467,6 +467,9 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 		}
 		_, mergeErr := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, forge.Root, "glab", args...)
 		if mergeErr != nil && !strings.Contains(strings.ToLower(mergeErr.Error()), "already been merged") {
+			if refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, member.project, cfg, member.task, repo.Repo, mergeErr); refreshErr != nil {
+				return prefixFailure(repo.Repo, refreshErr)
+			}
 			return axi.Failure("pr_merge_failed", repo.Repo+": GitLab did not merge the merge request", true, mergeErr.Error())
 		}
 		confirmed, confirmErr := s.reconcileGitLabMergedMember(ctx, db, project, cfg, task, member, forge, number)
@@ -489,6 +492,9 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 			args = append(args, "--subject", mergeCommitSubject(prTitle, number))
 		}
 		if _, err := runOutputStep(ctx, db, intent, "pr.merge:"+repo.Repo, member.target.Root, "gh", args...); err != nil {
+			if refreshErr := s.refreshAfterPRMergeRefusal(ctx, db, member.project, cfg, member.task, repo.Repo, err); refreshErr != nil {
+				return prefixFailure(repo.Repo, refreshErr)
+			}
 			return axi.Failure("pr_merge_failed", repo.Repo+": GitHub did not merge the pull request", true, err.Error())
 		}
 	}
