@@ -522,6 +522,40 @@ func TestTeardownChecksReAdoptedWorkspaceAgainstSandboxBeforeClosing(t *testing.
 	}
 }
 
+func TestCompletedRestoredPaneUsesIdleShellOwnershipProof(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	defer fixture.db.Close()
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, _ = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	adapter := fixture.service.Herdr.(*herdr.Fake)
+	snapshot := adapter.SnapshotValue
+	snapshot.Panes[1].AgentStatus = "idle"
+	adapter.SnapshotValue = snapshot
+	proofs, err := fixture.service.planCompletedWorkerPaneProofs(context.Background(), fixture.db, fixture.project, fixture.task)
+	if err != nil || proofs[fixture.task.PaneID] != "completed_worker_idle_shell" {
+		t.Fatalf("completed restored pane proof = %#v, %v", proofs, err)
+	}
+}
+
+func TestCompletedRestoredPaneRefusesCanonicalReplacementWorker(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	defer fixture.db.Close()
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, _ = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	adapter := fixture.service.Herdr.(*herdr.Fake)
+	snapshot := adapter.SnapshotValue
+	snapshot.Panes[1].AgentStatus = "idle"
+	snapshot.Agents = []herdr.Agent{{Name: agentName(fixture.project.Name, 2, 1), PaneID: fixture.task.PaneID}}
+	adapter.SnapshotValue = snapshot
+	if _, err := fixture.service.planCompletedWorkerPaneProofs(context.Background(), fixture.db, fixture.project, fixture.task); err == nil || !strings.Contains(err.Error(), "canonical Worker") {
+		t.Fatalf("canonical replacement Worker proof error = %v, want refusal", err)
+	}
+}
+
 func TestApprovedDiscardRefusesUnverifiableAgentBeforeTeardown(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateWorking)
 	attachPRFixtureSandbox(t, fixture)

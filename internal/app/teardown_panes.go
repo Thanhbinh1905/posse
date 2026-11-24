@@ -26,6 +26,7 @@ type teardownPanes struct {
 
 type taskPaneTeardownPlan struct {
 	panes             teardownPanes
+	completedProofs   map[string]string
 	paneIDs           map[string]bool
 	tabs              map[string]bool
 	workspaces        map[string]bool
@@ -43,6 +44,7 @@ type teardownResult struct {
 	// Task scratch without a retained ancestor; Teardown cannot prove they are
 	// Task-owned, so it reports them instead of stopping them.
 	EscapedProcesses []taskProcessDetail
+	PaneCloseProofs  []string
 	CacheMaintenance string
 	AlreadyTornDown  bool
 	// RemoteBranchErrors name why a merged branch stayed on origin; a later
@@ -181,10 +183,11 @@ func (s *Service) requireNoLiveTaskAgent(ctx context.Context, project store.Proj
 	}
 	tabs := taskTabs(snapshot, project, task)
 	for _, pane := range snapshot.Panes {
-		if pane.Label == task.PaneLabel && pane.Agent != "" && !ownsTaskPane(snapshot, project, task, tabs, pane) {
+		restoredProof := restoredIdleTaskPane(snapshot, project, task, pane)
+		if pane.Label == task.PaneLabel && pane.Agent != "" && !ownsTaskPane(snapshot, project, task, tabs, pane) && !restoredProof {
 			return axi.Failure("discard_agent_identity_unavailable", "cannot verify that the Task-labeled pane belongs to this Worker", true, pane.PaneID, identityHelp)
 		}
-		if !ownsTaskPane(snapshot, project, task, tabs, pane) {
+		if !ownsTaskPane(snapshot, project, task, tabs, pane) && !restoredProof {
 			continue
 		}
 		raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": pane.PaneID})
@@ -264,6 +267,10 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 	if err != nil {
 		return axi.Failure("sandbox_process_identity_unavailable", "could not verify Task-owned process paths", true, err.Error())
 	}
+	completedProofs, err := s.planCompletedWorkerPaneProofs(ctx, db, project, task)
+	if err != nil {
+		return err
+	}
 	for index := range roots {
 		roots[index].includeOpenFiles = true
 		roots[index].includeMappedFiles = true
@@ -280,6 +287,9 @@ func (s *Service) verifySandboxForegroundOwnershipWithAuthorization(ctx context.
 		paneInsideSandbox := pathInside(pane.CWD, heldSandbox.Path)
 		agentName := snapshotAgentName(snapshot, pane.PaneID)
 		taskPane := ownsTaskPane(snapshot, project, task, tabs, pane)
+		if completedProofs[pane.PaneID] != "" {
+			continue
+		}
 		if !taskPane && task.ContainmentMarker != "" && pane.WorkspaceID == task.HerdrWorkspaceID {
 			if err := s.verifyNoForeignTaskMarkedForeground(ctx, task, pane); err != nil {
 				return err
@@ -975,8 +985,8 @@ func (s *Service) verifyTaskPanesGone(ctx context.Context, project store.Project
 // planTaskPaneTeardown records the panes Herdr currently associates with a
 // Task. Teardown uses the plan only to verify that Herdr removes those panes
 // when their retained processes exit; it never closes a pane by id alone.
-func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Project, task store.Task) (taskPaneTeardownPlan, error) {
-	plan := taskPaneTeardownPlan{paneIDs: map[string]bool{}, tabs: map[string]bool{}, workspaces: map[string]bool{}, workspaceLabels: map[string]string{}}
+func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Project, task store.Task, dbs ...*store.DB) (taskPaneTeardownPlan, error) {
+	plan := taskPaneTeardownPlan{paneIDs: map[string]bool{}, tabs: map[string]bool{}, workspaces: map[string]bool{}, workspaceLabels: map[string]string{}, completedProofs: map[string]string{}}
 	if task.PaneLabel == "" && task.HerdrWorkspaceID == "" && task.PaneID == "" {
 		return plan, nil
 	}
@@ -988,6 +998,13 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 		return plan, err
 	}
 	plan.tabs = taskTabs(snapshot, project, task)
+	if len(dbs) > 0 && dbs[0] != nil {
+		proofs, err := s.planCompletedWorkerPaneProofs(ctx, dbs[0], project, task)
+		if err != nil {
+			return plan, err
+		}
+		plan.completedProofs = proofs
+	}
 	childID := ""
 	if project.IsWorkspace() {
 		for _, workspace := range snapshot.Workspaces {
@@ -1030,7 +1047,7 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 	}
 	ownedIDs := map[string]bool{}
 	for _, pane := range snapshot.Panes {
-		if ownsTaskPane(snapshot, project, task, plan.tabs, pane) {
+		if ownsTaskPane(snapshot, project, task, plan.tabs, pane) || plan.completedProofs[pane.PaneID] != "" {
 			ownedIDs[pane.PaneID] = true
 			plan.paneIDs[pane.PaneID] = true
 			if pane.PaneID == snapshot.FocusedPaneID && leadPaneBeside(snapshot, project, pane) != "" {
@@ -1192,6 +1209,191 @@ func ownsTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Tas
 	return taskAgentMatchesPane(snapshot, project, task, pane)
 }
 
+const completedPaneCloseProof = "completed_worker_idle_shell"
+
+func completedPaneProofFailure(code, message string, retryable bool, details ...string) *axi.Error {
+	help := append([]string{"proof: " + completedPaneCloseProof}, details...)
+	return axi.Failure(code, message, retryable, help...)
+}
+
+func (s *Service) planCompletedWorkerPaneProofs(ctx context.Context, db *store.DB, project store.Project, task store.Task) (map[string]string, error) {
+	proofs := map[string]string{}
+	currentTask, err := db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	if currentTask.Launches != task.Launches || currentTask.AgentName != task.AgentName || !completedWorkerHasNoReplacement(currentTask, project) {
+		return proofs, nil
+	}
+	task = currentTask
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var labeled []herdr.Pane
+	for _, pane := range snapshot.Panes {
+		if pane.Label == task.PaneLabel && task.PaneLabel != "" {
+			labeled = append(labeled, pane)
+		}
+	}
+	if len(labeled) == 0 {
+		return proofs, nil
+	}
+	if len(labeled) != 1 {
+		return nil, completedPaneProofFailure("task_pane_identity_ambiguous", "Task pane label does not identify exactly one pane", false, task.PaneLabel)
+	}
+	pane := labeled[0]
+	if hasCanonicalTaskWorkerIdentity(snapshot, project.Name, pane.PaneID) {
+		if snapshotAgentName(snapshot, pane.PaneID) == task.AgentName || pane.Agent == task.AgentName {
+			return proofs, nil
+		}
+		return nil, completedPaneProofFailure("task_pane_replacement_worker", "a canonical Worker identity is reported for the completed Task pane", false, pane.PaneID)
+	}
+	if taskAgentMatchesPane(snapshot, project, task, pane) {
+		return proofs, nil
+	}
+	if pane.Agent == "" && pane.AgentStatus != "exited" {
+		return proofs, nil
+	}
+	if pane.AgentStatus != "idle" && pane.AgentStatus != "exited" {
+		return nil, completedPaneProofFailure("task_pane_active_agent", "completed Task pane agent is not idle or exited", false, pane.PaneID)
+	}
+	if !restoredIdleTaskPane(snapshot, project, task, pane) {
+		return proofs, nil
+	}
+	raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": pane.PaneID})
+	if err != nil {
+		return nil, completedPaneProofFailure("task_pane_process_identity_unavailable", "cannot verify the restored Task pane foreground process", false, err.Error())
+	}
+	var result struct {
+		ProcessInfo paneProcessInfo `json:"process_info"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || result.ProcessInfo.PaneID != pane.PaneID || result.ProcessInfo.ShellPID <= 1 || result.ProcessInfo.ForegroundProcessGroup != result.ProcessInfo.ShellPID {
+		return nil, completedPaneProofFailure("task_pane_process_identity_unavailable", "restored Task pane does not have its shell in the foreground", false, pane.PaneID)
+	}
+	if !pathInside(pane.CWD, task.WorktreePath) {
+		return nil, completedPaneProofFailure("task_pane_process_identity_unavailable", "restored Task pane is outside the Task Sandbox", false, pane.PaneID)
+	}
+	if !snapshotStillMatchesCompletedPane(ctx, s, project, task, pane, result.ProcessInfo.ShellPID) {
+		return nil, completedPaneProofFailure("task_pane_process_identity_unavailable", "restored Task pane changed during ownership verification", false, pane.PaneID)
+	}
+	proofs[pane.PaneID] = completedPaneCloseProof
+	return proofs, nil
+}
+
+func (s *Service) closeCompletedWorkerPanes(ctx context.Context, db *store.DB, project store.Project, task store.Task) ([]string, error) {
+	if s.Herdr == nil {
+		return nil, nil
+	}
+	proofs, err := s.planCompletedWorkerPaneProofs(ctx, db, project, task)
+	if err != nil {
+		return nil, err
+	}
+	closed := make([]string, 0, len(proofs))
+	for paneID, proof := range proofs {
+		latest, err := s.planCompletedWorkerPaneProofs(ctx, db, project, task)
+		if err != nil {
+			return closed, err
+		}
+		if latest[paneID] != proof {
+			return closed, completedPaneProofFailure("task_pane_process_identity_unavailable", "restored Task pane ownership proof changed before closure", false, paneID)
+		}
+		if _, err := s.herdrCall(ctx, "pane.close", map[string]any{"pane_id": paneID}); err != nil && !missingPaneError(err) {
+			return closed, err
+		}
+		snapshot, err := s.snapshot(ctx)
+		if err != nil {
+			return closed, err
+		}
+		if _, found := snapshotPane(snapshot, paneID); found {
+			return closed, axi.Failure("task_pane_close_failed", "Herdr left the verified restored Task pane open", true, paneID)
+		}
+		closed = append(closed, paneID+":"+proof)
+	}
+	return closed, nil
+}
+
+func completedWorkerHasNoReplacement(task store.Task, project store.Project) bool {
+	if task.State != store.StateDone && task.State != store.StateMerged && task.State != store.StateTornDown {
+		return false
+	}
+	return task.Launches > 0 && task.AgentName == agentName(project.Name, task.Seq, task.Launches)
+}
+
+func snapshotStillMatchesCompletedPane(ctx context.Context, s *Service, project store.Project, task store.Task, pane herdr.Pane, shellPID int) bool {
+	bootID, startTime, err := store.ProcessIdentityForPID(shellPID)
+	if err != nil {
+		return false
+	}
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	if !restoredIdleTaskPane(snapshot, project, task, pane) {
+		return false
+	}
+	current, found := snapshotPane(snapshot, pane.PaneID)
+	if !found || current.TabID != pane.TabID || current.WorkspaceID != pane.WorkspaceID || current.Agent != pane.Agent || !pathInside(current.CWD, task.WorktreePath) {
+		return false
+	}
+	raw, err := s.herdrCall(ctx, "pane.process_info", map[string]any{"pane_id": pane.PaneID})
+	if err != nil {
+		return false
+	}
+	var result struct {
+		ProcessInfo paneProcessInfo `json:"process_info"`
+	}
+	if json.Unmarshal(raw, &result) != nil || result.ProcessInfo.ShellPID != shellPID || result.ProcessInfo.ForegroundProcessGroup != shellPID {
+		return false
+	}
+	currentBootID, currentStartTime, err := store.ProcessIdentityForPID(shellPID)
+	return err == nil && currentBootID == bootID && currentStartTime == startTime
+}
+
+func restoredIdleTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
+	if !completedWorkerHasNoReplacement(task, project) || pane.Label != task.PaneLabel || pane.Label == "" {
+		return false
+	}
+	if pane.AgentStatus != "idle" && pane.AgentStatus != "exited" {
+		return false
+	}
+	matches := 0
+	for _, candidate := range snapshot.Panes {
+		if candidate.Label == task.PaneLabel {
+			matches++
+		}
+	}
+	return matches == 1 && !hasCanonicalTaskWorkerIdentity(snapshot, project.Name, pane.PaneID)
+}
+
+func hasCanonicalTaskWorkerIdentity(snapshot herdr.Snapshot, project, paneID string) bool {
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == paneID && canonicalTaskWorkerIdentity(pane.Agent, project) {
+			return true
+		}
+	}
+	for _, agent := range snapshot.Agents {
+		if agent.PaneID == paneID && canonicalTaskWorkerIdentity(agent.Name, project) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalTaskWorkerIdentity(name, project string) bool {
+	index := strings.LastIndex(name, "-t")
+	if index < 0 {
+		return false
+	}
+	parts := strings.Split(name[index+2:], "-")
+	if len(parts) != 2 {
+		return false
+	}
+	sequence, sequenceErr := strconv.Atoi(parts[0])
+	launch, launchErr := strconv.Atoi(parts[1])
+	return sequenceErr == nil && launchErr == nil && sequence > 0 && launch > 0 && agentNameMatchesTask(name, project, sequence)
+}
+
 // taskAgentMatchesPane accepts a canonical launch name or the exact recorded
 // session for a named Task pane whose current Herdr agent has no name.
 func taskAgentMatchesPane(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
@@ -1305,6 +1507,7 @@ func (s *Service) teardownIncomplete(ctx context.Context, db *store.DB, project 
 	help := []string{}
 	var structured *axi.Error
 	if errors.As(cause, &structured) {
+		retryable = retryable && structured.Retryable
 		help = append(help, structured.Help...)
 	}
 	help = append(help, "Repair the failed "+step+" step, then retry `posse teardown "+taskIDString(task.Seq)+"`")
@@ -1315,7 +1518,12 @@ func (s *Service) teardownDiscardIncomplete(ctx context.Context, db *store.DB, p
 	if err := s.recordTeardownIncomplete(ctx, db, project, task, cause); err != nil {
 		return errors.Join(cause, err)
 	}
-	return axi.Failure("teardown_incomplete", cause.Error(), true, "Repair the failed "+step+" step, then retry `posse teardown "+taskIDString(task.Seq)+" --discard --user-approved \"<User's original words>\"`")
+	retryable := true
+	var structured *axi.Error
+	if errors.As(cause, &structured) {
+		retryable = structured.Retryable
+	}
+	return axi.Failure("teardown_incomplete", cause.Error(), retryable, "Repair the failed "+step+" step, then retry `posse teardown "+taskIDString(task.Seq)+" --discard --user-approved \"<User's original words>\"`")
 }
 
 func (s *Service) recordTeardownIncomplete(ctx context.Context, db *store.DB, project store.Project, task store.Task, cause error) error {

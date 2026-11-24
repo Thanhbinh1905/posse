@@ -183,11 +183,15 @@ func mergedTaskTargetRef(ctx context.Context, project store.Project, task store.
 	if task.MergeMode != "local" {
 		return taskTargetRef(ctx, project, task)
 	}
-	ref := "refs/heads/" + taskTargetBranch(project, task)
-	if _, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", ref+"^{commit}"); err != nil {
-		return "", err
+	branch := taskTargetBranch(project, task)
+	for _, ref := range []string{"refs/heads/" + branch, "refs/remotes/origin/" + branch} {
+		if _, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil {
+			return ref, nil
+		} else if !gitRefMissing(err) {
+			return "", err
+		}
 	}
-	return ref, nil
+	return "", axi.Failure("target_branch_missing", "Task target branch is missing", false, branch)
 }
 
 func ensureLocalTaskTarget(ctx context.Context, project store.Project, task store.Task) error {
