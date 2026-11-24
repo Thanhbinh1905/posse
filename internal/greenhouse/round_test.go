@@ -52,6 +52,20 @@ func TestSettledInspectionKeepsPendingRecord(t *testing.T) {
 	}
 }
 
+func TestSettledInspectionRejectsTerminalStatusEvenWithVerdict(t *testing.T) {
+	for _, status := range []string{"cancelled", "failed", "inconclusive", "timeout", "timed-out", "unconfigured", "refused"} {
+		t.Run(status, func(t *testing.T) {
+			result, found, err := settledInspection(context.Background(), Round{}, "grant", response{
+				HostResult: &HostResult{Grant: "grant", Status: status, Reason: "review did not complete", Verdict: "clean", Current: true},
+			})
+			var terminalErr *TerminalReviewError
+			if found || !errors.As(err, &terminalErr) || terminalErr.Status != status || terminalErr.Reason != "review did not complete" {
+				t.Fatalf("settledInspection = %+v, %t, %v; want terminal failure for %q", result, found, err, status)
+			}
+		})
+	}
+}
+
 func TestSpentGrantIsRecognizedWhenSettledResultWasNotIngested(t *testing.T) {
 	inspected := response{
 		Run:        &run{HostGrants: []string{"greenhouse/t143/greenhouse/r1", "greenhouse/t143/greenhouse/r2"}},
