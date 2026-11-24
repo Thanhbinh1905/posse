@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -687,6 +688,9 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			if gitRemoteWrite(e, args[1:], literal[1:]) {
 				return refuse(ruleGitPush, raw, "Workers must push their Task branch through `posse publish`, not `git push`")
 			}
+			if target := gitTargetOutsideWorker(e, args[1:], literal[1:], g.writable); target != "" {
+				return refuse(ruleWorkerHomeWrite, raw, "it runs Git against "+target+" outside this Worker's Sandbox and Task scratch")
+			}
 			return false, guardReason{}
 		case name == "ln" && len(args) >= 3 && sameSocket(args[len(args)-2], g.realSocket):
 			return refuse(ruleSocketAlias, raw, "it aliases the Worker's Herdr socket")
@@ -760,6 +764,507 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 		return false, guardReason{}
 	}
 	return false, guardReason{}
+}
+
+func gitTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable []string) string {
+	return gitTargetOutsideWorkerDepth(e, args, literal, writable, 0)
+}
+
+func gitTargetOutsideWorkerDepth(e *shellEnv, args []string, literal []bool, writable []string, depth int) string {
+	if depth >= 6 {
+		return "unresolved Git alias"
+	}
+	if target := gitPathOutsideWorker(e.cwd, writable); target != "" {
+		return target
+	}
+	gitEnv := e.clone()
+	gitEnv.cwd = gitEffectiveCWD(e, args, literal)
+	if gitEnv.cwd == "" {
+		return "unresolved Git directory"
+	}
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"} {
+		if e.unknown[name] {
+			return "unresolved " + name
+		}
+		if path := e.values[name]; path != "" && e.exported[name] {
+			if target := gitPathOutsideWorker(gitEnv.path(path), writable); target != "" {
+				return target
+			}
+		}
+	}
+	if target := gitConfigWorktreeTarget(gitEnv, args, literal, writable); target != "" {
+		return target
+	}
+	if target := gitDestinationOutsideWorker(e, args, literal, writable); target != "" {
+		return target
+	}
+	cwd := e.cwd
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		path := ""
+		isChangeDir := false
+		switch {
+		case arg == "-C" || arg == "--git-dir" || arg == "--work-tree":
+			if i+1 >= len(args) {
+				return "unresolved Git directory"
+			}
+			isChangeDir = arg == "-C"
+			i++
+			path = args[i]
+		case strings.HasPrefix(arg, "--git-dir="):
+			path = strings.TrimPrefix(arg, "--git-dir=")
+		case strings.HasPrefix(arg, "--work-tree="):
+			path = strings.TrimPrefix(arg, "--work-tree=")
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			isChangeDir = true
+			path = arg[2:]
+		}
+		if path == "" {
+			continue
+		}
+		pathEnv := e.clone()
+		pathEnv.cwd = cwd
+		if !literal[i] {
+			path = pathEnv.path(path)
+			if path == "" || resolvedNewPath(path) != resolvedNewPath(cwd) {
+				return "unresolved Git directory"
+			}
+		} else {
+			path = pathEnv.path(path)
+		}
+		if isChangeDir {
+			cwd = path
+		}
+		if target := gitPathOutsideWorker(path, writable); target != "" {
+			return target
+		}
+	}
+	return gitAliasTargetOutsideWorker(e, args, literal, writable, depth)
+}
+
+func gitEffectiveCWD(e *shellEnv, args []string, literal []bool) string {
+	cwd := e.cwd
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		path := ""
+		switch {
+		case arg == "-C":
+			if i+1 >= len(args) {
+				return ""
+			}
+			i++
+			path = args[i]
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			path = arg[2:]
+		}
+		if path == "" {
+			continue
+		}
+		pathEnv := e.clone()
+		pathEnv.cwd = cwd
+		if !literal[i] {
+			path = pathEnv.path(path)
+			if path == "" || resolvedNewPath(path) != resolvedNewPath(cwd) {
+				return ""
+			}
+		} else {
+			path = pathEnv.path(path)
+		}
+		cwd = path
+	}
+	return cwd
+}
+
+func gitAliasTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable []string, depth int) string {
+	aliases := map[string]string{}
+	cwd := e.cwd
+	command := -1
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !literal[i] {
+			return "unresolved Git alias"
+		}
+		if arg == "--" {
+			i++
+			command = i
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			command = i
+			break
+		}
+		switch {
+		case oneOfString(arg, "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"):
+			if i+1 >= len(args) {
+				return "unresolved Git alias"
+			}
+			i++
+			value := args[i]
+			if arg == "-c" {
+				recordGitAlias(aliases, value)
+			}
+			if arg == "-C" {
+				pathEnv := e.clone()
+				pathEnv.cwd = cwd
+				cwd = pathEnv.path(value)
+			}
+			if arg == "--config-env" {
+				recordGitConfigEnvAlias(aliases, e, value)
+			}
+		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
+			recordGitAlias(aliases, arg[2:])
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			pathEnv := e.clone()
+			pathEnv.cwd = cwd
+			cwd = pathEnv.path(arg[2:])
+		case strings.HasPrefix(arg, "--config-env="):
+			recordGitConfigEnvAlias(aliases, e, strings.TrimPrefix(arg, "--config-env="))
+		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") || strings.HasPrefix(arg, "--namespace=") || strings.HasPrefix(arg, "--exec-path=") || strings.HasPrefix(arg, "--list-cmds=") ||
+			oneOfString(arg, "-P", "-p", "--no-pager", "--paginate", "--bare", "--version", "--help", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--exec-path", "--html-path", "--man-path", "--info-path", "--no-lazy-fetch", "--no-advice"):
+		default:
+			return "unresolved Git alias"
+		}
+	}
+	if command < 0 || command >= len(args) {
+		return ""
+	}
+	subcommand := args[command]
+	count := 0
+	if raw := e.values["GIT_CONFIG_COUNT"]; raw != "" {
+		var err error
+		count, err = strconv.Atoi(raw)
+		if err != nil {
+			return "unresolved Git alias"
+		}
+	}
+	if count < 0 || count > 128 || e.unknown["GIT_CONFIG_COUNT"] {
+		return "unresolved Git alias"
+	}
+	for n := 0; n < count; n++ {
+		keyName, valueName := "GIT_CONFIG_KEY_"+strconv.Itoa(n), "GIT_CONFIG_VALUE_"+strconv.Itoa(n)
+		if e.unknown[keyName] || e.unknown[valueName] {
+			return "unresolved Git alias"
+		}
+		if e.values[keyName] == "alias."+subcommand {
+			aliases[subcommand] = e.values[valueName]
+		}
+	}
+	alias := aliases[subcommand]
+	if alias == "" {
+		output, err := exec.Command("git", "-C", cwd, "config", "--get", "alias."+subcommand).Output()
+		if err == nil {
+			alias = strings.TrimSpace(string(output))
+		}
+	}
+	if alias == "" {
+		return ""
+	}
+	if strings.HasPrefix(alias, "!") {
+		return "unresolved Git alias"
+	}
+	fields := strings.Fields(alias)
+	if len(fields) == 0 {
+		return "unresolved Git alias"
+	}
+	expanded := append(append([]string(nil), args[:command]...), fields...)
+	expanded = append(expanded, args[command+1:]...)
+	return gitTargetOutsideWorkerDepth(e, expanded, allLiteral(len(expanded)), writable, depth+1)
+}
+
+func gitConfigWorktreeTarget(e *shellEnv, args []string, literal []bool, writable []string) string {
+	for i := 0; i < len(args); i++ {
+		if !literal[i] {
+			continue
+		}
+		value := ""
+		if args[i] == "-c" && i+1 < len(args) {
+			i++
+			if !literal[i] {
+				return "unresolved Git configuration"
+			}
+			value = args[i]
+		} else if strings.HasPrefix(args[i], "--config-env=") {
+			key, name, ok := strings.Cut(strings.TrimPrefix(args[i], "--config-env="), "=")
+			if !ok || !strings.EqualFold(key, "core.worktree") {
+				continue
+			}
+			if e.unknown[name] || e.values[name] == "" {
+				return "unresolved core.worktree configuration"
+			}
+			if target := gitPathOutsideWorker(e.path(e.values[name]), writable); target != "" {
+				return target
+			}
+			continue
+		} else if strings.HasPrefix(args[i], "-c") && len(args[i]) > 2 {
+			value = strings.TrimPrefix(args[i], "-c")
+		}
+		key, path, ok := strings.Cut(value, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "core.worktree") {
+			if target := gitPathOutsideWorker(e.path(strings.Trim(path, "\\\"'")), writable); target != "" {
+				return target
+			}
+		}
+	}
+	if e.unknown["GIT_CONFIG_COUNT"] {
+		return "unresolved Git configuration"
+	}
+	if raw := e.values["GIT_CONFIG_COUNT"]; raw != "" && e.exported["GIT_CONFIG_COUNT"] {
+		count, err := strconv.Atoi(raw)
+		if err != nil || count < 0 || count > 128 {
+			return "unresolved Git configuration"
+		}
+		for i := 0; i < count; i++ {
+			n := strconv.Itoa(i)
+			keyName, valueName := "GIT_CONFIG_KEY_"+n, "GIT_CONFIG_VALUE_"+n
+			if e.unknown[keyName] || e.unknown[valueName] {
+				return "unresolved Git configuration"
+			}
+			if strings.EqualFold(e.values[keyName], "core.worktree") {
+				if target := gitPathOutsideWorker(e.path(e.values[valueName]), writable); target != "" {
+					return target
+				}
+			}
+		}
+	}
+	if e.unknown["GIT_CONFIG_PARAMETERS"] || strings.Contains(strings.ToLower(e.values["GIT_CONFIG_PARAMETERS"]), "core.worktree") {
+		return "unresolved Git configuration"
+	}
+	for _, path := range gitConfigWorktrees(e.cwd) {
+		if target := gitPathOutsideWorker(path, writable); target != "" {
+			return target
+		}
+	}
+	return ""
+}
+
+func gitConfigWorktrees(cwd string) []string {
+	for dir := filepath.Clean(cwd); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		gitPath := filepath.Join(dir, ".git")
+		info, err := os.Stat(gitPath)
+		if err != nil {
+			continue
+		}
+		gitDir := gitPath
+		if !info.IsDir() {
+			data, err := os.ReadFile(gitPath)
+			if err != nil || !strings.HasPrefix(strings.TrimSpace(string(data)), "gitdir:") {
+				return []string{""}
+			}
+			gitDir = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+			if !filepath.IsAbs(gitDir) {
+				gitDir = filepath.Join(dir, gitDir)
+			}
+			backlink, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
+			if err != nil {
+				return []string{""}
+			}
+			backlinkPath := strings.TrimSpace(string(backlink))
+			if !filepath.IsAbs(backlinkPath) {
+				backlinkPath = filepath.Join(gitDir, backlinkPath)
+			}
+			if resolvedNewPath(backlinkPath) != resolvedNewPath(gitPath) {
+				return []string{""}
+			}
+		}
+		var paths []string
+		for _, name := range []string{"config", "config.worktree"} {
+			data, err := os.ReadFile(filepath.Join(gitDir, name))
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return []string{""}
+			}
+			values, valid := gitConfigWorktreeValues(data, gitDir)
+			if !valid {
+				return []string{""}
+			}
+			paths = append(paths, values...)
+		}
+		return paths
+	}
+	return nil
+}
+
+func gitConfigWorktreeValues(data []byte, gitDir string) ([]string, bool) {
+	var worktrees []string
+	inCore := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		line = strings.TrimSpace(strings.SplitN(line, ";", 2)[0])
+		if strings.HasPrefix(line, "[") {
+			section := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			if strings.HasPrefix(strings.ToLower(section), "include") {
+				return nil, false
+			}
+			inCore = strings.EqualFold(section, "core")
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if inCore && ok && strings.EqualFold(strings.TrimSpace(key), "worktree") {
+			value = strings.TrimSpace(value)
+			if strings.HasPrefix(value, `"`) {
+				if unquoted, err := strconv.Unquote(value); err == nil {
+					value = unquoted
+				}
+			}
+			if !filepath.IsAbs(value) {
+				value = filepath.Join(gitDir, value)
+			}
+			worktrees = append(worktrees, value)
+		}
+	}
+	return worktrees, true
+}
+
+func gitDestinationOutsideWorker(e *shellEnv, args []string, literal []bool, writable []string) string {
+	command := -1
+	valueOptions := map[string]bool{"-C": true, "--git-dir": true, "--work-tree": true, "-c": true, "--config-env": true, "--exec-path": true, "--namespace": true, "--super-prefix": true}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !literal[i] {
+			return "unresolved Git command"
+		}
+		if valueOptions[arg] {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		command = i
+		break
+	}
+	if command < 0 {
+		return ""
+	}
+	if args[command] == "worktree" {
+		if command+1 >= len(args) {
+			return ""
+		}
+		start := command + 2
+		options := map[string]bool{"-b": true, "-B": true, "--reason": true, "--orphan": true}
+		switch args[command+1] {
+		case "add", "remove", "lock", "unlock":
+			return gitDestinationArg(e, args, literal, start, 1, options, writable)
+		case "move":
+			if target := gitDestinationArg(e, args, literal, start, 1, options, writable); target != "" {
+				return target
+			}
+			return gitDestinationArg(e, args, literal, start, 2, options, writable)
+		case "repair":
+			for i := start; i < len(args); i++ {
+				if args[i] == "--" {
+					continue
+				}
+				if strings.HasPrefix(args[i], "-") {
+					continue
+				}
+				if target := gitCheckDestination(e, args[i], literal[i], writable); target != "" {
+					return target
+				}
+			}
+		}
+		return ""
+	}
+	switch args[command] {
+	case "init":
+		if target := gitSubcommandPathOption(e, args, literal, command+1, writable, map[string]bool{"--separate-git-dir": true, "--template": true, "-t": true, "--initial-branch": true, "-b": true}); target != "" {
+			return target
+		}
+		return gitDestinationArg(e, args, literal, command+1, 1, map[string]bool{"--separate-git-dir": true, "--template": true, "-t": true, "--initial-branch": true, "-b": true}, writable)
+	case "clone":
+		if target := gitSubcommandPathOption(e, args, literal, command+1, writable, map[string]bool{"--separate-git-dir": true}); target != "" {
+			return target
+		}
+		return gitDestinationArg(e, args, literal, command+1, 2, map[string]bool{"-b": true, "--branch": true, "-o": true, "--origin": true, "-u": true, "--upload-pack": true, "-j": true, "--jobs": true, "--depth": true, "--shallow-since": true, "--shallow-exclude": true, "--filter": true, "--server-option": true, "--revision": true, "--bundle-uri": true, "-c": true, "--config": true}, writable)
+	case "submodule":
+		if command+1 < len(args) && args[command+1] == "add" {
+			return gitDestinationArg(e, args, literal, command+2, 2, map[string]bool{"-b": true, "--branch": true, "--name": true, "--reference": true, "--depth": true, "--filter": true}, writable)
+		}
+	}
+	return ""
+}
+
+func gitSubcommandPathOption(e *shellEnv, args []string, literal []bool, start int, writable []string, valueOptions map[string]bool) string {
+	for i := start; i < len(args); i++ {
+		arg := args[i]
+		if valueOptions[arg] {
+			if i+1 >= len(args) {
+				return "unresolved Git destination"
+			}
+			i++
+			if arg == "--separate-git-dir" {
+				if !literal[i] {
+					return "unresolved Git destination"
+				}
+				if target := gitPathOutsideWorker(e.path(args[i]), writable); target != "" {
+					return target
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--separate-git-dir=") {
+			if !literal[i] {
+				return "unresolved Git destination"
+			}
+			if target := gitPathOutsideWorker(e.path(strings.TrimPrefix(arg, "--separate-git-dir=")), writable); target != "" {
+				return target
+			}
+		}
+	}
+	return ""
+}
+
+func gitDestinationArg(e *shellEnv, args []string, literal []bool, start, want int, valueOptions map[string]bool, writable []string) string {
+	positionals := 0
+	for i := start; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			i++
+			for ; i < len(args); i++ {
+				positionals++
+				if positionals == want {
+					return gitCheckDestination(e, args[i], literal[i], writable)
+				}
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "-") {
+			if valueOptions[arg] {
+				i++
+				if i >= len(args) {
+					return "unresolved Git destination"
+				}
+			}
+			continue
+		}
+		positionals++
+		if positionals == want {
+			return gitCheckDestination(e, arg, literal[i], writable)
+		}
+	}
+	return ""
+}
+
+func gitCheckDestination(e *shellEnv, path string, literal bool, writable []string) string {
+	if !literal {
+		return "unresolved Git destination"
+	}
+	return gitPathOutsideWorker(e.path(path), writable)
+}
+
+func gitPathOutsideWorker(path string, writable []string) string {
+	if path == "" {
+		return "unresolved Git directory"
+	}
+	resolved := resolvedNewPath(path)
+	for _, root := range writable {
+		if lexicallyInside(resolved, resolvedNewPath(root)) {
+			return ""
+		}
+	}
+	return path
 }
 
 // homeWrite refuses a write to a path in the Worker's posse home outside the
