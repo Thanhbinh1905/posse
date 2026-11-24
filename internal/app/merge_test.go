@@ -539,6 +539,50 @@ func TestCompletedRestoredPaneUsesIdleShellOwnershipProof(t *testing.T) {
 	}
 }
 
+func TestRestoredIdleTaskPaneRequiresRecordedPaneIdentity(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	defer fixture.db.Close()
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := herdr.Pane{PaneID: "replacement:p1", WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, CWD: task.WorktreePath, Agent: "claude", AgentStatus: "idle"}
+	if restoredIdleTaskPane(herdr.Snapshot{Panes: []herdr.Pane{pane}}, fixture.project, task, pane) {
+		t.Fatal("idle pane with the Task label but a different recorded pane ID was accepted as restored Task pane")
+	}
+	pane.PaneID = task.PaneID
+	snapshot := herdr.Snapshot{Panes: []herdr.Pane{pane}, Agents: []herdr.Agent{{Name: "external-worker", PaneID: pane.PaneID}}}
+	if restoredIdleTaskPane(snapshot, fixture.project, task, pane) {
+		t.Fatal("idle Task pane with a noncanonical reported Worker identity was accepted as restored Task pane")
+	}
+	snapshot.Agents = []herdr.Agent{{PaneID: pane.PaneID, SessionID: "foreign-session"}}
+	if restoredIdleTaskPane(snapshot, fixture.project, task, pane) {
+		t.Fatal("idle Task pane with a nameless reported Worker identity was accepted as restored Task pane")
+	}
+}
+
+func TestCompletedRestoredPaneRefusesPaneClaimedByAnotherTask(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	defer fixture.db.Close()
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET launches=1, agent_name=? WHERE id=?`, agentName(fixture.project.Name, fixture.task.Seq, 1), fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, _ = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if _, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Other Worker", PaneID: fixture.task.PaneID, HerdrWorkspaceID: fixture.task.HerdrWorkspaceID}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.service.Herdr.(*herdr.Fake)
+	snapshot := adapter.SnapshotValue
+	snapshot.Panes[1].AgentStatus = "idle"
+	adapter.SnapshotValue = snapshot
+	if _, err := fixture.service.planCompletedWorkerPaneProofs(context.Background(), fixture.db, fixture.project, fixture.task); err == nil || !strings.Contains(err.Error(), "another Task") {
+		t.Fatalf("pane claimed by another Task proof error = %v, want refusal", err)
+	}
+}
+
 func TestCompletedRestoredPaneRefusesCanonicalReplacementWorker(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateDone)
 	defer fixture.db.Close()

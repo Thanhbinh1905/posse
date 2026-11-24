@@ -1243,11 +1243,26 @@ func (s *Service) planCompletedWorkerPaneProofs(ctx context.Context, db *store.D
 		return nil, completedPaneProofFailure("task_pane_identity_ambiguous", "Task pane label does not identify exactly one pane", false, task.PaneLabel)
 	}
 	pane := labeled[0]
+	tasks, err := db.Tasks(ctx, project.ID, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range tasks {
+		if other.ID != task.ID && other.PaneID == pane.PaneID {
+			return nil, completedPaneProofFailure("task_pane_identity_ambiguous", "restored Task pane is also claimed by another Task", false, taskIDString(other.Seq), pane.PaneID)
+		}
+	}
 	if hasCanonicalTaskWorkerIdentity(snapshot, project.Name, pane.PaneID) {
 		if snapshotAgentName(snapshot, pane.PaneID) == task.AgentName || pane.Agent == task.AgentName {
 			return proofs, nil
 		}
 		return nil, completedPaneProofFailure("task_pane_replacement_worker", "a canonical Worker identity is reported for the completed Task pane", false, pane.PaneID)
+	}
+	if pane.PaneID != task.PaneID || pane.WorkspaceID != task.HerdrWorkspaceID {
+		return nil, completedPaneProofFailure("task_pane_identity_changed", "restored Task pane no longer matches its recorded Herdr identity", false, pane.PaneID)
+	}
+	if reportedPaneAgentIdentity(snapshot, project, task, pane) {
+		return nil, completedPaneProofFailure("task_pane_replacement_worker", "a reported Worker identity for the completed Task pane does not match its recorded identity", false, pane.PaneID)
 	}
 	if taskAgentMatchesPane(snapshot, project, task, pane) {
 		return proofs, nil
@@ -1351,7 +1366,7 @@ func snapshotStillMatchesCompletedPane(ctx context.Context, s *Service, project 
 }
 
 func restoredIdleTaskPane(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
-	if !completedWorkerHasNoReplacement(task, project) || pane.Label != task.PaneLabel || pane.Label == "" {
+	if !completedWorkerHasNoReplacement(task, project) || pane.Label != task.PaneLabel || pane.Label == "" || pane.PaneID != task.PaneID || pane.WorkspaceID != task.HerdrWorkspaceID {
 		return false
 	}
 	if pane.AgentStatus != "idle" && pane.AgentStatus != "exited" {
@@ -1363,7 +1378,25 @@ func restoredIdleTaskPane(snapshot herdr.Snapshot, project store.Project, task s
 			matches++
 		}
 	}
-	return matches == 1 && !hasCanonicalTaskWorkerIdentity(snapshot, project.Name, pane.PaneID)
+	return matches == 1 && !hasCanonicalTaskWorkerIdentity(snapshot, project.Name, pane.PaneID) && !reportedPaneAgentIdentity(snapshot, project, task, pane)
+}
+
+func reportedPaneAgentIdentity(snapshot herdr.Snapshot, project store.Project, task store.Task, pane herdr.Pane) bool {
+	for _, agent := range snapshot.Agents {
+		if agent.PaneID != pane.PaneID {
+			continue
+		}
+		if agent.Name != "" {
+			if !agentNameMatchesTask(agent.Name, project.Name, task.Seq) {
+				return true
+			}
+			continue
+		}
+		if (agent.SessionID != "" || task.AgentSession != "") && !namelessAgentMatchesTaskSession(agent, task, pane) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasCanonicalTaskWorkerIdentity(snapshot herdr.Snapshot, project, paneID string) bool {

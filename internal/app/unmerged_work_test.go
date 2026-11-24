@@ -36,6 +36,7 @@ func TestTeardownAllowsLocalBranchAlreadyContainedInTargetE2E(t *testing.T) {
 func TestTeardownAllowsLocalBranchAlreadyContainedInRemoteTargetE2E(t *testing.T) {
 	fixture := newPRMergeFixture(t, "local", store.StateDone)
 	attachPRFixtureSandbox(t, fixture)
+	gitTest(t, fixture.repo, "branch", "release", "main")
 	gitTest(t, fixture.repo, "push", "origin", "posse/t1:refs/heads/release")
 	gitTest(t, fixture.repo, "fetch", "origin", "refs/heads/release:refs/remotes/origin/release")
 	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET target_branch='release' WHERE id=?`, fixture.task.ID); err != nil {
@@ -46,6 +47,9 @@ func TestTeardownAllowsLocalBranchAlreadyContainedInRemoteTargetE2E(t *testing.T
 	code, output, stderr := fixture.run("teardown", "t1")
 	if code != 0 || !strings.Contains(output, "state: torn-down") {
 		t.Fatalf("plain teardown of a local branch already in its remote-tracking target = %d, output=%s stderr=%s", code, output, stderr)
+	}
+	if _, err := gitOutput(context.Background(), fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1"); err == nil {
+		t.Fatal("teardown kept the Task branch even though the remote-tracking target contains it")
 	}
 }
 
