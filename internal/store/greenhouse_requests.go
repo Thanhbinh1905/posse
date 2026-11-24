@@ -18,6 +18,7 @@ type GreenhouseReviewRequest struct {
 	Outcome       string
 	VerdictID     *int64
 	Grant         string
+	FailureCount  int
 }
 
 func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request GreenhouseReviewRequest) error {
@@ -33,6 +34,10 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 	}
 	if !belongs {
 		return errors.New("greenhouse request Task does not belong to its Project")
+	}
+	failureIncrement := 0
+	if request.Outcome == "failed" {
+		failureIncrement = 1
 	}
 	var verdictID any
 	if request.Grant != "" {
@@ -58,20 +63,20 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 			if existing.Outcome != "failed" {
 				return nil
 			}
-			_, err = db.ExecContext(ctx, `UPDATE greenhouse_review_requests SET settled_at=?,outcome=?,verdict_id=? WHERE id=?`, request.SettledAt, request.Outcome, verdictID, existing.ID)
+			_, err = db.ExecContext(ctx, `UPDATE greenhouse_review_requests SET settled_at=?,outcome=?,verdict_id=?,failure_count=failure_count+? WHERE id=?`, request.SettledAt, request.Outcome, verdictID, failureIncrement, existing.ID)
 			return err
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 	}
-	_, err := db.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id) VALUES(?,?,?,?,?,?,?,?,?,NULLIF(?,''))`,
-		request.ProjectID, request.TaskID, request.Repository, request.RequestedHead, request.Provider, request.RequestedAt, request.SettledAt, request.Outcome, verdictID, request.Grant)
+	_, err := db.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id,failure_count) VALUES(?,?,?,?,?,?,?,?,?,NULLIF(?,''),?)`,
+		request.ProjectID, request.TaskID, request.Repository, request.RequestedHead, request.Provider, request.RequestedAt, request.SettledAt, request.Outcome, verdictID, request.Grant, failureIncrement)
 	return err
 }
 
 func (db *DB) GreenhouseReviewRequests(ctx context.Context, projectID int64) ([]GreenhouseReviewRequest, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,COALESCE(grant_id,'') FROM greenhouse_review_requests WHERE project_id=? ORDER BY requested_at,id`, projectID)
+	rows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,COALESCE(grant_id,''),failure_count FROM greenhouse_review_requests WHERE project_id=? ORDER BY requested_at,id`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +84,7 @@ func (db *DB) GreenhouseReviewRequests(ctx context.Context, projectID int64) ([]
 	var requests []GreenhouseReviewRequest
 	for rows.Next() {
 		var request GreenhouseReviewRequest
-		if err := rows.Scan(&request.ID, &request.ProjectID, &request.TaskID, &request.Repository, &request.RequestedHead, &request.Provider, &request.RequestedAt, &request.SettledAt, &request.Outcome, &request.VerdictID, &request.Grant); err != nil {
+		if err := rows.Scan(&request.ID, &request.ProjectID, &request.TaskID, &request.Repository, &request.RequestedHead, &request.Provider, &request.RequestedAt, &request.SettledAt, &request.Outcome, &request.VerdictID, &request.Grant, &request.FailureCount); err != nil {
 			return nil, err
 		}
 		requests = append(requests, request)
