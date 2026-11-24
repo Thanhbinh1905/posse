@@ -561,6 +561,21 @@ func (db *DB) ObsoleteTaskDecisions(ctx context.Context, taskID int64) error {
 	return db.PersistProject(ctx, projectID)
 }
 
+// ObsoleteGreenhouseCoverageDecision retires a pending coverage choice after a complete Verdict.
+func (db *DB) ObsoleteGreenhouseCoverageDecision(ctx context.Context, taskID int64, repository, head, reason string) error {
+	result, err := db.ExecContext(ctx, `UPDATE decisions SET obsolete_at=?,obsolete_reason=?
+WHERE task_id=? AND kind='greenhouse_coverage' AND answered_at=0 AND obsolete_at=0
+AND origin=(SELECT 'greenhouse-coverage:t'||seq||':'||?||':'||? FROM tasks WHERE id=?)`, time.Now().UnixMilli(), reason, taskID, repository, head, taskID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
 // ObsoleteResolvedDecisions removes unanswered questions whose situation has
 // resolved. Answered Decisions are otherwise retained.
 func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) error {

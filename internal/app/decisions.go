@@ -77,6 +77,13 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 			if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
 				return err
 			}
+			applies, err := greenhousePartialReviewApplies(ctx, db, task, data.Repository, data.Head)
+			if err != nil {
+				return err
+			}
+			if !applies {
+				continue
+			}
 			request.Kind = "greenhouse_coverage"
 			request.Origin = greenhouseCoverageDecisionOrigin(task.Seq, data.Repository, data.Head)
 			request.Question = greenhousePartialDecisionQuestion(data.Repository, data.Head, data.Result)

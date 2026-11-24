@@ -564,8 +564,8 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				allPassed = false
 				break
 			}
-			var partialReview bool
-			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, target.Repository, target.Commit).Scan(&partialReview); err != nil {
+			partialReview, err := greenhousePartialReviewApplies(ctx, db, task, target.Repository, target.Commit)
+			if err != nil {
 				return err
 			}
 			if partialReview {
@@ -597,8 +597,8 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				}
 			}
 			if failed != nil {
-				var partialReview bool
-				if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, failed.Repository, failed.Head).Scan(&partialReview); err != nil {
+				partialReview, err := greenhousePartialReviewApplies(ctx, db, task, failed.Repository, failed.Head)
+				if err != nil {
 					return err
 				}
 				if !partialReview || failed.Blocking > 0 {
@@ -762,8 +762,8 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 		if latest != nil {
 			verdict := *latest
-			var partialReview bool
-			if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, project.Name, head).Scan(&partialReview); err != nil {
+			partialReview, err := greenhousePartialReviewApplies(ctx, db, task, project.Name, head)
+			if err != nil {
 				return err
 			}
 			accepted := false

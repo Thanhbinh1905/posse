@@ -112,6 +112,72 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 	}
 }
 
+func TestGreenhouseCompleteGreenhouseReviewSupersedesPartialNotice(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "Review requested", map[string]string{"greenhouse_pending_head": f.headSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateDone, "worker", "Review requested"); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	partialVerdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "inconclusive", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, partialVerdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record partial Verdict: recorded=%t err=%v", recorded, err)
+	}
+	at := time.Now().UnixMilli()
+	if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA, Provider: store.GreenhouseReviewProvider, RequestedAt: at, SettledAt: at + 1, Outcome: "verdict", Grant: partialVerdict.Grant}); err != nil {
+		t.Fatalf("record partial request: %v", err)
+	}
+	partial := greenhouse.HostResult{Status: "partial-review", Verdict: "partial", Uncovered: []greenhouse.UncoveredPath{{Path: "large.sql", Reason: "hunk windows exceed 65536 bytes"}}}
+	if _, err := f.db.CreateGreenhousePartialNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "Partial review", partial); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.raiseNoticeDecisions(ctx, f.db, f.project); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil || len(pending) != 1 || pending[0].Kind != "greenhouse_coverage" {
+		t.Fatalf("partial coverage Decision = %+v, %v; want one pending", pending, err)
+	}
+	complete := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r2", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "findings", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, complete, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record complete Verdict: recorded=%t err=%v", recorded, err)
+	}
+	at = time.Now().UnixMilli()
+	if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA, Provider: store.GreenhouseReviewProvider, RequestedAt: at, SettledAt: at + 1, Outcome: "verdict", Grant: complete.Grant}); err != nil {
+		t.Fatalf("record complete request: %v", err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(ctx, f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.db.UndeliveredTaskMessages(ctx, f.task.ID)
+	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "Greenhouse passed Task head") {
+		t.Fatalf("publication after complete same-head review = %+v, %v; old partial notice must not require coverage acceptance", messages, err)
+	}
+	pending, err = f.db.Decisions(ctx, f.project.ID, true)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("stale coverage Decisions after complete review = %+v, %v; want none", pending, err)
+	}
+}
+
 func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateWorking)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")

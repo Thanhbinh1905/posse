@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func greenhouseCoverageDecisionOrigin(taskSeq int, repository, head string) string {
@@ -23,6 +25,35 @@ func parseGreenhouseCoverageDecisionOrigin(origin string, taskSeq int) (string, 
 	}
 	repository, head := value[:separator], value[separator+1:]
 	return repository, head, true
+}
+
+func greenhousePartialReviewApplies(ctx context.Context, db *store.DB, task store.Task, repository, head string) (bool, error) {
+	var noticeExists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_partial_review' AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?)`, task.ID, repository, head).Scan(&noticeExists); err != nil {
+		return false, err
+	}
+	if !noticeExists {
+		return false, nil
+	}
+	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	var latest *store.Verdict
+	for index := len(verdicts) - 1; index >= 0; index-- {
+		verdict := verdicts[index]
+		if verdict.Provider == store.GreenhouseReviewProvider && verdict.Repository == repository && verdict.Head == head && verdict.Mode == "gate" {
+			latest = &verdict
+			break
+		}
+	}
+	if latest == nil || !latest.Qualifies(head) {
+		return true, nil
+	}
+	if err := db.ObsoleteGreenhouseCoverageDecision(ctx, task.ID, repository, head, "A later complete Greenhouse Verdict superseded the partial review"); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func greenhousePartialDecisionQuestion(repository, head string, result greenhouse.HostResult) string {
