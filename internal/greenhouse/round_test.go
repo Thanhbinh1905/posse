@@ -66,6 +66,72 @@ func TestSettledInspectionRejectsTerminalStatusEvenWithVerdict(t *testing.T) {
 	}
 }
 
+func TestReviewReturnsTerminalResultFromFailedAttachInspection(t *testing.T) {
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, "worktree")
+	for _, args := range [][]string{{"init", "-q", worktree}, {"-C", worktree, "config", "user.email", "test@example.com"}, {"-C", worktree, "config", "user.name", "Test"}, {"-C", worktree, "commit", "-q", "--allow-empty", "-m", "new head"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	binary := filepath.Join(dir, "greenhouse")
+	script := `#!/bin/sh
+request=$(cat)
+case "$request" in
+*'"op":"attach"'*) printf '%s\n' '{"version":2,"outcome":"refused","error":"attach failed"}' ;;
+*'"op":"inspect"'*) printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","host_result":{"grant":"shop/t1/shop/r2","head":"old-head","status":"inconclusive","reason":"review timed out","verdict":"clean","current":true}}' ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	home := "h"
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	daemon := exec.Command("sleep", "60")
+	daemon.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if err := daemon.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = daemon.Process.Kill(); _ = daemon.Wait() })
+	if err := os.WriteFile(filepath.Join(home, "pid"), []byte(strconv.Itoa(daemon.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(home, "socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	state, err := json.Marshal(DaemonState{PID: daemon.Process.Pid, Binary: binary, Range: Range{Min: 1, Max: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, stateFile), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := "review.pending.json"
+	if err := os.WriteFile(pending, []byte(`{"grant":"shop/t1/shop/r2","request":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSSE_TASK_ID", "")
+	d := &Daemon{Binary: binary, Home: home, InTask: func(int) bool { return false }}
+	result, err := d.Review(context.Background(), Round{
+		Worktree: worktree, Host: Host{Name: "shop", ID: "shop/t1/shop"}, GrantPrefix: "shop/t1/shop", Pending: pending,
+	})
+	var terminalErr *TerminalReviewError
+	if !errors.As(err, &terminalErr) || terminalErr.Status != "inconclusive" || terminalErr.Reason != "review timed out" {
+		t.Fatalf("Review error = %v; want terminal status and reason", err)
+	}
+	if result.Grant != "shop/t1/shop/r2" {
+		t.Fatalf("Review result grant = %q, want consumed grant shop/t1/shop/r2", result.Grant)
+	}
+	if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending review still exists: %v", err)
+	}
+}
+
 func TestSpentGrantIsRecognizedWhenSettledResultWasNotIngested(t *testing.T) {
 	inspected := response{
 		Run:        &run{HostGrants: []string{"greenhouse/t143/greenhouse/r1", "greenhouse/t143/greenhouse/r2"}},

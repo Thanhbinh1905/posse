@@ -100,7 +100,7 @@ func (d *Daemon) Review(ctx context.Context, round Round) (RoundResult, error) {
 		result := inspected.HostResult
 		if result != nil && result.Grant == pending.Grant {
 			if settled, found, settledErr := settledInspection(ctx, round, pending.Grant, inspected); settledErr != nil {
-				return RoundResult{}, settledErr
+				return settled, settledErr
 			} else if found {
 				return settled, nil
 			}
@@ -241,7 +241,7 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 			}
 			settled, found, inspectErr := settledInspection(ctx, round, grant, inspected)
 			if inspectErr != nil {
-				return RoundResult{}, inspectErr
+				return settled, inspectErr
 			}
 			if found {
 				return settled, nil
