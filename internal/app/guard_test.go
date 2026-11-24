@@ -646,6 +646,25 @@ func TestGuardClassifiesATextPosseScriptByItsContents(t *testing.T) {
 	}
 }
 
+func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
+	home := "/home/u/.posse"
+	sandbox := filepath.Join(home, "pool", "project-a", "sandbox-1")
+	foreign := "/home/u/projects/project-b"
+	scope := guardScope{env: guardEnv, cwd: sandbox, workerHome: home, writable: []string{sandbox, filepath.Join(home, "scratch", "project-a", "t1")}}
+	for _, command := range []string{
+		"git -C " + foreign + " fetch origin",
+		"git --git-dir=" + foreign + "/.git fetch origin",
+		"git --git-dir=" + foreign + "/.git -C " + sandbox + " fetch origin",
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, foreign) {
+			t.Errorf("guard did not refuse git targeting another Project checkout for %q: refused=%v reason=%#v", command, refused, reason)
+		}
+	}
+	if refused, reason := guardCommand("git status --short", scope); refused {
+		t.Errorf("guard refused git in the Worker's Sandbox: %#v", reason)
+	}
+}
+
 func TestGuardAllowsTheIsolatedSetupItsRefusalPrescribes(t *testing.T) {
 	home := "/home/u/.posse"
 	scope := guardScope{env: guardEnv, cwd: home + "/pool/posse/sandbox-1", workerHome: home, writable: []string{home + "/pool/posse/sandbox-1"}}

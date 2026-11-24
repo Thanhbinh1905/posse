@@ -687,6 +687,9 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 			if gitRemoteWrite(e, args[1:], literal[1:]) {
 				return refuse(ruleGitPush, raw, "Workers must push their Task branch through `posse publish`, not `git push`")
 			}
+			if target := gitTargetOutsideWorker(e, args[1:], literal[1:], g.writable); target != "" {
+				return refuse(ruleWorkerHomeWrite, raw, "it runs Git against "+target+" outside this Worker's Sandbox and Task scratch")
+			}
 			return false, guardReason{}
 		case name == "ln" && len(args) >= 3 && sameSocket(args[len(args)-2], g.realSocket):
 			return refuse(ruleSocketAlias, raw, "it aliases the Worker's Herdr socket")
@@ -760,6 +763,54 @@ func (g *guard) command(e *shellEnv, args []string, literal []bool, raw, stdin s
 		return false, guardReason{}
 	}
 	return false, guardReason{}
+}
+
+func gitTargetOutsideWorker(e *shellEnv, args []string, literal []bool, writable []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !literal[i] {
+			continue
+		}
+		path := ""
+		switch {
+		case arg == "-C" || arg == "--git-dir" || arg == "--work-tree":
+			if i+1 >= len(args) {
+				return "an unresolved Git directory"
+			}
+			i++
+			path = args[i]
+		case strings.HasPrefix(arg, "--git-dir="):
+			path = strings.TrimPrefix(arg, "--git-dir=")
+		case strings.HasPrefix(arg, "--work-tree="):
+			path = strings.TrimPrefix(arg, "--work-tree=")
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			path = arg[2:]
+		}
+		if path == "" {
+			continue
+		}
+		if !literal[i] {
+			if resolvedNewPath(e.path(path)) == resolvedNewPath(e.cwd) {
+				continue
+			}
+			return "an unresolved Git directory"
+		}
+		target := e.path(path)
+		resolved := resolvedNewPath(target)
+		if resolved == resolvedNewPath(e.cwd) {
+			continue
+		}
+		for _, root := range writable {
+			if lexicallyInside(resolved, resolvedNewPath(root)) {
+				target = ""
+				break
+			}
+		}
+		if target != "" {
+			return target
+		}
+	}
+	return ""
 }
 
 // homeWrite refuses a write to a path in the Worker's posse home outside the
