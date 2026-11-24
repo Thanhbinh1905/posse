@@ -604,16 +604,20 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 		c.requireRecorded(t, c.finish(t, done), head, "clean", 0)
 	})
 
-	t.Run("inconclusive verdict with zero findings never satisfies the gate", func(t *testing.T) {
+	t.Run("inconclusive review never records a Verdict", func(t *testing.T) {
 		head := c.authorCommit(t)
 		c.setMode(t, "inconclusive")
-		c.requireRecorded(t, c.review(t), head, "inconclusive", 0)
-		verdicts := c.verdicts(t)
-		gate := verdicts[len(verdicts)-1]
-		gate.Mode = "gate"
-		if gate.Qualifies(head) {
-			t.Fatalf("an inconclusive Verdict with blocking = 0 qualifies: %+v", gate)
+		before := len(c.verdicts(t))
+		output, err := c.posse(c.env, c.f.repo, c.reviewArgs()...)
+		failure := decodeGreenhouseOutput(t, output)
+		message, _ := failure["message"].(string)
+		if err == nil || failure["code"] != "greenhouse_failed" || !strings.Contains(message, `Greenhouse terminal status "inconclusive": inconclusive`) {
+			t.Fatalf("inconclusive review = %v, %s; want greenhouse_failed with its status and reason", err, output)
 		}
+		if got := len(c.verdicts(t)); got != before {
+			t.Fatalf("inconclusive review recorded a Verdict: before %d, after %d", before, got)
+		}
+		c.requireNoVerdictFor(t, head)
 		c.setMode(t, "clean")
 	})
 
