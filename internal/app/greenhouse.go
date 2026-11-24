@@ -424,7 +424,14 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err := recordRequest("verdict", result.Grant, time.Now().UnixMilli()); err != nil {
 				return err
 			}
-			if recorded && verdict.Outcome == "findings" && verdict.Blocking > 0 {
+			if len(result.Result.Uncovered) > 0 {
+				reviewedHead := result.Result.Head
+				summary := greenhousePartialDecisionQuestion(member.name, shortSHA(reviewedHead), *result.Result)
+				if _, err := db.CreateGreenhousePartialNoticeOnce(ctx.Context, project.ID, task.ID, member.name, reviewedHead, summary, result.Result); err != nil {
+					return err
+				}
+			}
+			if recorded && result.Result.Verdict == "findings" && verdict.Blocking > 0 {
 				if err := s.handleGreenhouseBlockingVerdict(ctx.Context, db, project, task, verdict); err != nil {
 					return err
 				}
@@ -432,7 +439,11 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if err := greenhouse.ClearPending(round.Pending); err != nil {
 				return err
 			}
-			output = append(output, axi.Field{Key: "head", Value: verdict.Head}, axi.Field{Key: "verdict", Value: verdict.Outcome},
+			outputVerdict := result.Result.Verdict
+			if len(result.Result.Uncovered) > 0 && outputVerdict == "clean" {
+				outputVerdict = "partial"
+			}
+			output = append(output, axi.Field{Key: "head", Value: result.Result.Head}, axi.Field{Key: "verdict", Value: outputVerdict},
 				axi.Field{Key: "blocking", Value: verdict.Blocking}, axi.Field{Key: "findings", Value: verdict.FindingsPath}, axi.Field{Key: "recorded", Value: recorded}, axi.Field{Key: "replayed", Value: result.Replayed})
 		case greenhouse.Stale:
 			if err := recordRequest("head_mismatch", result.Grant, time.Now().UnixMilli()); err != nil {
@@ -538,6 +549,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 			return err
 		}
 		allPassed := true
+		acceptedMembers := make(map[string]bool)
 		var failed *store.Verdict
 		for _, target := range targets {
 			var latest *store.Verdict
@@ -552,11 +564,25 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				allPassed = false
 				break
 			}
-			if !latest.Qualifies(target.Commit) {
-				allPassed = false
-				failed = latest
-				break
+			partialReview, err := greenhousePartialReviewApplies(ctx, db, task, target.Repository, target.Commit)
+			if err != nil {
+				return err
 			}
+			if partialReview {
+				accepted, err := greenhouseAcceptHeadDisposition(ctx, db, task, target.Repository, target.Commit)
+				if err != nil {
+					return err
+				}
+				if accepted && latest.Mode == "gate" && latest.Blocking == 0 {
+					acceptedMembers[target.Repository] = true
+					continue
+				}
+			} else if latest.Qualifies(target.Commit) {
+				continue
+			}
+			allPassed = false
+			failed = latest
+			break
 		}
 		if !allPassed {
 			if failed != nil && failed.Outcome == "findings" && failed.Blocking > 0 {
@@ -571,17 +597,27 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 				}
 			}
 			if failed != nil {
-				_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, failed.Repository, failed.Head, fmt.Sprintf("Greenhouse returned %s for Member %s at %s; publication is blocked", failed.Outcome, failed.Repository, shortSHA(failed.Head)))
+				partialReview, err := greenhousePartialReviewApplies(ctx, db, task, failed.Repository, failed.Head)
 				if err != nil {
 					return err
+				}
+				if !partialReview || failed.Blocking > 0 {
+					_, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, failed.Repository, failed.Head, fmt.Sprintf("Greenhouse returned %s for Member %s at %s; publication is blocked", failed.Outcome, failed.Repository, shortSHA(failed.Head)))
+					if err != nil {
+						return err
+					}
 				}
 			}
 			continue
 		}
 		var body strings.Builder
-		body.WriteString("Greenhouse passed these exact Member heads. Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
+		body.WriteString("Greenhouse passed or the User accepted coverage for these exact Member heads. Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
 		for _, target := range targets {
-			fmt.Fprintf(&body, "- %s at %s: `posse publish --repo %s \"<summary>\"`\n", target.Repository, shortSHA(target.Commit), target.Repository)
+			status := "Greenhouse passed"
+			if acceptedMembers[target.Repository] {
+				status = "User accepted coverage"
+			}
+			fmt.Fprintf(&body, "- %s: %s at %s: `posse publish --repo %s \"<summary>\"`\n", target.Repository, status, shortSHA(target.Commit), target.Repository)
 		}
 		_, queued, err := db.QueueMessageOnceAfter(ctx, task.ID, body.String(), true, signals[0].At-1)
 		if err != nil {
@@ -675,7 +711,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 						return err
 					}
 					if !passed {
-						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, head)
+						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, project.Name, head)
 						if err != nil {
 							return err
 						}
@@ -726,17 +762,35 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		}
 		if latest != nil {
 			verdict := *latest
-			if verdict.Qualifies(head) {
-				body := fmt.Sprintf("Greenhouse passed Task head %s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", shortSHA(head), task.Title)
+			partialReview, err := greenhousePartialReviewApplies(ctx, db, task, project.Name, head)
+			if err != nil {
+				return err
+			}
+			accepted := false
+			if partialReview {
+				accepted, err = greenhouseAcceptHeadDisposition(ctx, db, task, project.Name, head)
+				if err != nil {
+					return err
+				}
+			}
+			if (accepted && verdict.Mode == "gate" && verdict.Blocking == 0) || (!partialReview && verdict.Qualifies(head)) {
+				message := fmt.Sprintf("Greenhouse passed Task head %s", shortSHA(head))
+				if accepted {
+					message = fmt.Sprintf("User accepted Greenhouse coverage at Task head %s", shortSHA(head))
+				}
+				body := fmt.Sprintf("%s. Publish this exact head with `posse publish \"%s\"`, then report done with the PR URL. Do not change the branch before publishing; a new head needs a new done Signal and Verdict.", message, task.Title)
 				_, queued, err := db.QueueMessageOnceAfter(ctx, task.ID, body, true, signals[0].At-1)
 				if err != nil {
 					return err
 				}
 				if queued {
-					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: Greenhouse passed %s; Posse queued publication", task.Title, shortSHA(head)), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
+					if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: fmt.Sprintf("%s: %s; Posse queued publication", task.Title, message), DataJSON: marshalJSON(map[string]string{"head": head})}); err != nil {
 						return err
 					}
 				}
+				continue
+			}
+			if partialReview {
 				continue
 			}
 			reason := fmt.Sprintf("Greenhouse returned %s for Task head %s; Posse will not publish it. The review findings are at %s. A new head requires a new done Signal.", verdict.Outcome, shortSHA(head), verdict.FindingsPath)
@@ -940,13 +994,28 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 			Excerpt: finding.Explanation, Guidance: finding.Action, Rule: finding.Rule, Head: finding.Head,
 		})
 	}
+	if hr.Verdict == "partial" || (len(hr.Uncovered) > 0 && hr.Verdict != "findings") {
+		verdict.Outcome = "inconclusive"
+	}
 	if hr.Verdict == "findings" {
 		verdict.Blocking = greenhouseBlocking(hr.Findings, blockAt)
 	}
 	recorded, err := db.RecordGreenhouseVerdict(ctx, verdict, func(ctx context.Context) (string, error) {
 		return taskBranchAuthorHead(ctx, member.root, task.Branch)
 	})
-	return recorded, verdict, err
+	if err != nil || recorded {
+		return recorded, verdict, err
+	}
+	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	if err != nil {
+		return false, store.Verdict{}, err
+	}
+	for _, persisted := range verdicts {
+		if persisted.Grant == result.Grant && persisted.Repository == member.name && persisted.Provider == store.GreenhouseReviewProvider {
+			return false, persisted, nil
+		}
+	}
+	return false, store.Verdict{}, fmt.Errorf("greenhouse verdict for already-recorded grant %s was not found", result.Grant)
 }
 
 // greenhouseBlocking counts findings at or above blockAt. An unknown priority blocks.

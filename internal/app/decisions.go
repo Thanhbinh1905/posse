@@ -11,6 +11,7 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -52,7 +53,7 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		if notice.Kind == "review_cap_reached" && latestCapNotice[notice.TaskID] != notice.ID {
 			continue
 		}
-		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached", "quota_exhausted", "budget_exceeded") {
+		if notice.TaskID == 0 || !oneOfString(notice.Kind, "merge_ready", "task_failed", "task_lost", "task_done", "needs_decision", "worker_exited", "review_cap_reached", "quota_exhausted", "budget_exceeded", "greenhouse_partial_review") {
 			continue
 		}
 		task, err := db.TaskByID(ctx, project.ID, notice.TaskID)
@@ -67,6 +68,26 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		}
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
+		case notice.Kind == "greenhouse_partial_review" && task.Type == "change":
+			var data struct {
+				Repository string                `json:"repo"`
+				Head       string                `json:"head"`
+				Result     greenhouse.HostResult `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(notice.DataJSON), &data); err != nil {
+				return err
+			}
+			applies, err := greenhousePartialReviewApplies(ctx, db, task, data.Repository, data.Head)
+			if err != nil {
+				return err
+			}
+			if !applies {
+				continue
+			}
+			request.Kind = "greenhouse_coverage"
+			request.Origin = greenhouseCoverageDecisionOrigin(task.Seq, data.Repository, data.Head)
+			request.Question = greenhousePartialDecisionQuestion(data.Repository, data.Head, data.Result)
+			request.Options = []string{"accept-coverage-at-exact-head", "hold"}
 		case notice.Kind == "review_cap_reached" && task.Type == "change":
 			binding, used, max, err := reviewCapNoticeData(notice)
 			if err != nil {
@@ -432,7 +453,7 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	} // User's own shell input is their quote.
 	reason := ""
 	if decisionBefore.Kind == "teardown_dependants" && parsed.Positionals[1] == "re-point" {
-		reason = "to=" + parsed.Flags["to"]
+		reason = "to=" + strings.TrimSpace(parsed.Flags["to"])
 	}
 	decision, err := db.AnswerDecisionAs(ctx.Context, project.ID, id, parsed.Positionals[1], "user", quote, reason)
 	if store.IsNotFound(err) {

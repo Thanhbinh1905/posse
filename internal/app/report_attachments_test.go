@@ -14,13 +14,29 @@ import (
 )
 
 func TestReportAttachmentGitArgsOmitEmptyBaseRef(t *testing.T) {
-	got := reportAttachmentGitArgs("", "HEAD")
+	got := reportAttachmentGitArgs("", "HEAD", false)
 	want := [][]string{
 		{"diff", "--name-only", "-z", "HEAD"},
 		{"ls-files", "--others", "--exclude-standard", "-z"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Git argv = %#v, want %#v", got, want)
+	}
+	withBase := reportAttachmentGitArgs("main", "HEAD", true)
+	if !reflect.DeepEqual(withBase[0], []string{"diff", "--name-only", "-z", "--merge-base", "main", "HEAD"}) {
+		t.Fatalf("base-relative Git argv = %#v", withBase[0])
+	}
+	withoutMergeBase := reportAttachmentGitArgs("tree", "HEAD", false)
+	if !reflect.DeepEqual(withoutMergeBase[0], []string{"diff", "--name-only", "-z", "tree", "HEAD"}) {
+		t.Fatalf("tree-relative Git argv = %#v", withoutMergeBase[0])
+	}
+	deletedWithoutMergeBase := reportDeletedGitArgs("tree", false)
+	if !reflect.DeepEqual(deletedWithoutMergeBase[0], []string{"diff", "--diff-filter=D", "--name-only", "-z", "tree", "HEAD"}) {
+		t.Fatalf("tree-relative deleted-file Git argv = %#v", deletedWithoutMergeBase[0])
+	}
+	deletedWithMergeBase := reportDeletedGitArgs("main", true)
+	if !reflect.DeepEqual(deletedWithMergeBase[0], []string{"diff", "--diff-filter=D", "--name-only", "-z", "--merge-base", "main", "HEAD"}) {
+		t.Fatalf("base-relative deleted-file Git argv = %#v", deletedWithMergeBase[0])
 	}
 	for _, command := range got {
 		for _, arg := range command {
