@@ -191,6 +191,9 @@ func TestSendDeliveryPolicy(t *testing.T) {
 				if err != nil || message.WaitForIdle != tc.queue {
 					t.Fatalf("queued message=%#v err=%v", message, err)
 				}
+				if !strings.Contains(output.String(), fmt.Sprintf("posse unsend %d", message.ID)) {
+					t.Fatalf("queued result omitted withdrawal help for message %d: %s", message.ID, output.String())
+				}
 				projects, _, err := testService(home, fake).ingestProjects(ctx, db, pluginEvent{Event: "pane.focused"}, "w1:p1")
 				if err != nil || len(projects) != 1 || projects[0].ID != project.ID {
 					t.Fatalf("focus retry projects=%#v err=%v", projects, err)
