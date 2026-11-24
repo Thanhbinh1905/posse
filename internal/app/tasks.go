@@ -2495,7 +2495,7 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 				return ctx.Print(workerPaneMissingQueued(task, messageID))
 			}
 		}
-		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "waiting_for_idle"}, {Key: "help", Value: []any{"The instruction will be delivered after the current Worker turn; run `posse show " + taskIDString(task.Seq) + "` to inspect its queue age"}}})
+		return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "waiting_for_idle"}, {Key: "help", Value: []any{"The instruction will be delivered after the current Worker turn; run `posse show " + taskIDString(task.Seq) + "` to inspect its queue age", queuedMessageWithdrawalHelp(messageID)}}})
 	}
 	delivered := false
 	snapshot, err := s.snapshot(ctx.Context)
@@ -2625,7 +2625,8 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		} else if blockedByMessageID != 0 {
 			help = fmt.Sprintf("Earlier message #%d is ahead in the queue; inspect it with `posse show %s`", blockedByMessageID, taskIDString(task.Seq))
 		}
-		result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{help}}}
+		result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}}
+		result = append(result, axi.Field{Key: "reason", Value: reason}, axi.Field{Key: "help", Value: []any{help, queuedMessageWithdrawalHelp(messageID)}})
 		if blockedByMessageID != 0 {
 			result = append(result, axi.Field{Key: "blocked_by_message", Value: blockedByMessageID})
 		}
@@ -2643,7 +2644,11 @@ func completedChangeTask(task store.Task) bool {
 
 func workerPaneMissingQueued(task store.Task, messageID int64) axi.Object {
 	id := taskIDString(task.Seq)
-	return axi.Object{{Key: "task", Value: id}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "worker_pane_missing"}, {Key: "help", Value: []any{"The " + string(task.State) + " Task has no live Worker pane; run `posse relaunch " + id + "` to bring its Worker back, then the message is delivered"}}}
+	return axi.Object{{Key: "task", Value: id}, {Key: "message", Value: messageID}, {Key: "state", Value: "queued"}, {Key: "reason", Value: "worker_pane_missing"}, {Key: "help", Value: []any{"The " + string(task.State) + " Task has no live Worker pane; run `posse relaunch " + id + "` to bring its Worker back, then the message is delivered", queuedMessageWithdrawalHelp(messageID)}}}
+}
+
+func queuedMessageWithdrawalHelp(messageID int64) string {
+	return fmt.Sprintf("Withdraw this queued message with `posse unsend %d`", messageID)
 }
 
 // submittingMessageReason reports a message another dispatcher, such as the
@@ -3042,6 +3047,10 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, project store.Pr
 		return err
 	}
 	reservationStopped = true
+	help := []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}
+	if state == "queued" {
+		help = append(help, queuedMessageWithdrawalHelp(messageID))
+	}
 	return ctx.Print(axi.Object{
 		{Key: "task", Value: taskIDString(task.Seq)},
 		{Key: "message", Value: messageID},
@@ -3050,7 +3059,7 @@ func (s *Service) sendInterrupt(ctx *axi.Context, db *store.DB, project store.Pr
 		{Key: "interrupted", Value: outcome.Interrupted},
 		{Key: "verified", Value: outcome.Verified},
 		{Key: "abort_keys", Value: outcome.Keys},
-		{Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}},
+		{Key: "help", Value: help},
 	})
 }
 
