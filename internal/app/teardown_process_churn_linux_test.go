@@ -19,6 +19,30 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestSandboxCleanupWaitsForShortLivedUnverifiedProcess(t *testing.T) {
+	root := t.TempDir()
+	authorization := newSandboxProcessAuthorization()
+	defer authorization.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	child := exec.Command("sh", "-c", "sleep 0.1")
+	child.Dir = root
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer stopSandboxProcess(t, child)
+	stopped, err := stopSandboxProcessesAuthorized(root, authorization)
+	if err != nil {
+		t.Fatalf("cleanup refused a short-lived child that exited during teardown: %v", err)
+	}
+	if len(stopped) != 0 {
+		t.Fatalf("signaled processes = %v, want no unverified process to be signaled", stopped)
+	}
+	if pids, err := sandboxProcessIDs(root); err != nil || len(pids) != 0 {
+		t.Fatalf("Sandbox processes remain after their natural exit: pids=%v err=%v", pids, err)
+	}
+}
+
 func TestSandboxCleanupWaitsForTransientProcessInVerifiedGroup(t *testing.T) {
 	root := t.TempDir()
 	leader := exec.Command("sleep", "60")
