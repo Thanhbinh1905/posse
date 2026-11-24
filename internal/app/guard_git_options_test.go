@@ -20,8 +20,11 @@ func TestWorkerGitGuardBlocksRemoteWritesThroughAliasesAndPlumbing(t *testing.T)
 	scope, _ := guardFixture(t)
 	repo := t.TempDir()
 	scope.cwd = repo
+	scope.writable = append(scope.writable, repo)
 	gitTest(t, repo, "init")
 	gitTest(t, repo, "config", "alias.p", "push")
+	foreign := filepath.Join(t.TempDir(), "foreign-worktree")
+	gitTest(t, repo, "config", "alias.foreign", "worktree add "+foreign)
 	for _, command := range []string{
 		"git subtree push --prefix docs origin main",
 		"git subtree --prefix docs push origin main",
@@ -34,6 +37,11 @@ func TestWorkerGitGuardBlocksRemoteWritesThroughAliasesAndPlumbing(t *testing.T)
 	} {
 		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, "posse publish") {
 			t.Errorf("remote write %q allowed: %v %#v", command, refused, reason)
+		}
+	}
+	for _, command := range []string{"git foreign", "git -c 'alias.foreign=worktree add " + foreign + "' foreign"} {
+		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, foreign) {
+			t.Errorf("aliased Git write %q allowed: %v %#v", command, refused, reason)
 		}
 	}
 	// A literal read alias and benign git config are not remote writes.

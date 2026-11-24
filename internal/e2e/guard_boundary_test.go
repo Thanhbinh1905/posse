@@ -62,8 +62,35 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.WriteFile(foreignBinary, binaryData, 0700); err != nil {
 		t.Fatal(err)
 	}
-	workerEnv := setEnv(env, "POSSE_WORKER_HOME", filepath.Join(root, "posse"))
+	workerHome := filepath.Join(root, "posse")
+	workerEnv := setEnv(env, "POSSE_WORKER_HOME", workerHome)
 	workerEnv = setEnv(workerEnv, "HERDR_SOCKET_PATH", socket)
+	workerSandbox := filepath.Join(workerHome, "pool", "sandbox")
+	if err := os.MkdirAll(workerSandbox, 0700); err != nil {
+		t.Fatal(err)
+	}
+	workerForeignSibling := filepath.Join(workerHome, "foreign")
+	if err := os.MkdirAll(workerForeignSibling, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(workerSandbox, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-b", "main", workerSandbox}, {"-C", workerSandbox, "config", "user.name", "Fixture"}, {"-C", workerSandbox, "config", "user.email", "fixture@example.invalid"}} {
+		command := exec.Command("git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workerSandbox, "tracked.txt"), []byte("worker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", workerSandbox, "add", "tracked.txt"}, {"-C", workerSandbox, "commit", "-m", "fixture"}} {
+		command := exec.Command("git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
 	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", "w-test:p-test")
 	other := filepath.Join(root, "other")
 	if err := os.MkdirAll(other, 0700); err != nil {
@@ -79,9 +106,45 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	}
 	otherClient := herdr.NewWithEnv("herdr", otherEnv)
 	startServer(t, otherClient)
+	foreignRepo := filepath.Join(otherRoot, "checkout")
+	foreignRemote := filepath.Join(otherRoot, "remote.git")
+	aliasedWorktree := filepath.Join(otherRoot, "aliased-worktree")
+	for _, args := range [][]string{{"init", "--bare", foreignRemote}, {"init", "-b", "main", foreignRepo}} {
+		command := exec.Command("git", args...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
+	for _, args := range [][]string{{"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@example.invalid"}} {
+		command := exec.Command("git", append([]string{"-C", foreignRepo}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git config: %v %s", err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(foreignRepo, "tracked.txt"), []byte("fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "tracked.txt"}, {"commit", "-m", "fixture"}, {"remote", "add", "origin", foreignRemote}, {"push", "-u", "origin", "main"}} {
+		command := exec.Command("git", append([]string{"-C", foreignRepo}, args...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, output)
+		}
+	}
 	otherWorkspace, err := createWorkspace(otherClient, otherRoot)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignRepo, "tracked.txt"), []byte("local change\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := exec.Command("git", "-C", workerSandbox, "config", "alias.foreign", "worktree add "+aliasedWorktree)
+	if output, err := alias.CombinedOutput(); err != nil {
+		t.Fatalf("set fixture Git alias: %v %s", err, output)
+	}
+	foreignRef := exec.Command("git", "-C", foreignRepo, "rev-parse", "refs/remotes/origin/main")
+	foreignRefBefore, err := foreignRef.Output()
+	if err != nil {
+		t.Fatalf("read initial remote-tracking ref: %v", err)
 	}
 	source := filepath.Join(root, "internal", "herdr")
 	if err := os.MkdirAll(source, 0700); err != nil {
@@ -109,6 +172,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		currentSocketCase = "current socket"
 	}
 	otherSocketEnv := "HERDR_SOCKET_PATH=" + shellQuote(herdr.SocketPath(otherEnv)) + " "
+	outsideInit := filepath.Join(foreignRepo, "new-repo")
+	outsideClone := filepath.Join(foreignRepo, "new-checkout")
+	outsideWorktree := filepath.Join(otherRoot, "worktree")
 	cases := []struct {
 		name, command string
 		blocked       bool
@@ -140,6 +206,17 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"python heredoc edit of Go source naming herdr", "python3 - <<'PY'\nfrom pathlib import Path\np = Path('internal/herdr/adapter_test.go')\np.write_text(p.read_text() + 'import \"github.com/thanhbinh1905/posse/internal/herdr\"\\nvar _ = herdr.Snapshot{}\\n')\nPY", false},
 		{"python heredoc running herdr", fmt.Sprintf("python3 - <<'PY'\nimport subprocess\nsubprocess.run(['herdr', 'workspace', 'rename', '%s', 'forbidden'])\nPY", id), true},
 		{"direct Worker push", "git push origin HEAD", true},
+		{"other Project checkout fetch", "git -C " + foreignRepo + " fetch origin", true},
+		{"other Project checkout file change", "git -C " + foreignRepo + " checkout -- tracked.txt", true},
+		{"other Project checkout after relative -C", "cd " + filepath.Join(workerSandbox, "sub") + " && git -C .. --work-tree=../../foreign checkout -- tracked.txt", true},
+		{"other Project checkout through alias", "git foreign", true},
+		{"other Project checkout after cd", "cd " + foreignRepo + " && git fetch origin", true},
+		{"other Project checkout through GIT_DIR", "GIT_DIR=" + foreignRepo + "/.git git fetch origin", true},
+		{"other Project checkout through GIT_WORK_TREE", "GIT_WORK_TREE=" + foreignRepo + " git checkout -- tracked.txt", true},
+		{"Git destination init", "git init " + outsideInit, true},
+		{"Git destination clone", "git clone " + foreignRemote + " " + outsideClone, true},
+		{"Git destination worktree", "git worktree add " + outsideWorktree, true},
+		{"Git config-env uppercase key", "FOREIGN_WORKTREE=" + foreignRepo + " git --config-env=CORE.WORKTREE=FOREIGN_WORKTREE status", true},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},
@@ -152,6 +229,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": tc.command}})
 			guard := exec.Command(bin, "_guard")
 			guard.Dir = root
+			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" {
+				guard.Dir = workerSandbox
+			}
 			guard.Env = workerEnv
 			guard.Stdin = strings.NewReader(string(payload))
 			output, err := guard.CombinedOutput()
@@ -184,6 +264,22 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 					t.Logf("unguarded shell: %v %s", err, result)
 				} else if err != nil {
 					t.Errorf("isolated shell failed: %v %s", err, result)
+				}
+			}
+			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" {
+				for _, destination := range []string{outsideInit, outsideClone, outsideWorktree, aliasedWorktree} {
+					if _, err := os.Stat(destination); !os.IsNotExist(err) {
+						t.Errorf("Git command created foreign destination %s: %v", destination, err)
+					}
+				}
+				foreignRef := exec.Command("git", "-C", foreignRepo, "rev-parse", "refs/remotes/origin/main")
+				foreignRefAfter, err := foreignRef.Output()
+				if err != nil || string(foreignRefAfter) != string(foreignRefBefore) {
+					t.Errorf("foreign fetch changed the remote-tracking ref: before=%q after=%q err=%v", foreignRefBefore, foreignRefAfter, err)
+				}
+				contents, err := os.ReadFile(filepath.Join(foreignRepo, "tracked.txt"))
+				if err != nil || string(contents) != "local change\n" {
+					t.Errorf("foreign checkout changed the Project file: %v %q", err, contents)
 				}
 			}
 			if tc.name == "python heredoc edit of Go source naming herdr" {
