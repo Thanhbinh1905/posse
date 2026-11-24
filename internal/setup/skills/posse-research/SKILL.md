@@ -22,7 +22,7 @@ This skill has a Lead part and a Worker part. Run `posse _context` to find yours
 
 Your Brief owns the question and sources; this part sets the method.
 
-1. Use primary sources only: source code, official docs, specs, first-party APIs, original papers. Follow a secondary write-up back to its source, or drop it.
+1. Use primary sources only: source code, official docs, specs, first-party APIs, original papers. Follow a secondary write-up back to its source, or drop it. To read another repository, clone it or add a worktree under this Task's scratch. Never fetch or check out in another Project's root checkout.
 2. Cite every claim (`path:line`, commit, URL or section) and label it seen, inferred or guess.
 3. Record each search that found nothing, with the query and where you looked.
 4. Keep the Report within the Brief's limit, or 150 lines if it names none: answer first, evidence after.

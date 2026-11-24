@@ -383,7 +383,7 @@ func guardFixture(t *testing.T) (guardScope, string) {
 			t.Fatal(err)
 		}
 	}
-	return guardScope{env: append(append([]string(nil), guardEnv...), "PATH="+dir+":/usr/bin"), cwd: dir, workerHome: "/home/u/.posse", posse: filepath.Join(dir, "posse")}, dir
+	return guardScope{env: append(append([]string(nil), guardEnv...), "PATH="+dir+":/usr/bin"), cwd: dir, workerHome: "/home/u/.posse", writable: []string{dir}, posse: filepath.Join(dir, "posse")}, dir
 }
 
 func TestGuardFollowsIndirection(t *testing.T) {
@@ -643,6 +643,80 @@ func TestGuardClassifiesATextPosseScriptByItsContents(t *testing.T) {
 	}
 	if refused, reason := guardCommand("bin/posse-wrap list", scope); !refused || reason.rule != rulePosseBuild {
 		t.Errorf("guard did not refuse a script that runs another posse build: %v %#v", refused, reason)
+	}
+}
+
+func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, ".posse")
+	sandbox := filepath.Join(home, "pool", "project-a", "sandbox-1")
+	foreign := filepath.Join(root, "project-b")
+	if err := os.MkdirAll(filepath.Join(sandbox, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox, ".git", "config"), []byte("[core]\n\tworktree = "+sandbox+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	scope := guardScope{env: append(append([]string(nil), guardEnv...), "FOREIGN_WORKTREE="+foreign), cwd: sandbox, workerHome: home, writable: []string{sandbox, filepath.Join(home, "scratch", "project-a", "t1")}}
+	for _, command := range []string{
+		"git -C " + foreign + " fetch origin",
+		"git --git-dir=" + foreign + "/.git fetch origin",
+		"git --git-dir=" + foreign + "/.git -C " + sandbox + " fetch origin",
+		"cd " + foreign + " && git fetch origin",
+		"GIT_DIR=" + foreign + "/.git git fetch origin",
+		"GIT_WORK_TREE=" + foreign + " git checkout -- tracked.txt",
+		"git -c core.worktree=" + foreign + " fetch origin",
+		"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=" + foreign + " git fetch origin",
+		"git init " + foreign + "/new-repo",
+		"git clone " + foreign + " " + foreign + "/new-checkout",
+		"git worktree add " + foreign + "/worktree",
+		"git worktree add -b branch " + foreign + "/branch-worktree",
+		"git worktree move " + sandbox + " " + foreign + "/moved-worktree",
+		"git submodule add " + foreign + " " + foreign + "/submodule",
+		"git init --separate-git-dir=" + foreign + "/metadata " + sandbox + "/nested",
+		"git --config-env=CORE.WORKTREE=FOREIGN_WORKTREE fetch origin",
+	} {
+		if refused, reason := guardCommand(command, scope); !refused || !strings.Contains(reason.why, foreign) {
+			t.Errorf("guard did not refuse git targeting another Project checkout for %q: refused=%v reason=%#v", command, refused, reason)
+		}
+	}
+	sub := filepath.Join(sandbox, "sub")
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	subScope := scope
+	subScope.cwd = sub
+	effectiveWorktree := filepath.Join(filepath.Dir(sandbox), "foreign")
+	for _, command := range []string{
+		"cd " + sub + " && git -C .. --work-tree=../foreign checkout -- tracked.txt",
+		"git -C .. --work-tree=../foreign checkout -- tracked.txt",
+		"git -C .. --git-dir=../foreign/.git fetch origin",
+		"GIT_WORK_TREE=../foreign git -C .. checkout -- tracked.txt",
+		"GIT_DIR=../foreign/.git git -C .. fetch origin",
+	} {
+		if refused, reason := guardCommand(command, subScope); !refused || !strings.Contains(reason.why, effectiveWorktree) {
+			t.Errorf("guard did not resolve Git paths after -C from Git's effective directory for %q: refused=%v reason=%#v", command, refused, reason)
+		}
+	}
+	if refused, reason := guardCommand("GIT_DIR=$(printf %s "+foreign+"/.git) git fetch origin", scope); !refused || !strings.Contains(reason.why, "unresolved GIT_DIR") {
+		t.Errorf("guard did not refuse an unresolved GIT_DIR: refused=%v reason=%#v", refused, reason)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox, ".git", "config"), []byte("[core]\n\tworktree = "+foreign+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if refused, reason := guardCommand("git status --short", scope); !refused {
+		t.Errorf("guard allowed Git with an external core.worktree: %#v", reason)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox, ".git", "config"), []byte("[core]\n\tworktree = "+sandbox+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if refused, reason := guardCommand("git status --short", scope); refused {
+		t.Errorf("guard refused git in the Worker's Sandbox: %#v", reason)
+	}
+	foreignScope := scope
+	foreignScope.cwd = foreign
+	if refused, reason := guardCommand("git fetch origin", foreignScope); !refused {
+		t.Errorf("guard allowed Git from another Project's root: %#v", reason)
 	}
 }
 
