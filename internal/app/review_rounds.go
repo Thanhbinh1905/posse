@@ -323,6 +323,7 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 		return err
 	}
 	queued := false
+	candidateTargetPinMoved := false
 	for _, lane := range lanes {
 		candidate, err := db.LatestValidationCandidate(ctx.Context, change.ID, lane.repo)
 		if err != nil {
@@ -341,6 +342,7 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 			return err
 		}
 		if checked.Fresh {
+			candidateTargetPinMoved = candidateTargetPinMoved || candidate.TargetSHA != targetHead
 			continue
 		}
 		if err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA); err != nil {
@@ -349,6 +351,9 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 		queued = true
 	}
 	if !queued {
+		if candidateTargetPinMoved {
+			return axi.Failure("candidate_target_moved", "the current target is already in the candidate head, but differs from the candidate's recorded target", false, "From the Task Sandbox, run `posse publish --refresh \"<summary>\"` to submit a candidate pinned to the current target, then rerun Review and validation")
+		}
 		return axi.Failure("candidate_target_moved", "candidate target changed before Review admission but no stale candidate lane remains", true)
 	}
 	if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {
@@ -419,12 +424,7 @@ func (s *Service) prepareReviewCandidateCheckouts(ctx context.Context, db *store
 		if err != nil {
 			return err
 		}
-		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Root: lane.task.WorktreePath}
-		checked, err := freshness.of(ctx, freshness.Root, candidate.CandidateSHA)
-		if err != nil {
-			return err
-		}
-		if targetHead == "" || !checked.Fresh {
+		if targetHead == "" || targetHead != candidate.TargetSHA {
 			if candidate.State == store.ValidationCandidateActive && targetHead != "" {
 				if err := db.MarkValidationCandidateStale(ctx, candidate.ID, targetHead); err != nil {
 					return err
