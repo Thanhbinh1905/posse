@@ -190,11 +190,11 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	if _, err := db.AcquireSandbox(ctx, project.ID, parkedID, filepath.Join(home, "pool", "shop")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := executionResourceSummary(ctx, db, project.ID, 4)
+	got, err := executionResourceSummary(ctx, db, project.ID, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"active_workers=1/4", "native_children=0", "parked_resources=1"} {
+	for _, want := range []string{"active_workers=1/3", "native_children=0", "parked_resources=1"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("resource summary %q omitted %q", got, want)
 		}
@@ -205,7 +205,7 @@ func TestExecutionResourceSummarySeparatesActiveNativeAndParkedCounts(t *testing
 	}
 	for _, check := range result.Checks {
 		if check.Name == "execution resources shop" {
-			if !strings.Contains(check.Detail, "active_workers=1/4") || !strings.Contains(check.Detail, "native_children=0") || !strings.Contains(check.Detail, "parked_resources=1") {
+			if !strings.Contains(check.Detail, "active_workers=1/3") || !strings.Contains(check.Detail, "native_children=0") || !strings.Contains(check.Detail, "parked_resources=1") {
 				t.Fatalf("doctor execution resource detail = %#v", check)
 			}
 			return

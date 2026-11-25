@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/execgroup"
+	"github.com/thanhbinh1905/posse/internal/heavy"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
@@ -45,6 +46,9 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 	var notices []store.Notice
 	var failures []error
 	for _, task := range tasks {
+		if heavy.IsWaiting("", project.Name, taskID(task.Seq)) {
+			continue
+		}
 		if err := reconcileWorkDeferred(ctx); err != nil {
 			return notices, errors.Join(append(failures, err)...)
 		}

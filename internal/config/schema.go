@@ -48,7 +48,7 @@ var keySpecs = []KeySpec{
 	{Key: "skills.review", Type: TypeStringArray, Default: []string{}, Meaning: "Workflow skills Review Round Workers load on top of the platform skills, frozen at admission; entries as in skills.lead."},
 	{Key: "skills.research", Type: TypeStringArray, Default: []string{}, Meaning: "Workflow skills Research Workers load on top of the platform skills, frozen at admission; entries as in skills.lead."},
 	{Key: "lead.profiles.<kind>", Type: TypeString, Meaning: "Profile used by the Lead for this agent kind."},
-	{Key: "defaults.max_workers", Type: TypeInteger, Default: 4, Meaning: "Maximum concurrent Workers for a Project."},
+	{Key: "defaults.max_workers", Type: TypeInteger, Default: 3, Meaning: "Maximum concurrent Workers for a Project."},
 	{Key: "defaults.dispatch_inheritance", Type: TypeString, Allowed: []string{"kind", "lead_profile"}, Default: "kind", Meaning: "Profile inherited when no Dispatch Rule matches: the Lead's agent kind only, or its resolved Profile."},
 	{Key: "defaults.stall_after", Type: TypeDuration, Default: "20m", Meaning: "Time without output or worktree progress before a Worker is stalled."},
 	{Key: "defaults.idle_after", Type: TypeDuration, Default: "3m", Meaning: "Time a Worker may be idle without a Signal before a Notice is created."},
