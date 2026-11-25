@@ -1515,6 +1515,7 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
 	for _, reason := range []string{
 		"reviewer quota exceeded; retry after reset",
+		`Greenhouse terminal status "inconclusive": quota exhausted`,
 		"network connection reset by peer",
 		"dial tcp: i/o timeout",
 		"greenhouse daemon unavailable: socket disappeared",
@@ -1546,6 +1547,10 @@ func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
 	terminal := &greenhouse.TerminalReviewError{Status: "failed", Reason: "quota exceeded; service unavailable; gateway timeout"}
 	if transientGreenhouseFailure(terminal) {
 		t.Fatalf("transientGreenhouseFailure(%q) = true for a terminal review", terminal)
+	}
+	inconclusiveQuota := &greenhouse.TerminalReviewError{Status: "inconclusive", Reason: "quota exhausted"}
+	if !transientGreenhouseFailure(inconclusiveQuota) {
+		t.Fatalf("transientGreenhouseFailure(%q) = false for an inconclusive quota result", inconclusiveQuota)
 	}
 }
 
@@ -1672,7 +1677,7 @@ func TestGreenhouseQuotaFailuresAtRetryLimitDoNotRaiseNeedsDecision(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "inconclusive: quota exhausted"); err != nil {
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, `Greenhouse terminal status "inconclusive": quota exhausted`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.service.startParallelGreenhouseReviews(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}); err != nil {
