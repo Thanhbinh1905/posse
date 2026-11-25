@@ -379,6 +379,34 @@ func TestApprovedDiscardRequiresQuoteBeforeDestructiveWork(t *testing.T) {
 	}
 }
 
+func TestTeardownDiscardIncompletePreservesNonRetryableStepError(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	defer f.db.Close()
+	cause := axi.Failure("discard_live_agent", "another Worker owns the pane", false, "Preserve the other Worker")
+	err := f.service.teardownDiscardIncomplete(context.Background(), f.db, f.project, f.task, "pane closure", cause)
+	commandError, ok := err.(*axi.Error)
+	if !ok || commandError.Code != "teardown_incomplete" || commandError.Retryable {
+		t.Fatalf("non-retryable discard refusal = %#v, want non-retryable teardown_incomplete", err)
+	}
+	if !strings.Contains(strings.Join(commandError.Help, " "), "pane closure") {
+		t.Fatalf("non-retryable discard error did not name its blocking step: %#v", commandError.Help)
+	}
+}
+
+func TestTeardownIncompletePreservesNonRetryableStepError(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	defer f.db.Close()
+	cause := axi.Failure("ownership_refused", "the pane belongs to another Worker", false, "Preserve the other Worker")
+	err := f.service.teardownIncomplete(context.Background(), f.db, f.project, f.task, "pane inspection", cause)
+	commandError, ok := err.(*axi.Error)
+	if !ok || commandError.Code != "teardown_incomplete" || commandError.Retryable {
+		t.Fatalf("non-retryable pane refusal = %#v, want non-retryable teardown_incomplete", err)
+	}
+	if !strings.Contains(strings.Join(commandError.Help, " "), "pane inspection") {
+		t.Fatalf("non-retryable teardown error did not name its blocking step: %#v", commandError.Help)
+	}
+}
+
 func TestTeardownIncompleteDeterministicRefusalIsNotRetryable(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	defer f.db.Close()

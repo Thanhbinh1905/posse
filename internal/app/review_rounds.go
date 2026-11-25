@@ -323,6 +323,7 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 		return err
 	}
 	queued := false
+	candidateTargetPinMoved := false
 	for _, lane := range lanes {
 		candidate, err := db.LatestValidationCandidate(ctx.Context, change.ID, lane.repo)
 		if err != nil {
@@ -332,23 +333,32 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 		if err != nil {
 			return err
 		}
-		if candidate.State != store.ValidationCandidateStale && candidate.TargetSHA == targetHead {
-			continue
-		}
 		if targetHead == "" {
 			return axi.Failure("candidate_target_missing", lane.memberLabel("the frozen target branch is missing"), false)
 		}
 		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Local: lane.localDelivery(), Root: lane.task.WorktreePath}
+		checked, err := freshness.of(ctx.Context, freshness.Root, candidate.CandidateSHA)
+		if err != nil {
+			return err
+		}
+		if checked.Fresh {
+			candidateTargetPinMoved = candidateTargetPinMoved || candidate.TargetSHA != targetHead
+			continue
+		}
 		instructionQueued, err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA)
 		if err != nil {
 			return err
 		}
 		if !instructionQueued {
+			candidateTargetPinMoved = candidateTargetPinMoved || candidate.TargetSHA != targetHead
 			continue
 		}
 		queued = true
 	}
 	if !queued {
+		if candidateTargetPinMoved {
+			return axi.Failure("candidate_target_moved", "the current target is already in the candidate head, but differs from the candidate's recorded target", false, "From the Task Sandbox, run `posse publish --refresh \"<summary>\"` to submit a candidate pinned to the current target, then rerun Review and validation")
+		}
 		return axi.Failure("candidate_target_moved", "candidate target changed before Review admission but no stale candidate lane remains", true)
 	}
 	if err := s.deliverNotices(ctx.Context, db, project); err != nil && !isHerdrUnavailable(err) {

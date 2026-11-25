@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -183,11 +185,43 @@ func mergedTaskTargetRef(ctx context.Context, project store.Project, task store.
 	if task.MergeMode != "local" {
 		return taskTargetRef(ctx, project, task)
 	}
-	ref := "refs/heads/" + taskTargetBranch(project, task)
-	if _, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", ref+"^{commit}"); err != nil {
-		return "", err
+	branch := taskTargetBranch(project, task)
+	refs := []string{"refs/heads/" + branch, "refs/remotes/origin/" + branch}
+	taskRef := "refs/heads/" + task.Branch
+	taskTipErr := error(nil)
+	if task.Branch != "" {
+		_, taskTipErr = gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", taskRef+"^{commit}")
+		if taskTipErr != nil && !gitRefMissing(taskTipErr) {
+			return "", taskTipErr
+		}
 	}
-	return ref, nil
+	firstExisting := ""
+	for _, ref := range refs {
+		if _, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+			if gitRefMissing(err) {
+				continue
+			}
+			return "", err
+		}
+		if firstExisting == "" {
+			firstExisting = ref
+		}
+		if taskTipErr != nil || task.Branch == "" {
+			continue
+		}
+		if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", taskRef, ref); err == nil {
+			return ref, nil
+		} else {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				return "", err
+			}
+		}
+	}
+	if firstExisting != "" {
+		return firstExisting, nil
+	}
+	return "", axi.Failure("target_branch_missing", "Task target branch is missing", false, branch)
 }
 
 func ensureLocalTaskTarget(ctx context.Context, project store.Project, task store.Task) error {

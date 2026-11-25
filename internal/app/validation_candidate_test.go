@@ -169,6 +169,55 @@ func addCandidateFix(t *testing.T, fixture *prMergeFixture) string {
 	return strings.TrimSpace(gitTest(t, candidate.WorktreePath, "rev-parse", "HEAD"))
 }
 
+func TestReviewAdmissionRejectsCandidateWithMovedTargetPinWhenHeadContainsTarget(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	ctx := context.Background()
+	pinnedTarget := strings.TrimSpace(gitTest(t, fixture.repo, "rev-parse", "main"))
+	gitTest(t, fixture.repo, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target.txt"), []byte("target update\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.repo, "add", "target.txt")
+	gitTest(t, fixture.repo, "commit", "-m", "advance target")
+	gitTest(t, fixture.repo, "push", "origin", "main")
+	gitTest(t, fixture.worktree, "fetch", "origin", "main")
+	gitTest(t, fixture.worktree, "merge", "--no-edit", "origin/main")
+	head := strings.TrimSpace(gitTest(t, fixture.worktree, "rev-parse", "HEAD"))
+	candidatePath, err := candidateCheckoutPath(fixture.home, fixture.project, fixture.task, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := fixture.db.CreateValidationCandidate(ctx, store.ValidationCandidate{
+		TaskID: fixture.task.ID, SubmittedSHA: head, CandidateSHA: head, TargetSHA: pinnedTarget,
+		RefName: candidateRefName(fixture.task), WorktreePath: candidatePath,
+		Summary: "Candidate summary", Verification: "go test ./... -> passed", Proof: "Intent proof", Risk: "Rollback: revert",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.ActivateValidationCandidate(ctx, candidate.ID, head); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = fixture.service.prepareReviewCandidateCheckouts(ctx, fixture.db, fixture.home, fixture.project, fixture.task, plan)
+	var failure *axi.Error
+	if !errors.As(err, &failure) || failure.Code != "candidate_target_moved" {
+		t.Fatalf("Review admission error = %v, want candidate_target_moved for differing TargetSHA even when candidate contains target", err)
+	}
+	refreshErr := fixture.service.queueReviewTargetRefresh(&axi.Context{Context: ctx}, fixture.db, fixture.project, fixture.task)
+	if !errors.As(refreshErr, &failure) || failure.Code != "candidate_target_moved" {
+		t.Fatalf("refresh result = %v, want candidate_target_moved without an unnecessary merge instruction", refreshErr)
+	}
+	instructions, err := fixture.db.PendingTaskInstructions(ctx, fixture.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("target refresh instructions = %+v, %v; want none for a head that contains target", instructions, err)
+	}
+}
+
 func TestFullPipelineMergeRequiresSubmittedValidatedCandidate(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	installFullPipelinePlan(t, fixture)
