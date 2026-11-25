@@ -69,6 +69,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.MkdirAll(workerSandbox, 0700); err != nil {
 		t.Fatal(err)
 	}
+	if output, err := exec.Command("git", "init", "-b", "main", workerSandbox).CombinedOutput(); err != nil {
+		t.Fatalf("initialize Worker checkout: %v %s", err, output)
+	}
 	workerForeignSibling := filepath.Join(workerHome, "foreign")
 	if err := os.MkdirAll(workerForeignSibling, 0700); err != nil {
 		t.Fatal(err)
@@ -76,7 +79,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(workerSandbox, "sub"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"init", "-b", "main", workerSandbox}, {"-C", workerSandbox, "config", "user.name", "Fixture"}, {"-C", workerSandbox, "config", "user.email", "fixture@example.invalid"}} {
+	for _, args := range [][]string{{"-C", workerSandbox, "config", "user.name", "Fixture"}, {"-C", workerSandbox, "config", "user.email", "fixture@example.invalid"}} {
 		command := exec.Command("git", args...)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v %s", args, err, output)
@@ -217,6 +220,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"Git destination clone", "git clone " + foreignRemote + " " + outsideClone, true},
 		{"Git destination worktree", "git worktree add " + outsideWorktree, true},
 		{"Git config-env uppercase key", "FOREIGN_WORKTREE=" + foreignRepo + " git --config-env=CORE.WORKTREE=FOREIGN_WORKTREE status", true},
+		{"preflight repository root", `cd "$(git rev-parse --show-toplevel)" && git rev-parse --show-toplevel`, false},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},
@@ -229,7 +233,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			payload, _ := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]string{"command": tc.command}})
 			guard := exec.Command(bin, "_guard")
 			guard.Dir = root
-			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" {
+			if strings.HasPrefix(tc.name, "other Project checkout") || strings.HasPrefix(tc.name, "Git destination") || tc.name == "Git config-env uppercase key" || tc.name == "preflight repository root" {
 				guard.Dir = workerSandbox
 			}
 			guard.Env = workerEnv
@@ -258,6 +262,9 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 			if !blocked && runShell {
 				shell := exec.Command("bash", "-c", tc.command)
 				shell.Dir = root
+				if tc.name == "preflight repository root" {
+					shell.Dir = workerSandbox
+				}
 				shell.Env = workerEnv
 				result, err := shell.CombinedOutput()
 				if tc.blocked {

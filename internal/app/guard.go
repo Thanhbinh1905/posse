@@ -389,8 +389,12 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		e.merge(paths...)
 		return false, guardReason{}
 	}
-	// Command substitutions are evaluated by the shell before the outer call.
-	// They get a copy of the environment, as do pipelines and function bodies.
+	unknownCWD := false
+	if outer, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(outer.Args) > 1 {
+		name, known := e.word(script, outer.Args[0])
+		_, pathKnown := e.word(script, outer.Args[1])
+		unknownCWD = known && (name == "cd" || name == "pushd") && !pathKnown && wordHasCommandSubstitution(outer.Args[1])
+	}
 	refused, reason := false, guardReason{}
 	syntax.Walk(stmt, func(node syntax.Node) bool {
 		if refused {
@@ -412,6 +416,9 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		}
 		return !refused
 	})
+	if unknownCWD {
+		e.cwd = ""
+	}
 	return refused, reason
 }
 
@@ -564,9 +571,10 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 			}
 			return false, guardReason{}
 		case "cd", "pushd":
-			if len(args) > 1 && literal[1] {
+			knownTarget := len(args) > 1 && literal[1] && !directoryStackTarget(args[0], args[1])
+			if knownTarget {
 				e.cwd = e.path(args[1])
-			} else {
+			} else if len(call.Args) < 2 || !wordHasCommandSubstitution(call.Args[1]) {
 				e.cwd = ""
 			}
 			return false, guardReason{}
@@ -590,6 +598,33 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 		stdin = g.input
 	}
 	return g.command(child, args, literal, raw, stdin, depth, stdinRedirected || stmt != nil && len(stmt.Redirs) > 0)
+}
+
+func directoryStackTarget(command, target string) bool {
+	if strings.HasPrefix(target, "-") {
+		return true
+	}
+	if command != "pushd" || len(target) < 2 || target[0] != '+' {
+		return false
+	}
+	for _, char := range target[1:] {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func wordHasCommandSubstitution(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.CmdSubst); ok {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
 }
 
 // hereText returns the here-documents and here-strings a statement reads.
@@ -951,9 +986,12 @@ func gitAliasTargetOutsideWorker(e *shellEnv, args []string, literal []bool, wri
 	}
 	alias := aliases[subcommand]
 	if alias == "" {
-		output, err := exec.Command("git", "-C", cwd, "config", "--get", "alias."+subcommand).Output()
-		if err == nil {
-			alias = strings.TrimSpace(string(output))
+		configured, found, known := gitConfigAlias(e, cwd, subcommand)
+		if !known {
+			return "unresolved Git alias"
+		}
+		if found {
+			alias = configured
 		}
 	}
 	if alias == "" {
@@ -1035,6 +1073,173 @@ func gitConfigWorktreeTarget(e *shellEnv, args []string, literal []bool, writabl
 		}
 	}
 	return ""
+}
+
+func gitConfigAlias(e *shellEnv, cwd, subcommand string) (string, bool, bool) {
+	if e.unknown["GIT_CONFIG_PARAMETERS"] || strings.Contains(strings.ToLower(e.values["GIT_CONFIG_PARAMETERS"]), "alias.") {
+		return "", false, false
+	}
+	paths := []string{}
+	if e.values["GIT_CONFIG_NOSYSTEM"] != "1" && e.values["GIT_CONFIG_NOSYSTEM"] != "true" {
+		system := "/etc/gitconfig"
+		if e.unknown["GIT_CONFIG_SYSTEM"] {
+			return "", false, false
+		}
+		if e.exported["GIT_CONFIG_SYSTEM"] && e.values["GIT_CONFIG_SYSTEM"] != "" {
+			system = e.path(e.values["GIT_CONFIG_SYSTEM"])
+		}
+		paths = append(paths, system)
+	}
+	if e.unknown["GIT_CONFIG_GLOBAL"] || e.unknown["HOME"] || e.unknown["XDG_CONFIG_HOME"] {
+		return "", false, false
+	}
+	if e.exported["GIT_CONFIG_GLOBAL"] && e.values["GIT_CONFIG_GLOBAL"] != "" {
+		paths = append(paths, e.path(e.values["GIT_CONFIG_GLOBAL"]))
+	} else if home := e.values["HOME"]; home != "" {
+		if xdg := e.values["XDG_CONFIG_HOME"]; xdg != "" && e.exported["XDG_CONFIG_HOME"] {
+			paths = append(paths, filepath.Join(xdg, "git", "config"))
+		} else {
+			paths = append(paths, filepath.Join(home, ".config", "git", "config"))
+		}
+		paths = append(paths, filepath.Join(home, ".gitconfig"))
+	}
+	for dir := filepath.Clean(cwd); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		gitDir, ok := gitDirectoryAt(dir)
+		if !ok {
+			continue
+		}
+		commonDir := gitDir
+		if data, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+			commonDir = strings.TrimSpace(string(data))
+			if !filepath.IsAbs(commonDir) {
+				commonDir = filepath.Join(gitDir, commonDir)
+			}
+		} else if !os.IsNotExist(err) {
+			return "", false, false
+		}
+		paths = append(paths, filepath.Join(commonDir, "config"), filepath.Join(gitDir, "config.worktree"))
+		break
+	}
+	alias := ""
+	found := false
+	for _, path := range paths {
+		if path == "" {
+			return "", false, false
+		}
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", false, false
+		}
+		value, exists, valid := parseGitConfigAlias(data, subcommand)
+		if !valid {
+			return "", false, false
+		}
+		if exists {
+			alias, found = value, true
+		}
+	}
+	return alias, found, true
+}
+
+func parseGitConfigAlias(data []byte, subcommand string) (string, bool, bool) {
+	section := ""
+	alias, found := "", false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasSuffix(line, "\\") {
+			return "", false, false
+		}
+		line = gitConfigLine(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if !strings.HasSuffix(line, "]") {
+				return "", false, false
+			}
+			section = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
+			if strings.HasPrefix(section, "include") {
+				return "", false, false
+			}
+			continue
+		}
+		if section != "alias" {
+			continue
+		}
+		key, value, hasValue := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !strings.EqualFold(key, subcommand) {
+			continue
+		}
+		if !hasValue {
+			value = "true"
+		}
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(value, `"`) {
+			unquoted, err := strconv.Unquote(value)
+			if err != nil {
+				return "", false, false
+			}
+			value = unquoted
+		}
+		alias, found = value, true
+	}
+	return alias, found, true
+}
+
+func gitConfigLine(line string) string {
+	quoted, escaped := false, false
+	for index, char := range line {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && quoted {
+			escaped = true
+			continue
+		}
+		if char == '"' {
+			quoted = !quoted
+		}
+		if !quoted && (char == '#' || char == ';') {
+			return strings.TrimSpace(line[:index])
+		}
+	}
+	return line
+}
+
+func gitDirectoryAt(dir string) (string, bool) {
+	gitPath := filepath.Join(dir, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", false
+	}
+	if info.IsDir() {
+		return gitPath, true
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(data)), "gitdir:") {
+		return "", false
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+	backlink, err := os.ReadFile(filepath.Join(gitDir, "gitdir"))
+	if err != nil {
+		return "", false
+	}
+	backlinkPath := strings.TrimSpace(string(backlink))
+	if !filepath.IsAbs(backlinkPath) {
+		backlinkPath = filepath.Join(gitDir, backlinkPath)
+	}
+	if resolvedNewPath(backlinkPath) != resolvedNewPath(gitPath) {
+		return "", false
+	}
+	return gitDir, true
 }
 
 func gitConfigWorktrees(cwd string) []string {
@@ -2034,6 +2239,15 @@ func newShellEnv(env []string) *shellEnv {
 	return state
 }
 
+func (e *shellEnv) hasGitDirectoryOverride() bool {
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		if e.unknown[name] || e.exported[name] && e.values[name] != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *shellEnv) clone() *shellEnv {
 	copied := &shellEnv{values: map[string]string{}, exported: map[string]bool{}, unknown: map[string]bool{}, cwd: e.cwd}
 	for key, value := range e.values {
@@ -2257,6 +2471,11 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 		if sourceText(script, part) == "$(pwd)" && e.cwd != "" {
 			return e.cwd, true
 		}
+		if gitTopLevelCall(part) && e.cwd != "" && !e.hasGitDirectoryOverride() {
+			if root, ok := gitTopLevelDirectory(e.cwd); ok {
+				return root, true
+			}
+		}
 		if mktempCall(part) {
 			return mktempPath, true
 		}
@@ -2273,6 +2492,33 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 		return e.values[name], true
 	}
 	return "", false
+}
+
+func gitTopLevelDirectory(cwd string) (string, bool) {
+	for dir := filepath.Clean(cwd); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if _, ok := gitDirectoryAt(dir); !ok {
+			continue
+		}
+		for _, worktree := range gitConfigWorktrees(cwd) {
+			if worktree == "" || resolvedNewPath(worktree) != resolvedNewPath(dir) {
+				return "", false
+			}
+		}
+		return dir, true
+	}
+	return "", false
+}
+
+func gitTopLevelCall(subst *syntax.CmdSubst) bool {
+	if len(subst.Stmts) != 1 {
+		return false
+	}
+	stmt := subst.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Coprocess || len(stmt.Redirs) > 0 || len(call.Assigns) > 0 || len(call.Args) != 3 {
+		return false
+	}
+	return call.Args[0].Lit() == "git" && call.Args[1].Lit() == "rev-parse" && call.Args[2].Lit() == "--show-toplevel"
 }
 
 // mktempCall reports a command substitution that only runs mktemp and prints
