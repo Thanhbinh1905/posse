@@ -2634,6 +2634,23 @@ func (db *DB) WithdrawQueuedMessage(ctx context.Context, messageID int64) (Messa
 	return message, count == 1, err
 }
 
+// WithdrawQueuedFreshnessInstructionsForHead withdraws the undelivered
+// target-refresh instructions issued for head, which already contains the
+// target, and reports how many it withdrew.
+func (db *DB) WithdrawQueuedFreshnessInstructionsForHead(ctx context.Context, taskID int64, head string) (int64, error) {
+	result, err := db.ExecContext(ctx, `UPDATE messages SET status='withdrawn' WHERE status='queued' AND id IN (
+SELECT r.message_id FROM validation_fix_rounds r WHERE r.ship_task_id=? AND r.kind='freshness' AND r.expected_base_head=?
+AND NOT EXISTS (SELECT 1 FROM validation_fix_rounds other WHERE other.message_id=r.message_id AND other.kind!='freshness'))`, taskID, head)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil || count == 0 {
+		return count, err
+	}
+	return count, db.PersistTask(ctx, taskID)
+}
+
 func (db *DB) WithdrawQueuedFreshnessInstructions(ctx context.Context, taskID int64) ([]Message, []Message, error) {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {

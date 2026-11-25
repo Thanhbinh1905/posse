@@ -81,6 +81,22 @@ func TestPRTargetSyncDoesNotQueueFreshTaskBehindAnotherHead(t *testing.T) {
 	}
 }
 
+func TestPRTargetSyncWithdrawsQueuedRefreshOnceHeadContainsTarget(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	if _, err := f.db.QueueValidationFixInstruction(ctx, f.task.ID, "freshness", f.headSHA, "freshness:stale", "merge origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.queuePRTargetSyncInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("pending instructions = %+v, %v; want the stale refresh withdrawn", instructions, err)
+	}
+}
+
 func TestGreenhouseTargetRefreshSkipsHeadThatAlreadyContainsTarget(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))

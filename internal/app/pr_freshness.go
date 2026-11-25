@@ -150,6 +150,9 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 			return targetSync{}, err
 		}
 		if checked.Fresh {
+			if _, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, headSHA); err != nil {
+				return targetSync{}, err
+			}
 			if err := db.DequeueMergeQueue(ctx, task.ID, member, "target_already_current", time.Now().UnixMilli()); err != nil {
 				return targetSync{}, err
 			}
@@ -263,7 +266,8 @@ func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.T
 			return false, err
 		}
 		if checked.Fresh {
-			return false, nil
+			_, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, headSHA)
+			return false, err
 		}
 	}
 	memberLabel := ""
