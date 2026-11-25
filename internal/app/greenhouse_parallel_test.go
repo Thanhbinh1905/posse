@@ -109,6 +109,206 @@ func TestGreenhouseTargetRefreshSkipsHeadThatAlreadyContainsTarget(t *testing.T)
 	}
 }
 
+func TestGreenhouseFindingOnUnchangedAcceptedLineDoesNotBlock(t *testing.T) {
+	repo := t.TempDir()
+	gitRun := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	gitRun("init", "-q")
+	gitRun("config", "user.name", "Test")
+	gitRun("config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("first\naccepted line\nlast\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "accepted")
+	accepted := gitRun("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("target line\nfirst\naccepted line\nlast\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "target merge")
+	current := gitRun("rev-parse", "HEAD")
+	changed, err := greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 3, 3)
+	if err != nil || changed {
+		t.Fatalf("unchanged accepted line changed=%t err=%v; want unchanged", changed, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("target line\nfirst\naccepted line\nchanged last\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "change line inside finding range")
+	current = gitRun("rev-parse", "HEAD")
+	changed, err = greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 2, 4)
+	if err != nil || !changed {
+		t.Fatalf("multi-line finding changed=%t err=%v; want changed when an end line changed", changed, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("target line\nfirst\nchanged line\nlast\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun("add", ".")
+	gitRun("commit", "-qm", "change accepted line")
+	current = gitRun("rev-parse", "HEAD")
+	changed, err = greenhouseFindingChangedSinceAccepted(context.Background(), repo, accepted, current, "main.go", 3, 3)
+	if err != nil || !changed {
+		t.Fatalf("changed accepted line changed=%t err=%v; want changed", changed, err)
+	}
+}
+
+func TestAcceptedGreenhouseHeadUsesTheMatchingRepositoryHistory(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	accepted := f.headSHA
+	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, accepted), Question: "Accept this exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err = f.db.AnswerDecision(ctx, f.project.ID, decision.ID, "accept-head", "Accept this exact head.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, decision.ID, []string{accepted}, decision.UserQuote, "P1", "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	foreignHead := strings.Repeat("b", 40)
+	foreignDecision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, foreignHead), Question: "Accept another exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignDecision, err = f.db.AnswerDecision(ctx, f.project.ID, foreignDecision.ID, "accept-head", "Accept this other repository head.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, foreignDecision.ID, []string{foreignHead}, foreignDecision.UserQuote, "P1", "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "cat-file", "-e", accepted+"^{commit}")
+	gitTest(t, f.repo, "merge-base", "--is-ancestor", accepted, accepted)
+	got, err := acceptedGreenhouseHead(ctx, f.db, f.task.ID, f.repo, accepted)
+	if err != nil || got != accepted {
+		t.Fatalf("accepted head for %s=%q err=%v; want repository head %s", f.project.Name, got, err, accepted)
+	}
+}
+
+func TestAcceptedFindingFollowupSupportsGitLab(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	gitTest(t, f.repo, "config", "remote.origin.url", "https://gitlab.com/acme/shop.git")
+	fakeBin := filepath.Join(f.root, "gitlab-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	apiLog := filepath.Join(f.root, "glab.log")
+	fakeGlab := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> \"%s\"\ncase \"$*\" in\n  *'/issues?state=opened'*) printf '[]\\n' ;;\n  *'/issues') printf '{\\\"iid\\\":99}\\n' ;;\n  *) exit 1 ;;\nesac\n", apiLog)
+	if err := os.WriteFile(filepath.Join(fakeBin, "glab"), []byte(fakeGlab), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	findings := []store.ProviderFinding{{Key: "G-2", Severity: "P1", Path: "worker.go", Line: 17, Excerpt: "accepted finding", Guidance: "fix later"}}
+	err := createAcceptedFindingFollowup(context.Background(), greenhouseMember{name: "shop", root: f.repo}, f.task, f.headSHA, findings, config.Config{})
+	if err != nil {
+		t.Fatalf("file GitLab follow-up issue: %v", err)
+	}
+	calls, err := os.ReadFile(apiLog)
+	if err != nil || !strings.Contains(string(calls), "--method POST") || !strings.Contains(string(calls), "/issues") || !strings.Contains(string(calls), "worker.go:17") {
+		t.Fatalf("GitLab issue API calls=%q err=%v", calls, err)
+	}
+}
+
+func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(f.worktree, "change.txt"), []byte("worker line 1\nworker line 2\nworker line 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.worktree, "add", "change.txt")
+	gitTest(t, f.worktree, "commit", "-m", "prepare multi-line accepted finding")
+	accepted := strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	decision, err := f.db.RaiseDecision(ctx, store.DecisionRequest{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "review_cap", Origin: reviewCapOrigin(f.task, accepted), Question: "Accept this exact head?", Options: []string{"accept-head"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err = f.db.AnswerDecision(ctx, f.project.ID, decision.ID, "accept-head", "Accept this exact head.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordReviewDisposition(ctx, f.task.ID, decision.ID, []string{accepted}, decision.UserQuote, "P1", "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.worktree, "target.txt"), []byte("target merge\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.worktree, "add", "target.txt")
+	gitTest(t, f.worktree, "commit", "-m", "merge target")
+	current := strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	fakeBin := filepath.Join(f.root, "issue-bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	issueLog := filepath.Join(f.root, "issue.log")
+	fakeGH := fmt.Sprintf("#!/bin/sh\ncase \"$1 $2\" in\n  'issue list') printf '[]\\n' ;;\n  'issue create') printf '%%s\\n' \"$*\" > \"%s\"; printf 'https://github.com/acme/shop/issues/99\\n' ;;\n  *) exit 1 ;;\nesac\n", issueLog)
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(fakeGH), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result := greenhouse.RoundResult{Grant: "shop/t1/shop/r1", Result: &greenhouse.HostResult{
+		Head: current, Target: accepted, Verdict: "findings",
+		Findings: []greenhouse.Finding{{ID: "G-1", Priority: "P1", File: "change.txt", Start: 1, End: 3, Explanation: "Previously accepted issue", Action: "Track follow-up", Head: current}},
+	}}
+	member := greenhouseMember{name: f.project.Name, root: f.repo, worktree: f.worktree}
+	recorded, verdict, err := recordGreenhouseVerdict(ctx, f.db, f.task, member, f.root, "P1", config.Config{}, result)
+	if err != nil || !recorded || verdict.Blocking != 0 {
+		t.Fatalf("record accepted-code findings Verdict: recorded=%t blocking=%d err=%v", recorded, verdict.Blocking, err)
+	}
+	var reviewCapDecisions int
+	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decisions WHERE task_id=? AND kind='review_cap'`, f.task.ID).Scan(&reviewCapDecisions); err != nil || reviewCapDecisions != 1 {
+		t.Fatalf("review_cap Decisions=%d err=%v; want only the accepted Decision", reviewCapDecisions, err)
+	}
+	passed, err := f.db.GreenhouseGatePass(ctx, f.task.ID, f.project.Name, current, "P1")
+	if err != nil || !passed {
+		t.Fatalf("Greenhouse gate pass=%t err=%v; want pass", passed, err)
+	}
+	issue, err := os.ReadFile(issueLog)
+	if err != nil || !strings.Contains(string(issue), "Follow up Greenhouse findings") || !strings.Contains(string(issue), "change.txt:1") {
+		t.Fatalf("follow-up issue command=%q err=%v", issue, err)
+	}
+	if err := os.WriteFile(filepath.Join(f.worktree, "change.txt"), []byte("worker line 1\nworker line 2\nchanged line 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.worktree, "add", "change.txt")
+	gitTest(t, f.worktree, "commit", "-m", "change accepted line")
+	changedHead := strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	result.Grant = "shop/t1/shop/r2"
+	result.Result.Head = changedHead
+	result.Result.Findings[0].Head = changedHead
+	recorded, verdict, err = recordGreenhouseVerdict(ctx, f.db, f.task, member, f.root, "P1", config.Config{}, result)
+	if err != nil || !recorded || verdict.Blocking != 1 {
+		t.Fatalf("record changed-code findings Verdict: recorded=%t blocking=%d err=%v; want blocking", recorded, verdict.Blocking, err)
+	}
+}
+
 func TestGreenhouseStaleHeadInstructionRequestsReviewWithoutPR(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
