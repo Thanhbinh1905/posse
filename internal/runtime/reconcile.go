@@ -197,6 +197,18 @@ func reconcileWorkDeferred(ctx context.Context) error {
 	return nil
 }
 
+func executorSuspended(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	deliveries, err := db.TaskDeliveries(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(deliveries) == 0 {
+		return false, nil
+	}
+	policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
+	return policy == "suspend", err
+}
+
 func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
 	var notices []store.Notice
 	waitingHeavy := heavy.IsWaitingTask(filepath.Dir(db.Path), project.Name, taskID(task.Seq), task.ContainmentMarker)
@@ -227,6 +239,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	}
 	if !found {
 		if task.State == store.StateDone || task.State == store.StateMerging {
+			suspended, err := executorSuspended(ctx, db, task)
+			if err != nil || suspended {
+				return nil, err
+			}
 			return nil, db.CreateWorkerExitedNotice(ctx, task, now)
 		}
 		groupedWorker := !project.IsWorkspace() && project.HerdrWorkspaceID != "" && task.HerdrWorkspaceID != ""
@@ -266,6 +282,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
 			if task.State == store.StateDone || task.State == store.StateMerging {
+				suspended, err := executorSuspended(ctx, db, task)
+				if err != nil || suspended {
+					return nil, err
+				}
 				return nil, db.CreateWorkerExitedNotice(ctx, task, now)
 			}
 			err := markLost(ctx, db, task, "Worker has been absent for two minutes", now, &notices)
