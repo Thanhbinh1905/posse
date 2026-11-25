@@ -1139,6 +1139,10 @@ func TestGreenhouseReviewDoesNotStartForDoneTaskWithNoCommittedDiff(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	signals, err := f.db.TaskSignals(context.Background(), f.task.ID, 1)
+	if err != nil || len(signals) != 1 || strings.Contains(signals[0].DataJSON, "greenhouse_pending_head") {
+		t.Fatalf("no-change done Signal data = %+v, %v; want no pending review head", signals, err)
+	}
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)
