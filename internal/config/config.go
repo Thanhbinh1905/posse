@@ -230,36 +230,34 @@ type Budget struct {
 const DefaultKnowledgeBudgetBytes = 8192
 
 type Config struct {
-	ReviewParallel      string                     `toml:"review_parallel" json:"review_parallel"`
-	Repositories        map[string]Repository      `toml:"repositories" json:"repositories"`
-	ReviewProvider      string                     `toml:"review_provider" json:"review_provider"`
-	Lowkey              Lowkey                     `toml:"lowkey" json:"lowkey"`
-	Notify              Notify                     `toml:"notify" json:"notify"`
-	Knowledge           Knowledge                  `toml:"knowledge" json:"knowledge"`
-	Budget              Budget                     `toml:"budget" json:"budget"`
-	Skills              Skills                     `toml:"skills" json:"skills"`
-	Identity            Identity                   `toml:"identity" json:"identity"`
-	Lead                Lead                       `toml:"lead" json:"lead"`
-	Defaults            Defaults                   `toml:"defaults" json:"defaults"`
-	ReviewLoop          ReviewLoop                 `toml:"review_loop" json:"review_loop"`
-	CILoop              CILoop                     `toml:"ci_loop" json:"ci_loop"`
-	FullPipeline        FullPipeline               `toml:"full_pipeline" json:"full_pipeline"`
-	Pipeline            Pipeline                   `toml:"pipeline" json:"pipeline"`
-	Pool                Pool                       `toml:"pool" json:"pool"`
-	Retention           Retention                  `toml:"retention" json:"retention"`
-	Research            Research                   `toml:"research" json:"research"`
-	WorkerGoCache       WorkerGoCache              `toml:"worker_go_cache" json:"worker_go_cache"`
-	Up                  Up                         `toml:"up" json:"up"`
-	Kinds               map[string]Kind            `toml:"kinds" json:"kinds"`
-	Profiles            map[string]Profile         `toml:"profiles" json:"profiles"`
-	Workflows           map[string]WorkflowProfile `toml:"workflows" json:"workflows"`
-	WorkflowSources     map[string]string          `toml:"-" json:"-"`
-	Dispatch            []Rule                     `toml:"dispatch_rules" json:"dispatch"`
-	DispatchDefault     DispatchDefault            `toml:"dispatch_default" json:"dispatch_default"`
-	Autonomy            Autonomy                   `toml:"autonomy" json:"autonomy"`
-	Files               []string                   `toml:"-" json:"-"`
-	LeadLanguageDefault bool                       `toml:"-" json:"-"`
-	Warnings            []string                   `toml:"-" json:"-"`
+	ReviewParallel      string                `toml:"review_parallel" json:"review_parallel"`
+	Repositories        map[string]Repository `toml:"repositories" json:"repositories"`
+	ReviewProvider      string                `toml:"review_provider" json:"review_provider"`
+	Lowkey              Lowkey                `toml:"lowkey" json:"lowkey"`
+	Notify              Notify                `toml:"notify" json:"notify"`
+	Knowledge           Knowledge             `toml:"knowledge" json:"knowledge"`
+	Budget              Budget                `toml:"budget" json:"budget"`
+	Skills              Skills                `toml:"skills" json:"skills"`
+	Identity            Identity              `toml:"identity" json:"identity"`
+	Lead                Lead                  `toml:"lead" json:"lead"`
+	Defaults            Defaults              `toml:"defaults" json:"defaults"`
+	ReviewLoop          ReviewLoop            `toml:"review_loop" json:"review_loop"`
+	CILoop              CILoop                `toml:"ci_loop" json:"ci_loop"`
+	FullPipeline        FullPipeline          `toml:"full_pipeline" json:"full_pipeline"`
+	Pipeline            Pipeline              `toml:"pipeline" json:"pipeline"`
+	Pool                Pool                  `toml:"pool" json:"pool"`
+	Retention           Retention             `toml:"retention" json:"retention"`
+	Research            Research              `toml:"research" json:"research"`
+	WorkerGoCache       WorkerGoCache         `toml:"worker_go_cache" json:"worker_go_cache"`
+	Up                  Up                    `toml:"up" json:"up"`
+	Kinds               map[string]Kind       `toml:"kinds" json:"kinds"`
+	Profiles            map[string]Profile    `toml:"profiles" json:"profiles"`
+	Dispatch            []Rule                `toml:"dispatch_rules" json:"dispatch"`
+	DispatchDefault     DispatchDefault       `toml:"dispatch_default" json:"dispatch_default"`
+	Autonomy            Autonomy              `toml:"autonomy" json:"autonomy"`
+	Files               []string              `toml:"-" json:"-"`
+	LeadLanguageDefault bool                  `toml:"-" json:"-"`
+	Warnings            []string              `toml:"-" json:"-"`
 }
 
 type DispatchDefault struct {
@@ -520,7 +518,6 @@ func configFromMaps(globalPath string, global map[string]any, projectPath string
 	} else {
 		merged["dispatch_rules"] = globalRules
 	}
-	removeEmptyWorkflowProfiles(merged)
 	if globalDefault != "" {
 		merged["dispatch_default"] = map[string]any{"use": globalDefault}
 	}
@@ -555,7 +552,6 @@ func configFromMaps(globalPath string, global map[string]any, projectPath string
 	if projectPath != "" {
 		cfg.Files = append(cfg.Files, projectPath)
 	}
-	cfg.WorkflowSources = workflowSources(cfg.Workflows, globalPath, global, projectPath, project)
 	cfg.normalizeBuiltins()
 	if cfg.Autonomy.Yolo {
 		cfg.Autonomy.Review = "lead"
@@ -653,37 +649,12 @@ func applyProjectScalars(project map[string]any) map[string]any {
 	return project
 }
 
-func removeEmptyWorkflowProfiles(values map[string]any) {
-	workflows, ok := values["workflows"].(map[string]any)
-	if !ok {
-		return
-	}
-	for name, profile := range workflows {
-		if table, ok := profile.(map[string]any); ok && len(table) == 0 {
-			delete(workflows, name)
-		}
-	}
-}
-
 func mergeMaps(base, override map[string]any) map[string]any {
 	result := make(map[string]any, len(base)+len(override))
 	for key, value := range base {
 		result[key] = clone(value)
 	}
 	for key, value := range override {
-		if key == "workflows" {
-			baseWorkflows, _ := result[key].(map[string]any)
-			overrideWorkflows, _ := value.(map[string]any)
-			mergedWorkflows := clone(baseWorkflows).(map[string]any)
-			for name, profile := range overrideWorkflows {
-				if table, ok := profile.(map[string]any); ok && len(table) == 0 {
-					continue
-				}
-				mergedWorkflows[name] = clone(profile)
-			}
-			result[key] = mergedWorkflows
-			continue
-		}
 		if baseMap, ok := result[key].(map[string]any); ok {
 			if overrideMap, overrideOK := value.(map[string]any); overrideOK {
 				result[key] = mergeMaps(baseMap, overrideMap)
@@ -751,7 +722,6 @@ func defaultMap() map[string]any {
 			"opencode": map[string]any{"disabled": false, "auto_approve_args": []string{"--auto"}, "lead_auto_approve": true, "model_args": []string{"--model", "{model}"}, "resume_args": []string{"--session", "{session}"}, "notice_delivery": NoticeDeliveryOpenCodePlugin, "interrupt_keys": []string{"esc"}},
 		},
 		"profiles":         map[string]any{},
-		"workflows":        map[string]any{},
 		"dispatch_default": map[string]any{"use": ""},
 	}
 }
@@ -798,9 +768,6 @@ func (c *Config) normalizeBuiltins() {
 	}
 	if c.Profiles == nil {
 		c.Profiles = map[string]Profile{}
-	}
-	if c.Workflows == nil {
-		c.Workflows = map[string]WorkflowProfile{}
 	}
 	if c.Repositories == nil {
 		c.Repositories = map[string]Repository{}

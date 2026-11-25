@@ -17,20 +17,6 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
-func resolveWorkflowSelection(cfg config.Config, name string) (*config.WorkflowSelection, error) {
-	if name == "" {
-		return nil, nil
-	}
-	workflow, found, err := cfg.ResolveWorkflow(name)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		return nil, unknownWorkflow(name, "")
-	}
-	return &workflow, nil
-}
-
 func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) (taskplan.Launch, error) {
 	kind, ok := kinds[resolution.Resolved.Kind]
 	if !ok {
@@ -50,7 +36,7 @@ func frozenLaunch(resolution dispatch.Resolution, kinds map[string]config.Kind) 
 		ConfiguredModel: identity.ConfiguredModel, ModelKnown: identity.ModelKnown}, nil
 }
 
-func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice, workflow *config.WorkflowSelection) (taskplan.Plan, error) {
+func resolveTaskPlan(ctx context.Context, home string, project store.Project, cfg config.Config, task store.Task, resolution dispatch.Resolution, briefPath string, briefData []byte, members []taskMember, choice *taskplan.UserChoice) (taskplan.Plan, error) {
 	brief, err := dispatch.ParseBriefText(string(briefData))
 	if err != nil {
 		return taskplan.Plan{}, err
@@ -134,7 +120,7 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		Paths:           taskplan.Paths{Scratch: filepath.Join(root, "scratch", project.Name, "{task}"), Output: filepath.Join(root, "projects", project.Name, "tasks", "{task}")},
 		WorkflowJobs:    cfg.FullPipeline.RunWorkflows,
 		ValidationLoops: &taskplan.ValidationLoops{Review: cfg.ReviewLoop, CI: cfg.CILoop, ReviewProvider: cfg.ReviewProvider, ReviewParallel: cfg.ReviewParallel},
-		MergeMethod:     cfg.Defaults.MergeMethod, Workflow: workflow, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup},
+		MergeMethod:     cfg.Defaults.MergeMethod, Pool: config.Pool{Clean: cfg.Pool.Clean, Setup: cfg.Pool.Setup},
 		DeleteBranchOnMerge: cfg.Defaults.DeleteBranchOnMerge, TaskBudgetTokens: cfg.Budget.TaskTokens})
 }
 
@@ -182,7 +168,7 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
-	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + roleSkillProtocol(plan, task) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(home, project, task, brief, launchPath, plan.Paths.Scratch, plan.Execution.RootContext) + roleSkillProtocol(plan, task) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	contents = appendKnowledgeInstructions(contents, project, planKnowledge(plan))
 	return writeFile(launchPath, []byte(contents))

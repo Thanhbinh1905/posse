@@ -18,7 +18,7 @@ func (db *DB) IdleSlotTasks(ctx context.Context, projectID int64, idleFor time.D
 SELECT tasks.id FROM tasks
 WHERE tasks.project_id=? AND tasks.type='change' AND tasks.state IN ('done','merging')
 AND NOT EXISTS (SELECT 1 FROM notices WHERE notices.task_id=tasks.id AND notices.acked_at IS NULL)
-AND NOT EXISTS (SELECT 1 FROM decisions WHERE decisions.task_id=tasks.id AND decisions.answered_at=0)
+AND NOT EXISTS (SELECT 1 FROM decisions WHERE decisions.task_id=tasks.id AND decisions.kind<>'workflow_stage' AND decisions.answered_at=0)
 AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.task_id=tasks.id AND messages.status IN ('queued','claimed','interrupting','submitting'))
 AND NOT (
   tasks.landing_mode IN ('pr','greenhouse')
