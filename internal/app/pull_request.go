@@ -1566,6 +1566,7 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			}
 			continue
 		}
+		ciFailures := failures
 		retainGreenObservation := false
 		if observation.State == "OPEN" && (cfg.Defaults.RequireCurrentTarget || observation.Mergeable == "CONFLICTING" || observation.Mergeable == "BEHIND" || fullPipelineSelected(task, "")) {
 			freshness, freshnessErr := inspectPRTargetFreshness(ctx, project.Root, taskTargetBranch(project, task), observation.HeadSHA)
@@ -1637,7 +1638,6 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 				continue
 			}
 		}
-		ciFailures := failures
 		if forge.Kind != "gitlab" && pull.checksRunning() {
 			ciFailures = nil
 		}
