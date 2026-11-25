@@ -197,7 +197,7 @@ func reconcileWorkDeferred(ctx context.Context) error {
 	return nil
 }
 
-func executorSuspended(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
 	deliveries, err := db.TaskDeliveries(ctx, task.ID)
 	if err != nil {
 		return false, err
@@ -206,7 +206,7 @@ func executorSuspended(ctx context.Context, db *store.DB, task store.Task) (bool
 		return false, nil
 	}
 	policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
-	return policy == "suspend", err
+	return policy == "suspend" || policy == "release", err
 }
 
 func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
@@ -239,8 +239,8 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	}
 	if !found {
 		if task.State == store.StateDone || task.State == store.StateMerging {
-			suspended, err := executorSuspended(ctx, db, task)
-			if err != nil || suspended {
+			stoppedIntentionally, err := executorStoppedIntentionally(ctx, db, task)
+			if err != nil || stoppedIntentionally {
 				return nil, err
 			}
 			return nil, db.CreateWorkerExitedNotice(ctx, task, now)
@@ -282,8 +282,8 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
 			if task.State == store.StateDone || task.State == store.StateMerging {
-				suspended, err := executorSuspended(ctx, db, task)
-				if err != nil || suspended {
+				stoppedIntentionally, err := executorStoppedIntentionally(ctx, db, task)
+				if err != nil || stoppedIntentionally {
 					return nil, err
 				}
 				return nil, db.CreateWorkerExitedNotice(ctx, task, now)
