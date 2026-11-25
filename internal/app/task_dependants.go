@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -29,7 +30,14 @@ func queuedTaskDependants(ctx context.Context, db *store.DB, projectID int64, pr
 			continue
 		}
 		for _, dependency := range plan.Dependencies {
-			if dependency.TaskID == predecessorID {
+			if dependency.TaskID != predecessorID {
+				continue
+			}
+			unmet, err := db.UnmetTaskDependencies(ctx, projectID, []dispatch.Dependency{dependency})
+			if err != nil {
+				return nil, err
+			}
+			if len(unmet) > 0 {
 				dependants = append(dependants, task)
 				break
 			}

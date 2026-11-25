@@ -118,6 +118,44 @@ func (s *Service) raiseReviewCapNotice(ctx context.Context, db *store.DB, projec
 	return createReviewCapNotice(ctx, db, project, task, binding, used, max)
 }
 
+func refreshReviewCapNoticeForCandidate(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
+	if plan == nil || plan.ValidationLoops == nil || !plan.ValidationLoops.Review.Enabled {
+		return nil
+	}
+	usage, err := db.ReviewCapUsage(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	maxRounds := plan.ValidationLoops.MaxReviewRounds()
+	used := reviewCapUsed(task, usage)
+	if used < maxRounds {
+		return nil
+	}
+	targets, err := changeCandidateTargets(ctx, db, project, task)
+	if err != nil {
+		return err
+	}
+	if err := ensureReviewCarry(ctx, db, project, task, targets); err != nil {
+		return err
+	}
+	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets)
+	if err != nil {
+		return err
+	}
+	if evidence.Complete {
+		return nil
+	}
+	binding, err := newReviewCapBinding(targets)
+	if err != nil {
+		return err
+	}
+	return createReviewCapNotice(ctx, db, project, task, binding, used, maxRounds)
+}
+
 func createReviewCapNotice(ctx context.Context, db *store.DB, project store.Project, task store.Task, binding reviewCapBinding, used, max int) error {
 	head := binding.Head
 	if err := db.ObsoleteStaleReviewCapDecisions(ctx, task.ID, reviewCapOrigin(task, head)); err != nil {

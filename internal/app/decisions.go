@@ -379,6 +379,10 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 		return err
 	}
 	quote := parsed.Flags["user-approved"]
+	trimmedQuote := strings.TrimSpace(quote)
+	if len(trimmedQuote) >= 2 && strings.HasPrefix(trimmedQuote, "<") && strings.HasSuffix(trimmedQuote, ">") {
+		return axi.Failure("user_approval_placeholder", "--user-approved requires the User's actual words, not a placeholder", false)
+	}
 	if _, supplied := parsed.Flags["lead-reason"]; supplied && (strings.TrimSpace(parsed.Flags["lead-reason"]) == "" || quote != "") {
 		return axi.Usage("--lead-reason requires a non-empty reason and cannot be combined with --user-approved")
 	}

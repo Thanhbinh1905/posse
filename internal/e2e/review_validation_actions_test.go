@@ -791,16 +791,23 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--user-approved", quote); code != 0 {
 		t.Fatalf("record User's cap choice: %d %s", code, output)
 	}
+	if err := f.db.Transition(context.Background(), change.ID, store.StateDone, store.StateWorking, "worker", "Resume after acceptance"); err != nil {
+		t.Fatal(err)
+	}
+	applyOutput := ""
 	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "accepted-head") {
 		t.Fatalf("apply exact-head acceptance: %d %s", code, output)
+	} else {
+		applyOutput = output
+	}
+	for _, required := range []string{"posse validate test", "posse validate docs", "posse validate lint", "posse publish"} {
+		if !strings.Contains(applyOutput, required) {
+			t.Fatalf("accept-head apply output omits next step %q: %s", required, applyOutput)
+		}
 	}
 	var dispositionHead, recordedQuote string
 	if err := f.db.QueryRowContext(context.Background(), `SELECT head_sha,user_quote FROM review_dispositions WHERE ship_task_id=? ORDER BY id DESC LIMIT 1`, change.ID).Scan(&dispositionHead, &recordedQuote); err != nil || dispositionHead != candidate.CandidateSHA || recordedQuote != quote {
 		t.Fatalf("accepted-head disposition=(%s,%q), want (%s,%q), err=%v", dispositionHead, recordedQuote, candidate.CandidateSHA, quote, err)
-	}
-	requireReviewPassNextStep(t, f, f.leadEnv, f.repo, change, candidatePath)
-	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "signal", "working", "Resume local validation"); code != 0 {
-		t.Fatalf("resume validation: %d %s", code, output)
 	}
 	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "publish", "Candidate summary"); code == 0 || !strings.Contains(output, "validation_stage_required") {
 		t.Fatalf("accept-head incorrectly skipped local stages: %d %s", code, output)
@@ -883,6 +890,35 @@ func TestReviewCapRethinkStartsAChangeWithInheritedFindings(t *testing.T) {
 		t.Fatalf("inherited findings=%d err=%v, want both reviewed patterns", inherited, err)
 	}
 	assertTaskBranchAbsentOnBareOrigin(t, f, change.Branch)
+}
+
+func TestReviewCapFinalFixAllowsOnlyNonBlockingFindings(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	runPosse(t, f.binary, f.repo, f.env, "config", "set", "review_provider", "builtin", "--project", "shop")
+	_, _, seq := startPrivateReviewChange(t, f, "1")
+	recordBlockingRepairThenFinding(t, f, seq, "")
+	change := f.mustTask(t, seq)
+	plan, err := change.AdmittedPlan()
+	if err != nil || plan.ReviewProvider != store.BuiltinReviewProvider {
+		t.Fatalf("admitted review provider=%v err=%v, want builtin", plan, err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE review_findings SET severity='P3' WHERE ship_task_id=? AND state IN ('open','fix_claimed','unverified','disputed','regressed')`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	var severity, state string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT severity,state FROM review_findings WHERE ship_task_id=? AND state IN ('open','fix_claimed','unverified','disputed','regressed') LIMIT 1`, change.ID).Scan(&severity, &state); err != nil || severity != "P3" || state != "open" {
+		t.Fatalf("remaining finding severity=%q state=%q err=%v", severity, state, err)
+	}
+	var decisionID int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0`, change.ID).Scan(&decisionID); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "final-fix", "--user-approved", "Allow one final repair of the remaining non-blocking findings."); code != 0 {
+		t.Fatalf("answer final-fix: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "final-fix-queued") {
+		t.Fatalf("apply final-fix to non-blocking findings: %d %s", code, output)
+	}
 }
 
 func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {

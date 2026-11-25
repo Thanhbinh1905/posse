@@ -114,6 +114,45 @@ func TestFullPipelinePassCarriesAcrossCleanTargetRefreshOfMergedCandidate(t *tes
 	}
 }
 
+func TestReviewCapDecisionRefreshesWhenPublishSubmitsANewerCandidate(t *testing.T) {
+	f := reviewIdentityFixture(t)
+	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")
+	recordBlockingRepairThenFinding(t, f, changeSeq, "")
+	change := f.mustTask(t, changeSeq)
+	if err := os.WriteFile(filepath.Join(candidatePath, "review-issue.txt"), []byte("changed after the final review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, candidatePath, "add", "review-issue.txt")
+	gitTest(t, f.env, candidatePath, "commit", "-m", "unreviewed final candidate")
+	workerEnv := setEnv(f.env, "HERDR_PANE_ID", change.PaneID)
+	workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "signal", "working", "Submit the new candidate head"); code != 0 {
+		t.Fatalf("reopen Change Task: %d %s", code, output)
+	}
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "New candidate"); code != 0 {
+		t.Fatalf("publish new candidate: %d %s", code, output)
+	}
+	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "decisions"); code != 0 || !strings.Contains(output, "review_cap") {
+		t.Fatalf("reconcile refreshed Review cap Decision: %d %s", code, output)
+	}
+	var currentDecision int64
+	var currentOrigin string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id,origin FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&currentDecision, &currentOrigin); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(currentOrigin, candidate.CandidateSHA) {
+		t.Fatalf("current Review cap origin=%q, candidate=%s", currentOrigin, candidate.CandidateSHA)
+	}
+	var oldOpen int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0 AND id<>?`, change.ID, currentDecision).Scan(&oldOpen); err != nil || oldOpen != 0 {
+		t.Fatalf("stale Review cap Decisions remain open: %d %v", oldOpen, err)
+	}
+}
+
 // t718: the User accepted a head at the Review cap (Decision 1001); a
 // merge-only target refresh must carry that acceptance instead of raising a
 // second review_cap Decision (1004).
