@@ -391,11 +391,16 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 				return err
 			}
 			help := []any{}
-			if fullPipelineSelected(task, "") && task.State == store.StateWorking {
+			if task.State == store.StateWorking {
 				for _, target := range actual.Targets {
 					repoFlag := ""
+					repository := ""
 					if project.IsWorkspace() {
-						repoFlag = " --repo " + target.Repository
+						repository = target.Repository
+						repoFlag = " --repo " + repository
+					}
+					if !fullPipelineSelected(task, repository) {
+						continue
 					}
 					help = append(help, fmt.Sprintf("In the private candidate checkout for %s, run `posse validate test%s`, `posse validate docs%s` and `posse validate lint%s`, then run `posse publish%s` to promote it. These required stages are not waived by accepting the head.", shortSHA(target.Commit), repoFlag, repoFlag, repoFlag, repoFlag))
 				}
