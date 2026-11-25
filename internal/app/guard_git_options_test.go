@@ -17,6 +17,30 @@ func TestWorkerGitGuardRefusesGitAfterUnresolvedCd(t *testing.T) {
 	}
 }
 
+func TestWorkerGitGuardDoesNotRunGitFromPATHWhileChecking(t *testing.T) {
+	scope, _ := guardFixture(t)
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-ran")
+	fakeGit := filepath.Join(bin, "git")
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nprintf ran > \""+marker+"\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	scope.env = append(scope.env, "PATH="+bin)
+	scope.cwd = repo
+	scope.writable = append(scope.writable, repo)
+	if _, reason := guardCommand(`cd "$(git rev-parse --show-toplevel)" && git status`, scope); reason.rule != "" {
+		t.Fatalf("guard refused the Sandbox Git command: %#v", reason)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("guard executed the PATH-provided Git program: %v", err)
+	}
+}
+
 func TestWorkerGitGuardAcceptsDocumentedReadOptions(t *testing.T) {
 	scope, _ := guardFixture(t)
 	for _, command := range []string{"git -P log", "git -p log", "git --no-optional-locks status", "git --no-replace-objects log", "git --literal-pathspecs log", "git --exec-path", "git -C . -P diff", "git -C $(pwd) diff"} {

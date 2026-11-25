@@ -1,7 +1,6 @@
 package app
 
 import (
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -125,9 +124,12 @@ func gitRemoteWriteDepth(e *shellEnv, args []string, literal []bool, depth int) 
 	}
 	alias := aliases[subcommand]
 	if alias == "" && e.cwd != "" {
-		output, err := exec.Command("git", "-C", e.cwd, "config", "--get", "alias."+subcommand).Output()
-		if err == nil {
-			alias = strings.TrimSpace(string(output))
+		configured, found, known := gitConfigAlias(e, e.cwd, subcommand)
+		if !known {
+			return true
+		}
+		if found {
+			alias = configured
 		}
 	}
 	if alias != "" {
