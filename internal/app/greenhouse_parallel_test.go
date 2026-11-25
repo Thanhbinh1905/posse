@@ -1390,6 +1390,10 @@ func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
 			}
 		})
 	}
+	commandErr := exec.Command("sh", "-c", "exit 1").Run()
+	if !transientGreenhouseFailure(fmt.Errorf("greenhouse axi: %w", commandErr)) {
+		t.Fatal("transientGreenhouseFailure(non-zero greenhouse subprocess) = false")
+	}
 	terminal := &greenhouse.TerminalReviewError{Status: "failed", Reason: "quota exceeded; service unavailable; gateway timeout"}
 	if transientGreenhouseFailure(terminal) {
 		t.Fatalf("transientGreenhouseFailure(%q) = true for a terminal review", terminal)

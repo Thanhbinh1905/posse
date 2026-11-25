@@ -230,8 +230,12 @@ exec '%s' "$@"
 	}
 
 	output, err := c.posse(c.env, f.repo, "_greenhouse", "review", "t1", "--reviewer-backend", "pi", "--reviewer-model", "fixture/model", "--timeout", "60000", "--json")
-	if err == nil || !strings.Contains(output, "greenhouse_failed") {
-		t.Fatalf("exhausted transport retry result: %v\n%s", err, output)
+	if err != nil {
+		t.Fatalf("exhausted transport retry: %v\n%s", err, output)
+	}
+	var retrying map[string]any
+	if err := json.Unmarshal([]byte(output), &retrying); err != nil || retrying["outcome"] != "retrying" {
+		t.Fatalf("exhausted transport retry result = %v, %v; want retrying", retrying, err)
 	}
 	c.waitInvocations(t, 1)
 	assertGreenhouseRequestStats(t, f, c.env, 1, 0)

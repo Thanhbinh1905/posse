@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os/exec"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +40,10 @@ func transientGreenhouseFailure(err error) bool {
 	var terminalErr *greenhouse.TerminalReviewError
 	if errors.As(err, &terminalErr) {
 		return false
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) && strings.Contains(strings.ToLower(err.Error()), "greenhouse axi:") {
+		return true
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) {
