@@ -12,6 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/heavy"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -227,7 +228,14 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 	if plan != nil {
 		admission = "admitted"
 	}
+	project, err := db.ProjectByID(ctx.Context, task.ProjectID)
+	if err != nil {
+		return err
+	}
 	output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}}
+	if heavy.IsWaiting(home, project.Name, taskIDString(task.Seq)) {
+		output = append(output, axi.Field{Key: "waiting", Value: "heavy slot"}, axi.Field{Key: "holders", Value: heavy.HolderSummary()})
+	}
 	if greenhouse, err := greenhouseTaskStatus(ctx.Context, db, task, time.Now()); err != nil {
 		return err
 	} else if greenhouse != "" {
@@ -247,6 +255,20 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 			"title": finding.Title, "state": finding.State, "severity": finding.Severity,
 			"repository": finding.Repository, "path": finding.Path, "symbol": finding.Symbol,
 			"fix_guidance": finding.FixGuidance,
+		})
+	}
+	providerFindings, err := db.ProviderFindingsForTask(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, finding := range providerFindings {
+		if !reviewFindingActionable(store.ReviewFindingDetail{State: finding.State}) {
+			continue
+		}
+		openFindings = append(openFindings, map[string]any{
+			"id": "G-" + strconv.Itoa(finding.FindingSeq), "pattern": "P-" + strconv.Itoa(finding.PatternSeq),
+			"title": finding.Title, "state": finding.State, "severity": finding.Severity,
+			"repository": finding.Repository, "path": finding.Path, "fix_guidance": finding.FixGuidance,
 		})
 	}
 	output = append(output, axi.Field{Key: "open_findings", Value: openFindings})

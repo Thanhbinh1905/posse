@@ -15,6 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 type workerFixture struct {
@@ -678,6 +679,42 @@ func TestBriefShowsAcceptedTurnTokenAfterWorkingAndReviewFixInstructions(t *test
 	}
 }
 
+func TestWorkerStatusListsOpenGreenhousePatterns(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(context.Background(), fixture.sandbox, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: task.ID, Repository: fixture.project.Name, Provider: store.GreenhouseReviewProvider,
+		Protocol: "2", Grant: "shop/t1/shop/r1", Head: head, Target: head, ReviewBase: head,
+		Outcome: "findings", Blocking: 2, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{
+			{Key: "first", Severity: "P1", Origin: "introduced", Path: "internal/app/one.go", Line: 10, Excerpt: "first", Rule: "First rule", Guidance: "Fix first", Head: head},
+			{Key: "second", Severity: "P1", Origin: "introduced", Path: "internal/app/two.go", Line: 20, Excerpt: "second", Rule: "Second rule", Guidance: "Fix second", Head: head},
+		},
+	}
+	if recorded, err := db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record Greenhouse Verdict: recorded=%v err=%v", recorded, err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Chdir(fixture.sandbox)
+	service := testService(fixture.home, herdr.NewFake())
+	code, output := runCLI(t, service, "status")
+	if code != 0 || !strings.Contains(output, "P-1") || !strings.Contains(output, "P-2") {
+		t.Fatalf("Worker status = %d %s; want both Greenhouse patterns", code, output)
+	}
+}
+
 func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	ctx := context.Background()
@@ -759,9 +796,41 @@ func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 	}
 }
 
+func TestStatusReportsHeavyWaitAndSurvivingHolderPID(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	t.Chdir(fixture.sandbox)
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("POSSE_TASK_ID", "")
+	lockDir := filepath.Join(runtimeDir, "posse", "heavy")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wait := fmt.Sprintf(`{"pid":%d,"home":%q,"project":"shop","task":"t1"}`, os.Getpid(), fixture.home)
+	if err := os.WriteFile(filepath.Join(lockDir, "wait-424242.json"), []byte(wait), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(lockDir, "cpu-0.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	holder := fmt.Sprintf(`{"pid":%d,"project":"other","task":"t8","command":"go test"}`, os.Getpid())
+	if err := os.WriteFile(filepath.Join(lockDir, "cpu-0.json"), []byte(holder), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, testService(fixture.home, nil), "status", "--json")
+	if code != 0 || !strings.Contains(output, `"waiting":"heavy slot"`) || !strings.Contains(output, fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Fatalf("status exit=%d output=%s", code, output)
+	}
+}
+
 func TestWorkerProtocolRequiresIsolatedExperiments(t *testing.T) {
 	protocol := workerProtocol("/tmp/posse", store.Project{Name: "shop"}, store.Task{Seq: 3, Type: "change", MergeMode: "local"}, dispatch.Brief{DoneWhen: "done"}, "/tmp/launch.md", "/tmp/posse/scratch/shop/t3", "none")
-	for _, want := range []string{"# Worker protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "first run `posse signal working \"<reason>\"` and wait for success before acting", "Each delivered Lead instruction carries a new `turn` token in its Posse envelope; `done` must use the latest one", "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
+	for _, want := range []string{"# Worker protocol", "isolated Herdr server", "POSSE_HOME under a temp dir", "never touch panes, tabs or workspaces you did not create", "A `done` Signal is rejected while queued, claimed or interrupting Lead instructions remain undelivered", "Wrap heavy commands, including multi-package `go test`, every `-race` run, `scripts/preflight.sh` and E2E shard runs, with `posse heavy -- <command>`", "Wrap Greenhouse `cmd/eval run`, `judge` and `fix-run` with `posse heavy --class reviewer -- <command>`", "first run `posse signal working \"<reason>\"` and wait for success before acting", "Each delivered Lead instruction carries a new `turn` token in its Posse envelope; `done` must use the latest one", "Files passed to `--findings` and `--report` may be in this Worker's worktree or this Task's scratch directory (`/tmp/posse/scratch/shop/t3`)"} {
 		if !strings.Contains(protocol, want) {
 			t.Fatalf("Worker protocol lacks %q:\n%s", want, protocol)
 		}
