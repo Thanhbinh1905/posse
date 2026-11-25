@@ -524,6 +524,50 @@ func TestGreenhousePassQueuesPublicationForNeedsDecisionWorker(t *testing.T) {
 	}
 }
 
+func TestGreenhouseBlockingVerdictQueuesEveryFindingPattern(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	defer f.db.Close()
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider,
+		Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA,
+		ReviewBase: f.headSHA, Outcome: "findings", Blocking: 2, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{
+			{Key: "first", Severity: "P1", Origin: "introduced", Path: "one.go", Line: 1, Excerpt: "first", Guidance: "fix first", Rule: "First rule", Head: f.headSHA},
+			{Key: "second", Severity: "P2", Origin: "introduced", Path: "two.go", Line: 2, Excerpt: "second", Guidance: "fix second", Rule: "Second rule", Head: f.headSHA},
+		},
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
+	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "P-1") || !strings.Contains(messages[0].Body, "P-2") {
+		t.Fatalf("Review fix instructions = %+v, err=%v; want both finding patterns", messages, err)
+	}
+}
+
 func TestGreenhouseFindingsWithoutPriorReadinessDoNotWithdrawReadiness(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	defer f.db.Close()

@@ -249,6 +249,20 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 			"fix_guidance": finding.FixGuidance,
 		})
 	}
+	providerFindings, err := db.ProviderFindingsForTask(ctx.Context, task.ID)
+	if err != nil {
+		return err
+	}
+	for _, finding := range providerFindings {
+		if !reviewFindingActionable(store.ReviewFindingDetail{State: finding.State}) {
+			continue
+		}
+		openFindings = append(openFindings, map[string]any{
+			"id": "G-" + strconv.Itoa(finding.FindingSeq), "pattern": "P-" + strconv.Itoa(finding.PatternSeq),
+			"title": finding.Title, "state": finding.State, "severity": finding.Severity,
+			"repository": finding.Repository, "path": finding.Path, "fix_guidance": finding.FixGuidance,
+		})
+	}
 	output = append(output, axi.Field{Key: "open_findings", Value: openFindings})
 	if children, err := taskResearchViews(ctx.Context, db, task); err != nil {
 		return err
