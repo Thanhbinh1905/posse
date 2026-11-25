@@ -17,6 +17,8 @@ import (
 const ReconcileBudget = store.ObservationWriteBudget
 const AgentAbsentGrace = 2 * time.Minute
 
+type herdrAdapterKey struct{}
+
 type RunResult struct {
 	Snapshot           herdr.Snapshot
 	Notices            []store.Notice
@@ -62,7 +64,7 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
 		}
 	}
-	notices, err := ReconcileSnapshot(withTurnEndBaselines(withBackgroundJobDetector(budgetCtx, adapter), baselines), db, projectID, snapshot, now, idleAfter)
+	notices, err := ReconcileSnapshot(withTurnEndBaselines(context.WithValue(budgetCtx, herdrAdapterKey{}, adapter), baselines), db, projectID, snapshot, now, idleAfter)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
 		return result, errors.Join(returnedErr, err)
@@ -274,7 +276,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		serverStartedAt = snapshot.ServerStartedAt
 	}
 	idleSince := task.IdleSince
-	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") && !paneHasBackgroundJob(ctx, pane) {
+	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
 		if idleSince == 0 {
 			idleSince = now.UnixMilli()
 		}
@@ -368,11 +370,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 const blockedDialogLines = 15
 
 func blockedDialogFromContext(ctx context.Context, paneID string) string {
-	detector, _ := ctx.Value(backgroundJobsKey{}).(*backgroundJobDetector)
-	if detector == nil {
+	adapter, _ := ctx.Value(herdrAdapterKey{}).(herdr.Adapter)
+	if adapter == nil {
 		return ""
 	}
-	return BlockedDialog(ctx, detector.adapter, paneID)
+	return BlockedDialog(ctx, adapter, paneID)
 }
 
 // BlockedDialog returns the last lines of the blocked pane's screen, which
