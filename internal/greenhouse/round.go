@@ -148,11 +148,7 @@ func (d *Daemon) continueReview(ctx context.Context, round Round, v response, pe
 		return RoundResult{}, err
 	}
 	if replay.Outcome != "ok" && !delivered {
-		// The request never reached the daemon and its envelope is stale.
-		if err := ClearPending(round.Pending); err != nil {
-			return RoundResult{}, err
-		}
-		return d.startReview(ctx, round, v)
+		return RoundResult{Grant: pending.Grant}, replay.refusal("review")
 	}
 	if delivered && v.HostResult.Status == "paused" {
 		if _, err := d.call(ctx, round, v, pending.Grant, "resume", nil); err != nil {
@@ -236,8 +232,7 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 				return RoundResult{}, inspectErr
 			}
 			if !grantWasUsed(err, inspected, grant) {
-				_ = ClearPending(round.Pending)
-				return RoundResult{}, err
+				return RoundResult{Grant: grant}, err
 			}
 			settled, found, inspectErr := settledInspection(ctx, round, grant, inspected)
 			if inspectErr != nil {
@@ -258,8 +253,7 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 			}
 			return d.startReviewWithRecovery(ctx, round, refreshed, retries-1)
 		}
-		_ = ClearPending(round.Pending)
-		return RoundResult{}, err
+		return RoundResult{Grant: grant}, err
 	}
 	if round.Checkpoint != nil {
 		round.Checkpoint("review-sent")
