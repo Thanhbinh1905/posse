@@ -497,6 +497,9 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 					if err != nil {
 						return err
 					}
+					if err := refreshReviewCapNoticeForCandidate(ctx, db, project, task); err != nil {
+						return err
+					}
 					return printCandidateSubmission(out, lane, candidate, true, missing, submittedReviewCarry(ctx, db, lane))
 				}
 			}
@@ -579,6 +582,9 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 	}
 	candidate, err = db.LatestValidationCandidate(ctx, task.ID, repoName)
 	if err != nil {
+		return err
+	}
+	if err := refreshReviewCapNoticeForCandidate(ctx, db, project, task); err != nil {
 		return err
 	}
 	return printCandidateSubmission(out, lane, candidate, false, missing, submittedReviewCarry(ctx, db, lane))

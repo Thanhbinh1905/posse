@@ -71,7 +71,14 @@ func (h *workspaceCapChange) applyFix(t *testing.T, name string, members []strin
 	if code, output := h.lead(t, "show", "t1"); code != 0 {
 		t.Fatalf("deliver queued fix instruction: code=%d %s", code, output)
 	}
-	candidates := h.candidates(t)
+	candidates := map[string]store.ValidationCandidate{}
+	for _, member := range members {
+		candidate, err := h.f.db.LatestValidationCandidate(context.Background(), h.change.ID, member)
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates[member] = candidate
+	}
 	for _, member := range members {
 		path := candidates[member].WorktreePath
 		if err := os.WriteFile(filepath.Join(path, "change.txt"), []byte(name+" "+member+" operation\n"), 0o600); err != nil {
@@ -129,11 +136,22 @@ func unsafeMemberPattern(key, member, excerpt string) string {
 }
 
 func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
+	return startWorkspaceCapChangeWithReviewModes(t, false)
+}
+
+func startWorkspaceCapChangeWithReviewModes(t *testing.T, perMemberReview bool) *workspaceCapChange {
 	t.Helper()
 	f := reviewIdentityFixture(t)
 	ws := newFullPipelineWorkspace(t, f)
 	if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "config", "set", "review_loop.max_rounds", "1", "--user-approved", "Use a one-round cap for this E2E scenario"); code != 0 {
 		t.Fatalf("set one-round cap: code=%d %s", code, output)
+	}
+	if perMemberReview {
+		for _, setting := range [][2]string{{"defaults.review", "quick"}, {"repositories.api.review", "full-pipeline"}, {"repositories.web.review", "quick"}} {
+			if code, output := runReleaseCLI(t, f.binary, ws.root, ws.leadEnv, "config", "set", setting[0], setting[1], "--project", "stack", "--user-approved", "Use per-Member review modes for this workspace test"); code != 0 {
+				t.Fatalf("set %s: code=%d %s", setting[0], code, output)
+			}
+		}
 	}
 	brief := filepath.Join(f.root, "workspace-cap.md")
 	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Workspace cap\ndone_when: checked\nrepos: [api, web]\n---\nChange both Members safely.\n"), 0o600); err != nil {
@@ -151,6 +169,9 @@ func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
 		t.Fatalf("workspace Members: %+v %v", repos, err)
 	}
 	for _, repo := range repos {
+		if perMemberReview && repo.Repo == "web" {
+			continue
+		}
 		if err := os.WriteFile(filepath.Join(repo.WorktreePath, "change.txt"), []byte("unsafe "+repo.Repo+" operation\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -165,13 +186,21 @@ func startWorkspaceCapChange(t *testing.T) *workspaceCapChange {
 	if code, output := h.lead(t, "review", "t1"); code != 0 || !strings.Contains(output, "max_rounds: 1") || !strings.Contains(output, "blocking findings") {
 		t.Fatalf("review status does not explain the shared cap before round 1: code=%d %s", code, output)
 	}
-	h.recordRound(t, "t2", "changes_requested", unsafeMemberPattern("unsafe-api", "api", "unsafe api operation")+","+unsafeMemberPattern("unsafe-web", "web", "unsafe web operation"), "")
+	patterns := unsafeMemberPattern("unsafe-api", "api", "unsafe api operation")
+	members, patternKeys := []string{"api"}, []string{"P-1"}
+	resolutionJSON := `{"finding":"F-1","status":"resolved","note":"api validates"}`
+	if !perMemberReview {
+		patterns += "," + unsafeMemberPattern("unsafe-web", "web", "unsafe web operation")
+		members = append(members, "web")
+		patternKeys = append(patternKeys, "P-2")
+		resolutionJSON += `,{"finding":"F-2","status":"resolved","note":"web validates"}`
+	}
+	h.recordRound(t, "t2", "changes_requested", patterns, "")
 	if code, output := h.lead(t, "review", "fix", "t1"); code != 0 || !strings.Contains(output, "queued") {
 		t.Fatalf("queue repair round 1: code=%d %s", code, output)
 	}
-	h.applyFix(t, "repair", []string{"api", "web"}, "P-1", "P-2")
-	h.recordRound(t, "t3", "changes_requested", unsafeMemberPattern("api-retry", "api", "repair api operation"),
-		`{"finding":"F-1","status":"resolved","note":"api validates"},{"finding":"F-2","status":"resolved","note":"web validates"}`)
+	h.applyFix(t, "repair", members, patternKeys...)
+	h.recordRound(t, "t3", "changes_requested", unsafeMemberPattern("api-retry", "api", "repair api operation"), resolutionJSON)
 	return h
 }
 
@@ -229,6 +258,46 @@ func TestWorkspaceReviewCapRaisesDecisionBoundToEveryMemberCandidate(t *testing.
 	}
 	if published := gitRef(t, h.f, h.f.remote, "refs/heads/"+h.change.Branch); published != candidates["api"].CandidateSHA {
 		t.Fatalf("api origin Task branch=%s, want accepted candidate %s", published, candidates["api"].CandidateSHA)
+	}
+}
+
+func TestWorkspaceReviewCapAcceptanceShowsPerMemberValidationSteps(t *testing.T) {
+	h := startWorkspaceCapChangeWithReviewModes(t, true)
+	plan, err := h.change.AdmittedPlan()
+	if err != nil || plan.Review != "quick" {
+		t.Fatalf("workspace Task plan review=%v err=%v, want quick", plan, err)
+	}
+	for _, member := range plan.Execution.Members {
+		want := "full-pipeline"
+		if member.Name == "web" {
+			want = "quick"
+		}
+		if member.Review != want {
+			t.Fatalf("Member %s review=%q, want %q", member.Name, member.Review, want)
+		}
+	}
+	decisionID, _ := h.openCapDecision(t)
+	if code, output := h.lead(t, "decide", fmt.Sprint(decisionID), "accept-head", "--user-approved", "Accept the full-pipeline API candidate at the cap."); code != 0 {
+		t.Fatalf("answer accept-head: code=%d %s", code, output)
+	}
+	current, err := h.f.db.TaskByID(context.Background(), h.ws.project.ID, h.change.ID)
+	if err != nil || current.State != store.StateDone {
+		t.Fatalf("Task state=%s err=%v before local stages, want done", current.State, err)
+	}
+	if err := h.f.db.Transition(context.Background(), h.change.ID, store.StateDone, store.StateWorking, "worker", "Resume after acceptance"); err != nil {
+		t.Fatal(err)
+	}
+	code, output := h.lead(t, "apply", fmt.Sprint(decisionID))
+	if code != 0 || !strings.Contains(output, "accepted-head") {
+		t.Fatalf("apply exact-head acceptance: code=%d %s", code, output)
+	}
+	for _, stage := range []string{"validate test", "validate docs", "validate lint", "publish"} {
+		if !strings.Contains(output, "posse "+stage+" --repo api") {
+			t.Fatalf("accept-head output omits %s for full-pipeline Member api: %s", stage, output)
+		}
+		if strings.Contains(output, "posse "+stage+" --repo web") {
+			t.Fatalf("accept-head output includes %s for quick Member web: %s", stage, output)
+		}
 	}
 }
 
