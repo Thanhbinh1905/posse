@@ -389,8 +389,12 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		e.merge(paths...)
 		return false, guardReason{}
 	}
-	// Command substitutions are evaluated by the shell before the outer call.
-	// They get a copy of the environment, as do pipelines and function bodies.
+	unknownCWD := false
+	if outer, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(outer.Args) > 1 {
+		name, known := e.word(script, outer.Args[0])
+		_, pathKnown := e.word(script, outer.Args[1])
+		unknownCWD = known && (name == "cd" || name == "pushd") && !pathKnown
+	}
 	refused, reason := false, guardReason{}
 	syntax.Walk(stmt, func(node syntax.Node) bool {
 		if refused {
@@ -412,6 +416,9 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 		}
 		return !refused
 	})
+	if unknownCWD {
+		e.cwd = ""
+	}
 	return refused, reason
 }
 
@@ -566,8 +573,6 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 		case "cd", "pushd":
 			if len(args) > 1 && literal[1] {
 				e.cwd = e.path(args[1])
-			} else {
-				e.cwd = ""
 			}
 			return false, guardReason{}
 		}
