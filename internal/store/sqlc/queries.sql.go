@@ -11,8 +11,13 @@ import (
 )
 
 const ackAllNotices = `-- name: AckAllNotices :execresult
-UPDATE notices SET acked_at = ? WHERE notices.project_id = ? AND notices.acked_at IS NULL AND (
-    notices.claim_token = '' OR EXISTS (
+UPDATE notices SET acked_at = ?,
+    claim_token = CASE WHEN NOT EXISTS (SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token) THEN '' ELSE notices.claim_token END,
+    claimed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token) THEN 0 ELSE notices.claimed_at END
+WHERE notices.project_id = ? AND notices.acked_at IS NULL AND (
+    notices.claim_token = '' OR notices.claim_token NOT LIKE 'uncertain:%' AND NOT EXISTS (
+        SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token
+    ) OR EXISTS (
         SELECT 1 FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n
         WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token
           AND r.state = 'printed' AND CAST(n.value AS INTEGER) = notices.id
@@ -30,8 +35,13 @@ func (q *Queries) AckAllNotices(ctx context.Context, arg AckAllNoticesParams) (s
 }
 
 const ackNotice = `-- name: AckNotice :execresult
-UPDATE notices SET acked_at = ? WHERE notices.id = ? AND notices.project_id = ? AND notices.acked_at IS NULL AND (
-    notices.claim_token = '' OR EXISTS (
+UPDATE notices SET acked_at = ?,
+    claim_token = CASE WHEN NOT EXISTS (SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token) THEN '' ELSE notices.claim_token END,
+    claimed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token) THEN 0 ELSE notices.claimed_at END
+WHERE notices.id = ? AND notices.project_id = ? AND notices.acked_at IS NULL AND (
+    notices.claim_token = '' OR notices.claim_token NOT LIKE 'uncertain:%' AND NOT EXISTS (
+        SELECT 1 FROM notice_delivery_receipts r WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token
+    ) OR EXISTS (
         SELECT 1 FROM notice_delivery_receipts r, json_each(r.notice_ids_json) n
         WHERE r.project_id = notices.project_id AND r.owner_token = notices.claim_token
           AND r.state = 'printed' AND CAST(n.value AS INTEGER) = notices.id

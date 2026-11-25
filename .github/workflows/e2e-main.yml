@@ -103,7 +103,7 @@ jobs:
           tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
           mkdir -p "$tool_dir"
           herdr="$tool_dir/herdr"
-          curl -fsSL \
+          curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
             https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 \
             -o "$herdr"
           printf '%s  %s\n' \
@@ -190,7 +190,7 @@ jobs:
           tool_dir="$RUNNER_TEMP/posse-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}/herdr"
           mkdir -p "$tool_dir"
           herdr="$tool_dir/herdr"
-          curl -fsSL \
+          curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
             https://github.com/herdrdev/herdr/releases/download/v0.9.1/herdr-linux-x86_64 \
             -o "$herdr"
           printf '%s  %s\n' \
