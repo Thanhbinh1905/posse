@@ -148,7 +148,7 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 		queuedHead := headSHA
 		checkedHead := headSHA
 		worktreePath := task.WorktreePath
-		if fullPipelineSelected(task, member) {
+		if greenhouseFullPipelineTaskWithConfig(task, config.Config{}, member) {
 			if member != "" {
 				repos, err := db.TaskRepos(ctx, task.ID)
 				if err != nil {

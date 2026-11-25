@@ -56,6 +56,22 @@ func TestPRTargetSyncWithdrawsRefreshForCurrentAndObservedHeads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	oldHead := f.headSHA
 	target := f.advanceTarget(t, false, true)
@@ -77,6 +93,47 @@ func TestPRTargetSyncWithdrawsRefreshForCurrentAndObservedHeads(t *testing.T) {
 	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
 	if err != nil || len(instructions) != 0 {
 		t.Fatalf("pending instructions = %+v, %v; want both superseded refreshes withdrawn", instructions, err)
+	}
+}
+
+func TestNonGreenhouseFullPipelineKeepsCandidateTargetRefreshWhenAuthorMovesAhead(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	installValidationPlanForReview(t, f, "full-pipeline")
+	var err error
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.BuiltinReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHead := f.headSHA
+	target := f.advanceTarget(t, false, true)
+	gitTest(t, f.worktree, "fetch", "origin", "main")
+	gitTest(t, f.worktree, "merge", "--no-edit", "origin/main")
+	sync, err := f.service.queuePRTargetSyncInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, oldHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sync.Queued {
+		t.Fatalf("target sync = %+v; want refresh for the stale candidate head %s", sync, oldHead)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || len(instructions) != 1 || !strings.Contains(instructions[0].Body, oldHead) {
+		t.Fatalf("candidate refresh instructions = %+v, %v; want one instruction for stale candidate %s", instructions, err, oldHead)
 	}
 }
 
