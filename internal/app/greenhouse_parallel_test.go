@@ -933,12 +933,18 @@ func TestReplayedGreenhouseBlockingVerdictWithdrawsReadinessAndQueuesFix(t *test
 	if err := f.service.applyGreenhouseVerdict(ctx, f.db, f.project, f.task, verdict); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := f.db.ReviewFixInstructionPending(ctx, f.task.ID)
-	if err != nil || !pending {
-		t.Fatalf("replayed blocking Verdict fix instruction pending=%t err=%v", pending, err)
+	if _, err := f.db.AddSignal(ctx, f.task.ID, "done", "Repeated done Signal for unchanged head", map[string]string{"greenhouse_pending_head": f.headSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.applyGreenhouseVerdict(ctx, f.db, f.project, f.task, verdict); err != nil {
+		t.Fatalf("Watch maintenance repeated enqueue for the same head: %v", err)
+	}
+	var fixRounds int
+	if err := f.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='review'`, f.task.ID).Scan(&fixRounds); err != nil || fixRounds != 1 {
+		t.Fatalf("replayed blocking Verdict fix rounds=%d err=%v; want one", fixRounds, err)
 	}
 	notices, err := f.db.Notices(ctx, f.project.ID, false)
-	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 || countNoticeKind(notices, "merge_readiness_withdrawn") != 1 {
+	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 || countNoticeKind(notices, "merge_readiness_withdrawn") != 1 || countNoticeKind(notices, "pr_watch_failing") != 0 {
 		t.Fatalf("replayed blocking Verdict notices=%+v err=%v", notices, err)
 	}
 	providerFindings, err := f.db.ProviderFindingsForTask(ctx, f.task.ID)
