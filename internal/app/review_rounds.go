@@ -338,9 +338,13 @@ func (s *Service) queueReviewTargetRefresh(ctx *axi.Context, db *store.DB, proje
 		if targetHead == "" {
 			return axi.Failure("candidate_target_missing", lane.memberLabel("the frozen target branch is missing"), false)
 		}
-		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Local: lane.localDelivery()}
-		if err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA); err != nil {
+		freshness := prTargetFreshness{Branch: lane.targetBranch(), Tip: targetHead, Local: lane.localDelivery(), Root: lane.task.WorktreePath}
+		instructionQueued, err := queueTargetMergeInstruction(ctx.Context, db, change, lane.repo, freshness, candidate.CandidateSHA)
+		if err != nil {
 			return err
+		}
+		if !instructionQueued {
+			continue
 		}
 		queued = true
 	}
