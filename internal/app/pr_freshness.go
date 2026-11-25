@@ -145,13 +145,44 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 		return targetSync{}, nil
 	}
 	if freshness.Root != "" {
+		queuedHead := headSHA
+		checkedHead := headSHA
+		worktreePath := task.WorktreePath
+		if greenhouseFullPipelineTaskWithConfig(task, config.Config{}, member) {
+			if member != "" {
+				repos, err := db.TaskRepos(ctx, task.ID)
+				if err != nil {
+					return targetSync{}, err
+				}
+				worktreePath = ""
+				for _, repo := range repos {
+					if repo.Repo == member {
+						worktreePath = repo.WorktreePath
+						break
+					}
+				}
+				if worktreePath == "" {
+					return targetSync{}, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
+				}
+			}
+			if worktreePath != "" {
+				currentHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
+				if err != nil {
+					return targetSync{}, err
+				}
+				checkedHead = currentHead
+			}
+		}
+		headSHA = checkedHead
 		checked, err := freshness.of(ctx, freshness.Root, headSHA)
 		if err != nil {
 			return targetSync{}, err
 		}
 		if checked.Fresh {
-			if _, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, headSHA); err != nil {
-				return targetSync{}, err
+			for _, head := range []string{headSHA, queuedHead} {
+				if _, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, head); err != nil {
+					return targetSync{}, err
+				}
 			}
 			if err := db.DequeueMergeQueue(ctx, task.ID, member, "target_already_current", time.Now().UnixMilli()); err != nil {
 				return targetSync{}, err
