@@ -39,9 +39,12 @@ func transientGreenhouseFailure(err error) bool {
 	}
 	var terminalErr *greenhouse.TerminalReviewError
 	if errors.As(err, &terminalErr) {
-		return false
+		return strings.EqualFold(terminalErr.Status, "inconclusive") && strings.Contains(strings.ToLower(terminalErr.Reason), "quota")
 	}
 	reason := strings.ToLower(err.Error())
+	if strings.Contains(reason, `greenhouse terminal status "inconclusive"`) && strings.Contains(reason, "quota") {
+		return true
+	}
 	for _, marker := range []string{"greenhouse review ended with status", "greenhouse terminal status", "terminal greenhouse failure"} {
 		if strings.Contains(reason, marker) {
 			return false

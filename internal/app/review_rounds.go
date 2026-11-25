@@ -1069,6 +1069,18 @@ func recordAutoStartReviewerReadiness(ctx context.Context, db *store.DB, project
 	return err
 }
 
+func greenhouseLatestFailure(summary string) string {
+	if index := strings.LastIndex(summary, "Latest failure: "); index >= 0 {
+		summary = summary[index+len("Latest failure: "):]
+	}
+	if strings.HasPrefix(summary, "Greenhouse parallel review failed for ") {
+		if index := strings.Index(summary, ": "); index >= 0 {
+			summary = summary[index+2:]
+		}
+	}
+	return summary
+}
+
 func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Project, change store.Task) (bool, error) {
 	current, err := db.TaskByID(ctx, project.ID, change.ID)
 	if err != nil {
@@ -1102,8 +1114,9 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 		if err != nil {
 			return err
 		}
-		if failures >= greenhouseReviewFailureLimit {
-			reason := "Needs a decision: split the change or land it another way. Latest failure: " + lastFailure
+		latestFailure := greenhouseLatestFailure(lastFailure)
+		if failures >= greenhouseReviewFailureLimit && !transientGreenhouseFailure(errors.New(latestFailure)) {
+			reason := "Needs a decision: split the change or land it another way. Latest failure: " + latestFailure
 			if !hasFailureNotice {
 				reason = "Needs a decision: split the change or land it another way. The latest Greenhouse review failed, but Posse could not retrieve its failure reason."
 			}
@@ -1112,10 +1125,11 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			}
 			continue
 		}
-		if hasFailureNotice && reviewerSizeFailure(errors.New(lastFailure)) {
+		if hasFailureNotice && reviewerSizeFailure(errors.New(latestFailure)) {
 			continue
 		}
-		if !explicitStart && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+		retryBackoff := !explicitStart || transientGreenhouseFailure(errors.New(latestFailure)) || greenhouseReviewHasRefusedRequest(requests, change.ID, target.Repository, target.Commit)
+		if retryBackoff && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
 			continue
 		}
 		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
