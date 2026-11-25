@@ -339,9 +339,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
-			if clearErr := greenhouse.ClearPending(pendingPath); clearErr != nil {
-				return clearErr
-			}
 			if noticeErr := notifyFailure(requestHead, protocolErr.Error()); noticeErr != nil {
 				return noticeErr
 			}

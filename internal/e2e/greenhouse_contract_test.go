@@ -631,12 +631,23 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 		env := setEnv(c.env, "PATH", filepath.Dir(protocolOne)+string(os.PathListSeparator)+testEnvValue(c.env, "PATH"))
 		before := len(c.verdicts(t))
 		c.authorCommit(t)
+		pendingPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse", "shop.pending.json")
+		if err := os.MkdirAll(filepath.Dir(pendingPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		pendingRequest := []byte(`{"grant":"shop/t1/shop/r1","request":{}}`)
+		if err := os.WriteFile(pendingPath, pendingRequest, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		output, err := c.posse(env, f.repo, c.reviewArgs()...)
 		if err == nil || !strings.Contains(output, "greenhouse_protocol") || !strings.Contains(output, "speaks protocol 1 and Posse needs protocol 2") {
 			t.Fatalf("posse did not refuse a protocol 1 daemon naming both ranges: %v\n%s", err, output)
 		}
 		if got := len(c.verdicts(t)); got != before {
 			t.Fatalf("a refused daemon produced a Verdict")
+		}
+		if got, err := os.ReadFile(pendingPath); err != nil || string(got) != string(pendingRequest) {
+			t.Fatalf("protocol refusal changed pending request: %s, %v", got, err)
 		}
 		state, err := os.ReadFile(filepath.Join(c.home, "state.json"))
 		if err != nil {
