@@ -989,9 +989,6 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, output, stderr := f.run("signal", "done", "Greenhouse review requested", "--head", head); code != 0 {
-		t.Fatalf("done Signal: %d %s %s", code, output, stderr)
-	}
 	taskScratch := os.Getenv("TMPDIR")
 	if taskScratch == "" {
 		taskScratch = t.TempDir()
@@ -1033,10 +1030,10 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 	if !realGreenhouse {
 		greenhouseBinary = "/usr/bin/false"
 	}
-	if err := os.Symlink(greenhouseBinary, filepath.Join(binDir, "greenhouse")); err != nil {
-		t.Fatal(err)
-	}
 	if realGreenhouse {
+		if err := os.Symlink(greenhouseBinary, filepath.Join(binDir, "greenhouse")); err != nil {
+			t.Fatal(err)
+		}
 		fakeReviewer := `#!/usr/bin/python3
 import json, sys
 if "--list-models" in sys.argv:
@@ -1053,6 +1050,8 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 		if err := os.WriteFile(filepath.Join(binDir, "pi"), []byte(fakeReviewer), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	} else if err := os.WriteFile(filepath.Join(binDir, "greenhouse"), []byte("#!/bin/sh\nsleep 2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	binary := filepath.Join(f.root, "bin", "posse")
@@ -1067,6 +1066,11 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	build.Dir = filepath.Clean(filepath.Join(workingDir, "../.."))
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build Posse CLI: %v\\n%s", err, output)
+	}
+	t.Setenv("POSSE_TEST_HERDR", "1")
+	t.Setenv("POSSE_TEST_DISABLE_SYSTEMD_WATCH", "1")
+	if err := os.WriteFile(watchRuntimeLogPath(f.home, f.project), []byte("prior daemon run\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	previousVerifier := watchExecutableVerifier
 	watchExecutableVerifier = func(string) bool { return true }
@@ -1106,7 +1110,31 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	if readWatchPassToken(watchPassDonePath(f.home, f.project)) != passToken {
 		t.Fatal("Project Watch did not serve the requested pass")
 	}
-	deadline = time.Now().Add(20 * time.Second)
+	watchLog, err := os.ReadFile(watchRuntimeLogPath(f.home, f.project))
+	if err != nil || !strings.Contains(string(watchLog), "prior daemon run") || !strings.Contains(string(watchLog), "Watch poll completed for shop") {
+		t.Fatalf("watch.log after poll-only restart = %q, err=%v", watchLog, err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "Greenhouse review requested", map[string]string{"greenhouse_pending_head": head}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateDone, "worker", "Greenhouse review requested"); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	deadline = startedAt.Add(watchPassInterval + time.Second)
+	ownerPath := parallelReviewOwnerPath(filepath.Join(f.home, "projects", f.project.Name, "tasks", taskIDString(f.task.Seq), "greenhouse"), f.project.Name)
+	var owner *parallelReviewOwner
+	for time.Now().Before(deadline) {
+		owner, err = readParallelReviewOwner(ownerPath)
+		if err != nil || owner != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil || owner == nil || owner.PID < 2 {
+		t.Fatalf("poll daemon did not start the Greenhouse review within one poll interval: owner=%+v err=%v", owner, err)
+	}
+	deadline = time.Now().Add(45 * time.Second)
 	var requests []store.GreenhouseReviewRequest
 	var notices []store.Notice
 	for time.Now().Before(deadline) {
