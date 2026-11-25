@@ -48,6 +48,67 @@ func TestPRTargetSyncDoesNotQueueFreshHead(t *testing.T) {
 	}
 }
 
+func TestPRTargetSyncDoesNotQueueFreshTaskBehindAnotherHead(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	otherID, err := f.db.CreateTask(ctx, f.project.ID, store.Task{Seq: 2, Type: "change", Title: "queue head", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET state='done' WHERE id=?`, otherID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddSignal(ctx, otherID, "done", "ready", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE signals SET at=1 WHERE task_id=?`, otherID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.PlaceInMergeQueue(ctx, otherID, "", "main", 1); err != nil {
+		t.Fatal(err)
+	}
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	sync, err := f.service.queuePRTargetSyncInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sync.Queued || sync.Place.Queued() {
+		t.Fatalf("target sync = %+v; want no queue entry for a head that contains target", sync)
+	}
+	places, err := f.db.MergeQueuePlaces(ctx, f.project.ID)
+	if err != nil || len(places[f.task.ID]) != 0 {
+		t.Fatalf("merge queue places = %+v, %v; want no entry", places[f.task.ID], err)
+	}
+}
+
+func TestPRTargetSyncWithdrawsQueuedRefreshOnceHeadContainsTarget(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	if _, err := f.db.QueueValidationFixInstruction(ctx, f.task.ID, "freshness", f.headSHA, "freshness:stale", "merge origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.queuePRTargetSyncInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("pending instructions = %+v, %v; want the stale refresh withdrawn", instructions, err)
+	}
+}
+
+func TestGreenhouseTargetRefreshSkipsHeadThatAlreadyContainsTarget(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	if _, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("target refresh instructions = %+v, %v; want none for a head that contains target %s", instructions, err, target)
+	}
+}
+
 func TestGreenhouseFindingOnUnchangedAcceptedLineDoesNotBlock(t *testing.T) {
 	repo := t.TempDir()
 	gitRun := func(args ...string) string {
