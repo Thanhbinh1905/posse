@@ -297,12 +297,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				Outcome: outcome, Grant: grant,
 			})
 		}
-		recordTransientRefusal := func() error {
-			return db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{
-				ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestHead,
-				Provider: store.GreenhouseReviewProvider, RequestedAt: requestedAt, SettledAt: time.Now().UnixMilli(), Outcome: "refused",
-			})
-		}
 		var result greenhouse.RoundResult
 		for {
 			var attempts int
@@ -351,7 +345,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if err != nil {
 			failureReason := err.Error()
 			if parallelMode && transientGreenhouseFailure(err) {
-				if recordErr := recordTransientRefusal(); recordErr != nil {
+				if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
 					return recordErr
 				}
 				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: "retrying"}, {Key: "head", Value: requestHead}})

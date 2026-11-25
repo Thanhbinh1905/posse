@@ -60,7 +60,7 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 			if existing.ProjectID != request.ProjectID || existing.RequestedHead != request.RequestedHead || existing.RequestedAt != request.RequestedAt {
 				return errors.New("greenhouse review grant changed request identity")
 			}
-			if existing.Outcome != "failed" {
+			if existing.Outcome != "failed" && existing.Outcome != "refused" {
 				return nil
 			}
 			_, err = db.ExecContext(ctx, `UPDATE greenhouse_review_requests SET settled_at=?,outcome=?,verdict_id=?,failure_count=failure_count+? WHERE id=?`, request.SettledAt, request.Outcome, verdictID, failureIncrement, existing.ID)

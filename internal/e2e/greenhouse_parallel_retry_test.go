@@ -71,7 +71,7 @@ exec '%s' "$@"
 		requests, err := requestsDB.GreenhouseReviewRequests(context.Background(), f.task(t, "t1").ProjectID)
 		_ = requestsDB.Close()
 		failedRequests = requests
-		return err == nil && len(requests) == 1 && requests[0].Outcome == "refused"
+		return err == nil && len(requests) == 1 && requests[0].Outcome == "refused" && requests[0].Grant == "shop/t1/shop/r1"
 	}) {
 		t.Fatalf("quota failure requests = %+v; want one refused request", failedRequests)
 	}
@@ -102,7 +102,7 @@ exec '%s' "$@"
 		requests, err := requestsDB.GreenhouseReviewRequests(context.Background(), f.task(t, "t1").ProjectID)
 		_ = requestsDB.Close()
 		retryRequests = requests
-		return err == nil && len(requests) == 2 && requests[0].Outcome == "refused" && requests[0].Grant == "" && requests[1].Outcome == "verdict" && requests[1].Grant == "shop/t1/shop/r1" && requests[1].RequestedHead == head
+		return err == nil && len(requests) == 1 && requests[0].Outcome == "verdict" && requests[0].Grant == "shop/t1/shop/r1" && requests[0].RequestedHead == head && requests[0].FailureCount == 0
 	}) {
 		t.Fatalf("same-head Greenhouse requests = %+v; want a Verdict recorded for the refused request's grant", retryRequests)
 	}

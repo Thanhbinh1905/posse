@@ -52,6 +52,12 @@ BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END;`); err
 	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM posse_migration_checksums WHERE version=20261123132235`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM goose_db_version WHERE version_id=20261125051456`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM posse_migration_checksums WHERE version=20261125051456`); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -369,6 +375,45 @@ func TestGreenhouseReviewLedgerKeepsResumeOutcomeForSameGrant(t *testing.T) {
 	requests, err := f.db.GreenhouseReviewRequests(f.ctx, task.ProjectID)
 	if err != nil || len(requests) != 1 || requests[0].Outcome != "verdict" || requests[0].VerdictID == nil || requests[0].RequestedAt != failed.RequestedAt {
 		t.Fatalf("resumed request rows = %+v, %v; want one request with its final outcome", requests, err)
+	}
+}
+
+func TestGreenhouseReviewRequestFinalizesRefusedGrantAsVerdict(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	grant := "shop/t1/shop/r1"
+	refused := GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 200, Outcome: "refused", Grant: grant}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, refused); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(f.ctx, greenhouseVerdict(task.ID, grant, reviewShaA), func(context.Context) (string, error) { return reviewShaA, nil }); err != nil || !recorded {
+		t.Fatalf("record resumed Verdict = %v, %v", recorded, err)
+	}
+	settled := refused
+	settled.SettledAt, settled.Outcome = 300, "verdict"
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, settled); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(f.ctx, task.ProjectID)
+	if err != nil || len(requests) != 1 || requests[0].Outcome != "verdict" || requests[0].VerdictID == nil || requests[0].FailureCount != 0 {
+		t.Fatalf("finalized refused request = %+v, %v; want one Verdict row with no failures", requests, err)
+	}
+}
+
+func TestGreenhouseReviewRequestCountsFailureAfterRefusal(t *testing.T) {
+	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
+	task := f.task(t, f.change)
+	request := GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 100, SettledAt: 200, Outcome: "refused", Grant: "shop/t1/shop/r1"}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.SettledAt, request.Outcome = 300, "failed"
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(f.ctx, task.ProjectID)
+	if err != nil || len(requests) != 1 || requests[0].Outcome != "failed" || requests[0].FailureCount != 1 {
+		t.Fatalf("failed resumed request = %+v, %v; want one counted failure", requests, err)
 	}
 }
 
