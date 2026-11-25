@@ -40,6 +40,20 @@ func stalled() error {
 	return &herdr.Error{Code: "agent_prompt_stalled", Message: "no agent activity was observed after the prompt"}
 }
 
+func TestLaunchPromptRetriesUntilAgentIsRegistered(t *testing.T) {
+	service, fake := promptDeliveryService(t)
+	fake.ErrorQueue["agent.prompt"] = []error{
+		&herdr.Error{Code: "agent_not_ready", Message: "agent w1:p1 is not an active named agent"},
+		nil,
+	}
+	if err := service.deliverLaunchPrompt(context.Background(), "w1:p1", "Read launch.md and follow it."); err != nil {
+		t.Fatalf("deliverLaunchPrompt: %v", err)
+	}
+	if got := fake.CallCount("agent.prompt"); got != 2 {
+		t.Fatalf("prompt calls = %d, want 2", got)
+	}
+}
+
 func TestLaunchPromptResendsWhenAgentDropsFirstSubmission(t *testing.T) {
 	service, fake := promptDeliveryService(t)
 	fake.ErrorQueue["agent.prompt"] = []error{stalled(), nil}

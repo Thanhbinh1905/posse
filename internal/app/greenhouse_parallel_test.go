@@ -720,6 +720,92 @@ func TestGreenhouseCoverageAcceptanceDoesNotPublishBlockingFindings(t *testing.T
 	}
 }
 
+func TestReplayedGreenhouseBlockingVerdictWithdrawsReadinessAndQueuesFix(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	if err := os.WriteFile(filepath.Join(f.repo, "target.txt"), []byte("target change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "add", "target.txt")
+	gitTest(t, f.repo, "commit", "-m", "target advance")
+	gitTest(t, f.repo, "push", "origin", "main")
+	gitTest(t, f.worktree, "fetch", "origin", "main")
+	gitTest(t, f.worktree, "merge", "--no-edit", "origin/main")
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	f.headSHA = strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	f.task, err = f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=?`, f.headSHA, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	if _, err := queueTargetMergeInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("target refresh instructions after target merge = %+v, %v; want none", instructions, err)
+	}
+	if _, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "target-merged head is ready", DataJSON: marshalJSON(map[string]string{"head_sha": f.headSHA})}); err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2",
+		Grant: "shop/t1/shop/r4", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA,
+		Outcome: "findings", Blocking: 1, FindingsPath: "findings.json", Mode: "gate",
+		Findings: []store.ProviderFinding{{Key: "P-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}},
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record first Verdict: recorded=%t err=%v", recorded, err)
+	}
+	replayed, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return f.headSHA, nil })
+	if err != nil || replayed {
+		t.Fatalf("replay Verdict: recorded=%t err=%v; want persisted Verdict", replayed, err)
+	}
+	if err := f.service.applyGreenhouseVerdict(ctx, f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.db.ReviewFixInstructionPending(ctx, f.task.ID)
+	if err != nil || !pending {
+		t.Fatalf("replayed blocking Verdict fix instruction pending=%t err=%v", pending, err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 || countNoticeKind(notices, "merge_readiness_withdrawn") != 1 {
+		t.Fatalf("replayed blocking Verdict notices=%+v err=%v", notices, err)
+	}
+	providerFindings, err := f.db.ProviderFindingsForTask(ctx, f.task.ID)
+	if err != nil || len(providerFindings) != 1 || providerFindings[0].Severity != "P1" {
+		t.Fatalf("replayed provider findings=%+v err=%v", providerFindings, err)
+	}
+	code, output, stderr := f.run("show", "t1", "--format", "json")
+	if code != 0 || !strings.Contains(output, `"latest_verdict":"findings"`) || !strings.Contains(output, `"grant":"shop/t1/shop/r4"`) {
+		t.Fatalf("posse show did not expose the replayed Verdict: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
@@ -989,9 +1075,6 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, output, stderr := f.run("signal", "done", "Greenhouse review requested", "--head", head); code != 0 {
-		t.Fatalf("done Signal: %d %s %s", code, output, stderr)
-	}
 	taskScratch := os.Getenv("TMPDIR")
 	if taskScratch == "" {
 		taskScratch = t.TempDir()
@@ -1033,10 +1116,10 @@ func TestGreenhouseWatchPassSpawnsAuthorizedReviewChild(t *testing.T) {
 	if !realGreenhouse {
 		greenhouseBinary = "/usr/bin/false"
 	}
-	if err := os.Symlink(greenhouseBinary, filepath.Join(binDir, "greenhouse")); err != nil {
-		t.Fatal(err)
-	}
 	if realGreenhouse {
+		if err := os.Symlink(greenhouseBinary, filepath.Join(binDir, "greenhouse")); err != nil {
+			t.Fatal(err)
+		}
 		fakeReviewer := `#!/usr/bin/python3
 import json, sys
 if "--list-models" in sys.argv:
@@ -1053,6 +1136,8 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 		if err := os.WriteFile(filepath.Join(binDir, "pi"), []byte(fakeReviewer), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	} else if err := os.WriteFile(filepath.Join(binDir, "greenhouse"), []byte("#!/bin/sh\nsleep 2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	binary := filepath.Join(f.root, "bin", "posse")
@@ -1067,6 +1152,11 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	build.Dir = filepath.Clean(filepath.Join(workingDir, "../.."))
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build Posse CLI: %v\\n%s", err, output)
+	}
+	t.Setenv("POSSE_TEST_HERDR", "1")
+	t.Setenv("POSSE_TEST_DISABLE_SYSTEMD_WATCH", "1")
+	if err := os.WriteFile(watchRuntimeLogPath(f.home, f.project), []byte("prior daemon run\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	previousVerifier := watchExecutableVerifier
 	watchExecutableVerifier = func(string) bool { return true }
@@ -1106,7 +1196,31 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	if readWatchPassToken(watchPassDonePath(f.home, f.project)) != passToken {
 		t.Fatal("Project Watch did not serve the requested pass")
 	}
-	deadline = time.Now().Add(20 * time.Second)
+	watchLog, err := os.ReadFile(watchRuntimeLogPath(f.home, f.project))
+	if err != nil || !strings.Contains(string(watchLog), "prior daemon run") || !strings.Contains(string(watchLog), "Watch poll completed for shop") {
+		t.Fatalf("watch.log after poll-only restart = %q, err=%v", watchLog, err)
+	}
+	if _, err := f.db.AddSignal(context.Background(), f.task.ID, "done", "Greenhouse review requested", map[string]string{"greenhouse_pending_head": head}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(context.Background(), f.task.ID, store.StateWorking, store.StateDone, "worker", "Greenhouse review requested"); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	deadline = startedAt.Add(watchPassInterval + time.Second)
+	ownerPath := parallelReviewOwnerPath(filepath.Join(f.home, "projects", f.project.Name, "tasks", taskIDString(f.task.Seq), "greenhouse"), f.project.Name)
+	var owner *parallelReviewOwner
+	for time.Now().Before(deadline) {
+		owner, err = readParallelReviewOwner(ownerPath)
+		if err != nil || owner != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil || owner == nil || owner.PID < 2 {
+		t.Fatalf("poll daemon did not start the Greenhouse review within one poll interval: owner=%+v err=%v", owner, err)
+	}
+	deadline = time.Now().Add(45 * time.Second)
 	var requests []store.GreenhouseReviewRequest
 	var notices []store.Notice
 	for time.Now().Before(deadline) {
@@ -1279,6 +1393,20 @@ func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
 	terminal := &greenhouse.TerminalReviewError{Status: "failed", Reason: "quota exceeded; service unavailable; gateway timeout"}
 	if transientGreenhouseFailure(terminal) {
 		t.Fatalf("transientGreenhouseFailure(%q) = true for a terminal review", terminal)
+	}
+}
+
+func TestReviewGreenhouseWithRetriesRetriesTargetFetchFailure(t *testing.T) {
+	calls := 0
+	result, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Second, func(time.Duration) (greenhouse.RoundResult, error) {
+		calls++
+		if calls == 1 {
+			return greenhouse.RoundResult{}, errors.New("greenhouse_target_unavailable: could not fetch target origin/main")
+		}
+		return greenhouse.RoundResult{Outcome: greenhouse.Settled}, nil
+	})
+	if err != nil || calls != 2 || attempts != 2 || result.Outcome != greenhouse.Settled {
+		t.Fatalf("retry result=%+v calls=%d attempts=%d err=%v; want same review to succeed after target fetch recovers", result, calls, attempts, err)
 	}
 }
 

@@ -68,6 +68,10 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		}
 		request := store.DecisionRequest{ProjectID: project.ID, TaskID: task.ID, Origin: fmt.Sprintf("notice:%d", notice.ID)}
 		switch {
+		case greenhouseNeedsDecisionNotice(notice):
+			request.Kind = "worker_question"
+			request.Question = notice.Summary
+			request.Options = []string{"retry", "stop"}
 		case notice.Kind == "greenhouse_partial_review" && task.Type == "change":
 			var data struct {
 				Repository string                `json:"repo"`
@@ -196,6 +200,17 @@ func (s *Service) raiseNoticeDecisions(ctx context.Context, db *store.DB, projec
 		return db.AdvanceDecisionNoticeCursor(ctx, project.ID, notices[len(notices)-1].ID)
 	}
 	return nil
+}
+
+func greenhouseNeedsDecisionNotice(notice store.Notice) bool {
+	if notice.Kind != "needs_decision" {
+		return false
+	}
+	var data struct {
+		Repository string `json:"repo"`
+		Head       string `json:"head"`
+	}
+	return json.Unmarshal([]byte(notice.DataJSON), &data) == nil && data.Repository != "" && data.Head != ""
 }
 
 func (s *Service) raiseWorkerExitedDecision(ctx context.Context, db *store.DB, project store.Project, task store.Task, notice store.Notice) error {

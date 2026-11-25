@@ -391,6 +391,16 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := testService(home, herdr.NewFake())
+	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
+		t.Fatal(err)
+	}
+	greenhouseNoticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: failed.ID, Kind: "needs_decision", Summary: "Greenhouse review failed at head-a", DataJSON: `{"repo":"shop","head":"head-a"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AdvanceDecisionNoticeCursor(ctx, project.ID, greenhouseNoticeID); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
 		if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
 			t.Fatal(err)
@@ -398,12 +408,12 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	}
 	items, err := db.Decisions(ctx, project.ID, true)
 	// A Worker's needs_decision Notice with findings raises no Decision itself.
-	if err != nil || len(items) != 5 {
+	if err != nil || len(items) != 6 {
 		t.Fatalf("raised Decisions: %#v %v", items, err)
 	}
 	// Neither Task holds a Sandbox and both ran before, so relaunch is not offered.
-	want := [][]string{{"merge", "wait", "discard"}, {"discard"}, {"discard"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}}
-	wantKinds := []string{"merge_ready", "recovery", "recovery", "review", "worker_exited"}
+	want := [][]string{{"merge", "wait", "discard"}, {"discard"}, {"discard"}, {"accept", "request-changes", "ignore"}, {"relaunch", "discard"}, {"retry", "stop"}}
+	wantKinds := []string{"merge_ready", "recovery", "recovery", "review", "worker_exited", "worker_question"}
 	for i, d := range items {
 		if d.Kind != wantKinds[i] || !strings.HasPrefix(d.Origin, "notice:") {
 			t.Fatalf("Decision origin or kind not recorded explicitly: %#v", d)
@@ -434,7 +444,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err := db.Decisions(ctx, project.ID, true)
-	if err != nil || len(pending) != 2 {
+	if err != nil || len(pending) != 3 {
 		t.Fatalf("resolved Decisions stayed pending: %#v %v", pending, err)
 	}
 	all, err := db.Decisions(ctx, project.ID, false)
@@ -452,7 +462,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err = db.Decisions(ctx, project.ID, true)
-	if err != nil || len(pending) != 2 {
+	if err != nil || len(pending) != 3 {
 		t.Fatalf("repeated failure duplicated pending recovery Decision: %#v %v", pending, err)
 	}
 	if err := db.TransitionWithApproval(ctx, failed.ID, store.StateFailed, store.StateTornDown, "user", "discarded", "discard", "User requested discard"); err != nil {
@@ -462,7 +472,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err = db.Decisions(ctx, project.ID, true)
-	if err != nil || len(pending) != 1 {
+	if err != nil || len(pending) != 2 {
 		t.Fatalf("torn-down Task still has pending Decision: %#v %v", pending, err)
 	}
 }

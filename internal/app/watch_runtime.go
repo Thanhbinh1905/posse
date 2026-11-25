@@ -1158,6 +1158,10 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 			return nil
 		}
+		if err := s.reconcileGreenhousePrepublication(loopCtx, db, home, fresh); err != nil {
+			fmt.Fprintf(ctx.ErrOut, "Greenhouse review dispatch failed for %s: %v\n", project.Name, err)
+			recordWatchFailure(ctx, db, project.ID, lastFailures, "Greenhouse review", err)
+		}
 		workspaceMissing := fresh.HerdrWorkspaceID != ""
 		snapshot, snapshotErr := s.snapshot(loopCtx)
 		if snapshotErr == nil {
@@ -1175,10 +1179,14 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			return nil
 		}
 		if err != nil && !errors.Is(err, errRecoveryHeld) && !errors.Is(err, errRecoveryDeferred) && !isHerdrUnavailable(err) {
+			fmt.Fprintf(ctx.ErrOut, "Watch reconciliation failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}
 		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
+			fmt.Fprintf(ctx.ErrOut, "Watch maintenance failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "maintenance", err)
+		} else {
+			fmt.Fprintf(ctx.Out, "Watch poll completed for %s\n", project.Name)
 		}
 		if lastLeadReceiverCheck.IsZero() || time.Since(lastLeadReceiverCheck) >= time.Minute {
 			if !workspaceMissing {

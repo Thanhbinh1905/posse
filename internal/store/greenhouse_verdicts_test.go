@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -469,6 +470,20 @@ func TestGreenhouseFailureNoticeOncePerHead(t *testing.T) {
 	var receiptState, receiptOwner string
 	if err := f.db.QueryRowContext(f.ctx, `SELECT state,owner_token FROM notice_delivery_receipts WHERE delivery_id='delivery-1'`).Scan(&receiptState, &receiptOwner); err != nil || receiptState != "rejected" || receiptOwner != "" {
 		t.Fatalf("old Notice delivery receipt = state %q owner %q err=%v", receiptState, receiptOwner, err)
+	}
+	var needsDecisionID int64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT id FROM notices WHERE task_id=? AND kind='needs_decision'`, task.ID).Scan(&needsDecisionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AckNotices(f.ctx, task.ProjectID, []string{strconv.FormatInt(needsDecisionID, 10)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.CreateGreenhouseNeedsDecisionNoticeOnce(f.ctx, task.ProjectID, task.ID, "shop", reviewShaA, "Needs a decision: latest context overflow"); err != nil {
+		t.Fatal(err)
+	}
+	var needsDecisionAcked sql.NullInt64
+	if err := f.db.QueryRowContext(f.ctx, `SELECT acked_at FROM notices WHERE id=?`, needsDecisionID).Scan(&needsDecisionAcked); err != nil || !needsDecisionAcked.Valid {
+		t.Fatalf("repeated needs-decision event cleared acknowledgement: acked=%v err=%v", needsDecisionAcked, err)
 	}
 }
 

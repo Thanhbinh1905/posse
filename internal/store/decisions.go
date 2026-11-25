@@ -442,12 +442,17 @@ const decisionSourceNoticesQuery = `SELECT n.id,n.project_id,COALESCE(n.task_id,
 		FROM tasks t INDEXED BY tasks_project_state_idx JOIN notices n INDEXED BY notices_task_kind_idx ON n.task_id=t.id AND n.kind='merge_ready'
 		WHERE t.project_id=? AND n.project_id=t.project_id AND t.state IN ('done','merging') AND t.autonomy_land<>'auto'
 		AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
+		UNION
+		SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
+		FROM tasks t INDEXED BY tasks_project_state_idx JOIN notices n INDEXED BY notices_task_kind_idx ON n.task_id=t.id AND n.kind='needs_decision'
+		WHERE t.project_id=?1 AND n.project_id=t.project_id
+		AND CASE WHEN json_valid(n.data_json) THEN json_type(n.data_json,'$.repo')='text' AND json_type(n.data_json,'$.head')='text' ELSE 0 END
+		AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.project_id=n.project_id AND d.origin='notice:'||n.id)
 		ORDER BY 1`
 
 // DecisionSourceNotices returns unevaluated Notices and merge_ready Notices
 // without a Decision, even if the cursor advanced before reconciliation completed.
-// Each half reads its own index range: Notices past the cursor, and the
-// merge_ready Notices of merge-ready Tasks, never the Project's whole history.
+// Each branch reads Notices through a cursor or Task index, not the Project's whole history.
 func (db *DB) DecisionSourceNotices(ctx context.Context, projectID int64) ([]Notice, error) {
 	rows, err := db.QueryContext(ctx, decisionSourceNoticesQuery, projectID, projectID, projectID)
 	if err != nil {
