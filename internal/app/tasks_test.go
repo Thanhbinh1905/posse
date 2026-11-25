@@ -325,8 +325,12 @@ use = "claude"
 	}
 }
 
-func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
+func TestConcurrentQueuedLaunchAndListTolerateAgentRegistrationRace(t *testing.T) {
 	fixture := newStartFixture(t)
+	fixture.fake.ErrorQueue["agent.prompt"] = []error{
+		&herdr.Error{Code: "agent_not_ready", Message: "agent w1:p1 is not an active named agent"},
+		nil,
+	}
 	if err := os.WriteFile(filepath.Join(fixture.home, "config.toml"), []byte("[defaults]\nmax_workers = 1\nmerge_mode = \"local\"\n\n[profiles.claude]\nkind = \"claude\"\n\n[dispatch.default]\nuse = \"claude\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +386,16 @@ func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
 		return taskBranchAvailableForBranch(ctx, db, project, branch, members)
 	}
 	tabCreated := make(chan struct{}, 1)
+	promptStarted := make(chan struct{})
+	releasePrompt := make(chan struct{})
+	var promptOnce sync.Once
 	fixture.fake.BeforeCall = func(method string) {
+		if method == "agent.prompt" {
+			promptOnce.Do(func() {
+				close(promptStarted)
+				<-releasePrompt
+			})
+		}
 		if method == "worktree.open" {
 			select {
 			case tabCreated <- struct{}{}:
@@ -416,6 +429,15 @@ func TestConcurrentQueuedLaunchLoserDoesNotRecordBranchDecline(t *testing.T) {
 	waitFor(secondAtBranchCheck, "second queued launch branch check")
 	close(releaseFirst)
 	waitFor(tabCreated, "first Worker tab creation")
+	waitFor(promptStarted, "queued Task launch prompt")
+	listOutput := &bytes.Buffer{}
+	listCLI := fixture.service.CLI()
+	listCLI.Out, listCLI.ErrOut = listOutput, listOutput
+	listExit := listCLI.Run([]string{"list"})
+	close(releasePrompt)
+	if listExit != 0 {
+		t.Fatalf("concurrent posse list exit=%d output=%s", listExit, listOutput.String())
+	}
 	close(releaseSecond)
 	launchExit := 0
 	for range 2 {
