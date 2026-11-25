@@ -679,6 +679,42 @@ func TestBriefShowsAcceptedTurnTokenAfterWorkingAndReviewFixInstructions(t *test
 	}
 }
 
+func TestWorkerStatusListsOpenGreenhousePatterns(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	task, err := db.Task(context.Background(), fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(context.Background(), fixture.sandbox, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: task.ID, Repository: fixture.project.Name, Provider: store.GreenhouseReviewProvider,
+		Protocol: "2", Grant: "shop/t1/shop/r1", Head: head, Target: head, ReviewBase: head,
+		Outcome: "findings", Blocking: 2, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{
+			{Key: "first", Severity: "P1", Origin: "introduced", Path: "internal/app/one.go", Line: 10, Excerpt: "first", Rule: "First rule", Guidance: "Fix first", Head: head},
+			{Key: "second", Severity: "P1", Origin: "introduced", Path: "internal/app/two.go", Line: 20, Excerpt: "second", Rule: "Second rule", Guidance: "Fix second", Head: head},
+		},
+	}
+	if recorded, err := db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return head, nil }); err != nil || !recorded {
+		t.Fatalf("record Greenhouse Verdict: recorded=%v err=%v", recorded, err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Chdir(fixture.sandbox)
+	service := testService(fixture.home, herdr.NewFake())
+	code, output := runCLI(t, service, "status")
+	if code != 0 || !strings.Contains(output, "P-1") || !strings.Contains(output, "P-2") {
+		t.Fatalf("Worker status = %d %s; want both Greenhouse patterns", code, output)
+	}
+}
+
 func TestDoneSignalAcceptsDeliveredTaskInstructions(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	ctx := context.Background()
