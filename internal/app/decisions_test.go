@@ -390,10 +390,17 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 	if _, err := db.AckNotices(ctx, project.ID, []string{fmt.Sprint(ignoredID)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: failed.ID, Kind: "needs_decision", Summary: "Greenhouse review failed at head-a", DataJSON: `{"repo":"shop","head":"head-a"}`}); err != nil {
+	service := testService(home, herdr.NewFake())
+	if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
 		t.Fatal(err)
 	}
-	service := testService(home, herdr.NewFake())
+	greenhouseNoticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: failed.ID, Kind: "needs_decision", Summary: "Greenhouse review failed at head-a", DataJSON: `{"repo":"shop","head":"head-a"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AdvanceDecisionNoticeCursor(ctx, project.ID, greenhouseNoticeID); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
 		if err := service.raiseNoticeDecisions(ctx, db, project); err != nil {
 			t.Fatal(err)
