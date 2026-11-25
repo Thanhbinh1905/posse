@@ -15,6 +15,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 type workerFixture struct {
@@ -756,6 +757,38 @@ func TestWorkerMayExperimentAgainstATemporaryHome(t *testing.T) {
 	service := testService(filepath.Join(fixture.root, "experiment-home"), herdr.NewFake())
 	if code, output := runCLI(t, service, "project", "add", "--name", "scratch"); code != 0 || !strings.Contains(output, "registered: true") {
 		t.Fatalf("Worker could not register a Project in a temporary home: code=%d output=%s", code, output)
+	}
+}
+
+func TestStatusReportsHeavyWaitAndSurvivingHolderPID(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	t.Chdir(fixture.sandbox)
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("POSSE_TASK_ID", "")
+	lockDir := filepath.Join(runtimeDir, "posse", "heavy")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wait := fmt.Sprintf(`{"pid":%d,"home":%q,"project":"shop","task":"t1"}`, os.Getpid(), fixture.home)
+	if err := os.WriteFile(filepath.Join(lockDir, "wait-424242.json"), []byte(wait), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(lockDir, "cpu-0.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	holder := fmt.Sprintf(`{"pid":%d,"project":"other","task":"t8","command":"go test"}`, os.Getpid())
+	if err := os.WriteFile(filepath.Join(lockDir, "cpu-0.json"), []byte(holder), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, testService(fixture.home, nil), "status", "--json")
+	if code != 0 || !strings.Contains(output, `"waiting":"heavy slot"`) || !strings.Contains(output, fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Fatalf("status exit=%d output=%s", code, output)
 	}
 }
 
