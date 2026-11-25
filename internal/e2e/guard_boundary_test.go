@@ -220,7 +220,7 @@ func TestWorkerGuardAgainstIsolatedHerdr(t *testing.T) {
 		{"Git destination clone", "git clone " + foreignRemote + " " + outsideClone, true},
 		{"Git destination worktree", "git worktree add " + outsideWorktree, true},
 		{"Git config-env uppercase key", "FOREIGN_WORKTREE=" + foreignRepo + " git --config-env=CORE.WORKTREE=FOREIGN_WORKTREE status", true},
-		{"preflight repository root", `cd "$(git rev-parse --show-toplevel)"`, false},
+		{"preflight repository root", `cd "$(git rev-parse --show-toplevel)" && git rev-parse --show-toplevel`, false},
 		{"command probe", "command -v herdr", false},
 		{"which probe", "which herdr", false},
 		{"type probe", "type herdr", false},

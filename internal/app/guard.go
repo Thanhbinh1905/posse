@@ -2069,6 +2069,15 @@ func newShellEnv(env []string) *shellEnv {
 	return state
 }
 
+func (e *shellEnv) hasGitDirectoryOverride() bool {
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"} {
+		if e.unknown[name] || e.exported[name] && e.values[name] != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *shellEnv) clone() *shellEnv {
 	copied := &shellEnv{values: map[string]string{}, exported: map[string]bool{}, unknown: map[string]bool{}, cwd: e.cwd}
 	for key, value := range e.values {
@@ -2292,6 +2301,12 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 		if sourceText(script, part) == "$(pwd)" && e.cwd != "" {
 			return e.cwd, true
 		}
+		if gitTopLevelCall(part) && e.cwd != "" && !e.hasGitDirectoryOverride() {
+			command := exec.Command("git", "-C", e.cwd, "rev-parse", "--show-toplevel")
+			if output, err := command.Output(); err == nil {
+				return strings.TrimSpace(string(output)), true
+			}
+		}
 		if mktempCall(part) {
 			return mktempPath, true
 		}
@@ -2308,6 +2323,18 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 		return e.values[name], true
 	}
 	return "", false
+}
+
+func gitTopLevelCall(subst *syntax.CmdSubst) bool {
+	if len(subst.Stmts) != 1 {
+		return false
+	}
+	stmt := subst.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Coprocess || len(stmt.Redirs) > 0 || len(call.Assigns) > 0 || len(call.Args) != 3 {
+		return false
+	}
+	return call.Args[0].Lit() == "git" && call.Args[1].Lit() == "rev-parse" && call.Args[2].Lit() == "--show-toplevel"
 }
 
 // mktempCall reports a command substitution that only runs mktemp and prints
