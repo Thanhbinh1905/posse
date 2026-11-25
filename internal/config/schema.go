@@ -115,7 +115,6 @@ var keySpecs = []KeySpec{
 	{Key: "profiles.<profile>.args", Type: TypeStringArray, Default: []string{}, Meaning: "Additional arguments passed to this Profile's agent.", UserOnly: true},
 	{Key: "profiles.<profile>.attribution", Type: TypeBoolean, Default: false, Meaning: "Keep the agent's commit co-author trailer and PR attribution. When false, Claude launches get attribution disabled and publish refuses commits with agent attribution trailers.", UserOnly: true},
 	{Key: "profiles.<profile>.fallback", Type: TypeString, Default: "", Meaning: "Profile that relaunches a Worker in the same Sandbox when this Profile's quota or usage limit runs out; chains may not loop."},
-	{Key: "workflows.<workflow>.stages", Type: TypeTableArray, Meaning: "Ordered User-owned workflow stages; a Project replaces a named workflow as a whole.", UserOnly: true},
 	{Key: "dispatch", Type: TypeTableArray, Default: []any{}, Meaning: "Dispatch rules with type, when prose, and use naming one Profile or a nonempty list of alternatives for one Worker."},
 	{Key: "dispatch.default.use", Type: TypeString, Default: "", Meaning: "Fallback Profile used when no dispatch rule matches."},
 	{Key: "autonomy.yolo", Type: TypeBoolean, Default: false, Meaning: "Shorthand granting the Lead review and merging autonomy.", UserOnly: true},
@@ -193,6 +192,9 @@ func IsUserOnlyFor(key string, projectFile bool) bool {
 }
 
 func ValidateSetting(key string, value any, projectFile bool) error {
+	if key == "workflows" || strings.HasPrefix(key, "workflows.") {
+		return fmt.Errorf("%s: staged workflows were removed; see ADR 0026", key)
+	}
 	spec, found := Lookup(key)
 	if !found {
 		return fmt.Errorf("%s: %s", key, unknownKeyReason(key))
@@ -225,8 +227,6 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 	case TypeTableArray:
 		if key == "dispatch" {
 			valid = dispatchRules(value)
-		} else if isWorkflowStagesKey(key) {
-			_, valid = workflowTableEntries(value)
 		}
 	}
 	if !valid {
@@ -317,7 +317,10 @@ func ValidateSchemaMap(file string, values map[string]any, projectFile bool) err
 // SchemaValidationErrors reports every independently invalid setting in a
 // config map so an edit can distinguish pre-existing errors from new ones.
 func SchemaValidationErrors(file string, values map[string]any, projectFile bool) []error {
-	issues := workflowSchemaValidationErrors(file, values)
+	if _, found := values["workflows"]; found {
+		return []error{&InvalidError{File: file, Key: "workflows", Reason: "staged workflows were removed; see ADR 0026"}}
+	}
+	var issues []error
 	var walk func(string, any)
 	walk = func(prefix string, value any) {
 		if replacement := ReplacementKey(prefix); replacement != "" {
@@ -349,9 +352,6 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 				walk(path, current[key])
 			}
 		case []map[string]any:
-			if isWorkflowStagesKey(prefix) {
-				return
-			}
 			if prefix != "dispatch" {
 				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: prefix + " must be an array of tables"})
 				return
@@ -368,11 +368,6 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 				}
 			}
 		case []any:
-			if isWorkflowStagesKey(prefix) {
-				if _, ok := workflowTableEntries(current); ok {
-					return
-				}
-			}
 			key := canonicalSchemaKey(prefix)
 			if _, found := Lookup(key); !found {
 				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "unknown configuration key"})

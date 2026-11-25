@@ -872,7 +872,7 @@ func oneOfState(value State, candidates ...State) bool {
 }
 
 func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64, error) {
-	planJSON, err := db.bindTaskPlan(task, task.Seq, "")
+	planJSON, err := db.bindTaskPlan(task, task.Seq)
 	if err != nil {
 		return 0, err
 	}
@@ -898,7 +898,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID int64, task Task) (int64
 		AgentName: task.AgentName, AgentSession: task.AgentSession, AgentSessionKind: task.AgentSessionKind, PrUrl: task.PRURL, MergedRef: task.MergedRef,
 		LastOutputHash: task.LastOutputHash, LastWorktreeHash: task.LastWorktreeHash,
 		LastProgressAt: task.LastProgressAt, AgentAbsentSince: task.AgentAbsentSince, IdleSince: task.IdleSince, CreatedAt: now, UpdatedAt: now, PlanJson: planJSON,
-		ReportKind: task.ReportKind, PaneShellIdentity: task.PaneShellIdentity, WorkflowRunID: storedWorkflowRunID(planJSON), PlanRevision: int64(storedPlanRevision(planJSON)),
+		ReportKind: task.ReportKind, PaneShellIdentity: task.PaneShellIdentity, PlanRevision: int64(storedPlanRevision(planJSON)),
 	})
 	if err != nil {
 		return 0, err
@@ -1158,20 +1158,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 			return 0, 0, ErrTaskBranchExists
 		}
 	}
-	workflowRunID := ""
-	if admitted, err := task.AdmittedPlan(); err != nil {
-		return 0, 0, err
-	} else if admitted != nil && admitted.Workflow != nil {
-		if admitted.Workflow.RunID == "new" {
-			workflowRunID, err = nextWorkflowRunIDTx(ctx, tx.Tx, projectID)
-			if err != nil {
-				return 0, 0, err
-			}
-		} else if err := db.validateWorkflowTaskAdmissionTx(ctx, tx.Tx, projectID, task.Type, admitted.Workflow); err != nil {
-			return 0, 0, err
-		}
-	}
-	planJSON, err := db.bindTaskPlan(task, seq, workflowRunID)
+	planJSON, err := db.bindTaskPlan(task, seq)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1191,7 +1178,7 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'posse:' || ? || ':t' || ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		projectID, seq, task.Type, nullableID(task.ReviewsTaskID), task.Title, task.ShortName, string(task.State), task.Profile, task.DispatchRule,
 		task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath,
-		projectName, seq, now, now, planJSON, task.ReportKind, storedWorkflowRunID(planJSON), storedPlanRevision(planJSON)).Scan(&id)
+		projectName, seq, now, now, planJSON, task.ReportKind, "", storedPlanRevision(planJSON)).Scan(&id)
 	if err != nil {
 		return 0, 0, err
 	}

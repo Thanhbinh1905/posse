@@ -9,20 +9,17 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 9
+const Version = 10
+
+const planVersionWithoutStagedWorkflows = 10
 
 const planVersionGreenhouseDelivery = 9
-
-// planVersionRuntimeWorkflow marks the first plan version that binds a frozen
-// workflow to its run and stage identity.
-const planVersionRuntimeWorkflow = 5
 
 // planVersionWithoutNoMistakes marks the first plan version written after the
 // no-mistakes Merge Mode and review policy were removed. Older plans may still
@@ -30,8 +27,6 @@ const planVersionRuntimeWorkflow = 5
 const planVersionWithoutNoMistakes = 6
 
 const planVersionReviewProvider = 8
-
-var workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
 
 // planVersionCurrentBriefContract marks the first plan version written with
 // the current Brief vocabulary and semantics.
@@ -172,33 +167,33 @@ func (loops ValidationLoops) MaxReviewRounds() int {
 type Plan struct {
 	// Original bytes retain the digest and provenance of admitted 0.14 plans.
 	legacyJSON       string
-	AdmittedSHA256   string                    `json:"admitted_sha256,omitempty"`
-	Version          int                       `json:"version"`
-	Revision         int                       `json:"revision"`
-	PreviousSHA256   string                    `json:"previous_sha256,omitempty"`
-	Type             string                    `json:"type"`
-	Outcome          string                    `json:"outcome"`
-	Executor         string                    `json:"executor"`
-	Execution        Execution                 `json:"execution"`
-	Review           string                    `json:"review"`
-	ReviewProvider   string                    `json:"review_provider,omitempty"`
-	BudgetTokens     int64                     `json:"budget_tokens,omitempty"`
-	ReviewOf         int64                     `json:"review_of,omitempty"`
-	Dependencies     []dispatch.Dependency     `json:"dependencies,omitempty"`
-	Delivery         string                    `json:"delivery"`
-	Grants           []Grant                   `json:"grants"`
-	Preferences      []Preference              `json:"preferences,omitempty"`
-	UserChoice       *UserChoice               `json:"user_choice,omitempty"`
-	MemberAdmissions []MemberAdmission         `json:"member_admissions,omitempty"`
-	Inputs           []Input                   `json:"inputs"`
-	Paths            Paths                     `json:"paths"`
-	Launch           Launch                    `json:"launch"`
-	WorkflowJobs     bool                      `json:"workflow_jobs,omitempty"`
-	ValidationLoops  *ValidationLoops          `json:"validation_loops,omitempty"`
-	Workflow         *config.WorkflowSelection `json:"workflow,omitempty"`
-	MergeMethod      string                    `json:"merge_method"`
-	ProseLanguage    string                    `json:"prose_language,omitempty"`
-	Pool             config.Pool               `json:"pool"`
+	AdmittedSHA256   string                `json:"admitted_sha256,omitempty"`
+	Version          int                   `json:"version"`
+	Revision         int                   `json:"revision"`
+	PreviousSHA256   string                `json:"previous_sha256,omitempty"`
+	Type             string                `json:"type"`
+	Outcome          string                `json:"outcome"`
+	Executor         string                `json:"executor"`
+	Execution        Execution             `json:"execution"`
+	Review           string                `json:"review"`
+	ReviewProvider   string                `json:"review_provider,omitempty"`
+	BudgetTokens     int64                 `json:"budget_tokens,omitempty"`
+	ReviewOf         int64                 `json:"review_of,omitempty"`
+	Dependencies     []dispatch.Dependency `json:"dependencies,omitempty"`
+	Delivery         string                `json:"delivery"`
+	Grants           []Grant               `json:"grants"`
+	Preferences      []Preference          `json:"preferences,omitempty"`
+	UserChoice       *UserChoice           `json:"user_choice,omitempty"`
+	MemberAdmissions []MemberAdmission     `json:"member_admissions,omitempty"`
+	Inputs           []Input               `json:"inputs"`
+	Paths            Paths                 `json:"paths"`
+	Launch           Launch                `json:"launch"`
+	WorkflowJobs     bool                  `json:"workflow_jobs,omitempty"`
+	ValidationLoops  *ValidationLoops      `json:"validation_loops,omitempty"`
+	Workflow         json.RawMessage       `json:"workflow,omitempty"`
+	MergeMethod      string                `json:"merge_method"`
+	ProseLanguage    string                `json:"prose_language,omitempty"`
+	Pool             config.Pool           `json:"pool"`
 	// DeleteBranchOnMerge is nil in plans admitted before the setting existed.
 	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
 }
@@ -233,7 +228,6 @@ type Request struct {
 	Paths               Paths
 	WorkflowJobs        bool
 	ValidationLoops     *ValidationLoops
-	Workflow            *config.WorkflowSelection
 	MergeMethod         string
 	ProseLanguage       string
 	Pool                config.Pool
@@ -322,7 +316,7 @@ func Resolve(r Request) (Plan, error) {
 		Execution: r.Execution, Review: review, ReviewProvider: r.ReviewProvider, BudgetTokens: budgetTokens, ReviewOf: r.ReviewOf, Delivery: delivery,
 		Grants: []Grant{{Name: "autonomy.review", Value: autonomy.Review, Source: reviewSource}, {Name: "autonomy.merge", Value: autonomy.Merge, Source: mergeSource}},
 		Inputs: append([]Input{r.Brief}, r.Inputs...), Paths: r.Paths, Launch: r.Launch,
-		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, Workflow: r.Workflow, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool,
+		WorkflowJobs: r.WorkflowJobs && brief.Type == "change" && review == "full-pipeline", ValidationLoops: validationLoops, MergeMethod: r.MergeMethod, ProseLanguage: r.ProseLanguage, Pool: r.Pool,
 		DeleteBranchOnMerge: &r.DeleteBranchOnMerge}
 	p.Preferences = []Preference{{Name: "delivery", Value: p.Delivery, Source: source}, {Name: "review", Value: p.Review, Source: source}}
 	for i, explicit := range []bool{brief.MergeMode != "", brief.Review != ""} {
@@ -365,19 +359,18 @@ func Resolve(r Request) (Plan, error) {
 	// Snapshot interpreted configuration fields consumed by the contract, not
 	// entire TOML files, other Profiles or unrelated forge content.
 	settings, err := json.Marshal(struct {
-		Execution           Execution                 `json:"execution"`
-		Review              string                    `json:"review"`
-		ReviewProvider      string                    `json:"review_provider"`
-		Delivery            string                    `json:"delivery"`
-		Grants              []Grant                   `json:"grants"`
-		WorkflowJobs        bool                      `json:"workflow_jobs,omitempty"`
-		ValidationLoops     *ValidationLoops          `json:"validation_loops,omitempty"`
-		Workflow            *config.WorkflowSelection `json:"workflow,omitempty"`
-		MergeMethod         string                    `json:"merge_method"`
-		ProseLanguage       string                    `json:"prose_language"`
-		Pool                config.Pool               `json:"pool"`
-		DeleteBranchOnMerge *bool                     `json:"delete_branch_on_merge,omitempty"`
-	}{p.Execution, p.Review, p.ReviewProvider, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.Workflow, p.MergeMethod, p.ProseLanguage, p.Pool, p.DeleteBranchOnMerge})
+		Execution           Execution        `json:"execution"`
+		Review              string           `json:"review"`
+		ReviewProvider      string           `json:"review_provider"`
+		Delivery            string           `json:"delivery"`
+		Grants              []Grant          `json:"grants"`
+		WorkflowJobs        bool             `json:"workflow_jobs,omitempty"`
+		ValidationLoops     *ValidationLoops `json:"validation_loops,omitempty"`
+		MergeMethod         string           `json:"merge_method"`
+		ProseLanguage       string           `json:"prose_language"`
+		Pool                config.Pool      `json:"pool"`
+		DeleteBranchOnMerge *bool            `json:"delete_branch_on_merge,omitempty"`
+	}{p.Execution, p.Review, p.ReviewProvider, p.Delivery, p.Grants, p.WorkflowJobs, p.ValidationLoops, p.MergeMethod, p.ProseLanguage, p.Pool, p.DeleteBranchOnMerge})
 	if err != nil {
 		return Plan{}, err
 	}
@@ -556,10 +549,8 @@ func (p Plan) Validate() error {
 		return invalid("missing selected Brief")
 	}
 	parseBrief := dispatch.ParseBriefText
-	if p.Version < planVersionCurrentBriefContract {
+	if p.Version < planVersionWithoutStagedWorkflows {
 		parseBrief = dispatch.ParseHistoricalBriefText
-	} else if p.Version < planVersionWithoutNoMistakes {
-		parseBrief = dispatch.ParseStoredBriefText
 	}
 	brief, err := parseBrief(string(p.Inputs[0].Bytes))
 	if err != nil {
@@ -573,56 +564,6 @@ func (p Plan) Validate() error {
 	}
 	if p.Version >= 7 && brief.BudgetTokens > 0 && p.BudgetTokens != brief.BudgetTokens {
 		return invalid("frozen Task token budget does not match the selected Brief")
-	}
-	if p.Workflow == nil {
-		if brief.Workflow != "" || brief.WorkflowRun != "" || brief.Stage != "" {
-			return invalid("selected Brief workflow is not frozen in the plan")
-		}
-	} else {
-		if p.Workflow.Name == "" || p.Workflow.Source == "" || brief.Workflow != "" && p.Workflow.Name != brief.Workflow {
-			return invalid("frozen workflow does not match the selected Brief or has no source")
-		}
-		if len(p.Workflow.SHA256) != 64 {
-			return invalid("frozen workflow has an invalid digest")
-		}
-		if _, err := hex.DecodeString(p.Workflow.SHA256); err != nil {
-			return invalid("frozen workflow has an invalid digest")
-		}
-		digest, err := config.WorkflowDigest(p.Workflow.Profile)
-		if err != nil || digest != p.Workflow.SHA256 {
-			return invalid("frozen workflow content does not match its digest")
-		}
-		for _, issue := range config.ValidateWorkflowProfile(p.Workflow.Profile) {
-			return invalid("workflows." + p.Workflow.Name + "." + issue.Key + ": " + issue.Reason)
-		}
-		runtimeBound := p.Workflow.RunID != "" || p.Workflow.StageName != "" || p.Workflow.StageIndex != 0
-		if !runtimeBound {
-			if p.Version >= planVersionRuntimeWorkflow || brief.Workflow == "" || brief.WorkflowRun != "" || brief.Stage != "" {
-				return invalid("frozen workflow does not match the selected Brief or lacks run and stage identity")
-			}
-		} else {
-			if p.Workflow.RunID != "new" && !workflowRunIDPattern.MatchString(p.Workflow.RunID) {
-				return invalid("frozen workflow has an invalid run ID")
-			}
-			if p.Workflow.StageName == "" || p.Workflow.StageIndex < 0 || p.Workflow.StageIndex >= len(p.Workflow.Profile.Stages) {
-				return invalid("frozen workflow has an invalid stage identity")
-			}
-			stage := p.Workflow.Profile.Stages[p.Workflow.StageIndex]
-			if stage.Name != p.Workflow.StageName || stage.TaskType != p.Type {
-				return invalid("frozen workflow stage does not match the Task type")
-			}
-			if stage.TaskType == "none" {
-				return invalid("a none workflow stage cannot admit a Worker Task")
-			}
-			initialStage := p.Workflow.StageIndex == 0 && brief.Workflow != "" && brief.WorkflowRun == "" && brief.Stage == ""
-			if p.Workflow.RunID == "new" {
-				if !initialStage {
-					return invalid("new workflow run must start at its first stage")
-				}
-			} else if !initialStage && (brief.WorkflowRun != p.Workflow.RunID || brief.Stage != p.Workflow.StageName) {
-				return invalid("frozen workflow run or stage does not match the selected Brief")
-			}
-		}
 	}
 	if p.ValidationLoops == nil {
 		if brief.ReviewRounds > 0 {
@@ -757,6 +698,9 @@ func Decode(data string) (Plan, error) {
 	var p Plan
 	if err := json.Unmarshal([]byte(data), &p); err != nil {
 		return Plan{}, fmt.Errorf("decode execution plan: %w", err)
+	}
+	if p.Version >= planVersionWithoutStagedWorkflows && len(p.Workflow) > 0 {
+		return Plan{}, fmt.Errorf("decode execution plan: staged workflows were removed")
 	}
 	if p.Version < Version {
 		p.legacyJSON = data

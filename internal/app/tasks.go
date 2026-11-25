@@ -55,10 +55,6 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	if project.IsDirectory() {
 		return executionUnavailable(project)
 	}
-	workflow, err := resolveWorkflowForBrief(ctx.Context, db, project, cfg, brief)
-	if err != nil {
-		return err
-	}
 	targets, err := projectTargets(ctx.Context, db, project)
 	if err != nil {
 		return err
@@ -114,9 +110,6 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 	}
 	if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
 		result = append(result, axi.Field{Key: "profile_stats", Value: statsFor(history, resolution.Profile)})
-	}
-	if workflow != nil {
-		result = append(result, axi.Field{Key: "workflow", Value: workflow})
 	}
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
 	if brief.ReportKind != "" {
@@ -239,10 +232,6 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 			return axi.Failure("brief_invalid", "supersedes requires a User-approved rethink Decision for the prior Change Task", false)
 		}
 		supersededTask = &source
-	}
-	workflow, err := resolveWorkflowForBrief(ctx.Context, db, project, cfg, brief)
-	if err != nil {
-		return err
 	}
 	name := parsed.Flags["name"]
 	if name == "" {
@@ -538,7 +527,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		AutonomyReview: defaultValue(autonomy.Review, "ask"), AutonomyMerge: defaultValue(autonomy.Merge, "ask"),
 		Branch: branch, BaseRef: baseRef, TargetBranch: targetBranch, ReviewTargets: reviewTargets, Adoption: adoption,
 	}
-	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice, workflow)
+	plan, err := resolveTaskPlan(ctx.Context, home, project, cfg, task, resolution, sourceBriefPath, briefData, members, choice)
 	if err != nil {
 		return admittedPlanFailure(err)
 	}
@@ -616,7 +605,7 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		return axi.Failure("task_branch_changed", "Task sequence changed while its branch was being admitted", true, "Retry `posse start`; Posse will check the new Task-bound branch before creating the Task")
 	}
 	if err != nil {
-		return workflowAdmissionFailure(err)
+		return err
 	}
 	if queued {
 		if err := s.regenerateProjects(ctx.Context, db); err != nil {
@@ -837,7 +826,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan, task) + workflowLaunchContext(plan.Workflow) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, launchPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan, task) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
@@ -916,9 +905,6 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		{Key: "help", Value: []any{"Run `posse show " + taskIDString(sequence) + "` to inspect the Worker", "Run `posse peek " + taskIDString(sequence) + "` to read Worker output"}},
 	}
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
-	if workflow := plan.Workflow; workflow != nil {
-		result = append(result, axi.Field{Key: "workflow_run", Value: workflow.RunID}, axi.Field{Key: "stage", Value: workflow.StageName})
-	}
 	result = append(result, startPlanFields(cfg, project, brief, plan)...)
 	if report {
 		return ctx.Print(result)
@@ -2083,13 +2069,6 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		reportPath := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(task.Seq), "report.md")
 		if _, err := copySignalFile(home, project, task, parsed.Flags["report"], reportPath); err != nil {
 			return axi.Failure("signal_invalid", err.Error(), false)
-		}
-		if admittedPlan != nil && admittedPlan.Workflow != nil {
-			digest, err := fileSHA256(reportPath)
-			if err != nil {
-				return err
-			}
-			data["workflow_report_sha256"] = digest
 		}
 		if reviewFindings != nil {
 			if err := writeReviewFindingsArtifact(project, task, home, findingsContents); err != nil {
