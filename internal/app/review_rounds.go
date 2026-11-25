@@ -1128,7 +1128,8 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 		if hasFailureNotice && reviewerSizeFailure(errors.New(latestFailure)) {
 			continue
 		}
-		if (!explicitStart || transientGreenhouseFailure(errors.New(latestFailure))) && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+		retryBackoff := !explicitStart || transientGreenhouseFailure(errors.New(latestFailure)) || greenhouseReviewHasRefusedRequest(requests, change.ID, target.Repository, target.Commit)
+		if retryBackoff && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
 			continue
 		}
 		fenced, err := greenhouseReviewFenced(ctx, db, project, change)

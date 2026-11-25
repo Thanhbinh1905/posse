@@ -62,8 +62,24 @@ func repeatedGreenhouseReviewFailures(requests []store.GreenhouseReviewRequest, 
 	return count, latestFailure
 }
 
+func greenhouseReviewHasRefusedRequest(requests []store.GreenhouseReviewRequest, taskID int64, repository, head string) bool {
+	for _, request := range requests {
+		if request.TaskID == taskID && request.Repository == repository && request.RequestedHead == head && request.Outcome == "refused" {
+			return true
+		}
+	}
+	return false
+}
+
 func greenhouseReviewRetryAt(requests []store.GreenhouseReviewRequest, taskID int64, repository, head string) int64 {
 	count, latestFailure := repeatedGreenhouseReviewFailures(requests, taskID, repository, head)
+	for _, request := range requests {
+		if request.TaskID != taskID || request.Repository != repository || request.RequestedHead != head || request.Outcome != "refused" {
+			continue
+		}
+		count++
+		latestFailure = max(latestFailure, request.SettledAt)
+	}
 	if count == 0 {
 		return 0
 	}

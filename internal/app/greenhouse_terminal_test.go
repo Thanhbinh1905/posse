@@ -232,6 +232,78 @@ func TestGreenhouseSizeErrorsRaiseNeedsDecision(t *testing.T) {
 	}
 }
 
+func TestInconclusiveQuotaFailureIsRecordedAndBackedOff(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=? AND revision=1`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SetProjectLead(context.Background(), f.project.ID, "fixture", "lead-pane", "lead"); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitOutput(context.Background(), f.task.WorktreePath, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.service.greenhouseRound = func(context.Context, greenhouse.Round) (greenhouse.RoundResult, error) {
+		return greenhouse.RoundResult{}, &greenhouse.TerminalReviewError{Status: "inconclusive", Reason: "quota exhausted"}
+	}
+	binDir, err := os.MkdirTemp(os.Getenv("TMPDIR"), "gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(binDir) })
+	if err := os.Symlink("/usr/bin/true", filepath.Join(binDir, "greenhouse")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if code, output, stderr := f.run("_greenhouse", "review", "t1"); code != 0 {
+		t.Fatalf("inconclusive quota review: %d %s %s", code, output, stderr)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(context.Background(), f.project.ID)
+	if err != nil || len(requests) != 1 || requests[0].Outcome != "refused" {
+		t.Fatalf("inconclusive quota requests = %+v, %v; want one refused request", requests, err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil || len(notices) != 0 {
+		t.Fatalf("inconclusive quota notices = %+v, %v; want no failure Notice", notices, err)
+	}
+	starts := 0
+	previous := selfExecCommand
+	selfExecCommand = func(...string) (*exec.Cmd, error) {
+		starts++
+		return exec.Command("true"), nil
+	}
+	t.Cleanup(func() { selfExecCommand = previous })
+	started := false
+	if err := f.service.startParallelGreenhouseReviewsTracked(context.Background(), f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: head}}, &started, false); err != nil {
+		t.Fatal(err)
+	}
+	if started || starts != 0 {
+		t.Fatalf("automatic review restarted before quota retry backoff: started=%t, children=%d", started, starts)
+	}
+	notices, err = f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil || countNoticeKind(notices, "needs_decision") != 0 {
+		t.Fatalf("inconclusive quota needs_decision Notices = %+v, %v; want none", notices, err)
+	}
+}
+
 func TestGreenhouseReviewRecordsCancelledTerminalRunAsFailure(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
