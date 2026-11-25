@@ -52,8 +52,8 @@ func TestPosseSetupSkillNamesOnlySchemaKeys(t *testing.T) {
 			continue
 		}
 		concrete := strings.NewReplacer("<kind>", "claude", "<profile>", "deep").Replace(key)
-		if _, found := config.Lookup(concrete); !found {
-			t.Errorf("skill names %q, which is not a schema key", key)
+		if _, found := config.Lookup(concrete); !found && !config.IsDeprecatedKey(concrete) {
+			t.Errorf("skill names %q, which is not a schema key or documented deprecated key", key)
 		}
 		checked[key] = true
 	}

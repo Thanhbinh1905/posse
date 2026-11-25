@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	vocabularyMarkerV1 = "# posse vocabulary: 1\n"
-	vocabularyMarker   = "# posse vocabulary: 2\n"
+	vocabularyMarkerV1               = "# posse vocabulary: 1\n"
+	vocabularyMarker                 = "# posse vocabulary: 2\n"
+	deprecatedWorkerDisplayPrefixKey = "identity.worker.display_prefix"
 )
 
 func vocabularyMarkerVersion(data []byte) int {
@@ -40,6 +41,11 @@ func vocabularyVersion(data []byte, path string) (int, error) {
 		return 0, err
 	}
 	return vocabularyMarkerVersion(marker), nil
+}
+
+// IsDeprecatedKey reports whether an old schema accepted a key that no longer has an effect.
+func IsDeprecatedKey(key string) bool {
+	return key == deprecatedWorkerDisplayPrefixKey
 }
 
 // ReplacementKey is shared by validation and the one-time stored-config upgrade.
@@ -68,6 +74,9 @@ func ReplacementKey(key string) string {
 }
 
 func unknownKeyReason(key string) string {
+	if key == deprecatedWorkerDisplayPrefixKey {
+		return "deprecated and has no effect; remove it from the config file"
+	}
 	if key == "defaults.auto_recover" {
 		return autoRecoverRemoved
 	}
@@ -207,6 +216,7 @@ func migrateVocabularyFile(path string) error {
 	// shorthand here; Load enforces the actual file's global/Project scope.
 	validationValues := clone(values).(map[string]any)
 	removeLegacyGateSettings(path, validationValues)
+	removeDeprecatedSettings(path, validationValues)
 	// A removed value survives the rename unchanged; Load then reports it under
 	// its canonical key, where `posse config set` can replace it.
 	for _, issue := range SchemaValidationErrors(path, validationValues, true) {
@@ -326,9 +336,6 @@ func migrateVocabularyMap(values map[string]any, prefix string) (bool, error) {
 		}
 		if key == "auto_teardown" && value == "landed" {
 			values[key], changed = "merged", true
-		}
-		if full == "identity.worker.display_prefix" && value == "rider" {
-			values[key], changed = "worker", true
 		}
 	}
 	return changed, nil

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,21 +16,33 @@ import (
 )
 
 func (s *Service) configSchema(ctx *axi.Context, args []string) error {
-	if len(args) != 0 {
-		return axi.Usage("config schema takes no arguments")
+	parsed, err := parseArgs("config schema", args, map[string]flagSpec{"all": {boolean: true}})
+	if err != nil {
+		return err
 	}
-	rows := make([]map[string]any, 0, len(config.Schema()))
-	for _, spec := range config.Schema() {
+	if len(parsed.Positionals) != 0 {
+		return axi.Usage("config schema takes no positional arguments")
+	}
+	schema := config.Schema()
+	if parsed.Bool("all") {
+		schema = config.SchemaAll()
+	}
+	rows := make([]map[string]any, 0, len(schema))
+	for _, spec := range schema {
 		rows = append(rows, map[string]any{
 			"key": spec.Key, "type": string(spec.Type), "allowed_values": spec.Allowed,
 			"default": spec.Default, "meaning": spec.Meaning, "user_only": spec.UserOnly,
 		})
 	}
-	return ctx.Print(axi.Object{{Key: "keys", Value: rows}, {Key: "help", Value: []any{"Run `posse config show --effective` to inspect effective values", "Run `posse config set <key> <value>` to update a key"}}})
+	help := []any{"Run `posse config show --effective` to inspect effective values", "Run `posse config set <key> <value>` to update a key"}
+	if !parsed.Bool("all") {
+		help = append(help, "Run `posse config schema --all` to inspect harness-internal keys")
+	}
+	return ctx.Print(axi.Object{{Key: "keys", Value: rows}, {Key: "help", Value: help}})
 }
 
 func (s *Service) configShow(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("config show", args, map[string]flagSpec{"project": {}, "effective": {boolean: true}})
+	parsed, err := parseArgs("config show", args, map[string]flagSpec{"project": {}, "effective": {boolean: true}, "all": {boolean: true}})
 	if err != nil {
 		return err
 	}
@@ -59,22 +72,56 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return configError(err)
 		}
-		result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: cfg}, {Key: "sources", Value: sources}, {Key: "dispatch_rules", Value: effectiveDispatchRules(cfg)}, {Key: "dispatch_precedence", Value: stringsToAny(dispatch.Precedence)}}
+		delete(sources, "identity.worker.display_prefix")
+		effective := any(cfg)
+		if !parsed.Bool("all") {
+			encoded, err := json.Marshal(cfg)
+			if err != nil {
+				return err
+			}
+			var values map[string]any
+			if err := json.Unmarshal(encoded, &values); err != nil {
+				return err
+			}
+			delete(values, "kinds")
+			effective = values
+			for key := range sources {
+				if strings.HasPrefix(key, "kinds.") {
+					delete(sources, key)
+				}
+			}
+		}
+		result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "effective", Value: effective}, {Key: "sources", Value: sources}, {Key: "dispatch_rules", Value: effectiveDispatchRules(cfg)}, {Key: "dispatch_precedence", Value: stringsToAny(dispatch.Precedence)}}
 		if len(cfg.Warnings) > 0 {
 			result = append(result, axi.Field{Key: "warnings", Value: stringsToAny(cfg.Warnings)})
 		}
-		return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config schema` to inspect every key"}}))
+		help := []any{"Run `posse config schema` to inspect User-facing keys"}
+		if !parsed.Bool("all") {
+			help = append(help, "Run `posse config show --effective --all` to include harness-internal settings")
+		}
+		return ctx.Print(append(result, axi.Field{Key: "help", Value: help}))
 	}
 	path := config.ConfigPath(home, projectName)
 	values, _, err := config.ReadFile(path)
 	if err != nil {
 		return configError(err)
 	}
+	if identity, ok := values["identity"].(map[string]any); ok {
+		if worker, ok := identity["worker"].(map[string]any); ok {
+			delete(worker, "display_prefix")
+			if len(worker) == 0 {
+				delete(identity, "worker")
+			}
+		}
+	}
+	if !parsed.Bool("all") {
+		delete(values, "kinds")
+	}
 	result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "file", Value: path}, {Key: "values", Value: values}}
 	if len(cfg.Warnings) > 0 {
 		result = append(result, axi.Field{Key: "warnings", Value: stringsToAny(cfg.Warnings)})
 	}
-	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to include defaults and Project overrides"}}))
+	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to include defaults and Project overrides", "Pass `--all` to include harness-internal settings"}}))
 }
 
 func (s *Service) configSet(ctx *axi.Context, args []string) error {

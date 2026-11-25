@@ -102,7 +102,7 @@ func TestLiveTasksDoesNotLoadLargePlanInputs(t *testing.T) {
 	}
 }
 
-func TestPlanInputExternalizationKeepsLargeHistoricalBriefInline(t *testing.T) {
+func TestPlanInputExternalizationExternalizesLargeBrief(t *testing.T) {
 	home := t.TempDir()
 	db, err := Open(home)
 	if err != nil {
@@ -124,10 +124,20 @@ func TestPlanInputExternalizationKeepsLargeHistoricalBriefInline(t *testing.T) {
 	if err := json.Unmarshal([]byte(stored), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Inputs[0].Path != "" || !bytes.Equal(got.Inputs[0].Bytes, plan.Inputs[0].Bytes) {
-		t.Fatalf("large Brief was not kept inline: path=%q bytes=%d", got.Inputs[0].Path, len(got.Inputs[0].Bytes))
+	if got.Inputs[0].Path == "" || len(got.Inputs[0].Bytes) != 0 {
+		t.Fatalf("large Brief was not externalized: path=%q bytes=%d", got.Inputs[0].Path, len(got.Inputs[0].Bytes))
 	}
-	if _, err := taskplan.Decode(stored); err != nil {
+	externalizedBrief, err := db.readPlanBlob(got.Inputs[0])
+	if err != nil || !bytes.Equal(externalizedBrief, plan.Inputs[0].Bytes) {
+		t.Fatalf("externalized Brief changed: bytes=%d err=%v", len(externalizedBrief), err)
+	}
+	got.Inputs[0].Bytes = externalizedBrief
+	got.Inputs[0].Path = ""
+	storedWithBrief, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := taskplan.Decode(string(storedWithBrief)); err != nil {
 		t.Fatalf("decode stored plan with inline Brief: %v", err)
 	}
 }
