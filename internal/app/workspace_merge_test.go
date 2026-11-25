@@ -299,9 +299,15 @@ func TestWorkspacePRMergeRefusalQueuesMemberRefreshWhenTargetAdvances(t *testing
 		t.Fatal(err)
 	}
 	member.task.PlanJSON = encodedPlan
+	f.task.PlanJSON = encodedPlan
+	f.task.State = store.StateMerging
 	cfg := f.config()
 	if !greenhouseFullPipelineTaskWithConfig(member.task, cfg, "worker") {
 		t.Fatal("workspace Member is not recognized as Greenhouse full-pipeline")
+	}
+	sync, err := f.service.queuePRTargetSyncInstruction(ctx, f.db, f.task, "worker", prTargetFreshness{Branch: "main", Tip: targetTip, Root: member.target.Root}, head)
+	if err != nil || !sync.Queued {
+		t.Fatalf("workspace target sync = %+v, %v; want one queued Member refresh", sync, err)
 	}
 	refreshErr := f.service.refreshAfterPRMergeRefusal(ctx, f.db, member.project, cfg, member.task, "worker", errors.New("Pull request is not mergeable: the base branch was modified"))
 	var failure *axi.Error

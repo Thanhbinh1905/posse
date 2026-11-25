@@ -147,12 +147,31 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 	if freshness.Root != "" {
 		queuedHead := headSHA
 		checkedHead := headSHA
-		if fullPipelineSelected(task, member) && task.WorktreePath != "" {
-			currentHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
-			if err != nil {
-				return targetSync{}, err
+		worktreePath := task.WorktreePath
+		if fullPipelineSelected(task, member) {
+			if member != "" {
+				repos, err := db.TaskRepos(ctx, task.ID)
+				if err != nil {
+					return targetSync{}, err
+				}
+				worktreePath = ""
+				for _, repo := range repos {
+					if repo.Repo == member {
+						worktreePath = repo.WorktreePath
+						break
+					}
+				}
+				if worktreePath == "" {
+					return targetSync{}, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
+				}
 			}
-			checkedHead = currentHead
+			if worktreePath != "" {
+				currentHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
+				if err != nil {
+					return targetSync{}, err
+				}
+				checkedHead = currentHead
+			}
 		}
 		headSHA = checkedHead
 		checked, err := freshness.of(ctx, freshness.Root, headSHA)
