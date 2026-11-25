@@ -20,6 +20,15 @@ import (
 const ReconcileBudget = store.ObservationWriteBudget
 const AgentAbsentGrace = 2 * time.Minute
 
+func latestInterruptedStall(ctx context.Context, db *store.DB, taskID int64) (bool, error) {
+	transitions, err := db.TaskTransitions(ctx, taskID, 1)
+	if err != nil || len(transitions) == 0 {
+		return false, err
+	}
+	latest := transitions[0]
+	return latest.From == string(store.StateWorking) && latest.To == string(store.StateStalled) && latest.Note == store.WorkerInterruptedTransitionNote, nil
+}
+
 type herdrAdapterKey struct{}
 
 type RunResult struct {
@@ -325,23 +334,26 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		return nil, observationFailure(err)
 	}
 	if task.State == store.StateWorking && task.AgentStatus == "working" && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
-		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "Worker turn was interrupted by a Herdr restart"); err != nil {
-			return notices, err
-		}
-		notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_interrupted", task.Title+" was interrupted by the Herdr restart", fmt.Sprintf(`{"launch":%d,"herdr_generation":%q}`, task.Launches, snapshot.ServerStartedAt), now)
+		notice, err := db.InterruptWorker(ctx, task, snapshot.ServerStartedAt, now)
 		if err != nil {
 			return notices, err
 		}
 		notices = append(notices, notice)
+		task.State = store.StateStalled
 	}
-	if task.State == store.StateStalled && pane.AgentStatus == "working" {
-		var interrupted bool
-		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='worker_interrupted' AND json_extract(data_json,'$.launch')=?)`, task.ID, task.Launches).Scan(&interrupted); err != nil {
+	if task.State == store.StateStalled {
+		interrupted, err := latestInterruptedStall(ctx, db, task.ID)
+		if err != nil {
 			return notices, err
 		}
 		if interrupted {
-			if err := db.Transition(ctx, task.ID, store.StateStalled, store.StateWorking, "cli", "Worker resumed after its interrupted turn"); err != nil {
+			if err := db.EnsureWorkerInterruptedNotice(ctx, task, snapshot.ServerStartedAt, now); err != nil {
 				return notices, err
+			}
+			if pane.AgentStatus == "working" {
+				if err := db.Transition(ctx, task.ID, store.StateStalled, store.StateWorking, "cli", "Worker resumed after its interrupted turn"); err != nil {
+					return notices, err
+				}
 			}
 		}
 	}

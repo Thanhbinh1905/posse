@@ -835,6 +835,39 @@ func TestHeavyWaitInAnotherHomeDoesNotSuppressWorkerIdle(t *testing.T) {
 	}
 }
 
+func TestWorkerInterruptionTransitionAndNoticeAreAtomic(t *testing.T) {
+	ctx := context.Background()
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER reject_worker_interrupted_notice BEFORE INSERT ON notices WHEN NEW.kind='worker_interrupted' BEGIN SELECT RAISE(ABORT,'notice rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InterruptWorker(ctx, task, "new-generation", time.Now()); err == nil {
+		t.Fatal("interruption succeeded while notice insertion was rejected")
+	}
+	updated, err := db.Task(ctx, project.ID, taskID(task.Seq))
+	if err != nil || updated.State != store.StateWorking {
+		t.Fatalf("notice failure left Task in %#v, %v; want working", updated, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 0 {
+		t.Fatalf("notice failure left Notices %#v, %v; want none", notices, err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER reject_worker_interrupted_notice`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InterruptWorker(ctx, task, "new-generation", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureWorkerInterruptedNotice(ctx, task, "new-generation", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "worker_interrupted" {
+		t.Fatalf("repeated interruption Notice creation = %#v, %v; want one Notice", notices, err)
+	}
+}
+
 func TestRestartedWorkerIdleAfterAbortedTurnIsInterrupted(t *testing.T) {
 	ctx := context.Background()
 	db, project, task := createWorkingTask(t)
@@ -874,9 +907,29 @@ func TestRestartedWorkerIdleAfterAbortedTurnIsInterrupted(t *testing.T) {
 	if err != nil || updated.State != store.StateWorking {
 		t.Fatalf("active Worker did not leave interrupted state = %#v, %v; want working", updated, err)
 	}
+	adapter.SnapshotValue.Panes[0].AgentStatus = "working"
+	if _, err := EvaluateStalls(ctx, db, adapter, project.ID, time.Minute, now.Add(3*time.Minute), progress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EvaluateStalls(ctx, db, adapter, project.ID, time.Minute, now.Add(4*time.Minute), progress); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, taskID(task.Seq))
+	if err != nil || updated.State != store.StateStalled {
+		t.Fatalf("resumed Worker did not stall normally = %#v, %v; want stalled", updated, err)
+	}
+	adapter.SnapshotValue.Panes[0].AgentStatus = "idle"
+	progress = &fakeProgress{output: "later output", worktree: "later worktree"}
+	if _, err := EvaluateStalls(ctx, db, adapter, project.ID, time.Minute, now.Add(5*time.Minute), progress); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = db.Task(ctx, project.ID, taskID(task.Seq))
+	if err != nil || updated.State != store.StateWorking {
+		t.Fatalf("ordinary stall did not reopen after changed output = %#v, %v; want working", updated, err)
+	}
 	notices, err := db.Notices(ctx, project.ID, false)
-	if err != nil || len(notices) != 1 || notices[0].Kind != "worker_interrupted" || !strings.Contains(notices[0].Summary, "interrupted by the Herdr restart") {
-		t.Fatalf("interruption Notices = %#v, %v", notices, err)
+	if err != nil || len(notices) != 2 || notices[0].Kind != "worker_interrupted" || notices[1].Kind != "stalled" {
+		t.Fatalf("interruption and stall Notices = %#v, %v", notices, err)
 	}
 }
 

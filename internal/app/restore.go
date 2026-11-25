@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -28,6 +29,18 @@ func markHeldIdleWorkersInterrupted(ctx context.Context, db *store.DB, project s
 		return err
 	}
 	for _, task := range tasks {
+		if task.State == store.StateStalled {
+			transitions, err := db.TaskTransitions(ctx, task.ID, 1)
+			if err != nil {
+				return err
+			}
+			if len(transitions) == 1 && transitions[0].From == string(store.StateWorking) && transitions[0].To == string(store.StateStalled) && transitions[0].Note == store.WorkerInterruptedTransitionNote {
+				if err := db.EnsureWorkerInterruptedNotice(ctx, task, snapshot.ServerStartedAt, time.Now()); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if task.State != store.StateWorking || task.AgentStatus != "working" || task.AgentServerStartedAt == "" || task.AgentServerStartedAt == snapshot.ServerStartedAt {
 			continue
 		}
@@ -35,14 +48,10 @@ func markHeldIdleWorkersInterrupted(ctx context.Context, db *store.DB, project s
 		if !found || (pane.AgentStatus != "idle" && pane.AgentStatus != "done") {
 			continue
 		}
-		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "Worker turn was interrupted by a Herdr restart"); err != nil {
+		if _, err := db.InterruptWorker(ctx, task, snapshot.ServerStartedAt, time.Now()); err != nil {
 			if errors.Is(err, store.ErrStateRace) {
 				continue
 			}
-			return err
-		}
-		data := marshalJSON(map[string]any{"launch": task.Launches, "herdr_generation": snapshot.ServerStartedAt})
-		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "worker_interrupted", Summary: task.Title + " was interrupted by the Herdr restart", DataJSON: data}); err != nil {
 			return err
 		}
 	}

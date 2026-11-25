@@ -385,6 +385,8 @@ func missingMigrationVersions(ctx context.Context, provider *goose.Provider) ([]
 
 type State string
 
+const WorkerInterruptedTransitionNote = "Worker turn was interrupted by a Herdr restart"
+
 const (
 	StateQueued        State = "queued"
 	StateSpawning      State = "spawning"
@@ -3821,6 +3823,83 @@ func (db *DB) CreateNotice(ctx context.Context, notice Notice) (int64, error) {
 		return 0, err
 	}
 	return id, nil
+}
+
+func (db *DB) InterruptWorker(ctx context.Context, task Task, generation string, now time.Time) (Notice, error) {
+	dataJSON, err := json.Marshal(struct {
+		Launch          int    `json:"launch"`
+		HerdrGeneration string `json:"herdr_generation"`
+	}{Launch: task.Launches, HerdrGeneration: generation})
+	if err != nil {
+		return Notice{}, err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return Notice{}, err
+	}
+	defer tx.Rollback()
+	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), task.ID, StateWorking, StateStalled, "cli", WorkerInterruptedTransitionNote); err != nil {
+		return Notice{}, err
+	}
+	summary := task.Title + " was interrupted by the Herdr restart"
+	result, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at)
+		VALUES(?,?,'worker_interrupted',?,?,?)`, task.ProjectID, task.ID, summary, string(dataJSON), now.UnixMilli())
+	if err != nil {
+		return Notice{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return Notice{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Notice{}, err
+	}
+	if err := db.PersistTask(ctx, task.ID); err != nil {
+		return Notice{}, err
+	}
+	if err := db.PersistProject(ctx, task.ProjectID); err != nil {
+		return Notice{}, err
+	}
+	return Notice{ID: id, ProjectID: task.ProjectID, TaskID: task.ID, Kind: "worker_interrupted", Summary: summary, DataJSON: string(dataJSON), CreatedAt: now.UnixMilli()}, nil
+}
+
+func (db *DB) EnsureWorkerInterruptedNotice(ctx context.Context, task Task, generation string, now time.Time) error {
+	dataJSON, err := json.Marshal(struct {
+		Launch          int    `json:"launch"`
+		HerdrGeneration string `json:"herdr_generation"`
+	}{Launch: task.Launches, HerdrGeneration: generation})
+	if err != nil {
+		return err
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	tx, err := db.beginTxWithRetry(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at)
+		SELECT ?,?,'worker_interrupted',?,?,?
+		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='worker_interrupted' AND json_extract(data_json,'$.launch')=?)`,
+		task.ProjectID, task.ID, task.Title+" was interrupted by the Herdr restart", string(dataJSON), now.UnixMilli(), task.ID, task.Launches)
+	if err != nil {
+		return err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if created > 0 {
+		return db.PersistProject(ctx, task.ProjectID)
+	}
+	return nil
 }
 
 func (db *DB) CreateWorkerExitedNotice(ctx context.Context, task Task, now time.Time) error {
