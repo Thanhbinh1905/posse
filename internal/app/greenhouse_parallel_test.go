@@ -48,6 +48,38 @@ func TestPRTargetSyncDoesNotQueueFreshHead(t *testing.T) {
 	}
 }
 
+func TestPRTargetSyncWithdrawsRefreshForCurrentAndObservedHeads(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	installValidationPlanForReview(t, f, "full-pipeline")
+	var err error
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	oldHead := f.headSHA
+	target := f.advanceTarget(t, false, true)
+	gitTest(t, f.task.WorktreePath, "fetch", "origin", "main")
+	gitTest(t, f.task.WorktreePath, "merge", "--no-edit", "origin/main")
+	currentHead := strings.TrimSpace(gitTest(t, f.task.WorktreePath, "rev-parse", "HEAD"))
+	for _, head := range []string{oldHead, currentHead} {
+		if _, err := f.db.QueueValidationFixInstruction(ctx, f.task.ID, "freshness", head, "freshness:"+head, "Merge origin/main"); err != nil {
+			t.Fatalf("queue refresh for %s: %v", head, err)
+		}
+	}
+	sync, err := f.service.queuePRTargetSyncInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.task.WorktreePath}, oldHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sync.Queued || sync.Place.Queued() {
+		t.Fatalf("target sync = %+v; want no queue entry for the current head that contains target", sync)
+	}
+	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("pending instructions = %+v, %v; want both superseded refreshes withdrawn", instructions, err)
+	}
+}
+
 func TestPRTargetSyncDoesNotQueueFreshTaskBehindAnotherHead(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
