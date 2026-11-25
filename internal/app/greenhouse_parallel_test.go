@@ -720,6 +720,92 @@ func TestGreenhouseCoverageAcceptanceDoesNotPublishBlockingFindings(t *testing.T
 	}
 }
 
+func TestReplayedGreenhouseBlockingVerdictWithdrawsReadinessAndQueuesFix(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	if err := os.WriteFile(filepath.Join(f.repo, "target.txt"), []byte("target change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.repo, "add", "target.txt")
+	gitTest(t, f.repo, "commit", "-m", "target advance")
+	gitTest(t, f.repo, "push", "origin", "main")
+	gitTest(t, f.worktree, "fetch", "origin", "main")
+	gitTest(t, f.worktree, "merge", "--no-edit", "origin/main")
+	gitTest(t, f.worktree, "push", "origin", "posse/t1:refs/heads/posse/t1")
+	f.headSHA = strings.TrimSpace(gitTest(t, f.worktree, "rev-parse", "HEAD"))
+	f.task, err = f.db.TaskByID(ctx, f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(ctx, `UPDATE tasks SET gated_sha=? WHERE id=?`, f.headSHA, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
+	if _, err := queueTargetMergeInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("target refresh instructions after target merge = %+v, %v; want none", instructions, err)
+	}
+	if _, err := f.db.CreateNotice(ctx, store.Notice{ProjectID: f.project.ID, TaskID: f.task.ID, Kind: "merge_ready", Summary: "target-merged head is ready", DataJSON: marshalJSON(map[string]string{"head_sha": f.headSHA})}); err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2",
+		Grant: "shop/t1/shop/r4", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA,
+		Outcome: "findings", Blocking: 1, FindingsPath: "findings.json", Mode: "gate",
+		Findings: []store.ProviderFinding{{Key: "P-1", Severity: "P1", Origin: "correctness", Path: "main.go", Line: 1, Excerpt: "bad", Guidance: "fix", Head: f.headSHA}},
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record first Verdict: recorded=%t err=%v", recorded, err)
+	}
+	replayed, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return f.headSHA, nil })
+	if err != nil || replayed {
+		t.Fatalf("replay Verdict: recorded=%t err=%v; want persisted Verdict", replayed, err)
+	}
+	if err := f.service.applyGreenhouseVerdict(ctx, f.db, f.project, f.task, verdict); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.db.ReviewFixInstructionPending(ctx, f.task.ID)
+	if err != nil || !pending {
+		t.Fatalf("replayed blocking Verdict fix instruction pending=%t err=%v", pending, err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil || countNoticeKind(notices, "greenhouse_review_failed") != 1 || countNoticeKind(notices, "merge_readiness_withdrawn") != 1 {
+		t.Fatalf("replayed blocking Verdict notices=%+v err=%v", notices, err)
+	}
+	providerFindings, err := f.db.ProviderFindingsForTask(ctx, f.task.ID)
+	if err != nil || len(providerFindings) != 1 || providerFindings[0].Severity != "P1" {
+		t.Fatalf("replayed provider findings=%+v err=%v", providerFindings, err)
+	}
+	code, output, stderr := f.run("show", "t1", "--format", "json")
+	if code != 0 || !strings.Contains(output, `"latest_verdict":"findings"`) || !strings.Contains(output, `"grant":"shop/t1/shop/r4"`) {
+		t.Fatalf("posse show did not expose the replayed Verdict: code=%d output=%s stderr=%s", code, output, stderr)
+	}
+}
+
 func TestGreenhouseBlockingVerdictWithdrawsMergeReadinessAndQueuesFix(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
