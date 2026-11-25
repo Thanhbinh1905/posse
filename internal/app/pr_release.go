@@ -128,15 +128,15 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 				}
 				return nil
 			}
+			if err := s.recordExecutorPolicy(ctx.Context, db, target, policy, "Executor release selected after verifying PR head "+observation.HeadSHA); err != nil {
+				return err
+			}
 			if err := s.releaseExecutor(ctx.Context, db, target, target.cfg, afterRelease); err != nil {
 				var failure *axi.Error
 				if errors.As(err, &failure) && (failure.Code == "pr_release_refused" || failure.Code == "pr_release_incomplete") {
 					return err
 				}
 				return axi.Failure("pr_release_incomplete", "executor release did not finish: "+err.Error(), true, "Retry `posse pr release "+target.taskLabel()+" --policy release` after repairing the named resource")
-			}
-			if err := s.recordExecutorPolicy(ctx.Context, db, target, policy, "Executor stopped; Sandbox released after verifying PR head "+observation.HeadSHA); err != nil {
-				return err
 			}
 			return printExecutorPolicy(ctx, target, policy, true)
 		}
