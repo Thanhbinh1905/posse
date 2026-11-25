@@ -14,6 +14,103 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestGreenhouseQuotaFailureRetriesSameHeadWithoutWorkerAction(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("review_provider = \"greenhouse\"\nreview_parallel = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\nmerge_mode = \"local\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newGreenhouseContract(t, f)
+	c.change = f.start(t, "t1", "Greenhouse quota recovery", "greenhouse-quota-retry")
+	head := c.authorCommit(t)
+	c.hold(t)
+
+	binary := filepath.Join(f.root, "bin", "greenhouse")
+	realBinary := binary + ".real"
+	if err := os.Rename(binary, realBinary); err != nil {
+		t.Fatal(err)
+	}
+	quotaActive := filepath.Join(f.root, "quota-active")
+	if err := os.WriteFile(quotaActive, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = axi ]; then
+    request=$(cat)
+    if printf '%%s' "$request" | grep -q '"op":"review"' && [ -e '%s' ]; then
+        printf '{"version":2,"outcome":"error","error":"reviewer quota exceeded"}\n'
+        exit 0
+    fi
+    printf '%%s' "$request" | '%s' axi
+    exit $?
+fi
+exec '%s' "$@"
+`, quotaActive, realBinary, realBinary)
+	if err := os.WriteFile(binary, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(workerEnv, c.change.WorktreePath, "signal", "done", "Request Greenhouse review", "--head", head); err != nil {
+		t.Fatalf("Worker done Signal: %v\n%s", err, output)
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch after quota failure: %v\n%s", err, output)
+	}
+	var failedRequests []store.GreenhouseReviewRequest
+	if !waitForCondition(10*time.Second, func() bool {
+		requestsDB, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		requests, err := requestsDB.GreenhouseReviewRequests(context.Background(), f.task(t, "t1").ProjectID)
+		_ = requestsDB.Close()
+		failedRequests = requests
+		return err == nil && len(requests) == 1 && requests[0].Outcome == "refused"
+	}) {
+		t.Fatalf("quota failure requests = %+v; want one refused request", failedRequests)
+	}
+	if err := os.Remove(quotaActive); err != nil {
+		t.Fatal(err)
+	}
+	c.release(t)
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch retry: %v\n%s", err, output)
+	}
+	if !waitForCondition(30*time.Second, func() bool {
+		requestsDB, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		requests, err := requestsDB.GreenhouseReviewRequests(context.Background(), f.task(t, "t1").ProjectID)
+		_ = requestsDB.Close()
+		return err == nil && len(requests) == 2 && requests[1].Outcome == "verdict" && requests[1].RequestedHead == head
+	}) {
+		t.Fatal("same-head Greenhouse retry did not record a Verdict")
+	}
+	if got := c.invocations(t); got < 1 {
+		t.Fatalf("reviewer ran %d times, want a successful retry", got)
+	}
+	notices, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notices.Close()
+	allNotices, err := notices.Notices(context.Background(), f.task(t, "t1").ProjectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range allNotices {
+		if notice.TaskID == f.task(t, "t1").ID && (notice.Kind == "needs_decision" || notice.Kind == "greenhouse_review_failed") {
+			t.Fatalf("transient quota failure raised a Worker or Lead Notice: %+v", notice)
+		}
+	}
+}
+
 func TestGreenhouseSameHeadReviewerOverflowStopsAfterHistoricalLoop(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	projectConfig := filepath.Join(f.home, "projects", "shop", "config.toml")

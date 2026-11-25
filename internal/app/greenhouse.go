@@ -344,6 +344,12 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		}
 		if err != nil {
 			failureReason := err.Error()
+			if parallelMode && transientGreenhouseFailure(err) {
+				if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
+					return recordErr
+				}
+				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: "retrying"}, {Key: "head", Value: requestHead}})
+			}
 			var terminalErr *greenhouse.TerminalReviewError
 			if errors.As(err, &terminalErr) {
 				failureReason = fmt.Sprintf("Greenhouse terminal status %q: %s", terminalErr.Status, terminalErr.Reason)

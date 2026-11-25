@@ -1253,6 +1253,30 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 	}
 }
 
+func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
+	for _, reason := range []string{
+		"reviewer quota exceeded; retry after reset",
+		"network connection reset by peer",
+		"dial tcp: i/o timeout",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			if !transientGreenhouseFailure(errors.New(reason)) {
+				t.Fatalf("transientGreenhouseFailure(%q) = false", reason)
+			}
+		})
+	}
+	for _, reason := range []string{
+		"prompt_exceeds_context (12000 tokens > 8192)",
+		"Greenhouse binary is missing",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			if transientGreenhouseFailure(errors.New(reason)) {
+				t.Fatalf("transientGreenhouseFailure(%q) = true", reason)
+			}
+		})
+	}
+}
+
 func TestAutomaticGreenhouseReviewDoesNotRetrySizeFailures(t *testing.T) {
 	for _, reason := range []string{
 		"intent_too_long: intent is 8193 bytes; maximum is 8192",

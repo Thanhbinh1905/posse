@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/greenhouse"
@@ -28,6 +30,26 @@ func reviewGreenhouseWithRetries(ctx context.Context, parallel bool, wait time.D
 		case <-timer.C:
 		}
 	}
+}
+
+func transientGreenhouseFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ETIMEDOUT) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	reason := strings.ToLower(err.Error())
+	for _, marker := range []string{"quota", "rate limit", "rate-limit", "too many requests", "http 429", "status 429", "status code 429", "http 502", "bad gateway", "http 503", "http 504", "service unavailable", "gateway timeout", "network error", "network failure", "connection reset", "connection refused", "connection timed out", "network is unreachable", "temporary failure", "temporarily unavailable", "i/o timeout", "unexpected eof", "transport reset"} {
+		if strings.Contains(reason, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func reviewerSizeFailure(err error) bool {
