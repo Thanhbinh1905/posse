@@ -49,6 +49,62 @@ func TestNoticeDeliveryUncertaintyWarningStaysBounded(t *testing.T) {
 	}
 }
 
+func TestAckClaimsNoticeBeforeDeliveryAndPreventsDelayedAlert(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := currentTime() - delayedNoticeAlertAfter.Milliseconds() - 1
+	noticeID, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, Kind: "task_done", Summary: "Lead already read this", CreatedAt: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := db.ClaimNoticeBatch(ctx, project.ID, []int64{noticeID}, "delivery-in-flight", currentTime()); err != nil || !claimed {
+		t.Fatalf("claim Notice through delivery path: claimed=%v err=%v", claimed, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(repo)
+	service := testService(home, herdr.NewFake())
+	code, output := runCLI(t, service, "ack", fmt.Sprint(noticeID))
+	if code != 0 || !strings.Contains(output, "acknowledged: 1") {
+		t.Fatalf("ack claimed Notice: code=%d output=%s", code, output)
+	}
+
+	observer, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+	notices, err := observer.NoticesByIDs(ctx, project.ID, []int64{noticeID})
+	if err != nil || notices[0].AckedAt == 0 {
+		t.Fatalf("claimed Notice was not acknowledged: %#v err=%v", notices, err)
+	}
+	if err := raiseDelayedNoticeAlert(ctx, observer, project); err != nil {
+		t.Fatal(err)
+	}
+	open, err := observer.Notices(ctx, project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range open {
+		if notice.Kind == "notice_delivery_delayed" {
+			t.Fatalf("acknowledged Notice raised a delayed alert: %+v", notice)
+		}
+	}
+}
+
 func TestWatchExposesAmbiguousNoticeDelivery(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
