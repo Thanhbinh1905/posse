@@ -57,6 +57,21 @@ func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 		t.Fatalf("Herdr generation = %q", current)
 	}
 	f.holdOnStaleGeneration(t)
+	worker := f.task(t, "t1")
+	if _, err := f.client.Run(context.Background(), "pane", "report-agent", worker.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET agent_server_started_at=? WHERE id=?`, staleGeneration, worker.ID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if !waitForCondition(20*time.Second, func() bool { return f.recordedGeneration(t) == current }) {
 		t.Fatalf("watch kept the Project held on %q while every pane runs in %q", f.recordedGeneration(t), current)
 	}

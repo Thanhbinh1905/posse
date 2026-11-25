@@ -91,10 +91,11 @@ func (s *Service) adoptCurrentGeneration(ctx context.Context, db *store.DB, proj
 		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
-		if task.AgentServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt {
+		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+		if !found || !paneAgentRunning(pane) {
 			return false, nil
 		}
-		if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); !found || !paneAgentRunning(pane) {
+		if task.AgentServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt && pane.AgentStatus != "idle" && pane.AgentStatus != "done" {
 			return false, nil
 		}
 		// A Worker whose relaunch failed may still run an agent that never

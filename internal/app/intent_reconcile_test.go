@@ -447,6 +447,44 @@ func TestStartupTeardownRecoveryDoesNotFetchWhileReleasingSandbox(t *testing.T) 
 	}
 }
 
+func TestExhaustedAutomaticRecoveryFinishesAbandonedIntent(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 1, Type: "change", Title: "Interrupted recovery", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.StartIntent(ctx, project.ID, taskID, "relaunch", "done:agent.start", `{"automatic_recovery":true}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_recovery(task_id,generation,attempts,status,last_error) VALUES(?,?,?,?,?)`, taskID, "generation", 3, "exhausted", "agent did not start"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, herdr.NewFake())
+	if err := service.reconcileIntentsMode(ctx, db, project, cfg, herdr.Snapshot{}, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.IntentByTask(ctx, taskID); !store.IsNotFound(err) {
+		t.Fatalf("exhausted automatic recovery intent remains: %v", err)
+	}
+}
+
 func TestInterruptedCompletionTeardownCannotReleaseFailedTaskSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

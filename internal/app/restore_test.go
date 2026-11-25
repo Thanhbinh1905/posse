@@ -549,6 +549,16 @@ func TestNativeHerdrWorkerResumeRaisesRelaunchNotice(t *testing.T) {
 func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 	ctx := context.Background()
 	home, db, project, fake := adoptionFixture(t)
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := task.Observation()
+	observation.AgentServerStartedAt = "old-generation"
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
+		t.Fatal(err)
+	}
+	fake.SnapshotValue.Panes[1].AgentStatus = "idle"
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		t.Fatal(err)
