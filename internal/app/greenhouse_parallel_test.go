@@ -48,6 +48,95 @@ func TestPRTargetSyncDoesNotQueueFreshHead(t *testing.T) {
 	}
 }
 
+func TestPRTargetSyncWithdrawsRefreshForCurrentAndObservedHeads(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	installValidationPlanForReview(t, f, "full-pipeline")
+	var err error
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	oldHead := f.headSHA
+	target := f.advanceTarget(t, false, true)
+	gitTest(t, f.task.WorktreePath, "fetch", "origin", "main")
+	gitTest(t, f.task.WorktreePath, "merge", "--no-edit", "origin/main")
+	currentHead := strings.TrimSpace(gitTest(t, f.task.WorktreePath, "rev-parse", "HEAD"))
+	for _, head := range []string{oldHead, currentHead} {
+		if _, err := f.db.QueueValidationFixInstruction(ctx, f.task.ID, "freshness", head, "freshness:"+head, "Merge origin/main"); err != nil {
+			t.Fatalf("queue refresh for %s: %v", head, err)
+		}
+	}
+	sync, err := f.service.queuePRTargetSyncInstruction(ctx, f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.task.WorktreePath}, oldHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sync.Queued || sync.Place.Queued() {
+		t.Fatalf("target sync = %+v; want no queue entry for the current head that contains target", sync)
+	}
+	instructions, err := f.db.PendingTaskInstructions(ctx, f.task.ID)
+	if err != nil || len(instructions) != 0 {
+		t.Fatalf("pending instructions = %+v, %v; want both superseded refreshes withdrawn", instructions, err)
+	}
+}
+
+func TestNonGreenhouseFullPipelineKeepsCandidateTargetRefreshWhenAuthorMovesAhead(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	installValidationPlanForReview(t, f, "full-pipeline")
+	var err error
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.BuiltinReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHead := f.headSHA
+	target := f.advanceTarget(t, false, true)
+	gitTest(t, f.worktree, "fetch", "origin", "main")
+	gitTest(t, f.worktree, "merge", "--no-edit", "origin/main")
+	sync, err := f.service.queuePRTargetSyncInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, oldHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sync.Queued {
+		t.Fatalf("target sync = %+v; want refresh for the stale candidate head %s", sync, oldHead)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || len(instructions) != 1 || !strings.Contains(instructions[0].Body, oldHead) {
+		t.Fatalf("candidate refresh instructions = %+v, %v; want one instruction for stale candidate %s", instructions, err, oldHead)
+	}
+}
+
 func TestPRTargetSyncDoesNotQueueFreshTaskBehindAnotherHead(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
@@ -357,8 +446,9 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 		t.Fatal(err)
 	}
 	refreshed := f.advanceTarget(t, false, true)
-	if _, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed}, f.headSHA); err != nil {
-		t.Fatal(err)
+	oldVerdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r-old", Head: f.headSHA, Target: strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "HEAD")), ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), oldVerdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record earlier Verdict: recorded=%v err=%v", recorded, err)
 	}
 	if code, output, stderr := f.run("signal", "working", "Refreshing the target"); code != 0 {
 		t.Fatalf("working before target refresh: code=%d output=%s stderr=%s", code, output, stderr)
@@ -380,16 +470,27 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return newHead, nil }); err != nil || !recorded {
 		t.Fatalf("record refreshed-head pass: recorded=%v err=%v", recorded, err)
 	}
+	if _, err := f.service.queuePRTargetSyncInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed, Root: f.task.WorktreePath}, f.headSHA); err != nil {
+		t.Fatalf("check superseded Verdict head against current Task head: %v", err)
+	}
 	if err := f.service.maintainProjectWatch(context.Background(), f.db, f.project); err != nil {
 		t.Fatal(err)
 	}
 	messages, err := f.db.TaskMessagesAfter(context.Background(), f.task.ID, 0, 10)
-	published := false
+	publishInstructions, refreshInstructions := 0, 0
 	for _, message := range messages {
-		published = published || message.Status == "delivered" && strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish")
+		if message.Status == "withdrawn" {
+			continue
+		}
+		if strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish") {
+			publishInstructions++
+		}
+		if strings.Contains(message.Body, "merge origin/main") {
+			refreshInstructions++
+		}
 	}
-	if err != nil || !published {
-		t.Fatalf("refreshed-head publication message=%+v err=%v", messages, err)
+	if err != nil || publishInstructions != 1 || refreshInstructions != 0 {
+		t.Fatalf("refreshed-head messages=%+v err=%v; want one publication and no superseded target refresh", messages, err)
 	}
 }
 
