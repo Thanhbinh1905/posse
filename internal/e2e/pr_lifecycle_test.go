@@ -1089,7 +1089,7 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 	}
 }
 
-func TestSuspendingDoneTaskWithOpenPRDoesNotRaiseWorkerExited(t *testing.T) {
+func TestReleasingDoneTaskWithOpenPRDoesNotRaiseWorkerExited(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
 	brief := filepath.Join(fixture.root, "done-open-pr.md")
@@ -1103,13 +1103,28 @@ func TestSuspendingDoneTaskWithOpenPRDoesNotRaiseWorkerExited(t *testing.T) {
 	}
 	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
 	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", head)
-	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "pr", "release", "t1", "--policy", "suspend"); !strings.Contains(output, "executor: stopped") {
-		t.Fatalf("suspend executor: %s", output)
+	release := exec.Command(fixture.binary, "pr", "release", "t1", "--policy", "release")
+	release.Dir, release.Env = fixture.repo, fixture.leadEnv
+	releaseOutput := make(chan []byte, 1)
+	go func() {
+		output, err := release.CombinedOutput()
+		if err != nil {
+			output = append(output, []byte("\nrelease failed: "+err.Error())...)
+		}
+		releaseOutput <- output
+	}()
+	for {
+		select {
+		case output := <-releaseOutput:
+			if !strings.Contains(string(output), "executor: stopped") {
+				t.Fatalf("release executor: %s", output)
+			}
+			goto released
+		default:
+			runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
+		}
 	}
-	client := herdr.NewWithEnv("herdr", fixture.env)
-	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
-		t.Fatalf("remove suspended Worker pane before observation: %v", err)
-	}
+released:
 	stopBackgroundWatch(t, fixture)
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
 	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
@@ -1118,7 +1133,7 @@ func TestSuspendingDoneTaskWithOpenPRDoesNotRaiseWorkerExited(t *testing.T) {
 	}
 	for _, notice := range notices {
 		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
-			t.Fatalf("intentional suspension raised worker_exited Notice: %#v", notice)
+			t.Fatalf("intentional release raised worker_exited Notice: %#v", notice)
 		}
 	}
 	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
