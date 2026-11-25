@@ -180,6 +180,42 @@ func TestWorkerCanReadOwnTaskAndReviewButNotAnotherTask(t *testing.T) {
 	}
 }
 
+func TestWorkerCanReadOwnTaskWithoutWorkerHomeMarker(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	t.Setenv(workerHomeEnv, "")
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w2:p1")
+	t.Chdir(fixture.sandbox)
+	previousProcRoot := procRoot
+	procRoot = fakeProc(t, fixture.sandbox, []string{"PI_CODING_AGENT=1", "HERDR_PANE_ID=w2:p1"})
+	t.Cleanup(func() { procRoot = previousProcRoot })
+
+	service := testService(fixture.home, herdr.NewFake())
+	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
+		t.Fatalf("Worker without POSSE_WORKER_HOME could not inspect its Task: code=%d output=%s", code, output)
+	}
+
+	otherSandbox := filepath.Join(fixture.home, "pool", "shop", "sandbox-2")
+	gitTest(t, fixture.repo, "worktree", "add", "--detach", otherSandbox)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Other", State: store.StateSpawning, MergeMode: "local", PaneID: "w3:p1", WorktreePath: otherSandbox}); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HERDR_PANE_ID", "w3:p1")
+	procRoot = fakeProc(t, fixture.sandbox, []string{"PI_CODING_AGENT=1", "HERDR_PANE_ID=w2:p1"})
+	if code, output := runCLI(t, service, "show", "t2"); code == 0 || !strings.Contains(output, "worker_forbidden") {
+		t.Fatalf("Worker without POSSE_WORKER_HOME read another Task using its pane id: code=%d output=%s", code, output)
+	}
+}
+
 func TestSandboxAloneDoesNotGrantWorkerTaskIdentity(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	otherSandbox := filepath.Join(fixture.home, "pool", "shop", "sandbox-2")

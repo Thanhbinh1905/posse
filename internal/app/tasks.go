@@ -867,7 +867,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		argsForAgent = append(argsForAgent, "--prompt", openingText)
 	}
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.start", func() error {
-		return s.launchAgent(ctx.Context, opened.PaneID, workerName, kind, argsForAgent, nil, filepath.Join(taskHome, "agent-launch.sh"))
+		return s.launchAgent(ctx.Context, opened.PaneID, workerName, kind, argsForAgent, map[string]string{workerHomeEnv: home}, filepath.Join(taskHome, "agent-launch.sh"))
 	})
 	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -3590,7 +3590,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
 	if err := track("agent.start", func() error {
-		return s.launchAgent(ctx, pane.PaneID, workerName, kind, startArgs, nil, filepath.Join(filepath.Dir(relaunchPath), "agent-launch.sh"))
+		return s.launchAgent(ctx, pane.PaneID, workerName, kind, startArgs, map[string]string{workerHomeEnv: home}, filepath.Join(filepath.Dir(relaunchPath), "agent-launch.sh"))
 	}); err != nil {
 		return failure(err)
 	}
