@@ -199,14 +199,7 @@ func reconcileWorkDeferred(ctx context.Context) error {
 }
 
 func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
-	deliveries, err := db.TaskDeliveries(ctx, task.ID)
-	if err != nil {
-		return false, err
-	}
-	if len(deliveries) == 0 {
-		return false, nil
-	}
-	operation, found, err := db.LatestDeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
+	operation, found, err := db.LatestTaskExecutorPolicy(ctx, task.ID)
 	if err != nil || !found {
 		return false, err
 	}

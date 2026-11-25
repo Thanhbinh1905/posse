@@ -69,6 +69,51 @@ func TestReconcileDoesNotReportIntentionallyStoppedPRExecutors(t *testing.T) {
 	}
 }
 
+func TestReconcileUsesTaskWideExecutorPolicyAcrossDeliveries(t *testing.T) {
+	for _, policy := range []string{"suspend", "release"} {
+		t.Run(policy, func(t *testing.T) {
+			db, project, task := createWorkingTask(t)
+			defer db.Close()
+			ctx := context.Background()
+			if _, err := db.NextTaskLaunch(ctx, task.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+				t.Fatal(err)
+			}
+			first, err := db.EnsureDelivery(ctx, task.ID, "", "https://github.com/acme/shop/pull/17", "publish")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.RecordDeliveryOperation(ctx, store.DeliveryOperation{
+				DeliveryID: first.ID,
+				Operation:  "executor_policy",
+				Actor:      "lead",
+				Subject:    policy,
+				Baseline:   strconv.Itoa(task.Launches + 1),
+				Outcome:    "succeeded",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.EnsureDelivery(ctx, task.ID, "", "https://github.com/acme/shop/pull/18", "legacy"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReconcileSnapshot(ctx, db, project.ID, herdr.Snapshot{}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			notices, err := db.Notices(ctx, project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, notice := range notices {
+				if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+					t.Fatalf("policy %q from the earlier delivery did not suppress worker_exited", policy)
+				}
+			}
+		})
+	}
+}
+
 func TestReconcileReportsExitAfterStoppedExecutorRelaunch(t *testing.T) {
 	for _, testCase := range []struct {
 		policy string
