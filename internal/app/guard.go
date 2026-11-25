@@ -393,7 +393,7 @@ func (g *guard) statement(e *shellEnv, script string, stmt *syntax.Stmt, depth i
 	if outer, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(outer.Args) > 1 {
 		name, known := e.word(script, outer.Args[0])
 		_, pathKnown := e.word(script, outer.Args[1])
-		unknownCWD = known && (name == "cd" || name == "pushd") && !pathKnown
+		unknownCWD = known && (name == "cd" || name == "pushd") && !pathKnown && wordHasCommandSubstitution(outer.Args[1])
 	}
 	refused, reason := false, guardReason{}
 	syntax.Walk(stmt, func(node syntax.Node) bool {
@@ -571,8 +571,11 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 			}
 			return false, guardReason{}
 		case "cd", "pushd":
-			if len(args) > 1 && literal[1] {
+			knownTarget := len(args) > 1 && literal[1] && !directoryStackTarget(args[0], args[1])
+			if knownTarget {
 				e.cwd = e.path(args[1])
+			} else if len(call.Args) < 2 || !wordHasCommandSubstitution(call.Args[1]) {
+				e.cwd = ""
 			}
 			return false, guardReason{}
 		}
@@ -595,6 +598,33 @@ func (g *guard) call(e *shellEnv, script string, call *syntax.CallExpr, stmt *sy
 		stdin = g.input
 	}
 	return g.command(child, args, literal, raw, stdin, depth, stdinRedirected || stmt != nil && len(stmt.Redirs) > 0)
+}
+
+func directoryStackTarget(command, target string) bool {
+	if strings.HasPrefix(target, "-") {
+		return true
+	}
+	if command != "pushd" || len(target) < 2 || target[0] != '+' {
+		return false
+	}
+	for _, char := range target[1:] {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func wordHasCommandSubstitution(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.CmdSubst); ok {
+			found = true
+			return false
+		}
+		return !found
+	})
+	return found
 }
 
 // hereText returns the here-documents and here-strings a statement reads.

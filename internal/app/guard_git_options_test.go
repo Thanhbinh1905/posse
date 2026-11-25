@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func TestWorkerGitGuardRefusesGitAfterUnresolvedCd(t *testing.T) {
+	scope, _ := guardFixture(t)
+	scope.env = append(scope.env, "HOME="+t.TempDir())
+	for _, command := range []string{"cd && git fetch origin", "pushd && git fetch origin", "cd - && git fetch origin", "cd -P /tmp && git fetch origin", "pushd +0 && git fetch origin", "pushd -n /tmp && git fetch origin"} {
+		if refused, reason := guardCommand(command, scope); !refused {
+			t.Errorf("guard allowed Git after %q changed directory: %#v", command, reason)
+		}
+	}
+}
+
 func TestWorkerGitGuardAcceptsDocumentedReadOptions(t *testing.T) {
 	scope, _ := guardFixture(t)
 	for _, command := range []string{"git -P log", "git -p log", "git --no-optional-locks status", "git --no-replace-objects log", "git --literal-pathspecs log", "git --exec-path", "git -C . -P diff", "git -C $(pwd) diff"} {
