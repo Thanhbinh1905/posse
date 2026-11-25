@@ -16,7 +16,7 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 
 // workerCommands are the only commands a Worker may run against its own posse
 // home.
-const workerAllowedCommands = "`posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse show <own-task>`, `posse review <own-task>`, `posse candidate abandon`, `posse _context`, `posse research <list|show|cancel|start|wait|follow-up>` for own children, `posse knowledge show` and `posse config <show|schema>`"
+const workerAllowedCommands = "`posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse heavy`, `posse show <own-task>`, `posse review <own-task>`, `posse candidate abandon`, `posse _context`, `posse research <list|show|cancel|start|wait|follow-up>` for own children, `posse knowledge show` and `posse config <show|schema>`"
 
 var workerCommands = map[string]bool{
 	"show":               true,
@@ -25,6 +25,7 @@ var workerCommands = map[string]bool{
 	"status":             true,
 	"signal":             true,
 	"publish":            true,
+	"heavy":              true,
 	"validate":           true,
 	"candidate abandon":  true,
 	"_context":           true,

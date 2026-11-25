@@ -571,6 +571,34 @@ func TestStallRequiresWorkingHerdrAgentAndUnchangedOutputAndWorktree(t *testing.
 	}
 }
 
+func TestHeavyWaitInAnotherHomeDoesNotSuppressStall(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	start := time.Now().Truncate(time.Millisecond)
+	progress := &fakeProgress{output: "same", worktree: "HEAD\n"}
+	if err := db.UpdateProgress(ctx, task.ID, digest(progress.output), digest(progress.worktree), start.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("POSSE_TASK_ID", "")
+	lockDir := filepath.Join(runtimeDir, "posse", "heavy")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wait := fmt.Sprintf(`{"pid":%d,"home":%q,"project":%q,"task":"t1"}`, os.Getpid(), filepath.Join(t.TempDir(), "other-home"), project.Name)
+	if err := os.WriteFile(filepath.Join(lockDir, "wait-other.json"), []byte(wait), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := herdr.NewFake()
+	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{{PaneID: task.PaneID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "working"}}}
+	notices, err := EvaluateStalls(ctx, db, fake, project.ID, 5*time.Minute, start.Add(5*time.Minute), progress)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "stalled" {
+		t.Fatalf("unrelated home's wait record suppressed stall: notices=%#v err=%v", notices, err)
+	}
+}
+
 func TestProgressChangeResetsStallClockAndRunTakesOneSnapshot(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
@@ -617,6 +645,36 @@ func TestProgressChangeMovesStalledTaskBackToWorkingAndResetsProgress(t *testing
 	}
 	if updated.LastOutputHash != "" || updated.LastWorktreeHash != "" || updated.LastProgressAt != 0 {
 		t.Fatalf("progress baseline was not reset on return to working: %#v", updated)
+	}
+}
+
+func TestHeavyWaitInAnotherHomeDoesNotSuppressWorkerIdle(t *testing.T) {
+	ctx := context.Background()
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("POSSE_TASK_ID", "")
+	lockDir := filepath.Join(runtimeDir, "posse", "heavy")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wait := fmt.Sprintf(`{"pid":%d,"home":%q,"project":%q,"task":"t1"}`, os.Getpid(), filepath.Join(t.TempDir(), "other-home"), project.Name)
+	if err := os.WriteFile(filepath.Join(lockDir, "wait-other.json"), []byte(wait), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Truncate(time.Millisecond)
+	pane := herdr.Pane{PaneID: task.PaneID, WorkspaceID: task.HerdrWorkspaceID, Label: task.PaneLabel, Agent: "claude", AgentStatus: "idle"}
+	snapshot := herdr.Snapshot{Panes: []herdr.Pane{pane}}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, snapshot, start, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, snapshot, start.Add(time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 1 || notices[0].Kind != "worker_idle" {
+		t.Fatalf("unrelated home's wait record suppressed worker_idle: notices=%#v err=%v", notices, err)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/heavy"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -227,7 +228,14 @@ func (s *Service) status(ctx *axi.Context, args []string) error {
 	if plan != nil {
 		admission = "admitted"
 	}
+	project, err := db.ProjectByID(ctx.Context, task.ProjectID)
+	if err != nil {
+		return err
+	}
 	output := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "state", Value: string(task.State)}, {Key: "admission", Value: admission}, {Key: "launches", Value: task.Launches}, {Key: "review_evidence", Value: reviewEvidenceStatus(task)}}
+	if heavy.IsWaiting(home, project.Name, taskIDString(task.Seq)) {
+		output = append(output, axi.Field{Key: "waiting", Value: "heavy slot"}, axi.Field{Key: "holders", Value: heavy.HolderSummary()})
+	}
 	if greenhouse, err := greenhouseTaskStatus(ctx.Context, db, task, time.Now()); err != nil {
 		return err
 	} else if greenhouse != "" {
