@@ -764,7 +764,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 			processAuthorization.Close()
 		}
 	}()
-	panePlan, err := s.planTaskPaneTeardown(ctx, project, task)
+	panePlan, err := s.planTaskPaneTeardown(ctx, project, task, db)
 	if err != nil {
 		return result, s.teardownIncomplete(ctx, db, project, task, "pane inspection", err)
 	}
@@ -777,6 +777,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		if err != nil {
 			return result, err
 		}
+		result.PaneCloseProofs = append(result.PaneCloseProofs, workerPlan.PaneCloseProofs...)
 		defer workerPlan.Close()
 		if !option.keepPullRequests {
 			if err := s.closeAndVerifyDiscardPullRequests(ctx, db, discardPRs, cfg); err != nil {
@@ -840,6 +841,10 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	}
 	if !discardable {
 		processStopErr := s.runIntentStep(ctx, db, intent, "process.stop", func() error {
+			result.PaneCloseProofs, err = s.closeCompletedWorkerPanes(ctx, db, project, task)
+			if err != nil {
+				return err
+			}
 			if inPlace {
 				paneInfo, authorization, err := s.retainInPlaceTaskProcesses(ctx, db, project, task)
 				if err != nil {
@@ -1336,6 +1341,9 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 }
 
 func withTeardownDetails(fields axi.Object, result teardownResult) axi.Object {
+	if len(result.PaneCloseProofs) > 0 {
+		fields = append(fields, axi.Field{Key: "pane_close_proofs", Value: result.PaneCloseProofs})
+	}
 	if len(result.Dependants) > 0 {
 		fields = append(fields, axi.Field{Key: "dependants", Value: result.Dependants})
 	}
