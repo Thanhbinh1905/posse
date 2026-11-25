@@ -70,7 +70,7 @@ func UnsetFile(path, key string, projectFile bool) error {
 	if projectFile {
 		schemaKey = CanonicalProjectKey(schemaKey)
 	}
-	if _, ok := Lookup(schemaKey); !ok {
+	if _, ok := Lookup(schemaKey); !ok && !IsDeprecatedKey(key) {
 		return &InvalidError{File: path, Key: key, Reason: unknownKeyReason(key)}
 	}
 	original, err := readFileForEdit(path)

@@ -93,14 +93,13 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 	}
 
 	type rendered struct {
-		launch       []byte
-		agentName    string
-		paneLabel    string
-		display      []byte
-		leadDisplay  []byte
-		notice       []byte
-		home         []byte
-		workerPrefix string
+		launch      []byte
+		agentName   string
+		paneLabel   string
+		display     []byte
+		leadDisplay []byte
+		notice      []byte
+		home        []byte
 	}
 	renders := make([]rendered, 0, 2)
 	configs := []string{
@@ -156,10 +155,7 @@ func TestIdentityDoesNotAffectWorkerArtifactsOrSidebar(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		renders = append(renders, rendered{leadDisplay: leadDisplay, launch: launch, agentName: agentName(project.Name, sequence, 1), paneLabel: task.PaneLabel, display: display, notice: notice, home: append([]byte(nil), output.Bytes()...), workerPrefix: cfg.Identity.Worker.DisplayPrefix})
-	}
-	if renders[0].workerPrefix == renders[1].workerPrefix {
-		t.Fatal("Identity fixtures did not use distinct display prefixes")
+		renders = append(renders, rendered{leadDisplay: leadDisplay, launch: launch, agentName: agentName(project.Name, sequence, 1), paneLabel: task.PaneLabel, display: display, notice: notice, home: append([]byte(nil), output.Bytes()...)})
 	}
 	for _, field := range []struct {
 		name  string

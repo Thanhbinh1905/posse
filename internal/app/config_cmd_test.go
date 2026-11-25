@@ -557,8 +557,12 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	if code := cli.Run([]string{"config", "schema"}); code != 0 {
 		t.Fatalf("config schema TOON exit=%d stdout=%q stderr=%q", code, output, errorsOut)
 	}
-	if !strings.Contains(output.String(), "notice_delivery") || !strings.Contains(output.String(), "claude: watch") || !strings.Contains(output.String(), "codex: codex-queue") {
-		t.Fatalf("config schema TOON omitted typed map default: %s", output)
+	if strings.Contains(output.String(), "kinds.<kind>") {
+		t.Fatalf("default schema exposed kind internals: %s", output)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"config", "schema", "--all"}); code != 0 || !strings.Contains(output.String(), "kinds.<kind>.notice_delivery") || !strings.Contains(output.String(), "claude: watch") || !strings.Contains(output.String(), "codex: codex-queue") {
+		t.Fatalf("config schema --all exit=%d stdout=%q stderr=%q", code, output, errorsOut)
 	}
 	output.Reset()
 	if code := cli.Run([]string{"config", "schema", "--json"}); code != 0 {
@@ -573,6 +577,18 @@ func TestConfigSchemaRunsThroughCLIInToonAndJSON(t *testing.T) {
 	}
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
 		t.Fatalf("config schema JSON invalid: %v: %s", err, output)
+	}
+	for _, row := range decoded.Keys {
+		if strings.HasPrefix(row.Key, "kinds.") || row.Key == "identity.worker.display_prefix" {
+			t.Fatalf("default JSON schema exposed hidden or removed key %s", row.Key)
+		}
+	}
+	output.Reset()
+	if code := cli.Run([]string{"config", "schema", "--all", "--json"}); code != 0 {
+		t.Fatalf("config schema --all JSON exit=%d stdout=%q stderr=%q", code, output, errorsOut)
+	}
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatalf("config schema --all JSON invalid: %v: %s", err, output)
 	}
 	userOnly := map[string]bool{}
 	for _, row := range decoded.Keys {
@@ -757,6 +773,46 @@ func TestConfigSetUpProjectsIsUserOnlyAndNamesRegisteredProjects(t *testing.T) {
 	cfg, err := config.Load(home, "")
 	if err != nil || !equalStrings(cfg.Up.Projects, []string{"shop", "cafe"}) {
 		t.Fatalf("up.projects = %#v, %v", cfg.Up.Projects, err)
+	}
+}
+
+func TestConfigDeprecatedWorkerPrefixIsRejectedAndLegacyConfigWarns(t *testing.T) {
+	f := newStartFixture(t)
+	path := filepath.Join(f.home, "config.toml")
+	if err := os.WriteFile(path, []byte("[identity.worker]\ndisplay_prefix = \"worker\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runCLI(t, f.service, "config", "set", "identity.worker.display_prefix", "worker")
+	if code != 1 || !strings.Contains(output, "deprecated and has no effect") {
+		t.Fatalf("config set deprecated key: code=%d output=%s", code, output)
+	}
+	code, output = runCLI(t, f.service, "config", "show", "--json")
+	if code != 0 || !strings.Contains(output, "identity.worker.display_prefix was removed") || strings.Contains(output, `"display_prefix"`) {
+		t.Fatalf("config show legacy key: code=%d output=%s", code, output)
+	}
+}
+
+func TestConfigShowHidesHarnessInternalsUnlessAll(t *testing.T) {
+	f := newStartFixture(t)
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[kinds.claude]\ninterrupt_keys = [\"ctrl+c\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"config", "show", "--json"},
+		{"config", "show", "--effective", "--json"},
+	} {
+		code, output := runCLI(t, f.service, args...)
+		if code != 0 {
+			t.Fatalf("%v: code=%d output=%s", args, code, output)
+		}
+		if strings.Contains(output, `"kinds"`) {
+			t.Fatalf("default config show exposed kinds for %v: %s", args, output)
+		}
+		withAll := append(append([]string(nil), args...), "--all")
+		code, output = runCLI(t, f.service, withAll...)
+		if code != 0 || !strings.Contains(output, `"kinds"`) || !strings.Contains(output, "interrupt_keys") {
+			t.Fatalf("config show --all %v: code=%d output=%s", args, code, output)
+		}
 	}
 }
 

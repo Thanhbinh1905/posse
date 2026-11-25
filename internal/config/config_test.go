@@ -439,19 +439,38 @@ func TestDispatchDefaultOnly(t *testing.T) {
 	}
 }
 
-func TestWorkerIdentityAcceptsLegacyDisplayPrefix(t *testing.T) {
-	home := t.TempDir()
-	path := filepath.Join(home, "config.toml")
-	writeConfig(t, path, "[identity.worker]\ndisplay_prefix = \"worker\"\n")
-	cfg, err := Load(home, "shop")
-	if err != nil || cfg.Identity.Worker.DisplayPrefix != "worker" {
-		t.Fatalf("display_prefix config = %#v, %v", cfg.Identity.Worker, err)
-	}
-	writeConfig(t, path, "[identity.worker]\nname_prefix = \"worker\"\n")
-	_, err = Load(home, "shop")
-	invalid, ok := err.(*InvalidError)
-	if !ok || invalid.File != path || !strings.Contains(invalid.Key, "name_prefix") {
-		t.Fatalf("old worker identity key error = %#v", err)
+func TestDeprecatedWorkerDisplayPrefixLoadsWithWarning(t *testing.T) {
+	for name, projectConfig := range map[string]bool{"user": false, "project": true} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "config.toml")
+			projectName := "shop"
+			if projectConfig {
+				path = filepath.Join(home, "projects", projectName, "config.toml")
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			original := "[identity.worker]\ndisplay_prefix = \"worker\"\n"
+			writeConfig(t, path, original)
+			cfg, err := Load(home, projectName)
+			warning := strings.Join(cfg.Warnings, "\n")
+			if err != nil || !strings.Contains(warning, "identity.worker.display_prefix was removed") || !strings.Contains(warning, "ignored as deprecated") {
+				t.Fatalf("legacy display_prefix config warnings = %v, err = %v", cfg.Warnings, err)
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil || string(contents) != original {
+				t.Fatalf("loading deprecated config changed its contents: %q, %v", contents, err)
+			}
+			for _, spec := range Schema() {
+				if spec.Key == "identity.worker.display_prefix" {
+					t.Fatal("deprecated display_prefix remains in the config schema")
+				}
+			}
+			if _, err := SetFile(path, "identity.worker.display_prefix", "worker", projectConfig); err == nil || !strings.Contains(err.Error(), "deprecated and has no effect") {
+				t.Fatalf("setting deprecated display_prefix error = %v", err)
+			}
+		})
 	}
 }
 
