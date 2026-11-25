@@ -353,6 +353,9 @@ func (s *Service) confirmPrompt(ctx context.Context, paneID, text string, send f
 		if lastErr == nil {
 			return nil
 		}
+		if isInactiveNamedAgent(lastErr) {
+			continue
+		}
 		if !isPromptStall(lastErr) && !isAgentBlocked(lastErr) {
 			return lastErr
 		}
@@ -446,6 +449,10 @@ func (s *Service) codexBlockingPrompt(ctx context.Context, paneID string) error 
 func isAgentBlocked(err error) bool {
 	var failure *axi.Error
 	return errors.As(err, &failure) && failure.Code == "agent_blocked"
+}
+
+func isInactiveNamedAgent(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not an active named agent")
 }
 
 func isPromptStall(err error) bool {
