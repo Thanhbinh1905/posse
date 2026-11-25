@@ -734,6 +734,11 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return result, err
 	}
+	if discardable && sandboxHeld && s.Herdr != nil {
+		if err := s.verifyDiscardSandboxPaneOwnership(ctx, db, project, task); err != nil {
+			return result, s.teardownDiscardIncomplete(ctx, db, project, task, "Sandbox process ownership", err)
+		}
+	}
 	var discardPRs []discardPullRequest
 	if discardable {
 		discardPRs, err = s.discardPullRequests(ctx, db, project, task)

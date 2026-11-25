@@ -804,6 +804,37 @@ func shellOnlyPaneInSandbox(snapshot herdr.Snapshot, pane herdr.Pane, sandboxPat
 	return pane.Agent == "" && snapshotAgentName(snapshot, pane.PaneID) == "" && pathInside(pane.CWD, sandboxPath)
 }
 
+func (s *Service) verifyDiscardSandboxPaneOwnership(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
+	snapshot, err := s.snapshot(ctx)
+	if err != nil {
+		return axi.Failure("sandbox_process_identity_unavailable", "could not inspect Sandbox panes before discard", true, err.Error())
+	}
+	tabs := taskTabs(snapshot, project, task)
+	completedProofs, err := s.planCompletedWorkerPaneProofs(ctx, db, project, task)
+	if err != nil {
+		return err
+	}
+	for _, pane := range snapshot.Panes {
+		taskPane := ownsTaskPane(snapshot, project, task, tabs, pane) || completedProofs[pane.PaneID] != ""
+		if taskPane || !pathInside(pane.CWD, task.WorktreePath) && !tabs[pane.TabID] && pane.PaneID != task.PaneID {
+			continue
+		}
+		info, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
+		if err != nil {
+			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not inspect process ownership in pane %s before discard", pane.PaneID), true, err.Error())
+		}
+		for _, process := range info.ForegroundProcesses {
+			if pathInside(process.CWD, task.WorktreePath) {
+				return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("unowned pane %s has foreground PID %d in the held Sandbox", pane.PaneID, process.PID), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
+			}
+		}
+		if processInSandbox(info.ShellPID, task.WorktreePath) {
+			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("unowned pane %s shell PID %d still references the held Sandbox", pane.PaneID, info.ShellPID), false, "Move or close the unrelated pane, preserve its work, then retry Teardown")
+		}
+	}
+	return nil
+}
+
 func sandboxPaneProcessIDs(info paneProcessInfo, sandboxPath string) []int {
 	pids := make([]int, 0, len(info.ForegroundProcesses)+1)
 	if processInSandbox(info.ShellPID, sandboxPath) {
