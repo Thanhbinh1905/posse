@@ -19,6 +19,25 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestUnverifiedSandboxProcessHandleTreatsExitedProcessAsGone(t *testing.T) {
+	root := t.TempDir()
+	child := exec.Command("sleep", "60")
+	child.Dir = root
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := child.Process.Pid
+	stopSandboxProcess(t, child)
+
+	handle, alive, err := openUnverifiedSandboxProcessHandle(pid)
+	if err != nil {
+		t.Fatalf("open exited unverified process: %v", err)
+	}
+	if alive || handle != nil {
+		t.Fatalf("exited process result = handle %v, alive %v; want nil, false", handle, alive)
+	}
+}
+
 func TestSandboxCleanupWaitsForShortLivedUnverifiedProcess(t *testing.T) {
 	root := t.TempDir()
 	authorization := newSandboxProcessAuthorization()

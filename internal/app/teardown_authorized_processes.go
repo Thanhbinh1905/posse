@@ -128,16 +128,17 @@ func stopSandboxProcessesAuthorized(path string, authorization *sandboxProcessAu
 				return nil, fmt.Errorf("could not verify unretained Sandbox process %d: %w", pid, aliveErr)
 			}
 			if alive {
-				handle, handleErr := openSandboxProcessHandle(pid)
-				if handleErr != nil && !processGone(handleErr) {
+				handle, stillAlive, handleErr := openUnverifiedSandboxProcessHandle(pid)
+				if handleErr != nil {
 					return nil, fmt.Errorf("could not retain unverified Sandbox process %d: %w", pid, handleErr)
 				}
-				if handle != nil {
-					waitErr := waitForSandboxProcessExit(pid, root, handle)
-					_ = handle.Close()
-					if waitErr == nil {
-						continue
-					}
+				if !stillAlive {
+					continue
+				}
+				waitErr := waitForSandboxProcessExit(pid, root, handle)
+				_ = handle.Close()
+				if waitErr == nil {
+					continue
 				}
 			}
 			if alive {
@@ -316,16 +317,17 @@ func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxPr
 				return fmt.Errorf("cannot verify Sandbox process %d during teardown: %w", pid, aliveErr)
 			}
 			if alive && waitForTransients {
-				handle, handleErr := openSandboxProcessHandle(pid)
-				if handleErr != nil && !processGone(handleErr) {
+				handle, stillAlive, handleErr := openUnverifiedSandboxProcessHandle(pid)
+				if handleErr != nil {
 					return fmt.Errorf("cannot retain unverified Sandbox process %d during teardown: %w", pid, handleErr)
 				}
-				if handle != nil {
-					waitErr := waitForSandboxProcessExit(pid, root, handle)
-					_ = handle.Close()
-					if waitErr == nil {
-						continue
-					}
+				if !stillAlive {
+					continue
+				}
+				waitErr := waitForSandboxProcessExit(pid, root, handle)
+				_ = handle.Close()
+				if waitErr == nil {
+					continue
 				}
 			}
 			if alive {
@@ -338,6 +340,24 @@ func verifySandboxProcessSet(root string, handles, transients map[int]*sandboxPr
 		}
 	}
 	return nil
+}
+
+func openUnverifiedSandboxProcessHandle(pid int) (*sandboxProcessHandle, bool, error) {
+	handle, err := openSandboxProcessHandle(pid)
+	if err == nil {
+		return handle, true, nil
+	}
+	if !processGone(err) {
+		return nil, false, err
+	}
+	alive, err := unretainedSandboxProcessAlive(pid)
+	if err != nil {
+		return nil, false, err
+	}
+	if alive {
+		return nil, false, fmt.Errorf("unverified Sandbox process %d changed while opening its handle; preserving its work", pid)
+	}
+	return nil, false, nil
 }
 
 func waitForSandboxProcessExit(pid int, root string, handle *sandboxProcessHandle) error {
