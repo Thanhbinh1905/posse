@@ -1258,6 +1258,7 @@ func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
 		"reviewer quota exceeded; retry after reset",
 		"network connection reset by peer",
 		"dial tcp: i/o timeout",
+		"greenhouse daemon unavailable: socket disappeared",
 	} {
 		t.Run(reason, func(t *testing.T) {
 			if !transientGreenhouseFailure(errors.New(reason)) {

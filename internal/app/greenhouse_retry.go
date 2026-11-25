@@ -48,7 +48,7 @@ func transientGreenhouseFailure(err error) bool {
 		return true
 	}
 	reason := strings.ToLower(err.Error())
-	for _, marker := range []string{"quota", "rate limit", "rate-limit", "too many requests", "http 429", "status 429", "status code 429", "http 502", "bad gateway", "http 503", "http 504", "service unavailable", "gateway timeout", "network error", "network failure", "connection reset", "connection refused", "connection timed out", "network is unreachable", "temporary failure", "temporarily unavailable", "i/o timeout", "unexpected eof", "transport reset"} {
+	for _, marker := range []string{"quota", "daemon unavailable", "rate limit", "rate-limit", "too many requests", "http 429", "status 429", "status code 429", "http 502", "bad gateway", "http 503", "http 504", "service unavailable", "gateway timeout", "network error", "network failure", "connection reset", "connection refused", "connection timed out", "network is unreachable", "temporary failure", "temporarily unavailable", "i/o timeout", "unexpected eof", "transport reset"} {
 		if strings.Contains(reason, marker) {
 			return true
 		}
