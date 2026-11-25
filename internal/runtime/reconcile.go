@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -205,8 +206,17 @@ func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.
 	if len(deliveries) == 0 {
 		return false, nil
 	}
-	policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
-	return policy == "suspend" || policy == "release", err
+	operation, found, err := db.LatestDeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
+	if err != nil || !found {
+		return false, err
+	}
+	if operation.Subject != "suspend" && operation.Subject != "release" {
+		return false, nil
+	}
+	if operation.Baseline != "" {
+		return operation.Baseline == strconv.Itoa(task.Launches), nil
+	}
+	return task.Launches <= 1, nil
 }
 
 func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {

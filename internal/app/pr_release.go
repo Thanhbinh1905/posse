@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -271,6 +272,7 @@ func (s *Service) recordExecutorPolicy(ctx context.Context, db *store.DB, target
 		ActorPane:  target.actorPane,
 		HeadSHA:    target.task.GatedSHA,
 		Subject:    policy,
+		Baseline:   strconv.Itoa(target.task.Launches),
 		Outcome:    "succeeded",
 		Detail:     detail,
 	})

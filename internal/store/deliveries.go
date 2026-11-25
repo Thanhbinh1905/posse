@@ -114,6 +114,15 @@ func (db *DB) TaskDeliveries(ctx context.Context, taskID int64) ([]Delivery, err
 	return deliveries, rows.Err()
 }
 
+// LatestDeliveryExecutorPolicy returns the latest applied executor policy.
+func (db *DB) LatestDeliveryExecutorPolicy(ctx context.Context, deliveryID int64) (DeliveryOperation, bool, error) {
+	operation, err := scanDeliveryOperation(db.QueryRowContext(ctx, `SELECT `+deliveryOperationColumns+` FROM delivery_operations WHERE delivery_id=? AND operation='executor_policy' AND outcome='succeeded' ORDER BY id DESC LIMIT 1`, deliveryID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeliveryOperation{}, false, nil
+	}
+	return operation, err == nil, err
+}
+
 // DeliveryExecutorPolicy returns the latest applied policy, or retain when none was selected.
 func (db *DB) DeliveryExecutorPolicy(ctx context.Context, deliveryID int64) (string, error) {
 	var policy string
