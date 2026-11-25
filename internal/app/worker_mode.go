@@ -97,22 +97,8 @@ func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.T
 	if err != nil {
 		return store.Task{}, err
 	}
-	dir, err := currentDir()
-	if err != nil {
-		return store.Task{}, err
-	}
-	sandboxTask, hasSandbox, err := workerSandboxTask(ctx, db, dir)
-	if err != nil {
-		return store.Task{}, err
-	}
-	if hasAncestor && hasSandbox && ancestorTask.ID != sandboxTask.ID {
-		return store.Task{}, store.ErrNotFound
-	}
 	if hasAncestor {
 		return ancestorTask, nil
-	}
-	if hasSandbox {
-		return sandboxTask, nil
 	}
 	return store.Task{}, store.ErrNotFound
 }
@@ -139,34 +125,6 @@ func workerAncestorTask(ctx context.Context, db *store.DB, home string) (store.T
 	if store.IsNotFound(err) {
 		return store.Task{}, false, nil
 	}
-	return task, err == nil, err
-}
-
-func workerSandboxTask(ctx context.Context, db *store.DB, dir string) (store.Task, bool, error) {
-	projects, err := db.Projects(ctx)
-	if err != nil {
-		return store.Task{}, false, err
-	}
-	var match *store.Sandbox
-	for _, project := range projects {
-		sandboxes, err := db.Sandboxes(ctx, project.ID)
-		if err != nil {
-			return store.Task{}, false, err
-		}
-		for _, sandbox := range sandboxes {
-			if sandbox.State != "held" || sandbox.TaskID == 0 || !pathWithin(resolvedPath(sandbox.Path), dir) {
-				continue
-			}
-			if match != nil && (match.TaskID != sandbox.TaskID || match.ProjectID != sandbox.ProjectID) {
-				return store.Task{}, false, store.ErrNotFound
-			}
-			match = &sandbox
-		}
-	}
-	if match == nil {
-		return store.Task{}, false, nil
-	}
-	task, err := db.TaskByID(ctx, match.ProjectID, match.TaskID)
 	return task, err == nil, err
 }
 

@@ -165,11 +165,49 @@ func TestWorkerCanReadOwnTaskAndReviewButNotAnotherTask(t *testing.T) {
 			t.Fatalf("Worker outside its Sandbox read another Task by spoofing HERDR_PANE_ID with `posse %s`: code=%d output=%s", strings.Join(command, " "), code, output)
 		}
 	}
+	procRoot = fakeProc(t, fixture.repo, []string{"PI_CODING_AGENT=1", workerHomeEnv + "=" + fixture.home, "HERDR_PANE_ID=w2:p1"})
+	t.Setenv("HERDR_PANE_ID", "w2:p1")
+	t.Chdir(fixture.repo)
+	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
+		t.Fatalf("Worker could not inspect its Task from outside its Sandbox: code=%d output=%s", code, output)
+	}
 	t.Setenv(workerHomeEnv, "")
 	t.Setenv("HERDR_PANE_ID", "")
 	t.Chdir(fixture.sandbox)
-	if code, output := runCLI(t, service, "show", "t1"); code != 0 {
-		t.Fatalf("Worker identified by its Sandbox could not read its Task: code=%d output=%s", code, output)
+	procRoot = fakeProc(t, fixture.sandbox, []string{"PATH=/usr/bin"})
+	if code, output := runCLI(t, service, "show", "t1"); code == 0 || !strings.Contains(output, "worker_forbidden") {
+		t.Fatalf("Sandbox path alone granted Task identity: code=%d output=%s", code, output)
+	}
+}
+
+func TestSandboxAloneDoesNotGrantWorkerTaskIdentity(t *testing.T) {
+	fixture := newWorkerFixture(t)
+	otherSandbox := filepath.Join(fixture.home, "pool", "shop", "sandbox-2")
+	gitTest(t, fixture.repo, "worktree", "add", "--detach", otherSandbox)
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "Other", State: store.StateSpawning, MergeMode: "local", PaneID: "w3:p1", WorktreePath: otherSandbox})
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO mounts(project_id,n,path,state,task_id,acquired_at,released_at) VALUES(?,?,?,?,?,0,0)`, fixture.project.ID, 2, otherSandbox, "held", otherID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workerHomeEnv, fixture.home)
+	t.Setenv("HERDR_ENV", "1")
+	t.Chdir(otherSandbox)
+	previousProcRoot := procRoot
+	procRoot = fakeProc(t, otherSandbox, []string{workerHomeEnv + "=" + fixture.home, "PATH=/usr/bin"})
+	t.Cleanup(func() { procRoot = previousProcRoot })
+	if code, output := runCLI(t, testService(fixture.home, herdr.NewFake()), "show", "t2"); code == 0 || !strings.Contains(output, "worker_forbidden") {
+		t.Fatalf("Sandbox path alone granted Task identity: code=%d output=%s", code, output)
 	}
 }
 
