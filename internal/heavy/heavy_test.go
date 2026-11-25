@@ -2,10 +2,13 @@ package heavy
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -44,9 +47,7 @@ func TestHeavySubprocess(t *testing.T) {
 	if os.Getenv("POSSE_HEAVY_HELPER") != "1" {
 		return
 	}
-	if err := Run(context.Background(), "cpu", []string{"sh", "-c", os.Getenv("POSSE_HEAVY_SCRIPT")}, os.Stdout, os.Stderr); err != nil {
-		t.Fatal(err)
-	}
+	_ = Run(context.Background(), "cpu", []string{"sh", "-c", os.Getenv("POSSE_HEAVY_SCRIPT")}, os.Stdout, os.Stderr)
 }
 
 func TestCommandsFromSeparateHomesShareMachineSlot(t *testing.T) {
@@ -98,6 +99,125 @@ func TestCommandsFromSeparateHomesShareMachineSlot(t *testing.T) {
 	}
 }
 
+func TestKilledJobGroupFreesSlot(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	wrapper := startHeavyProcess(t, "sleep 60")
+	holder := waitForHolder(t, lockDir)
+	if holder.PID <= 1 {
+		t.Fatalf("unsafe job pid %d", holder.PID)
+	}
+	if err := syscall.Kill(-holder.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = wrapper.Wait()
+	file := waitForSlot(t, lockDir)
+	file.Close()
+}
+
+func TestWrapperKilledLeavesChildSlotHeldUntilChildExits(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	wrapper := startHeavyProcess(t, "sleep 60")
+	holder := waitForHolder(t, lockDir)
+	if holder.PID <= 1 || wrapper.Process.Pid <= 1 {
+		t.Fatalf("unsafe wrapper or child pid: wrapper=%d child=%d", wrapper.Process.Pid, holder.PID)
+	}
+	cleanupChild := true
+	defer func() {
+		if cleanupChild {
+			_ = syscall.Kill(-holder.PID, syscall.SIGKILL)
+		}
+	}()
+	if err := syscall.Kill(wrapper.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = wrapper.Wait()
+	if file, err := tryAcquire(lockDir, "cpu", 1); err != nil || file != nil {
+		if file != nil {
+			file.Close()
+		}
+		t.Fatalf("slot freed while child pid %d was still running, file=%v err=%v", holder.PID, file, err)
+	}
+	if summary := strings.Join(HolderSummary(), "\n"); !strings.Contains(summary, fmt.Sprintf("pid %d", holder.PID)) {
+		t.Fatalf("holder status omitted surviving child pid %d: %s", holder.PID, summary)
+	}
+	if err := syscall.Kill(-holder.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	cleanupChild = false
+	file := waitForSlot(t, lockDir)
+	file.Close()
+}
+
+func configureHeavyProcessTest(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	configHome := filepath.Join(root, "config")
+	configDir := filepath.Join(configHome, "posse")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "machine.toml"), []byte("[heavy]\ncpu_slots = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("POSSE_HOME", filepath.Join(root, "home"))
+	return filepath.Join(runtimeDir, "posse", "heavy")
+}
+
+func startHeavyProcess(t *testing.T, script string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHeavySubprocess$")
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		if key == "POSSE_HEAVY_HELPER" || key == "POSSE_HEAVY_SCRIPT" || key == "XDG_RUNTIME_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_HOME" {
+			continue
+		}
+		cmd.Env = append(cmd.Env, value)
+	}
+	cmd.Env = append(cmd.Env, "POSSE_HEAVY_HELPER=1", "POSSE_HEAVY_SCRIPT="+script, "XDG_RUNTIME_DIR="+os.Getenv("XDG_RUNTIME_DIR"), "XDG_CONFIG_HOME="+os.Getenv("XDG_CONFIG_HOME"), "POSSE_HOME="+os.Getenv("POSSE_HOME"))
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+func waitForHolder(t *testing.T, lockDir string) record {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(filepath.Join(lockDir, "cpu-0.json"))
+		if err == nil {
+			var holder record
+			if json.Unmarshal(data, &holder) == nil && holder.PID > 1 {
+				return holder
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("heavy command did not publish its holder record")
+	return record{}
+}
+
+func waitForSlot(t *testing.T, lockDir string) *os.File {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		file, err := tryAcquire(lockDir, "cpu", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file != nil {
+			return file
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("slot remained held after the job exited")
+	return nil
+}
+
 func TestSlotsReadsMachineOverrides(t *testing.T) {
 	configHome := t.TempDir()
 	configDir := filepath.Join(configHome, "posse")
@@ -129,6 +249,10 @@ func TestSlotCountUsesProcessorDefaultAndOverrides(t *testing.T) {
 }
 
 func TestHeavyCommandParsesClassAndCommand(t *testing.T) {
+	statusClass, statusCommand, err := HeavyCommand([]string{"--status"})
+	if err != nil || statusClass != "status" || len(statusCommand) != 0 {
+		t.Fatalf("status command = %q %q %v", statusClass, statusCommand, err)
+	}
 	class, command, err := HeavyCommand([]string{"--class", "reviewer", "--", "printf", "ok"})
 	if err != nil {
 		t.Fatal(err)

@@ -164,9 +164,10 @@ func HolderSummary() []string {
 		if lockErr == nil {
 			continue
 		}
-		label := strings.TrimSuffix(entry.Name(), ".json") + " " + holder.Command
+		slot := strings.TrimSuffix(entry.Name(), ".json")
+		label := fmt.Sprintf("%s pid %d %s", slot, holder.PID, holder.Command)
 		if holder.Project != "" && holder.Task != "" {
-			label = holder.Project + " " + holder.Task + " " + holder.Command
+			label = fmt.Sprintf("%s %s pid %d %s", holder.Project, holder.Task, holder.PID, holder.Command)
 		}
 		holders = append(holders, label)
 	}
@@ -243,6 +244,10 @@ func Release(file *os.File) error {
 }
 
 func Run(ctx context.Context, class string, args []string, stdout, stderr io.Writer) error {
+	if class == "status" {
+		_, err := fmt.Fprintln(stdout, strings.Join(HolderSummary(), "\n"))
+		return err
+	}
 	if class != "cpu" && class != "reviewer" {
 		return fmt.Errorf("unknown heavy class %q", class)
 	}
@@ -302,6 +307,9 @@ func Run(ctx context.Context, class string, args []string, stdout, stderr io.Wri
 }
 
 func HeavyCommand(args []string) (string, []string, error) {
+	if len(args) == 1 && args[0] == "--status" {
+		return "status", nil, nil
+	}
 	class := "cpu"
 	if len(args) > 0 && strings.HasPrefix(args[0], "--class=") {
 		class = strings.TrimPrefix(args[0], "--class=")
@@ -310,7 +318,7 @@ func HeavyCommand(args []string) (string, []string, error) {
 		class, args = args[1], args[2:]
 	}
 	if (class != "cpu" && class != "reviewer") || len(args) == 0 || args[0] != "--" {
-		return "", nil, errors.New("usage: posse heavy [--class cpu|reviewer] -- <command>")
+		return "", nil, errors.New("usage: posse heavy [--class cpu|reviewer] -- <command> | --status")
 	}
 	return class, args[1:], nil
 }
