@@ -43,7 +43,7 @@ func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.P
 		return err
 	}
 	if existing == 0 {
-		summary := "Herdr stopped the Lead of " + project.Name
+		summary := "Herdr restarted and the Lead of " + project.Name + " needs restoration"
 		if len(workers) > 0 {
 			summary += " and Workers " + strings.Join(workers, ", ")
 		}

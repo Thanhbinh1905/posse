@@ -2671,3 +2671,72 @@ func TestQueuedInstructionsPendingFailureNamesBlockingMessages(t *testing.T) {
 		t.Fatalf("refusal %q includes more than the first line", text)
 	}
 }
+
+func TestTearingDownLandedPrerequisiteDoesNotRaiseDependantsDecision(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 1, Type: "change", Title: "Landed prerequisite", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateDone, store.StateMerging, "cli", "merge started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, predecessorID, store.StateMerging, store.StateMerged, "cli", "merged"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTaskMerge(ctx, predecessorID, "", "landed-sha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.brief, []byte("---\ntype: change\ntitle: Dependant\ndone_when: landed prerequisite remains satisfied\nafter: t1:landed\n---\nWait for the already landed prerequisite.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	cli := fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--queue"}); code != 0 {
+		t.Fatalf("queue dependant: exit=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET state='queued' WHERE project_id=? AND seq=2`, fixture.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	output.Reset()
+	cli = fixture.service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"teardown", "t1"}); code != 0 {
+		t.Fatalf("teardown landed prerequisite: exit=%d output=%s", code, output.String())
+	}
+	decisions, err := db.Decisions(ctx, fixture.project.ID, true)
+	if err != nil || len(decisions) != 0 {
+		t.Fatalf("landed prerequisite teardown raised Decisions=%#v err=%v", decisions, err)
+	}
+	dependent, err := db.Task(ctx, fixture.project.ID, "t2")
+	if err != nil || dependent.State != store.StateQueued {
+		t.Fatalf("valid queued dependant changed: task=%+v err=%v", dependent, err)
+	}
+}
