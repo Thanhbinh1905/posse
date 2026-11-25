@@ -145,12 +145,22 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 		return targetSync{}, nil
 	}
 	if freshness.Root != "" {
+		queuedHead := headSHA
+		checkedHead := headSHA
+		if fullPipelineSelected(task, member) && task.WorktreePath != "" {
+			currentHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+			if err != nil {
+				return targetSync{}, err
+			}
+			checkedHead = currentHead
+		}
+		headSHA = checkedHead
 		checked, err := freshness.of(ctx, freshness.Root, headSHA)
 		if err != nil {
 			return targetSync{}, err
 		}
 		if checked.Fresh {
-			if _, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, headSHA); err != nil {
+			if _, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, queuedHead); err != nil {
 				return targetSync{}, err
 			}
 			if err := db.DequeueMergeQueue(ctx, task.ID, member, "target_already_current", time.Now().UnixMilli()); err != nil {

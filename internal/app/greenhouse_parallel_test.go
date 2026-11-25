@@ -357,8 +357,9 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 		t.Fatal(err)
 	}
 	refreshed := f.advanceTarget(t, false, true)
-	if _, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed}, f.headSHA); err != nil {
-		t.Fatal(err)
+	oldVerdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r-old", Head: f.headSHA, Target: strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "HEAD")), ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), oldVerdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record earlier Verdict: recorded=%v err=%v", recorded, err)
 	}
 	if code, output, stderr := f.run("signal", "working", "Refreshing the target"); code != 0 {
 		t.Fatalf("working before target refresh: code=%d output=%s stderr=%s", code, output, stderr)
@@ -380,16 +381,27 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return newHead, nil }); err != nil || !recorded {
 		t.Fatalf("record refreshed-head pass: recorded=%v err=%v", recorded, err)
 	}
+	if _, err := f.service.queuePRTargetSyncInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: refreshed, Root: f.task.WorktreePath}, f.headSHA); err != nil {
+		t.Fatalf("check superseded Verdict head against current Task head: %v", err)
+	}
 	if err := f.service.maintainProjectWatch(context.Background(), f.db, f.project); err != nil {
 		t.Fatal(err)
 	}
 	messages, err := f.db.TaskMessagesAfter(context.Background(), f.task.ID, 0, 10)
-	published := false
+	publishInstructions, refreshInstructions := 0, 0
 	for _, message := range messages {
-		published = published || message.Status == "delivered" && strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish")
+		if message.Status == "withdrawn" {
+			continue
+		}
+		if strings.Contains(message.Body, "Greenhouse passed Task head") && strings.Contains(message.Body, "posse publish") {
+			publishInstructions++
+		}
+		if strings.Contains(message.Body, "merge origin/main") {
+			refreshInstructions++
+		}
 	}
-	if err != nil || !published {
-		t.Fatalf("refreshed-head publication message=%+v err=%v", messages, err)
+	if err != nil || publishInstructions != 1 || refreshInstructions != 0 {
+		t.Fatalf("refreshed-head messages=%+v err=%v; want one publication and no superseded target refresh", messages, err)
 	}
 }
 
