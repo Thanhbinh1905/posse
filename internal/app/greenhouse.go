@@ -302,7 +302,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		for {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
-				requestAttempted = false
 				round.Wait = attemptWait
 				round.Target, err = greenhouseTarget(ctx.Context, member)
 				if err != nil {
