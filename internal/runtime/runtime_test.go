@@ -46,17 +46,18 @@ func TestReconcileDoesNotReportIntentionallyStoppedPRExecutors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			workerExited := 0
+			for _, notice := range notices {
+				if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+					workerExited++
+				}
+			}
 			want := 1
 			if policy == "suspend" || policy == "release" {
 				want = 0
 			}
-			for _, notice := range notices {
-				if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
-					want--
-				}
-			}
-			if want != 0 {
-				t.Fatalf("worker_exited Notice count does not match policy %q", policy)
+			if workerExited != want {
+				t.Fatalf("worker_exited Notice count = %d, want %d for policy %q", workerExited, want, policy)
 			}
 		})
 	}
