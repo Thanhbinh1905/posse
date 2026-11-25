@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/thanhbinh1905/posse/internal/config"
 	"golang.org/x/sys/unix"
 )
 
@@ -174,7 +175,7 @@ func HolderSummary() []string {
 	return holders
 }
 
-func IsWaitingTask(project, task, marker string) bool {
+func IsWaitingTask(home, project, task, marker string) bool {
 	entries, err := os.ReadDir(lockDirectory())
 	if err != nil {
 		return false
@@ -188,7 +189,7 @@ func IsWaitingTask(project, task, marker string) bool {
 			continue
 		}
 		var waiting record
-		if json.Unmarshal(data, &waiting) == nil && waiting.PID > 1 && waiting.Project == project && waiting.Task == task && waiting.Marker == marker {
+		if json.Unmarshal(data, &waiting) == nil && waiting.PID > 1 && waiting.Home == home && waiting.Project == project && waiting.Task == task && waiting.Marker == marker {
 			if err := syscall.Kill(waiting.PID, 0); err == nil || errors.Is(err, syscall.EPERM) {
 				return true
 			}
@@ -199,6 +200,10 @@ func IsWaitingTask(project, task, marker string) bool {
 }
 
 func Acquire(ctx context.Context, class, command string) (*os.File, time.Duration, error) {
+	home, err := config.DefaultHome()
+	if err != nil {
+		return nil, 0, err
+	}
 	count, err := slots(class)
 	if err != nil {
 		return nil, 0, err
@@ -214,7 +219,7 @@ func Acquire(ctx context.Context, class, command string) (*os.File, time.Duratio
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, 0, err
 		}
-		entry, _ := json.Marshal(record{PID: os.Getpid(), Home: os.Getenv("POSSE_HOME"), Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: started})
+		entry, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: started})
 		if err := os.WriteFile(waitingPath, entry, 0o600); err != nil {
 			return nil, 0, err
 		}
@@ -226,7 +231,7 @@ func Acquire(ctx context.Context, class, command string) (*os.File, time.Duratio
 		_ = os.Remove(waitingPath)
 	}
 	ownerPath := strings.TrimSuffix(file.Name(), ".lock") + ".json"
-	owner, _ := json.Marshal(record{PID: os.Getpid(), Home: os.Getenv("POSSE_HOME"), Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: time.Now()})
+	owner, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: time.Now()})
 	if err := os.WriteFile(ownerPath, owner, 0o600); err != nil {
 		_ = file.Close()
 		return nil, 0, err
@@ -262,8 +267,12 @@ func Run(ctx context.Context, class string, args []string, stdout, stderr io.Wri
 		return err
 	}
 	defer Release(file)
+	home, err := config.DefaultHome()
+	if err != nil {
+		return err
+	}
 	holderPath := strings.TrimSuffix(file.Name(), ".lock") + ".json"
-	holderData, _ := json.Marshal(record{PID: os.Getpid(), Home: os.Getenv("POSSE_HOME"), Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: strings.Join(args, " "), Since: time.Now()})
+	holderData, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: strings.Join(args, " "), Since: time.Now()})
 	if err := os.WriteFile(holderPath, holderData, 0o600); err != nil {
 		return err
 	}
@@ -274,7 +283,7 @@ func Run(ctx context.Context, class string, args []string, stdout, stderr io.Wri
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	holderData, _ = json.Marshal(record{PID: cmd.Process.Pid, Home: os.Getenv("POSSE_HOME"), Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: strings.Join(args, " "), Since: time.Now()})
+	holderData, _ = json.Marshal(record{PID: cmd.Process.Pid, Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: strings.Join(args, " "), Since: time.Now()})
 	if err := os.WriteFile(holderPath, holderData, 0o600); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		_ = cmd.Wait()

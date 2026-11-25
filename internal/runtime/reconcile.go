@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -198,7 +199,7 @@ func reconcileWorkDeferred(ctx context.Context) error {
 
 func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
 	var notices []store.Notice
-	waitingHeavy := heavy.IsWaitingTask(project.Name, taskID(task.Seq), task.ContainmentMarker)
+	waitingHeavy := heavy.IsWaitingTask(filepath.Dir(db.Path), project.Name, taskID(task.Seq), task.ContainmentMarker)
 	if task.State == store.StateSpawning && task.PaneID == "" {
 		return nil, nil
 	}

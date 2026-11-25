@@ -46,7 +46,7 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 	var notices []store.Notice
 	var failures []error
 	for _, task := range tasks {
-		if heavy.IsWaiting("", project.Name, taskID(task.Seq)) {
+		if heavy.IsWaiting(filepath.Dir(db.Path), project.Name, taskID(task.Seq)) {
 			continue
 		}
 		if err := reconcileWorkDeferred(ctx); err != nil {
