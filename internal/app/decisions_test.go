@@ -268,6 +268,9 @@ func TestAskAndDecideThroughCLIWithUserOnlyBoundary(t *testing.T) {
 	if got := run(1, "decide", decisionID, "wrong", "--user-approved", "User says retry"); !strings.Contains(got, "decision_refused") {
 		t.Fatal(got)
 	}
+	if got := run(1, "decide", decisionID, "retry", "--user-approved", "<User's words>"); !strings.Contains(got, "user_approval_placeholder") {
+		t.Fatal(got)
+	}
 	if got := run(0, "decide", decisionID, "retry", "--user-approved", "User says retry"); !strings.Contains(got, "User says retry") {
 		t.Fatal(got)
 	}

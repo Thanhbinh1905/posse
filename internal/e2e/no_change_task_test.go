@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/thanhbinh1905/posse/internal/herdr"
+	posseruntime "github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -51,12 +54,67 @@ func TestNoChangeTaskFinishesAndTearsDownWithoutDiscard(t *testing.T) {
 	if err := os.Remove(late); err != nil {
 		t.Fatal(err)
 	}
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentPID := os.Getpid()
+	if err := db.StartIntent(t.Context(), f.projectID, task.ID, "teardown", "panes.close", `{}`, intentPID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := posseruntime.ReconcileSnapshot(t.Context(), db, f.projectID, herdr.Snapshot{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(t.Context(), f.projectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+			t.Fatalf("deliberate teardown raised worker_exited Notice: %#v", notice)
+		}
+	}
+	intent, err := db.IntentByTask(t.Context(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishIntent(t.Context(), intent.ID, intentPID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	output := runPosse(t, f.binary, f.repo, f.leadEnv, "teardown", "t1")
 	if !strings.Contains(output, "torn-down") {
 		t.Fatalf("teardown without --discard did not tear down the no-change Task: %s", output)
 	}
 	if torn := f.task(t, "t1"); torn.State != store.StateTornDown {
 		t.Fatalf("teardown left Task in %s", torn.State)
+	}
+	runPosse(t, f.binary, f.repo, f.leadEnv, "list")
+	db, err = store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := f.project(t)
+	notices, err = db.Notices(t.Context(), project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+			t.Fatalf("deliberate teardown raised worker_exited Notice: %#v", notice)
+		}
+	}
+	decisions, err := db.Decisions(t.Context(), project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == task.ID && decision.Kind == "worker_exited" {
+			t.Fatalf("deliberate teardown raised worker_exited Decision: %#v", decision)
+		}
 	}
 	if out, err := exec.Command("git", "-C", f.repo, "show-ref", "--verify", "refs/heads/"+task.Branch).CombinedOutput(); err == nil {
 		t.Fatalf("empty Task branch survived teardown: %s", out)

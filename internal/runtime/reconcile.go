@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/heavy"
@@ -207,12 +209,53 @@ func reconcileWorkDeferred(ctx context.Context) error {
 	return nil
 }
 
+func intentProcessAlive(intent store.Intent) bool {
+	if intent.ProcessID <= 1 {
+		return false
+	}
+	err := syscall.Kill(intent.ProcessID, 0)
+	if err != nil && !errors.Is(err, syscall.EPERM) {
+		return false
+	}
+	if intent.ProcessBootID == "" || intent.ProcessStartTime == "" {
+		return true
+	}
+	bootID, startTime, err := store.ProcessIdentityForPID(intent.ProcessID)
+	return err == nil && bootID == intent.ProcessBootID && startTime == intent.ProcessStartTime
+}
+
+func taskTeardownInProgress(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	intent, err := db.IntentByTask(ctx, task.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return intent.Command == "teardown", err
+}
+
 func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
 	operation, found, err := db.LatestTaskExecutorPolicy(ctx, task.ID)
 	if err != nil || !found {
 		return false, err
 	}
 	if operation.Subject != "suspend" && operation.Subject != "release" {
+		return false, nil
+	}
+	if operation.Outcome == "pending" {
+		intent, err := db.IntentByTask(ctx, task.ID)
+		if store.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		step := strings.TrimPrefix(intent.Step, "resuming:")
+		if intent.Command != "pr-release" || step != "in_progress:executor.stop" && step != "done:executor.stop" && step != "in_progress:sandbox.release" && step != "done:sandbox.release" {
+			return false, nil
+		}
+		if !intentProcessAlive(intent) {
+			return false, nil
+		}
+	} else if operation.Outcome != "succeeded" {
 		return false, nil
 	}
 	if operation.Baseline != "" {
@@ -251,6 +294,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	}
 	if !found {
 		if task.State == store.StateDone || task.State == store.StateMerging {
+			teardownInProgress, err := taskTeardownInProgress(ctx, db, task)
+			if err != nil || teardownInProgress {
+				return nil, err
+			}
 			stoppedIntentionally, err := executorStoppedIntentionally(ctx, db, task)
 			if err != nil || stoppedIntentionally {
 				return nil, err
@@ -294,6 +341,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
 			if task.State == store.StateDone || task.State == store.StateMerging {
+				teardownInProgress, err := taskTeardownInProgress(ctx, db, task)
+				if err != nil || teardownInProgress {
+					return nil, err
+				}
 				stoppedIntentionally, err := executorStoppedIntentionally(ctx, db, task)
 				if err != nil || stoppedIntentionally {
 					return nil, err

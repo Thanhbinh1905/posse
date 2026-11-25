@@ -129,7 +129,7 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 			if requestedSeqs[finding.PatternSeq] {
 				selectedPatterns[finding.PatternSeq] = true
 			}
-		} else if greenhouse || reviewFindingBlocks(finding, plan) {
+		} else if capAuthorized || greenhouse || reviewFindingBlocks(finding, plan) {
 			selectedPatterns[finding.PatternSeq] = true
 		}
 	}
@@ -141,7 +141,7 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if len(selectedPatterns) == 0 {
 		return reviewFixQueued{}, axi.Failure("review_fix_empty", "no open blocking Finding Patterns are available to fix", false)
 	}
-	if !greenhouse && taskUsesSharedReviewRepairCap(change) && !selectedReviewPatternsBlock(findings, selectedPatterns, plan) {
+	if !capAuthorized && !greenhouse && taskUsesSharedReviewRepairCap(change) && !selectedReviewPatternsBlock(findings, selectedPatterns, plan) {
 		return reviewFixQueued{}, axi.Failure("review_fix_non_blocking", "a full-pipeline Review fix must include at least one blocking finding", false)
 	}
 	selected := make([]int, 0, len(selectedPatterns))
