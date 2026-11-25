@@ -135,7 +135,21 @@ func refreshReviewCapNoticeForCandidate(ctx context.Context, db *store.DB, proje
 	if used < maxRounds {
 		return nil
 	}
-	binding, err := reviewCapHead(ctx, db, project, task)
+	targets, err := changeCandidateTargets(ctx, db, project, task)
+	if err != nil {
+		return err
+	}
+	if err := ensureReviewCarry(ctx, db, project, task, targets); err != nil {
+		return err
+	}
+	evidence, err := db.ReviewEvidenceFor(ctx, task.ID, targets)
+	if err != nil {
+		return err
+	}
+	if evidence.Complete {
+		return nil
+	}
+	binding, err := newReviewCapBinding(targets)
 	if err != nil {
 		return err
 	}
