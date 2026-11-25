@@ -473,8 +473,6 @@ func migrateVocabularyString(path, value string) string {
 		return "watch"
 	case (path == "auto_teardown" || path == "defaults.auto_teardown") && value == "landed":
 		return "merged"
-	case path == "identity.worker.display_prefix" && value == "rider":
-		return "worker"
 	}
 	return value
 }

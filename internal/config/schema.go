@@ -37,7 +37,6 @@ var keySpecs = []KeySpec{
 	{Key: "identity.lead.persona", Type: TypeString, Default: "", Meaning: "Lead persona used only when speaking to the User."},
 	{Key: "identity.lead.language", Type: TypeString, Default: "en", Meaning: "Language for Lead messages to the User. Briefs, send instructions, reviews, Reports, commit messages and other artifacts stay in English."},
 	{Key: "identity.lead.address_user", Type: TypeString, Default: "", Meaning: "How the Lead addresses the User."},
-	{Key: "identity.worker.display_prefix", Type: TypeString, Default: "worker", Meaning: "Deprecated; retained for compatibility and has no effect on Herdr labels or Task names."},
 	{Key: "lead.kind", Type: TypeString, Default: "", Meaning: "Default agent kind used by posse up."},
 	{Key: "lowkey.lead", Type: TypeBoolean, Default: false, Meaning: "Lowkey mode for the Lead: only report decisions and outcomes to the User. A display preference, not an autonomy grant."},
 	{Key: "notify.command", Type: TypeString, Default: "", Meaning: "Command that receives JSON User-actionable Notices on stdin; command failures and timeouts are logged without delaying Notice delivery.", UserOnly: true},
@@ -127,10 +126,21 @@ var keySpecs = []KeySpec{
 var namePart = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 func Schema() []KeySpec {
-	result := make([]KeySpec, len(keySpecs))
-	copy(result, keySpecs)
-	for i := range result {
-		result[i].Allowed = append([]string(nil), result[i].Allowed...)
+	return schema(false)
+}
+
+func SchemaAll() []KeySpec {
+	return schema(true)
+}
+
+func schema(all bool) []KeySpec {
+	result := make([]KeySpec, 0, len(keySpecs))
+	for _, spec := range keySpecs {
+		if !all && strings.HasPrefix(spec.Key, "kinds.") {
+			continue
+		}
+		spec.Allowed = append([]string(nil), spec.Allowed...)
+		result = append(result, spec)
 	}
 	return result
 }
