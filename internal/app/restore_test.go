@@ -125,6 +125,11 @@ func TestHerdrRestartDoesNotRelaunchLead(t *testing.T) {
 	if restoreNotices != 1 {
 		t.Fatalf("restore_needed Notices = %d, want one: %#v", restoreNotices, notices)
 	}
+	for _, notice := range notices {
+		if notice.Kind == "restore_needed" && !strings.Contains(notice.Summary, "Herdr restarted") {
+			t.Fatalf("restore_needed Notice does not describe the restart: %+v", notice)
+		}
+	}
 	if fake.CallCount("notification.show") != 1 {
 		t.Fatalf("the User was not notified once through Herdr: %#v", fake.Calls)
 	}
