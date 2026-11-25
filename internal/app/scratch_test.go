@@ -70,7 +70,7 @@ func TestExportTaskScratchSetsTemporaryVariablesInOwnedPane(t *testing.T) {
 	fake := herdr.NewFake()
 	service := testService(t.TempDir(), fake)
 	scratch := "/home/thanhbinh/.posse/scratch/posse/t308/it's-owned"
-	if err := exportTaskScratch(context.Background(), service, "w1:p2", scratch, "task-marker-123"); err != nil {
+	if err := exportTaskScratch(context.Background(), service, "w1:p2", scratch, "task-marker-123", "shop", "t1"); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.Calls) != 1 || fake.Calls[0].Method != "pane.send_input" || fake.Calls[0].Params["pane_id"] != "w1:p2" {

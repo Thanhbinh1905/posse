@@ -132,7 +132,7 @@ func removeTaskScratch(home string, project store.Project, task store.Task) erro
 	return nil
 }
 
-func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMarker string) error {
+func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMarker, projectName, taskID string) error {
 	if paneID == "" || scratch == "" || taskMarker == "" {
 		return fmt.Errorf("task environment requires a pane, scratch directory, and process marker")
 	}
@@ -147,7 +147,7 @@ func exportTaskScratch(ctx context.Context, s *Service, paneID, scratch, taskMar
 	quotedScratch := shellQuote(scratch)
 	quotedMarker := shellQuote(taskMarker)
 	quotedCache := shellQuote(workerCache)
-	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker + " GOCACHE=" + quotedCache
+	command := "export TMPDIR=" + quotedScratch + " GOTMPDIR=" + quotedScratch + " TMP=" + quotedScratch + " TEMP=" + quotedScratch + " POSSE_TASK_TEMP=" + quotedScratch + " POSSE_TASK_ID=" + quotedMarker + " POSSE_TASK_SEQ=" + shellQuote(taskID) + " POSSE_PROJECT=" + shellQuote(projectName) + " POSSE_HOME=" + shellQuote(home) + " GOCACHE=" + quotedCache
 	return s.sendLaunchInput(ctx, paneID, command)
 }
 

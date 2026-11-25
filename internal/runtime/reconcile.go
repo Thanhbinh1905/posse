@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/thanhbinh1905/posse/internal/heavy"
 	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/sessionref"
 	"github.com/thanhbinh1905/posse/internal/store"
@@ -197,6 +199,7 @@ func reconcileWorkDeferred(ctx context.Context) error {
 
 func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
 	var notices []store.Notice
+	waitingHeavy := heavy.IsWaitingTask(filepath.Dir(db.Path), project.Name, taskID(task.Seq), task.ContainmentMarker)
 	if task.State == store.StateSpawning && task.PaneID == "" {
 		return nil, nil
 	}
@@ -276,7 +279,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		serverStartedAt = snapshot.ServerStartedAt
 	}
 	idleSince := task.IdleSince
-	if task.State == store.StateWorking && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
+	if task.State == store.StateWorking && !waitingHeavy && agentPresent && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
 		if idleSince == 0 {
 			idleSince = now.UnixMilli()
 		}
@@ -322,7 +325,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			return nil, err
 		}
 	}
-	if task.State == store.StateWorking && idleAfter > 0 && idleSince > 0 && now.Sub(time.UnixMilli(idleSince)) >= idleAfter {
+	if task.State == store.StateWorking && !waitingHeavy && idleAfter > 0 && idleSince > 0 && now.Sub(time.UnixMilli(idleSince)) >= idleAfter {
 		exists, err := db.HasWorkerIdleNotice(ctx, task.ProjectID, task.ID, task.Launches, idleSince)
 		if err != nil {
 			return nil, err
