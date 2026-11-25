@@ -64,6 +64,7 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		return err
 	}
 	for _, intent := range intents {
+		automaticRecovery := false
 		if intent.Command == "pr-release" {
 			// The retry must recheck the current PR and branch before releasing the Sandbox.
 			continue
@@ -81,10 +82,15 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 			if err := json.Unmarshal([]byte(intent.PayloadJSON), &payload); err != nil {
 				return err
 			}
-			// Automatic recovery owns its crashed intent and retry budget;
-			// an unrelated explicit relaunch still uses normal intent recovery.
-			if payload.AutomaticRecovery {
-				continue
+			automaticRecovery = payload.AutomaticRecovery
+			if automaticRecovery {
+				recovery, err := db.TaskRecovery(ctx, intent.TaskID)
+				if err != nil {
+					return err
+				}
+				if recovery.Status != "exhausted" {
+					continue
+				}
 			}
 		}
 		task, err := db.TaskByID(ctx, project.ID, intent.TaskID)
@@ -100,6 +106,14 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 		}
 		intent.ProcessID = os.Getpid()
 		switch intent.Command {
+		case "relaunch":
+			if automaticRecovery {
+				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+			} else if strings.HasPrefix(intent.Step, "done:task.working") && task.State == store.StateWorking {
+				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
+			} else {
+				_, err = s.relaunchTask(ctx, db, home, project, cfg, task, "")
+			}
 		case "start":
 			err = s.recoverStartIntent(ctx, db, project, cfg, task, intent, snapshot)
 		case "merge --open-pr":
@@ -145,12 +159,6 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 				} else {
 					_, err = s.teardownTask(ctx, db, project, cfg, task, false, "")
 				}
-			}
-		case "relaunch":
-			if strings.HasPrefix(intent.Step, "done:task.working") && task.State == store.StateWorking {
-				err = db.FinishIntent(ctx, intent.ID, intent.ProcessID)
-			} else {
-				_, err = s.relaunchTask(ctx, db, home, project, cfg, task, "")
 			}
 		default:
 			err = fmt.Errorf("unknown interrupted command %q", intent.Command)
