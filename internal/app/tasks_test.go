@@ -103,7 +103,7 @@ func TestOpenCodeWorkerArgsAndResume(t *testing.T) {
 }
 
 func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testing.T) {
-	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/t12", WorktreePath: "/tmp/pool/shop/sandbox-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12"}
+	task := store.Task{Seq: 12, Title: "Stable output for workers", ShortName: "stable-output", Branch: "posse/t12", WorktreePath: "/tmp/pool/shop/sandbox-2", PaneID: "w2:p1", PaneLabel: "posse:shop:t12", ContainmentMarker: "0123456789abcdef0123456789abcdef0123456789abcdef"}
 	if got := workerTabLabel(task); got != "stable-output-t12" {
 		t.Fatalf("Worker tab label = %q", got)
 	}
@@ -115,8 +115,8 @@ func TestWorkerDisplayUsesSidebarFieldsWithoutChangingCanonicalIdentity(t *testi
 		t.Fatalf("canonical pane label changed = %q", got)
 	}
 	tokens := metadata["tokens"].(map[string]string)
-	if tokens["posse_name"] != task.ShortName || tokens["posse_branch"] != task.Branch {
-		t.Fatalf("sidebar name/branch tokens = %#v, want %q and %q", tokens, task.ShortName, task.Branch)
+	if tokens["posse_name"] != task.ShortName || tokens["posse_branch"] != task.Branch || tokens[taskPaneOwnershipTokenKey] != task.ContainmentMarker {
+		t.Fatalf("sidebar and Task ownership tokens = %#v, want name %q, branch %q, identity %q", tokens, task.ShortName, task.Branch, task.ContainmentMarker)
 	}
 }
 

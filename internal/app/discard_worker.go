@@ -31,10 +31,11 @@ type discardPane struct {
 }
 
 type discardWorkerPlan struct {
-	Generation string        `json:"generation"`
-	Launch     int           `json:"launch"`
-	AgentName  string        `json:"agent_name"`
-	Panes      []discardPane `json:"panes"`
+	Generation      string        `json:"generation"`
+	Launch          int           `json:"launch"`
+	AgentName       string        `json:"agent_name"`
+	Panes           []discardPane `json:"panes"`
+	PaneCloseProofs []string      `json:"pane_close_proofs,omitempty"`
 }
 
 type discardIntentPayload struct {
@@ -101,8 +102,16 @@ func (s *Service) retainDiscardWorker(ctx context.Context, db *store.DB, project
 			return nil, discardIdentityRefused(err.Error())
 		}
 		plan = &discardWorkerPlan{Generation: snapshot.ServerStartedAt, Launch: task.Launches, AgentName: task.AgentName}
+		completedProofs, proofErr := s.planCompletedWorkerPaneProofs(ctx, db, project, task)
+		if proofErr != nil {
+			return nil, proofErr
+		}
+		for paneID, proof := range completedProofs {
+			plan.PaneCloseProofs = append(plan.PaneCloseProofs, paneID+":"+proof)
+		}
+		sort.Strings(plan.PaneCloseProofs)
 		for _, pane := range snapshot.Panes {
-			if pane.Label == task.PaneLabel && !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) {
+			if pane.Label == task.PaneLabel && !ownsTaskPane(snapshot, project, task, taskTabs(snapshot, project, task), pane) && completedProofs[pane.PaneID] == "" {
 				return nil, axi.Failure("discard_live_agent", "Task pane belongs to a foreign Worker; approved discard refused", false, "Preserve the foreign agent and its work")
 			}
 			if !panes.paneIDs[pane.PaneID] {
@@ -220,7 +229,8 @@ func (s *Service) verifyDiscardPane(ctx context.Context, project store.Project, 
 			return false, nil
 		}
 		name := snapshotAgentName(snapshot, current.PaneID)
-		if current.Label != pane.Pane.Label || current.TabID != pane.Pane.TabID || current.WorkspaceID != pane.Pane.WorkspaceID || !pathInside(current.CWD, task.WorktreePath) || name != "" && name != task.AgentName || current.Agent != "" && current.Agent != pane.Pane.Agent {
+		completedProof := restoredIdleTaskPane(snapshot, project, task, current)
+		if current.Label != pane.Pane.Label || current.TabID != pane.Pane.TabID || current.WorkspaceID != pane.Pane.WorkspaceID || !pathInside(current.CWD, task.WorktreePath) || name != "" && name != task.AgentName && !completedProof || current.Agent != "" && current.Agent != pane.Pane.Agent {
 			return false, discardIdentityRefused("Task pane identity changed; preserving its replacement")
 		}
 		return true, nil
@@ -242,6 +252,11 @@ func (s *Service) verifyDiscardPane(ctx context.Context, project store.Project, 
 		}
 		foreground := info.ForegroundProcessGroup
 		busy := foreground != info.ShellPID
+		if snapshot, err := s.snapshot(ctx); err != nil {
+			return false, discardIdentityRefused(err.Error())
+		} else if current, found := snapshotPane(snapshot, pane.Pane.PaneID); found && restoredIdleTaskPane(snapshot, project, task, current) && busy {
+			return false, discardIdentityRefused("completed Task pane no longer has its shell in the foreground")
+		}
 		if busy && foreground > 1 {
 			if foreground != pane.AgentPID {
 				return false, discardIdentityRefused("Replacement foreground process appeared in the Task pane")

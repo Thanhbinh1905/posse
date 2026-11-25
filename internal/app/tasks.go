@@ -932,10 +932,14 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 // UIs without changing canonical pane or agent identity.
 func workerDisplayMetadata(task store.Task, detectedAgent, expectedAgent string) map[string]any {
 	name := taskDisplayName(task)
+	tokens := map[string]string{"posse_title": task.Title, "posse_name": name, "posse_branch": task.Branch, "posse_sandbox": filepath.Base(task.WorktreePath)}
+	if task.ContainmentMarker != "" {
+		tokens[taskPaneOwnershipTokenKey] = task.ContainmentMarker
+	}
 	metadata := map[string]any{
 		"pane_id": task.PaneID, "source": "posse",
 		"title":  task.Title + " · " + name + " · " + task.WorktreePath,
-		"tokens": map[string]string{"posse_title": task.Title, "posse_name": name, "posse_branch": task.Branch, "posse_sandbox": filepath.Base(task.WorktreePath)},
+		"tokens": tokens,
 	}
 	displayAgent := detectedAgent
 	if displayAgent == "" {

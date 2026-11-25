@@ -433,10 +433,8 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 					return err
 				}
 			}
-			if recorded && result.Result.Verdict == "findings" && verdict.Blocking > 0 {
-				if err := s.handleGreenhouseBlockingVerdict(ctx.Context, db, project, task, verdict); err != nil {
-					return err
-				}
+			if err := s.applyGreenhouseVerdict(ctx.Context, db, project, task, verdict); err != nil {
+				return err
 			}
 			if err := greenhouse.ClearPending(round.Pending); err != nil {
 				return err
@@ -823,6 +821,13 @@ func (s *Service) queueGreenhouseReviewFix(ctx context.Context, db *store.DB, pr
 		return reviewFixQueued{}, nil
 	}
 	return queued, err
+}
+
+func (s *Service) applyGreenhouseVerdict(ctx context.Context, db *store.DB, project store.Project, task store.Task, verdict store.Verdict) error {
+	if verdict.Outcome == "findings" && verdict.Blocking > 0 {
+		return s.handleGreenhouseBlockingVerdict(ctx, db, project, task, verdict)
+	}
+	return nil
 }
 
 func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store.DB, project store.Project, task store.Task, verdict store.Verdict) error {

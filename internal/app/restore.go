@@ -211,6 +211,7 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 	}
 	restored := []any{}
 	failed := []any{}
+	deferredTasks := []any{}
 	down := []any{}
 	parked := []any{}
 	skipped := []any{}
@@ -236,6 +237,12 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		workers, err := s.restoreProject(ctx.Context, db, home, project)
 		if errors.Is(err, errRecoveryDeferred) {
 			pending = true
+			details, detailErr := deferredRecoveryTasks(ctx.Context, db, project)
+			if detailErr != nil {
+				failed = append(failed, map[string]any{"project": project.Name, "error": detailErr.Error()})
+				continue
+			}
+			deferredTasks = append(deferredTasks, details...)
 			err = nil
 		}
 		// Herdr cannot start an agent in the pane running this command;
@@ -274,6 +281,9 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 		help = append(help, "Run `posse up` in a skipped Project's folder to restore it, or add it to up.projects")
 	}
 	result := axi.Object{{Key: "restored", Value: restored}, {Key: "failed_projects", Value: failed}}
+	if len(deferredTasks) > 0 {
+		result = append(result, axi.Field{Key: "deferred_tasks", Value: deferredTasks})
+	}
 	if len(down) > 0 {
 		result = append(result, axi.Field{Key: "down_projects", Value: down})
 	}
@@ -292,6 +302,25 @@ func (s *Service) restoreAll(ctx *axi.Context) error {
 
 // restoreProject restores Workers stopped by a Herdr restart or group close,
 // then starts the Lead when none is running and ensures the watch.
+func deferredRecoveryTasks(ctx context.Context, db *store.DB, project store.Project) ([]any, error) {
+	tasks, err := db.Tasks(ctx, project.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	deferred := []any{}
+	for _, task := range tasks {
+		state, err := db.TaskRecovery(ctx, task.ID)
+		if err != nil {
+			return nil, err
+		}
+		if state.Status != "pending" && state.Status != "running" {
+			continue
+		}
+		deferred = append(deferred, map[string]any{"project": project.Name, "task": taskIDString(task.Seq), "name": taskDisplayName(task), "reason": state.LastError})
+	}
+	return deferred, nil
+}
+
 func (s *Service) restoreProject(ctx context.Context, db *store.DB, home string, project store.Project) (int, error) {
 	restarted, err := s.recoverProject(ctx, db, home, project)
 	if err != nil {
