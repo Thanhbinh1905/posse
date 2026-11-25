@@ -17,6 +17,60 @@ import (
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
+func TestGreenhousePRReleaseDoesNotRequirePrivateCandidatePromotion(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	freezeCILoopWithReview(t, fixture, 0, 0, "full-pipeline")
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task, err = fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachPRFixtureSandbox(t, fixture)
+	if _, err := fixture.db.ClaimBranchAuthor(context.Background(), fixture.repo, fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, fixture.worktree, "push", "origin", fixture.task.Branch)
+	prURL := "https://github.com/acme/shop/pull/17"
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET pr_url=?,profile='worker',launches=1 WHERE id=?`, prURL, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.task.PRURL = prURL
+	fixture.task.Profile = "worker"
+	fixture.task.Launches = 1
+	if _, err := fixture.db.EnsureDelivery(context.Background(), fixture.task.ID, "", prURL, "publish"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	removeFixtureTaskPane(fixture)
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release Greenhouse full-pipeline PR while CI is pending: %d %s %s", code, output, stderr)
+	}
+	otherID, err := fixture.db.CreateTask(context.Background(), fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "reuse released Sandbox", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := store.Task{ID: otherID, ProjectID: fixture.project.ID, Seq: 2, Type: "change", Branch: "posse/t2", BaseRef: "main"}
+	reused, err := acquireSandbox(context.Background(), fixture.db, fixture.project, other, fixture.home, "warm", nil)
+	if err != nil {
+		t.Fatalf("queued Task could not acquire the released Worker slot: %v", err)
+	}
+	if reused.Path != fixture.worktree {
+		t.Fatalf("queued Task acquired %s, want released Sandbox %s", reused.Path, fixture.worktree)
+	}
+}
+
 func TestPRMergeRefusesStaleHeadBeforeGate(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	gateMarker := filepath.Join(fixture.root, "gate-ran")
