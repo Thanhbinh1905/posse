@@ -2472,7 +2472,7 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 			return e.cwd, true
 		}
 		if gitTopLevelCall(part) && e.cwd != "" && !e.hasGitDirectoryOverride() {
-			if root, ok := gitTopLevelDirectory(e.cwd); ok {
+			if root, ok := gitTopLevelDirectory(e.cwd, e); ok {
 				return root, true
 			}
 		}
@@ -2494,12 +2494,16 @@ func (e *shellEnv) part(script string, part syntax.WordPart) (string, bool) {
 	return "", false
 }
 
-func gitTopLevelDirectory(cwd string) (string, bool) {
+func gitTopLevelDirectory(cwd string, e *shellEnv) (string, bool) {
 	for dir := filepath.Clean(cwd); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 		if _, ok := gitDirectoryAt(dir); !ok {
 			continue
 		}
-		for _, worktree := range gitConfigWorktrees(cwd) {
+		worktrees, known := gitConfigWorktreesWithEnv(e, cwd)
+		if !known {
+			return "", false
+		}
+		for _, worktree := range worktrees {
 			if worktree == "" || resolvedNewPath(worktree) != resolvedNewPath(dir) {
 				return "", false
 			}
@@ -2507,6 +2511,64 @@ func gitTopLevelDirectory(cwd string) (string, bool) {
 		return dir, true
 	}
 	return "", false
+}
+
+func gitConfigWorktreesWithEnv(e *shellEnv, cwd string) ([]string, bool) {
+	paths := []string{}
+	if e.unknown["GIT_CONFIG_NOSYSTEM"] {
+		return nil, false
+	}
+	if !e.exported["GIT_CONFIG_NOSYSTEM"] || e.values["GIT_CONFIG_NOSYSTEM"] == "" {
+		if e.unknown["GIT_CONFIG_SYSTEM"] {
+			return nil, false
+		}
+		system := "/etc/gitconfig"
+		if e.exported["GIT_CONFIG_SYSTEM"] && e.values["GIT_CONFIG_SYSTEM"] != "" {
+			system = e.path(e.values["GIT_CONFIG_SYSTEM"])
+		}
+		paths = append(paths, system)
+	}
+	if e.unknown["GIT_CONFIG_GLOBAL"] || e.unknown["HOME"] || e.unknown["XDG_CONFIG_HOME"] {
+		return nil, false
+	}
+	if e.exported["GIT_CONFIG_GLOBAL"] && e.values["GIT_CONFIG_GLOBAL"] != "" {
+		paths = append(paths, e.path(e.values["GIT_CONFIG_GLOBAL"]))
+	} else if home := e.values["HOME"]; home != "" {
+		if xdg := e.values["XDG_CONFIG_HOME"]; xdg != "" && e.exported["XDG_CONFIG_HOME"] {
+			paths = append(paths, filepath.Join(xdg, "git", "config"))
+		} else {
+			paths = append(paths, filepath.Join(home, ".config", "git", "config"))
+		}
+		paths = append(paths, filepath.Join(home, ".gitconfig"))
+	}
+	var worktrees []string
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, false
+		}
+		values, valid := gitConfigWorktreeValues(data, filepath.Dir(path))
+		if !valid {
+			return nil, false
+		}
+		worktrees = append(worktrees, values...)
+	}
+	local := gitConfigWorktrees(cwd)
+	for _, worktree := range local {
+		if worktree == "" {
+			return nil, false
+		}
+	}
+	if len(local) > 0 {
+		worktrees = append(worktrees, local...)
+	}
+	if len(worktrees) == 0 {
+		return nil, true
+	}
+	return worktrees[len(worktrees)-1:], true
 }
 
 func gitTopLevelCall(subst *syntax.CmdSubst) bool {
