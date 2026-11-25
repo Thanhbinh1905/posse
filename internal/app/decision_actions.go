@@ -390,10 +390,20 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			if err := queueSettledReviewStep(out.Context, db, project, task, "Authorized acceptance of the candidate head at the Review cap of Task "+taskIDString(task.Seq)); err != nil {
 				return err
 			}
-			if len(actual.Targets) > 1 {
-				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "heads", Value: actual.Targets}})
+			help := []any{}
+			if fullPipelineSelected(task, "") && task.State == store.StateWorking {
+				for _, target := range actual.Targets {
+					repoFlag := ""
+					if project.IsWorkspace() {
+						repoFlag = " --repo " + target.Repository
+					}
+					help = append(help, fmt.Sprintf("In the private candidate checkout for %s, run `posse validate test%s`, `posse validate docs%s` and `posse validate lint%s`, then run `posse publish%s` to promote it. These required stages are not waived by accepting the head.", shortSHA(target.Commit), repoFlag, repoFlag, repoFlag, repoFlag))
+				}
 			}
-			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "head", Value: expectedHead}})
+			if len(actual.Targets) > 1 {
+				return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "heads", Value: actual.Targets}, {Key: "help", Value: help}})
+			}
+			return out.Print(axi.Object{{Key: "decision", Value: id}, {Key: "state", Value: "accepted-head"}, {Key: "head", Value: expectedHead}, {Key: "help", Value: help}})
 		case "final-fix":
 			queued, err := s.queueReviewFix(out.Context, db, project, task, nil, true)
 			var failure *axi.Error
