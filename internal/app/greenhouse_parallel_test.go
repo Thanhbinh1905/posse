@@ -28,7 +28,7 @@ func hasPendingDecision(decisions []store.Decision, id int64) bool {
 	return false
 }
 
-func TestPRTargetSyncDoesNotLeaveFreshTaskInMergeQueue(t *testing.T) {
+func TestPRTargetSyncDoesNotQueueFreshHead(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	target := strings.TrimSpace(gitTest(t, f.repo, "rev-parse", "main"))
 	sync, err := f.service.queuePRTargetSyncInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.worktree}, f.headSHA)
