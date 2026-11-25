@@ -66,7 +66,7 @@ func adoptTaskTx(ctx context.Context, tx *writeTx, projectID, id int64, task Tas
 		return ErrTaskAdoptionChanged
 	}
 	var blocked bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND answered_at=0) OR EXISTS(SELECT 1 FROM task_adoptions WHERE source_task_id=?) OR EXISTS(SELECT 1 FROM intents WHERE task_id=?) OR EXISTS(SELECT 1 FROM delivery_operations o JOIN deliveries d ON d.id=o.delivery_id WHERE d.task_id=? AND o.outcome IN ('pending','uncertain'))`, a.SourceTaskID, a.SourceTaskID, a.SourceTaskID, a.SourceTaskID).Scan(&blocked); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM decisions WHERE task_id=? AND kind<>'workflow_stage' AND answered_at=0) OR EXISTS(SELECT 1 FROM task_adoptions WHERE source_task_id=?) OR EXISTS(SELECT 1 FROM intents WHERE task_id=?) OR EXISTS(SELECT 1 FROM delivery_operations o JOIN deliveries d ON d.id=o.delivery_id WHERE d.task_id=? AND o.outcome IN ('pending','uncertain'))`, a.SourceTaskID, a.SourceTaskID, a.SourceTaskID, a.SourceTaskID).Scan(&blocked); err != nil {
 		return err
 	}
 	if blocked {

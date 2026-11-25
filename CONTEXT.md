@@ -200,10 +200,6 @@ _Avoid_: Mandatory lifecycle, Worker Profile, bundle
 One of Posse's three work boundaries: Plan -> tickets, Implement, or Review. Ship is Git delivery after these frames, not a fourth frame.
 _Avoid_: Stage, phase, Task type
 
-**Stage**:
-One step in a workflow profile, mapped to a frame or to Ship, with a User decision before advancing; several stages may share a frame.
-_Avoid_: Frame, Task state, Gate
-
 **Platform skills**:
 The embedded skills every Posse-launched Lead and Worker loads: `posse`, `posse-setup`, `posse-down`, `posse-update` and `posse-better-each-day`.
 _Avoid_: Default skills, core skills

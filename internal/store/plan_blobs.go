@@ -38,14 +38,18 @@ func storedPlanRevision(data string) int {
 
 func storedWorkflowRunID(data string) string {
 	var plan struct {
-		Workflow *struct {
-			RunID string `json:"run_id"`
-		} `json:"workflow"`
+		Workflow json.RawMessage `json:"workflow"`
 	}
-	if json.Unmarshal([]byte(data), &plan) != nil || plan.Workflow == nil {
+	if json.Unmarshal([]byte(data), &plan) != nil || len(plan.Workflow) == 0 {
 		return ""
 	}
-	return plan.Workflow.RunID
+	var workflow struct {
+		RunID string `json:"run_id"`
+	}
+	if json.Unmarshal(plan.Workflow, &workflow) != nil {
+		return ""
+	}
+	return workflow.RunID
 }
 
 func (db *DB) externalizePlanJSON(data string) (string, error) {
@@ -206,11 +210,6 @@ func clonePlan(plan *taskplan.Plan) *taskplan.Plan {
 	if plan.ValidationLoops != nil {
 		loops := *plan.ValidationLoops
 		copy.ValidationLoops = &loops
-	}
-	if plan.Workflow != nil {
-		workflow := *plan.Workflow
-		workflow.Profile.Stages = append(workflow.Profile.Stages[:0:0], plan.Workflow.Profile.Stages...)
-		copy.Workflow = &workflow
 	}
 	if plan.DeleteBranchOnMerge != nil {
 		value := *plan.DeleteBranchOnMerge

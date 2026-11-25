@@ -18,9 +18,6 @@ type Brief struct {
 	Execution      string
 	Paths          []string
 	Review         string
-	Workflow       string
-	WorkflowRun    string
-	Stage          string
 	ReviewRounds   int
 	BudgetTokens   int64
 	Base           string
@@ -44,10 +41,7 @@ type Brief struct {
 	Body   string
 }
 
-var (
-	workflowRunIDPattern = regexp.MustCompile(`^w[1-9][0-9]*$`)
-	taskIDPattern        = regexp.MustCompile(`^t[1-9][0-9]*$`)
-)
+var taskIDPattern = regexp.MustCompile(`^t[1-9][0-9]*$`)
 
 type IssueRef struct {
 	Repository string
@@ -174,7 +168,13 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 		if key == "autonomy" && allowHistoricalMultiIssue {
 			value = regexp.MustCompile(`\bland\s*:`).ReplaceAllString(value, "merge:")
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "workflow", "workflow_run", "stage", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
+		if oneOf(key, "workflow", "workflow_run", "stage") {
+			if !allowHistoricalMultiIssue {
+				return Brief{}, &BriefError{Field: key, Reason: "was removed; staged workflows are no longer supported"}
+			}
+			continue
+		}
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -189,9 +189,6 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 		MergeMode:   unquote(values["merge_mode"]),
 		Execution:   unquote(values["execution"]),
 		Review:      unquote(values["review"]),
-		Workflow:    unquote(values["workflow"]),
-		WorkflowRun: unquote(values["workflow_run"]),
-		Stage:       unquote(values["stage"]),
 		ReviewOf:    unquote(values["review_of"]),
 		Supersedes:  unquote(values["supersedes"]),
 		Adopt:       unquote(values["adopt"]),
@@ -250,18 +247,6 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 			return Brief{}, err
 		}
 		brief.Repos = repos
-	}
-	if _, found := values["workflow"]; found && strings.TrimSpace(brief.Workflow) == "" {
-		return Brief{}, &BriefError{Field: "workflow", Reason: "must name a configured workflow profile"}
-	}
-	if (brief.WorkflowRun == "") != (brief.Stage == "") {
-		return Brief{}, &BriefError{Field: "workflow_run", Reason: "workflow_run and stage must be supplied together"}
-	}
-	if brief.WorkflowRun != "" && !workflowRunIDPattern.MatchString(brief.WorkflowRun) {
-		return Brief{}, &BriefError{Field: "workflow_run", Reason: "must be a workflow run ID such as w1"}
-	}
-	if brief.Stage != "" && strings.TrimSpace(brief.Stage) == "" {
-		return Brief{}, &BriefError{Field: "stage", Reason: "must name a workflow stage"}
 	}
 	if brief.RootContext != "" && brief.RootContext != "read-only" {
 		return Brief{}, &BriefError{Field: "root_context", Reason: "must be read-only when selected"}

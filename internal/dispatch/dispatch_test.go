@@ -18,22 +18,21 @@ func TestMaintenanceAdoptionBriefField(t *testing.T) {
 	}
 }
 
-func TestWorkflowRunBriefFields(t *testing.T) {
-	valid := "---\ntype: research\ntitle: Continue workflow\ndone_when: Report complete\nworkflow_run: w12\nstage: Plan\n---\n"
-	brief, err := ParseBriefText(valid)
-	if err != nil || brief.WorkflowRun != "w12" || brief.Stage != "Plan" {
-		t.Fatalf("parse workflow continuation = %#v, %v", brief, err)
-	}
-	for _, frontmatter := range []string{
-		"workflow_run: w1\n",
-		"stage: Build\n",
-		"workflow_run: workflow-1\nstage: Build\n",
-		"workflow_run: w1\nstage:   \n",
-	} {
-		contents := "---\ntype: change\ntitle: Invalid workflow\ndone_when: checked\n" + frontmatter + "---\n"
-		if _, err := ParseBriefText(contents); err == nil {
-			t.Errorf("invalid workflow Brief accepted: %q", frontmatter)
+func TestRemovedWorkflowBriefFieldsNameRemoval(t *testing.T) {
+	for _, field := range []string{"workflow: feature", "workflow_run: w1\nstage: Build", "stage: Build"} {
+		brief := "---\ntype: change\ntitle: Remove workflow\ndone_when: feature removed\n" + field + "\n---\n"
+		_, err := ParseBriefText(brief)
+		if err == nil || !strings.Contains(err.Error(), "removed") {
+			t.Fatalf("ParseBriefText(%q) error = %v, want removal note", field, err)
 		}
+	}
+}
+
+func TestHistoricalWorkflowBriefFieldsRemainReadable(t *testing.T) {
+	contents := "---\ntype: research\ntitle: Historical workflow\ndone_when: Report complete\nworkflow_run: w12\nstage: Plan\n---\n"
+	brief, err := ParseHistoricalBriefText(contents)
+	if err != nil || brief.Title != "Historical workflow" {
+		t.Fatalf("parse historical workflow = %#v, %v", brief, err)
 	}
 }
 

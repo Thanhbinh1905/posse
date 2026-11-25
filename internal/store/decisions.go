@@ -351,7 +351,7 @@ func (db *DB) AnswerDecisionAs(ctx context.Context, projectID, id int64, option,
 		return Decision{}, err
 	}
 	defer tx.Rollback()
-	decision, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=?`, projectID, id))
+	decision, err := decisionRow(tx.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=? AND kind<>'workflow_stage'`, projectID, id))
 	if err != nil {
 		return Decision{}, err
 	}
@@ -407,7 +407,7 @@ func (db *DB) AnswerDecisionAs(ctx context.Context, projectID, id int64, option,
 }
 
 func (db *DB) Decision(ctx context.Context, projectID, id int64) (Decision, error) {
-	return decisionRow(db.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=?`, projectID, id))
+	return decisionRow(db.QueryRowContext(ctx, decisionSelect+` WHERE project_id=? AND id=? AND kind<>'workflow_stage'`, projectID, id))
 }
 
 const reviewCapNoticesQuery = `SELECT n.id,n.project_id,COALESCE(n.task_id,0),n.kind,n.summary,n.data_json,n.created_at,COALESCE(n.delivered_at,0),COALESCE(n.acked_at,0)
@@ -684,7 +684,7 @@ func (db *DB) Decisions(ctx context.Context, projectID int64, pendingOnly bool) 
 // ones obsolete, so read commands work while the store is contended.
 func (db *DB) PendingDecisions(ctx context.Context, projectID int64) ([]Decision, error) {
 	query := decisionSelect + `
-		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0
+		WHERE d.project_id=? AND d.kind<>'workflow_stage' AND d.answered_at=0 AND d.obsolete_at=0
 		AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=d.task_id AND NOT (` + resolvedDecisionPredicate + `))
 		ORDER BY d.id`
 	rows, err := db.QueryContext(ctx, query, projectID)
@@ -704,7 +704,7 @@ func (db *DB) PendingDecisions(ctx context.Context, projectID int64) ([]Decision
 }
 
 func (db *DB) listDecisions(ctx context.Context, projectID int64, pendingOnly bool) ([]Decision, error) {
-	query := decisionSelect + ` WHERE project_id=?`
+	query := decisionSelect + ` WHERE project_id=? AND kind<>'workflow_stage'`
 	if pendingOnly {
 		query += ` AND answered_at=0 AND obsolete_at=0`
 	}
