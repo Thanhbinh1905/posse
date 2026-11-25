@@ -356,12 +356,21 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				return axi.Failure("greenhouse_target_unavailable", err.Error(), true, "Retry `posse review start "+taskIDString(task.Seq)+"` when the forge is reachable")
 			}
 			failureReason := err.Error()
+			if parallelMode && transientGreenhouseFailure(err) {
+				if recordErr := recordRequest("refused", result.Grant, time.Now().UnixMilli()); recordErr != nil {
+					return recordErr
+				}
+				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: "retrying"}, {Key: "head", Value: requestHead}})
+			}
 			var terminalErr *greenhouse.TerminalReviewError
 			if errors.As(err, &terminalErr) {
 				failureReason = fmt.Sprintf("Greenhouse terminal status %q: %s", terminalErr.Status, terminalErr.Reason)
 			}
 			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
+			}
+			if clearErr := greenhouse.ClearPending(pendingPath); clearErr != nil {
+				return clearErr
 			}
 			terminalFailure := reviewerSizeFailure(err)
 			if parallelMode {
