@@ -546,9 +546,68 @@ func TestNativeHerdrWorkerResumeRaisesRelaunchNotice(t *testing.T) {
 	}
 }
 
+func TestHeldProjectReportsInterruptedIdleWorkerWithoutSendingQueuedMessage(t *testing.T) {
+	ctx := context.Background()
+	home, db, project, fake := adoptionFixture(t)
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := task.Observation()
+	observation.AgentStatus = "working"
+	observation.AgentStatusSince = 1
+	observation.AgentServerStartedAt = "old-generation"
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
+		t.Fatal(err)
+	}
+	fake.SnapshotValue.Panes[0].Agent = ""
+	fake.SnapshotValue.Panes[1].AgentStatus = "idle"
+	messageID, err := db.QueueMessage(ctx, task.ID, "Do not send until restore", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, fake)
+	_, blocked, err := service.prepareProjectWatchObservation(ctx, db, project)
+	if !errors.Is(err, errRecoveryHeld) || !errors.Is(blocked, errRecoveryHeld) {
+		t.Fatalf("held Project observation = blocked %v, err %v", blocked, err)
+	}
+	updated, err := db.Task(ctx, project.ID, "t1")
+	if err != nil || updated.State != store.StateStalled {
+		t.Fatalf("held idle Worker = %#v, %v; want stalled", updated, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := 0
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_interrupted" {
+			interrupted++
+		}
+	}
+	if interrupted != 1 {
+		t.Fatalf("held Project worker_interrupted Notices = %d, want one", interrupted)
+	}
+	message, err := db.MessageByID(ctx, messageID)
+	if err != nil || message.Status != "queued" {
+		t.Fatalf("held Project instruction = %#v, %v; want queued", message, err)
+	}
+}
+
 func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 	ctx := context.Background()
 	home, db, project, fake := adoptionFixture(t)
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := task.Observation()
+	observation.AgentStatus = "working"
+	observation.AgentServerStartedAt = "old-generation"
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
+		t.Fatal(err)
+	}
+	fake.SnapshotValue.Panes[1].AgentStatus = "idle"
 	cfg, err := config.Load(home, project.Name)
 	if err != nil {
 		t.Fatal(err)
@@ -559,8 +618,13 @@ func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 	if generation, err := db.ProjectServerStartedAt(ctx, project.ID); err != nil || generation != "new-generation" {
 		t.Fatalf("generation = %q, %v; want new-generation adopted", generation, err)
 	}
-	if pending, err := db.UndeliveredNotices(ctx, project.ID); err != nil || len(pending) != 0 {
-		t.Fatalf("adoption left the restore_needed Notice pending: %#v, %v", pending, err)
+	pending, err := db.UndeliveredNotices(ctx, project.ID)
+	if err != nil || len(pending) != 1 || pending[0].Kind != "worker_interrupted" {
+		t.Fatalf("adoption pending Notices = %#v, %v; want worker_interrupted", pending, err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil || len(notices) != 2 || notices[1].Kind != "worker_interrupted" {
+		t.Fatalf("adoption Notices = %#v, %v; want restore_needed and worker_interrupted", notices, err)
 	}
 	if count := fake.CallCount("agent.start") + fake.CallCount("agent.stop"); count != 0 {
 		t.Fatalf("adoption started or stopped %d agents: %#v", count, fake.Calls)
