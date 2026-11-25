@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -233,7 +234,7 @@ func (s *Service) verifyDeliveryPreserved(ctx context.Context, db *store.DB, tar
 	if err != nil {
 		return store.PRObservation{}, admittedPlanFailure(err)
 	}
-	if plan != nil && plan.Review == "full-pipeline" {
+	if plan != nil && plan.Review == "full-pipeline" && !taskUsesGreenhouseReviewProvider(target.task, target.cfg, "") {
 		candidate, err := db.LatestValidationCandidate(ctx, target.task.ID, "")
 		if err != nil || candidate.State != store.ValidationCandidatePromoted || candidate.PromotedSHA != branchHead {
 			return store.PRObservation{}, prReleaseRefused("the current full-pipeline candidate is not confirmed as promoted", true)
@@ -271,6 +272,7 @@ func (s *Service) recordExecutorPolicy(ctx context.Context, db *store.DB, target
 		ActorPane:  target.actorPane,
 		HeadSHA:    target.task.GatedSHA,
 		Subject:    policy,
+		Baseline:   strconv.Itoa(target.task.Launches),
 		Outcome:    "succeeded",
 		Detail:     detail,
 	})

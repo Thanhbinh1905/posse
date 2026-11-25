@@ -286,12 +286,12 @@ func TestPRExecutorPoliciesAreRecordedSeparatelyFromMergeAndTeardown(t *testing.
 			if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", policy); code != 0 {
 				t.Fatalf("set %s policy: %d %s %s", policy, code, output, stderr)
 			}
-			var operation, subject, outcome string
-			if err := fixture.db.QueryRowContext(context.Background(), `SELECT operation,subject,outcome FROM delivery_operations ORDER BY id DESC LIMIT 1`).Scan(&operation, &subject, &outcome); err != nil {
+			var operation, subject, outcome, baseline string
+			if err := fixture.db.QueryRowContext(context.Background(), `SELECT operation,subject,outcome,baseline FROM delivery_operations ORDER BY id DESC LIMIT 1`).Scan(&operation, &subject, &outcome, &baseline); err != nil {
 				t.Fatal(err)
 			}
-			if operation != "executor_policy" || subject != policy || outcome != "succeeded" {
-				t.Fatalf("policy history = %q/%q/%q", operation, subject, outcome)
+			if operation != "executor_policy" || subject != policy || outcome != "succeeded" || baseline != fmt.Sprint(fixture.task.Launches) {
+				t.Fatalf("policy history = %q/%q/%q at launch %q", operation, subject, outcome, baseline)
 			}
 			sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID)
 			if err != nil || sandbox.State != "held" {

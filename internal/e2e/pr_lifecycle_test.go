@@ -1089,6 +1089,49 @@ func TestPRPollPartialGraphQLFailureDoesNotStarveMergedWorker(t *testing.T) {
 	}
 }
 
+func TestSuspendingDoneTaskWithOpenPRDoesNotRaiseWorkerExited(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "done-open-pr.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a completed Task with a recorded open PR.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.startAndComplete(t, brief, "t1")
+	const prURL = "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(context.Background(), task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", head)
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "pr", "release", "t1", "--policy", "suspend"); !strings.Contains(output, "executor: stopped") {
+		t.Fatalf("suspend executor: %s", output)
+	}
+	client := herdr.NewWithEnv("herdr", fixture.env)
+	if _, err := client.Call(context.Background(), "pane.close", map[string]any{"pane_id": task.PaneID}); err != nil {
+		t.Fatalf("remove suspended Worker pane before observation: %v", err)
+	}
+	stopBackgroundWatch(t, fixture)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+			t.Fatalf("intentional suspension raised worker_exited Notice: %#v", notice)
+		}
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == task.ID && decision.Kind == "worker_exited" {
+			t.Fatalf("intentional suspension raised worker_exited Decision: %#v", decision)
+		}
+	}
+}
+
 func TestWorkerExitedDoneTaskWithOpenPRCanBeDiscarded(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()
