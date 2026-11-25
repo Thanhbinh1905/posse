@@ -14,8 +14,7 @@ import (
 )
 
 type Identity struct {
-	Lead   IdentityRole `toml:"lead" json:"lead"`
-	Worker WorkerRole   `toml:"worker" json:"worker"`
+	Lead IdentityRole `toml:"lead" json:"lead"`
 }
 
 type IdentityRole struct {
@@ -23,10 +22,6 @@ type IdentityRole struct {
 	Persona     string `toml:"persona" json:"persona"`
 	Language    string `toml:"language" json:"language"`
 	AddressUser string `toml:"address_user" json:"address_user"`
-}
-
-type WorkerRole struct {
-	DisplayPrefix string `toml:"display_prefix" json:"display_prefix"`
 }
 
 type Lead struct {
@@ -420,6 +415,7 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		return Config{}, err
 	}
 	warnings := removeLegacyGateSettings(globalPath, global)
+	warnings = append(warnings, removeDeprecatedSettings(globalPath, global)...)
 	if _, found := global["autonomy"]; found {
 		return Config{}, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
 	}
@@ -435,6 +431,7 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 			return Config{}, err
 		}
 		warnings = append(warnings, removeLegacyGateSettings(projectPath, project)...)
+		warnings = append(warnings, removeDeprecatedSettings(projectPath, project)...)
 		for _, table := range userConfigOnlyTables {
 			if _, found := project[table]; found {
 				return Config{}, &InvalidError{File: projectPath, Key: table, Reason: userConfigOnlyReason(table)}
@@ -486,6 +483,25 @@ func removeLegacyGateSettings(path string, values map[string]any) []string {
 		warnings = append(warnings, fmt.Sprintf("%s: gate_loop was removed and is ignored", path))
 	}
 	return warnings
+}
+
+func removeDeprecatedSettings(path string, values map[string]any) []string {
+	identity, ok := values["identity"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	worker, ok := identity["worker"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if _, found := worker["display_prefix"]; !found {
+		return nil
+	}
+	delete(worker, "display_prefix")
+	if len(worker) == 0 {
+		delete(identity, "worker")
+	}
+	return []string{fmt.Sprintf("%s: identity.worker.display_prefix was removed and is ignored as deprecated", path)}
 }
 
 func configFromMaps(globalPath string, global map[string]any, projectPath string, project map[string]any, projectName string) (Config, error) {
@@ -708,8 +724,7 @@ func clone(value any) any {
 func defaultMap() map[string]any {
 	return map[string]any{
 		"identity": map[string]any{
-			"lead":   map[string]any{"name": "Lead", "persona": "", "language": "en", "address_user": ""},
-			"worker": map[string]any{"display_prefix": "worker"},
+			"lead": map[string]any{"name": "Lead", "persona": "", "language": "en", "address_user": ""},
 		},
 		"pool":            map[string]any{"clean": "warm", "setup": []string{}, "keep_idle": 4},
 		"retention":       map[string]any{"task_artifacts": "2160h"},

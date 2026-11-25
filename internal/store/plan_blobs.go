@@ -91,7 +91,7 @@ func (db *DB) externalizePlanJSON(data string) (string, error) {
 	digest := plan.SHA256()
 	for i := range plan.Inputs {
 		input := &plan.Inputs[i]
-		if input.Role == "brief" || len(input.Bytes) <= planInputBlobThreshold && !existingBlobs[i] {
+		if len(input.Bytes) <= planInputBlobThreshold && !existingBlobs[i] {
 			continue
 		}
 		path, err := db.writePlanBlob(input.SHA256, input.Bytes)
