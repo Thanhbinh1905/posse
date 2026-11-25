@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -999,6 +1001,34 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	}
 	if hr.Verdict == "findings" {
 		verdict.Blocking = greenhouseBlocking(hr.Findings, blockAt)
+		acceptedHead, err := acceptedGreenhouseHead(ctx, db, task.ID, member.root, verdict.Head)
+		if err != nil {
+			return false, store.Verdict{}, err
+		}
+		if acceptedHead != "" && acceptedHead != verdict.Head {
+			var followups []store.ProviderFinding
+			for index, finding := range verdict.Findings {
+				if !greenhouseFindingBlocks(finding.Severity, blockAt) {
+					continue
+				}
+				rangeFinding := hr.Findings[index]
+				changed, err := greenhouseFindingChangedSinceAccepted(ctx, member.root, acceptedHead, verdict.Head, finding.Path, rangeFinding.Start, rangeFinding.End)
+				if err != nil {
+					return false, store.Verdict{}, err
+				}
+				if changed {
+					followups = nil
+					break
+				}
+				followups = append(followups, finding)
+			}
+			if verdict.Blocking > 0 && len(followups) == verdict.Blocking {
+				if err := createAcceptedFindingFollowup(ctx, member, task, acceptedHead, followups, cfg); err != nil {
+					return false, store.Verdict{}, err
+				}
+				verdict.Blocking = 0
+			}
+		}
 	}
 	recorded, err := db.RecordGreenhouseVerdict(ctx, verdict, func(ctx context.Context) (string, error) {
 		return taskBranchAuthorHead(ctx, member.root, task.Branch)
@@ -1018,7 +1048,165 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	return false, store.Verdict{}, fmt.Errorf("greenhouse verdict for already-recorded grant %s was not found", result.Grant)
 }
 
-// greenhouseBlocking counts findings at or above blockAt. An unknown priority blocks.
+func acceptedGreenhouseHead(ctx context.Context, db *store.DB, taskID int64, repository, current string) (string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT rd.head_sha FROM review_dispositions rd JOIN decisions d ON d.id=rd.decision_id WHERE rd.ship_task_id=? AND d.kind='review_cap' AND d.answer='accept-head' AND d.answer_actor='user' AND d.answered_at>0 AND d.obsolete_at=0 ORDER BY rd.id DESC`, taskID)
+	if err != nil {
+		return "", err
+	}
+	var heads []string
+	for rows.Next() {
+		var head string
+		if err := rows.Scan(&head); err != nil {
+			rows.Close()
+			return "", err
+		}
+		heads = append(heads, head)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+	for _, head := range heads {
+		if _, err := exec.CommandContext(ctx, "git", "-C", repository, "cat-file", "-e", head+"^{commit}").Output(); err != nil {
+			continue
+		}
+		command := exec.CommandContext(ctx, "git", "-C", repository, "merge-base", "--is-ancestor", head, current)
+		if err := command.Run(); err == nil {
+			return head, nil
+		} else {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 1 {
+				continue
+			}
+			return "", fmt.Errorf("check accepted Greenhouse head %s ancestry in repository: %w", head, err)
+		}
+	}
+	return "", nil
+}
+
+func greenhouseFindingBlocks(severity, blockAt string) bool {
+	rank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+	findingRank, findingKnown := rank[severity]
+	threshold, thresholdKnown := rank[blockAt]
+	return !findingKnown || !thresholdKnown || findingRank <= threshold
+}
+
+func createAcceptedFindingFollowup(ctx context.Context, member greenhouseMember, task store.Task, acceptedHead string, findings []store.ProviderFinding, cfg config.Config) error {
+	forge, err := forgeForRepository(ctx, member.root, cfg, member.name)
+	if err != nil {
+		return fmt.Errorf("resolve forge for accepted Greenhouse findings: %w", err)
+	}
+	title := fmt.Sprintf("Follow up Greenhouse findings from Task t%d accepted at %s", task.Seq, shortSHA(acceptedHead))
+	var body strings.Builder
+	fmt.Fprintf(&body, "Blocking Greenhouse findings were reported on lines unchanged since the User accepted head `%s` for Task t%d. They do not block this target-merge re-review.\n\n", acceptedHead, task.Seq)
+	for _, finding := range findings {
+		fmt.Fprintf(&body, "- **%s** `%s:%d` (%s): %s\n  - %s\n", finding.Severity, finding.Path, finding.Line, finding.Key, finding.Excerpt, finding.Guidance)
+	}
+	if forge.Kind == "github" {
+		args := []string{"issue", "list", "--repo", forge.Host + "/" + forge.Path, "--state", "open", "--search", "in:title " + title, "--json", "number,title", "--limit", "100"}
+		output, err := commandOutputArgs(ctx, member.root, "gh", args...)
+		if err != nil {
+			return fmt.Errorf("find follow-up issue for accepted Greenhouse findings: %w", err)
+		}
+		var issues []struct {
+			Number int    `json:"number"`
+			Title  string `json:"title"`
+		}
+		if err := json.Unmarshal([]byte(output), &issues); err != nil {
+			return fmt.Errorf("decode follow-up issues for accepted Greenhouse findings: %w", err)
+		}
+		for _, issue := range issues {
+			if issue.Title == title {
+				_, err = commandOutputArgs(ctx, member.root, "gh", "issue", "edit", strconv.Itoa(issue.Number), "--body", body.String())
+				if err != nil {
+					return fmt.Errorf("update follow-up issue for accepted Greenhouse findings: %w", err)
+				}
+				return nil
+			}
+		}
+		_, err = commandOutputArgs(ctx, member.root, "gh", "issue", "create", "--repo", forge.Host+"/"+forge.Path, "--title", title, "--body", body.String())
+		if err != nil {
+			return fmt.Errorf("file follow-up issue for accepted Greenhouse findings: %w", err)
+		}
+		return nil
+	}
+	endpoint := "projects/" + url.PathEscape(forge.Path) + "/issues?state=opened&search=" + url.QueryEscape(title)
+	output, err := commandOutputArgs(ctx, member.root, "glab", "api", "--hostname", forge.Host, "--paginate", endpoint)
+	if err != nil {
+		return fmt.Errorf("find follow-up issue for accepted Greenhouse findings: %w", err)
+	}
+	var issues []struct {
+		IID   int    `json:"iid"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+		return fmt.Errorf("decode follow-up issues for accepted Greenhouse findings: %w", err)
+	}
+	for _, issue := range issues {
+		if issue.Title == title {
+			_, err = commandOutputArgs(ctx, member.root, "glab", "api", "--hostname", forge.Host, "--method", "PUT", "--raw-field", "description="+body.String(), "projects/"+url.PathEscape(forge.Path)+"/issues/"+strconv.Itoa(issue.IID))
+			if err != nil {
+				return fmt.Errorf("update follow-up issue for accepted Greenhouse findings: %w", err)
+			}
+			return nil
+		}
+	}
+	_, err = commandOutputArgs(ctx, member.root, "glab", "api", "--hostname", forge.Host, "--method", "POST", "--raw-field", "title="+title, "--raw-field", "description="+body.String(), "projects/"+url.PathEscape(forge.Path)+"/issues")
+	if err != nil {
+		return fmt.Errorf("file follow-up issue for accepted Greenhouse findings: %w", err)
+	}
+	return nil
+}
+
+func greenhouseFindingChangedSinceAccepted(ctx context.Context, repository, accepted, current, file string, start, end int) (bool, error) {
+	if accepted == "" || current == "" || file == "" || filepath.IsAbs(file) || start < 1 {
+		return true, nil
+	}
+	if end < start {
+		end = start
+	}
+	for _, part := range strings.Split(filepath.ToSlash(file), "/") {
+		if part == ".." {
+			return true, nil
+		}
+	}
+	ancestor := exec.CommandContext(ctx, "git", "-C", repository, "merge-base", "--is-ancestor", accepted, current)
+	if err := ancestor.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("check accepted Greenhouse head ancestry: %w", err)
+	}
+	command := exec.CommandContext(ctx, "git", "-C", repository, "diff", "--no-ext-diff", "--no-renames", "--unified=0", accepted, current, "--", filepath.ToSlash(file))
+	output, err := command.Output()
+	if err != nil {
+		return false, fmt.Errorf("diff accepted Greenhouse head %s against %s: %w", accepted, current, err)
+	}
+	for _, match := range greenhouseDiffHunk.FindAllSubmatch(output, -1) {
+		hunkStart, err := strconv.Atoi(string(match[1]))
+		if err != nil {
+			return false, fmt.Errorf("parse Greenhouse diff hunk: %w", err)
+		}
+		count := 1
+		if len(match[2]) > 0 {
+			count, err = strconv.Atoi(string(match[2]))
+			if err != nil {
+				return false, fmt.Errorf("parse Greenhouse diff hunk: %w", err)
+			}
+		}
+		if count > 0 && hunkStart <= end && hunkStart+count-1 >= start || count == 0 && hunkStart >= start && hunkStart <= end+1 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var greenhouseDiffHunk = regexp.MustCompile(`@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
+
 func greenhouseReviewBase(ctx context.Context, worktree, target, candidate string) (string, error) {
 	base, err := exec.CommandContext(ctx, "git", "-C", worktree, "merge-base", target, candidate).Output()
 	if err == nil {
@@ -1031,12 +1219,11 @@ func greenhouseReviewBase(ctx context.Context, worktree, target, candidate strin
 	return "", fmt.Errorf("git merge-base %s %s: %w", target, candidate, err)
 }
 
+// greenhouseBlocking counts findings at or above blockAt. An unknown priority blocks.
 func greenhouseBlocking(findings []greenhouse.Finding, blockAt string) int {
-	rank := map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}
-	threshold := rank[blockAt]
 	blocking := 0
 	for _, finding := range findings {
-		if priority, known := rank[finding.Priority]; !known || priority <= threshold {
+		if greenhouseFindingBlocks(finding.Priority, blockAt) {
 			blocking++
 		}
 	}
