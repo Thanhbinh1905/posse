@@ -61,7 +61,7 @@ func TestGreenhouseAfterDownUsesStubbedSelfExec(t *testing.T) {
 		if len(args) != 2 || args[0] != "_greenhouse" || args[1] != "stop" {
 			t.Errorf("self-exec args = %q, want _greenhouse stop", args)
 		}
-		childArgs := append([]string{"-c", `printf '%s\n' "$$" > "$1"; shift; exec "$@"`, "sh", pgidFile, testBinary}, args...)
+		childArgs := append([]string{"-c", `: > "$1"; sleep 0.05; printf '%s\n' "$$" > "$1"; shift; exec "$@"`, "sh", pgidFile, testBinary}, args...)
 		waiter := exec.Command(shellBinary, childArgs...)
 		waiter.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		return waiter, nil
@@ -107,7 +107,12 @@ func waiterProcessGroupID(t *testing.T, path string) (int, error) {
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			pgid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			value := strings.TrimSpace(string(data))
+			if value == "" {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			pgid, parseErr := strconv.Atoi(value)
 			if parseErr == nil && canSignalProcessGroup(pgid) {
 				return pgid, nil
 			}
