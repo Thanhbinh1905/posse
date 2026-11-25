@@ -464,4 +464,12 @@ func TestRecoveryCrashConsumesFinalAttempt(t *testing.T) {
 	if starts != 1 || state.Attempts != 1 || state.Status != "exhausted" || notices != 1 {
 		t.Fatalf("crash bypassed budget: starts=%d state=%#v Notices=%d", starts, state, notices)
 	}
+	if err := f.openDB(t, func(db *store.DB) error {
+		if _, err := db.IntentByTask(context.Background(), f.taskDBID); !store.IsNotFound(err) {
+			return fmt.Errorf("exhausted recovery left an active intent: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

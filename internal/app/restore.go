@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -18,6 +19,44 @@ import (
 // errRecoveryHeld marks a Project whose Lead or Workers stopped with Herdr.
 // Posse never restarts them on its own (ADR 0035); only `posse up` does.
 var errRecoveryHeld = errors.New("restore is held until posse up")
+
+func markHeldIdleWorkersInterrupted(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
+	if snapshot.ServerStartedAt == "" {
+		return nil
+	}
+	tasks, err := db.LiveTasks(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.State == store.StateStalled {
+			transitions, err := db.TaskTransitions(ctx, task.ID, 1)
+			if err != nil {
+				return err
+			}
+			if len(transitions) == 1 && transitions[0].From == string(store.StateWorking) && transitions[0].To == string(store.StateStalled) && transitions[0].Note == store.WorkerInterruptedTransitionNote {
+				if err := db.EnsureWorkerInterruptedNotice(ctx, task, snapshot.ServerStartedAt, time.Now()); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if task.State != store.StateWorking || task.AgentStatus != "working" || task.AgentServerStartedAt == "" || task.AgentServerStartedAt == snapshot.ServerStartedAt {
+			continue
+		}
+		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+		if !found || (pane.AgentStatus != "idle" && pane.AgentStatus != "done") {
+			continue
+		}
+		if _, err := db.InterruptWorker(ctx, task, snapshot.ServerStartedAt, time.Now()); err != nil {
+			if errors.Is(err, store.ErrStateRace) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
 
 // holdRestore records that a Herdr restart or group close stopped the agents
 // of a Project, and tells the User once per episode how to restore them.
@@ -91,10 +130,11 @@ func (s *Service) adoptCurrentGeneration(ctx context.Context, db *store.DB, proj
 		if task.State == store.StateFailed || !recoverableTaskState(task.State) {
 			continue
 		}
-		if task.AgentServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt {
+		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+		if !found || !paneAgentRunning(pane) {
 			return false, nil
 		}
-		if pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel); !found || !paneAgentRunning(pane) {
+		if task.AgentServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt && pane.AgentStatus != "idle" && pane.AgentStatus != "done" {
 			return false, nil
 		}
 		// A Worker whose relaunch failed may still run an agent that never
