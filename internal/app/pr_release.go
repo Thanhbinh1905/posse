@@ -128,10 +128,25 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 				}
 				return nil
 			}
-			if err := s.recordExecutorPolicy(ctx.Context, db, target, policy, "Executor release selected after verifying PR head "+observation.HeadSHA); err != nil {
+			var operation store.DeliveryOperation
+			beginPolicy := func() error {
+				var err error
+				operation, err = beginExecutorReleasePolicy(ctx.Context, db, target, policy, observation.HeadSHA)
 				return err
 			}
-			if err := s.releaseExecutor(ctx.Context, db, target, target.cfg, afterRelease); err != nil {
+			completePolicy := func() error {
+				if err := db.ResolveDeliveryOperation(ctx.Context, operation.ID, "succeeded", "Executor stopped; Sandbox released after verifying PR head "+observation.HeadSHA); err != nil {
+					return err
+				}
+				operation.Outcome = "succeeded"
+				return nil
+			}
+			if err := s.releaseExecutor(ctx.Context, db, target, target.cfg, beginPolicy, completePolicy, afterRelease); err != nil {
+				if operation.ID > 0 && operation.Outcome == "pending" {
+					if resolveErr := db.ResolveDeliveryOperation(ctx.Context, operation.ID, "failed", err.Error()); resolveErr != nil {
+						return errors.Join(err, fmt.Errorf("record failed executor release policy: %w", resolveErr))
+					}
+				}
 				var failure *axi.Error
 				if errors.As(err, &failure) && (failure.Code == "pr_release_refused" || failure.Code == "pr_release_incomplete") {
 					return err
@@ -279,6 +294,15 @@ func (s *Service) recordExecutorPolicy(ctx context.Context, db *store.DB, target
 	return err
 }
 
+func beginExecutorReleasePolicy(ctx context.Context, db *store.DB, target stewardTarget, policy, headSHA string) (store.DeliveryOperation, error) {
+	operation := target.operation("executor_policy", headSHA, policy, strconv.Itoa(target.task.Launches))
+	pending, err := db.BeginDeliveryOperation(ctx, operation, headSHA, 0)
+	if !errors.Is(err, store.ErrDeliveryOperationUnresolved) {
+		return pending, err
+	}
+	return db.UnresolvedDeliveryOperation(ctx, target.delivery.ID, "executor_policy", headSHA, policy)
+}
+
 func (s *Service) suspendExecutor(ctx context.Context, task store.Task) error {
 	if s.Herdr == nil {
 		return prReleaseRefused("Herdr is unavailable, so the executor cannot be verified", true)
@@ -297,7 +321,7 @@ func (s *Service) suspendExecutor(ctx context.Context, task store.Task) error {
 	return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
 }
 
-func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stewardTarget, cfg config.Config, afterRelease func() error) (returnErr error) {
+func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stewardTarget, cfg config.Config, beforeStop, onReleased, afterRelease func() error) (returnErr error) {
 	project, task := target.project, target.task
 	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "pr-release", `{}`)
 	if err != nil {
@@ -338,7 +362,7 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 	if pane, found := findTaskPane(snapshot.Panes, task); found && pane.Agent != "" && pane.AgentStatus != "idle" && pane.AgentStatus != "done" {
 		return prReleaseRefused("Worker status is "+pane.AgentStatus+"; wait for a settled turn before releasing it", true)
 	}
-	if err := releaseIntentStep(ctx, db, intent, "executor.stop", func() error {
+	if err := releaseIntentStep(ctx, db, intent, "executor.stop", beforeStop, func() error {
 		guard := taskProcessSignalGuard(nil)
 		if authorization != nil {
 			guard = authorization.guardSignal
@@ -378,7 +402,7 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 		return prReleaseRefused("preservation became uncertain while stopping the executor: "+err.Error(), true)
 	}
 	if sandboxNeedsRelease {
-		if err := releaseIntentStep(ctx, db, intent, "sandbox.release", func() error {
+		if err := releaseIntentStep(ctx, db, intent, "sandbox.release", nil, func() error {
 			_, err := releaseSandbox(ctx, db, project, task, cfg.Pool.Clean, false)
 			return err
 		}); err != nil {
@@ -390,22 +414,35 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 			return err
 		}
 	}
+	if onReleased != nil {
+		if err := onReleased(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func releaseIntentStep(ctx context.Context, db *store.DB, intent store.Intent, step string, action func() error) error {
+func releaseIntentStep(ctx context.Context, db *store.DB, intent store.Intent, step string, beforeAction, action func() error) error {
 	current, err := db.IntentByTask(ctx, intent.TaskID)
 	if err != nil {
 		return err
 	}
 	prior := strings.TrimPrefix(current.Step, "resuming:")
 	if prior == "done:"+step || step == "executor.stop" && (prior == "in_progress:sandbox.release" || prior == "done:sandbox.release") {
+		if beforeAction != nil {
+			return beforeAction()
+		}
 		return nil
 	}
 	if err := db.UpdateIntentStep(ctx, intent.ID, intent.ProcessID, "in_progress:"+step); err != nil {
 		return err
 	}
 	crashIntentAt(intent.Command, "before", step)
+	if beforeAction != nil {
+		if err := beforeAction(); err != nil {
+			return err
+		}
+	}
 	if err := action(); err != nil {
 		return err
 	}

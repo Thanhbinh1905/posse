@@ -69,6 +69,61 @@ func TestReconcileDoesNotReportIntentionallyStoppedPRExecutors(t *testing.T) {
 	}
 }
 
+func TestReconcileUsesPendingExecutorPolicyOnlyDuringActiveRelease(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(strconv.FormatBool(active), func(t *testing.T) {
+			db, project, task := createWorkingTask(t)
+			defer db.Close()
+			ctx := context.Background()
+			if _, err := db.NextTaskLaunch(ctx, task.ID); err != nil {
+				t.Fatal(err)
+			}
+			task.Launches = 1
+			if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+				t.Fatal(err)
+			}
+			delivery, err := db.EnsureDelivery(ctx, task.ID, "", "https://github.com/acme/shop/pull/17", "publish")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.BeginDeliveryOperation(ctx, store.DeliveryOperation{
+				DeliveryID: delivery.ID,
+				Operation:  "executor_policy",
+				Actor:      "lead",
+				Subject:    "release",
+				Baseline:   strconv.Itoa(task.Launches),
+			}, "", 0); err != nil {
+				t.Fatal(err)
+			}
+			if active {
+				if err := db.StartIntent(ctx, project.ID, task.ID, "pr-release", "in_progress:executor.stop", `{}`, os.Getpid()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := ReconcileSnapshot(ctx, db, project.ID, herdr.Snapshot{}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			notices, err := db.Notices(ctx, project.ID, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workerExited := 0
+			for _, notice := range notices {
+				if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+					workerExited++
+				}
+			}
+			want := 1
+			if active {
+				want = 0
+			}
+			if workerExited != want {
+				t.Fatalf("worker_exited Notice count = %d, want %d with active release %t", workerExited, want, active)
+			}
+		})
+	}
+}
+
 func TestReconcileUsesTaskWideExecutorPolicyAcrossDeliveries(t *testing.T) {
 	for _, policy := range []string{"suspend", "release"} {
 		t.Run(policy, func(t *testing.T) {
