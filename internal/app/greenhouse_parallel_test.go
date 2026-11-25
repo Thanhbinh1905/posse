@@ -1275,6 +1275,10 @@ func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
 			}
 		})
 	}
+	terminal := &greenhouse.TerminalReviewError{Status: "failed", Reason: "quota exceeded; service unavailable; gateway timeout"}
+	if transientGreenhouseFailure(terminal) {
+		t.Fatalf("transientGreenhouseFailure(%q) = true for a terminal review", terminal)
+	}
 }
 
 func TestAutomaticGreenhouseReviewDoesNotRetrySizeFailures(t *testing.T) {

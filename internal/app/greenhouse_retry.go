@@ -36,6 +36,10 @@ func transientGreenhouseFailure(err error) bool {
 	if err == nil {
 		return false
 	}
+	var terminalErr *greenhouse.TerminalReviewError
+	if errors.As(err, &terminalErr) {
+		return false
+	}
 	var networkError net.Error
 	if errors.As(err, &networkError) {
 		return true

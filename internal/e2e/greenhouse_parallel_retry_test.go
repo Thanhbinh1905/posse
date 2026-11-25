@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,6 +75,17 @@ exec '%s' "$@"
 	}) {
 		t.Fatalf("quota failure requests = %+v; want one refused request", failedRequests)
 	}
+	pendingPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse", "shop.pending.json")
+	pendingData, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatalf("read pending retry identity: %v", err)
+	}
+	var pending struct {
+		Grant string `json:"grant"`
+	}
+	if err := json.Unmarshal(pendingData, &pending); err != nil || pending.Grant != "shop/t1/shop/r1" {
+		t.Fatalf("pending retry grant = %q, %v; want shop/t1/shop/r1", pending.Grant, err)
+	}
 	if err := os.Remove(quotaActive); err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +93,7 @@ exec '%s' "$@"
 	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
 		t.Fatalf("Lead Watch retry: %v\n%s", err, output)
 	}
+	var retryRequests []store.GreenhouseReviewRequest
 	if !waitForCondition(30*time.Second, func() bool {
 		requestsDB, err := store.OpenReadOnly(f.home)
 		if err != nil {
@@ -88,9 +101,10 @@ exec '%s' "$@"
 		}
 		requests, err := requestsDB.GreenhouseReviewRequests(context.Background(), f.task(t, "t1").ProjectID)
 		_ = requestsDB.Close()
-		return err == nil && len(requests) == 2 && requests[1].Outcome == "verdict" && requests[1].RequestedHead == head
+		retryRequests = requests
+		return err == nil && len(requests) == 2 && requests[0].Outcome == "refused" && requests[0].Grant == "" && requests[1].Outcome == "verdict" && requests[1].Grant == "shop/t1/shop/r1" && requests[1].RequestedHead == head
 	}) {
-		t.Fatal("same-head Greenhouse retry did not record a Verdict")
+		t.Fatalf("same-head Greenhouse requests = %+v; want a Verdict recorded for the refused request's grant", retryRequests)
 	}
 	if got := c.invocations(t); got < 1 {
 		t.Fatalf("reviewer ran %d times, want a successful retry", got)
