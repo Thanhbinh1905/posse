@@ -47,11 +47,8 @@ func (f *workerTabsFixture) recordedGeneration(t *testing.T) string {
 }
 
 func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
-	f := newWorkerTabsFixture(t)
+	f := newWorkerTabsFixtureWithManualWatchOwner(t)
 	f.start(t, "t1", "Adopted worker", "adopted")
-	if !waitForCondition(10*time.Second, func() bool { return len(watchPIDs(f.root)) == 1 }) {
-		t.Fatalf("hidden watch not running: %v", watchPIDs(f.root))
-	}
 	current := f.snapshot(t).ServerStartedAt
 	if current == "" || current == staleGeneration {
 		t.Fatalf("Herdr generation = %q", current)
@@ -65,22 +62,54 @@ func TestWatchAdoptsGenerationWhenEveryPaneIsLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET agent_server_started_at=? WHERE id=?`, staleGeneration, worker.ID); err != nil {
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET agent_server_started_at=?,agent_status='working' WHERE id=?`, staleGeneration, worker.ID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	messageID, err := db.QueueMessage(context.Background(), worker.ID, "Continue after restart", false)
+	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !waitForCondition(20*time.Second, func() bool { return f.recordedGeneration(t) == current }) {
-		t.Fatalf("watch kept the Project held on %q while every pane runs in %q", f.recordedGeneration(t), current)
+	runPosse(t, f.binary, f.repo, f.env, "list")
+	if !waitForCondition(20*time.Second, func() bool {
+		if f.recordedGeneration(t) != current {
+			return false
+		}
+		db, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			return false
+		}
+		defer db.Close()
+		message, err := db.MessageByID(context.Background(), messageID)
+		return err == nil && message.Status == "delivered"
+	}) {
+		t.Fatalf("Watch did not adopt generation %q and deliver the queued instruction", current)
+	}
+	notices, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerNotices, err := notices.Notices(context.Background(), f.projectID, false)
+	_ = notices.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := 0
+	for _, notice := range workerNotices {
+		if notice.TaskID == worker.ID && notice.Kind == "worker_interrupted" {
+			interrupted++
+		}
+	}
+	if interrupted != 1 {
+		t.Fatalf("worker_interrupted Notices = %d, want one", interrupted)
 	}
 	lead, found := findLeadInSnapshot(f.snapshot(t))
 	if !found || lead.PaneID != f.leadPaneID {
 		t.Fatalf("adoption moved or stopped the Lead: %#v", f.snapshot(t).Panes)
-	}
-	if task := f.task(t, "t1"); task.State != store.StateWorking {
-		t.Fatalf("adoption changed Worker t1: %#v", task)
 	}
 }
 

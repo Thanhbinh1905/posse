@@ -298,7 +298,7 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		absentSince = 0
 	}
 	serverStartedAt := task.AgentServerStartedAt
-	if agentPresent && snapshot.ServerStartedAt != "" && (serverStartedAt == "" || serverStartedAt == snapshot.ServerStartedAt) {
+	if agentPresent && snapshot.ServerStartedAt != "" && (serverStartedAt == "" || serverStartedAt == snapshot.ServerStartedAt || pane.AgentStatus == "working") {
 		serverStartedAt = snapshot.ServerStartedAt
 	}
 	idleSince := task.IdleSince
@@ -323,6 +323,27 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	observation.AgentStatus, observation.AgentStatusSince = observedStatus, agentStatusSince(task, observedStatus, now)
 	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
 		return nil, observationFailure(err)
+	}
+	if task.State == store.StateWorking && task.AgentStatus == "working" && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt && (pane.AgentStatus == "idle" || pane.AgentStatus == "done") {
+		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "Worker turn was interrupted by a Herdr restart"); err != nil {
+			return notices, err
+		}
+		notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_interrupted", task.Title+" was interrupted by the Herdr restart", fmt.Sprintf(`{"launch":%d,"herdr_generation":%q}`, task.Launches, snapshot.ServerStartedAt), now)
+		if err != nil {
+			return notices, err
+		}
+		notices = append(notices, notice)
+	}
+	if task.State == store.StateStalled && pane.AgentStatus == "working" {
+		var interrupted bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='worker_interrupted' AND json_extract(data_json,'$.launch')=?)`, task.ID, task.Launches).Scan(&interrupted); err != nil {
+			return notices, err
+		}
+		if interrupted {
+			if err := db.Transition(ctx, task.ID, store.StateStalled, store.StateWorking, "cli", "Worker resumed after its interrupted turn"); err != nil {
+				return notices, err
+			}
+		}
 	}
 	episode, err := db.TaskModelErrorEpisode(ctx, task.ID)
 	if err != nil {

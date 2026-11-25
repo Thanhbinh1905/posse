@@ -93,6 +93,14 @@ func evaluateStallsSnapshot(ctx context.Context, db *store.DB, adapter herdr.Ada
 		changed := task.LastProgressAt == 0 || task.LastOutputHash != outputHash || task.LastWorktreeHash != worktreeHash
 		if task.State == store.StateStalled {
 			if changed {
+				var interrupted bool
+				if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notices WHERE task_id=? AND kind='worker_interrupted' AND json_extract(data_json,'$.launch')=?)`, task.ID, task.Launches).Scan(&interrupted); err != nil {
+					failures = append(failures, err)
+					continue
+				}
+				if interrupted && pane.AgentStatus != "working" {
+					continue
+				}
 				if err := db.Transition(ctx, task.ID, store.StateStalled, store.StateWorking, "cli", "Worker output or worktree changed"); err != nil {
 					if !errors.Is(err, store.ErrStateRace) {
 						failures = append(failures, err)

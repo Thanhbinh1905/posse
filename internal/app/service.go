@@ -511,6 +511,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 		}
 		if !adopted {
 			if !userStart {
+				if err := markHeldIdleWorkersInterrupted(ctx, db, project, current); err != nil {
+					return result, err
+				}
 				return result, s.holdRestore(ctx, db, project, current.ServerStartedAt)
 			}
 			home, err := s.homePath()
@@ -765,6 +768,9 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 						}
 					}
 					if runErr == nil && result.GenerationMismatch {
+						if err := markHeldIdleWorkersInterrupted(ctx, db, project, result.Snapshot); err != nil {
+							return cfg, err
+						}
 						runErr = heldGenerationError(ctx, db, project, result.Snapshot)
 					}
 					if runErr == nil {

@@ -19,6 +19,36 @@ import (
 // Posse never restarts them on its own (ADR 0035); only `posse up` does.
 var errRecoveryHeld = errors.New("restore is held until posse up")
 
+func markHeldIdleWorkersInterrupted(ctx context.Context, db *store.DB, project store.Project, snapshot herdr.Snapshot) error {
+	if snapshot.ServerStartedAt == "" {
+		return nil
+	}
+	tasks, err := db.LiveTasks(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.State != store.StateWorking || task.AgentStatus != "working" || task.AgentServerStartedAt == "" || task.AgentServerStartedAt == snapshot.ServerStartedAt {
+			continue
+		}
+		pane, found := findAppPane(snapshot.Panes, task.PaneID, task.PaneLabel)
+		if !found || (pane.AgentStatus != "idle" && pane.AgentStatus != "done") {
+			continue
+		}
+		if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateStalled, "cli", "Worker turn was interrupted by a Herdr restart"); err != nil {
+			if errors.Is(err, store.ErrStateRace) {
+				continue
+			}
+			return err
+		}
+		data := marshalJSON(map[string]any{"launch": task.Launches, "herdr_generation": snapshot.ServerStartedAt})
+		if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "worker_interrupted", Summary: task.Title + " was interrupted by the Herdr restart", DataJSON: data}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // holdRestore records that a Herdr restart or group close stopped the agents
 // of a Project, and tells the User once per episode how to restore them.
 func (s *Service) holdRestore(ctx context.Context, db *store.DB, project store.Project, episode string) error {
