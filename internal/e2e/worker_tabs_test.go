@@ -618,7 +618,9 @@ herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent "$agent_kin
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
-    if [ "$agent_kind" != codex ]; then IFS= read -r prompt || exit 0; fi
+    if [ "$agent_kind" != codex ]; then
+      IFS= read -r prompt || exit 0
+    fi
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then printf '%s\n' "${prompt:-}" >> "$POSSE_TEST_ROOT/focused-launch-prompts"; fi
     herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent "$agent_kind" --state working >/dev/null 2>&1
     if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
