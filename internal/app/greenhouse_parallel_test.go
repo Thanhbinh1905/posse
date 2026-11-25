@@ -1600,7 +1600,7 @@ func TestAutomaticGreenhouseReviewDoesNotRetrySizeFailures(t *testing.T) {
 	}
 }
 
-func TestAutomaticGreenhouseReviewRespectsRetryBackoff(t *testing.T) {
+func TestExplicitGreenhouseReviewRespectsQuotaRetryBackoff(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateDone)
 	ctx := context.Background()
 	now := time.Now().UnixMilli()
@@ -1610,15 +1610,22 @@ func TestAutomaticGreenhouseReviewRespectsRetryBackoff(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "temporary Greenhouse failure"); err != nil {
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "inconclusive: quota exhausted"); err != nil {
 		t.Fatal(err)
 	}
+	starts := 0
+	previous := selfExecCommand
+	selfExecCommand = func(...string) (*exec.Cmd, error) {
+		starts++
+		return exec.Command("true"), nil
+	}
+	t.Cleanup(func() { selfExecCommand = previous })
 	started := false
-	if err := f.service.startParallelGreenhouseReviewsTracked(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}, &started, false); err != nil {
+	if err := f.service.startParallelGreenhouseReviewsTracked(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}, &started, true); err != nil {
 		t.Fatal(err)
 	}
-	if started {
-		t.Fatal("automatic review started again before retry backoff expired")
+	if started || starts != 0 {
+		t.Fatalf("explicit quota retry started=%t, child starts=%d before backoff expired", started, starts)
 	}
 	requests, err := f.db.GreenhouseReviewRequests(ctx, f.project.ID)
 	if err != nil || len(requests) != 1 {
@@ -1650,6 +1657,33 @@ func TestResumedGreenhouseGrantFailuresReachRetryLimit(t *testing.T) {
 	}
 	if got := countNoticeKind(notices, "needs_decision"); got != 1 {
 		t.Fatalf("needs_decision Notices = %d, want one after %d failed resumed attempts: %+v", got, greenhouseReviewFailureLimit, notices)
+	}
+}
+
+func TestGreenhouseQuotaFailuresAtRetryLimitDoNotRaiseNeedsDecision(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateDone)
+	ctx := context.Background()
+	for attempt := range greenhouseReviewFailureLimit {
+		at := int64(100 + attempt*10)
+		if err := f.db.RecordGreenhouseReviewRequest(ctx, store.GreenhouseReviewRequest{
+			ProjectID: f.project.ID, TaskID: f.task.ID, Repository: f.project.Name, RequestedHead: f.headSHA,
+			Provider: store.GreenhouseReviewProvider, RequestedAt: at, SettledAt: at + 1, Outcome: "failed",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.CreateGreenhouseFailureNoticeOnce(ctx, f.project.ID, f.task.ID, f.project.Name, f.headSHA, "inconclusive: quota exhausted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.startParallelGreenhouseReviews(ctx, f.db, f.home, f.project, f.task, []store.ReviewTarget{{Repository: f.project.Name, Commit: f.headSHA}}); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countNoticeKind(notices, "needs_decision"); got != 0 {
+		t.Fatalf("quota failure needs_decision Notices = %d, want zero: %+v", got, notices)
 	}
 }
 
@@ -1686,6 +1720,13 @@ func TestGreenhouseFailureAtRetryLimitRaisesNeedsDecisionNotice(t *testing.T) {
 	}
 	if needsDecision != 1 || failure != 1 {
 		t.Fatalf("retry-limit Notices = %+v, want one actionable needs_decision and one acknowledged failure Notice", notices)
+	}
+}
+
+func TestGreenhouseLatestFailureUnwrapsPreviousEscalation(t *testing.T) {
+	got := greenhouseLatestFailure("Greenhouse review failed for shop at head: Needs a decision: split the change. Latest failure: Greenhouse parallel review failed for shop at head: quota exhausted")
+	if got != "quota exhausted" {
+		t.Fatalf("latest failure = %q, want only the newest underlying failure", got)
 	}
 }
 
