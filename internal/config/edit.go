@@ -203,9 +203,6 @@ func encodeSettingValue(key string, kind ValueType, value any) (string, error) {
 		for _, entry := range entries {
 			fields := []string{}
 			keys := []string{"type", "when", "use"}
-			if isWorkflowStagesKey(key) {
-				keys = sortedMapKeys(entry)
-			}
 			for _, field := range keys {
 				item, found := entry[field]
 				if !found {

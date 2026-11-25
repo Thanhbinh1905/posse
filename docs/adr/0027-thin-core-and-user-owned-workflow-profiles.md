@@ -1,6 +1,6 @@
 # 27. Thin core and User-owned workflow profiles
 
-**Current status:** ADR 0028 removes configurable command Gates and in-place execution. The historical design details below do not describe supported command or Task options; workflow stage `gate = "user"` remains a User decision.
+**Status:** Superseded by ADR 0026. Staged workflow profiles and their Brief fields, admission, runs and Decisions were removed in #1278. The design below records the former implementation.
 
 Posse is a dispatch-control layer: it assigns the right work to the right isolated Worker. The User's multi-stage process is an optional workflow profile, not a required product lifecycle. The User decides between stages; the Lead does not advance them automatically.
 

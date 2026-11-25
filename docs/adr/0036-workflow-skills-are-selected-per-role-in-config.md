@@ -19,10 +19,10 @@ Posse loads workflow skills only from the `[skills]` config block, which holds o
 
 An entry is a bundled skill name or an absolute or `~/` path to a directory holding `SKILL.md`; Posse freezes that `SKILL.md` under the skill's frontmatter name. A config with an unknown name, a missing or unreadable directory, or a path skill named like a bundled skill fails to load with an error naming the entry. A Project list replaces the User list for that role. Without a `[skills]` block, sessions get only the platform skills.
 
-The lists are explicit and complete. There are no add or remove deltas over a hidden default, so the config the User reads is the set that loads. Lists are flat per role, not `[skills.<role>]` tables; per-stage selection, if needed later, belongs to workflow profiles.
+The lists are explicit and complete. There are no add or remove deltas over a hidden default, so the config the User reads is the set that loads. Lists are flat per role, not `[skills.<role>]` tables; skills are not selected by Task stage.
 
 A Worker's selection is frozen into its Task plan at admission and into the content-addressed launch snapshot, as Codex instructions and preferences already are. A later config edit affects new Tasks only; relaunching an admitted Task, including with another Profile, keeps its frozen skills.
 
 Existing installs keep their behavior: the first `posse setup` of a version with this decision, which `posse update` runs, writes the full recommended block into the User config once and records that in the setup manifest. A fresh install starts with the platform skills only.
 
-This replaces ADR 0027's deferral of skill selection. Skills in workflow profile stages remain opaque.
+This replaces ADR 0027's deferral of skill selection. ADR 0027's staged workflow profiles were later removed by ADR 0026.

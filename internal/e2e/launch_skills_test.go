@@ -252,7 +252,7 @@ while [ ! -e "$POSSE_E2E_RELEASE" ]; do sleep 0.05; done
 			}
 			direct := startWorker("t3", "unconfigured-direct-path")
 			directPlan, err := direct.AdmittedPlan()
-			if err != nil || directPlan == nil || directPlan.Workflow != nil || directPlan.Launch.ProfileName != "implicit:"+kind || directPlan.Launch.Profile.Kind != kind || directPlan.Launch.Profile.Model != "" || directPlan.Launch.Profile.Effort != "" || len(directPlan.Launch.Profile.Args) != 0 {
+			if err != nil || directPlan == nil || directPlan.Launch.ProfileName != "implicit:"+kind || directPlan.Launch.Profile.Kind != kind || directPlan.Launch.Profile.Model != "" || directPlan.Launch.Profile.Effort != "" || len(directPlan.Launch.Profile.Args) != 0 {
 				t.Fatalf("unconfigured %s path did not freeze its implicit launch identity: %#v %v", kind, directPlan, err)
 			}
 			for _, path := range []string{

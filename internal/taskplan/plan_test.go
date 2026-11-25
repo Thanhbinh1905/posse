@@ -29,6 +29,46 @@ func request(taskType string) taskplan.Request {
 	return r
 }
 
+func TestHistoricalWorkflowPlanStillDecodes(t *testing.T) {
+	plan, err := taskplan.Resolve(request("change"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historical map[string]any
+	if err := json.Unmarshal([]byte(encoded), &historical); err != nil {
+		t.Fatal(err)
+	}
+	historical["version"] = float64(9)
+	historical["inputs"].([]any)[0].(map[string]any)["bytes"] = []byte("---\ntype: change\ntitle: Historical staged Task\ndone_when: old plan loads\nworkflow_run: w1\nstage: Build\n---\n")
+	historical["inputs"].([]any)[0].(map[string]any)["sha256"] = taskplan.Select("brief", "brief.md", []byte("---\ntype: change\ntitle: Historical staged Task\ndone_when: old plan loads\nworkflow_run: w1\nstage: Build\n---\n")).SHA256
+	historical["workflow"] = json.RawMessage(`{"name":"legacy","run_id":"w1","stage_name":"Build","stage_index":0,"profile":{"stages":[{"name":"Build","task_type":"change"}]}}`)
+	data, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := taskplan.Decode(string(data))
+	if err != nil {
+		t.Fatalf("historical workflow plan did not decode: %v", err)
+	}
+	preserved, err := decoded.Encode()
+	if err != nil || preserved != string(data) {
+		t.Fatalf("historical workflow plan did not round-trip unchanged: %v", err)
+	}
+
+	historical["version"] = float64(taskplan.Version)
+	current, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := taskplan.Decode(string(current)); err == nil || !strings.Contains(err.Error(), "staged workflows were removed") {
+		t.Fatalf("new plan admitted historical workflow data: %v", err)
+	}
+}
+
 func TestGreenhouseDeliveryCanBeFrozenInAPlan(t *testing.T) {
 	r := request("change")
 	r.Delivery = "greenhouse"
