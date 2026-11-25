@@ -310,6 +310,34 @@ func TestPRExecutorPoliciesAreRecordedSeparatelyFromMergeAndTeardown(t *testing.
 	}
 }
 
+func TestPRReleasePreflightFailureDoesNotRecordSucceededExecutorPolicy(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	fake := fixture.service.Herdr.(*herdr.Fake)
+	for i := range fake.SnapshotValue.Panes {
+		if fake.SnapshotValue.Panes[i].PaneID == fixture.task.PaneID {
+			fake.SnapshotValue.Panes[i].AgentStatus = "working"
+		}
+	}
+
+	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
+	combined := output + stderr
+	if code == 0 || !strings.Contains(combined, "Worker status is working") {
+		t.Fatalf("active Worker release exit=%d output=%s stderr=%s", code, output, stderr)
+	}
+	var operations int
+	if err := fixture.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM delivery_operations WHERE operation='executor_policy' AND outcome='succeeded'`).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != 0 {
+		t.Fatalf("preflight refusal recorded %d succeeded executor policies", operations)
+	}
+}
+
 func TestRelaunchAfterPublishedPRReleaseReacquiresSandbox(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()
@@ -774,8 +802,21 @@ func TestPRReleaseKeepsRefreshIntentUntilConflictRequeueSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.releaseExecutor(ctx, fixture.db, target, target.cfg, func() error { return errors.New("simulated PR refresh failure") }); err == nil || !strings.Contains(err.Error(), "simulated PR refresh failure") {
+	var policy store.DeliveryOperation
+	beginPolicy := func() error {
+		var err error
+		policy, err = beginExecutorReleasePolicy(ctx, fixture.db, target, "release", fixture.headSHA)
+		return err
+	}
+	completePolicy := func() error {
+		return fixture.db.ResolveDeliveryOperation(ctx, policy.ID, "succeeded", "Executor stopped and Sandbox released")
+	}
+	if err := fixture.service.releaseExecutor(ctx, fixture.db, target, target.cfg, beginPolicy, completePolicy, func() error { return errors.New("simulated PR refresh failure") }); err == nil || !strings.Contains(err.Error(), "simulated PR refresh failure") {
 		t.Fatalf("releaseExecutor error = %v, want simulated PR refresh failure", err)
+	}
+	var policyOutcome string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT outcome FROM delivery_operations WHERE id=?`, policy.ID).Scan(&policyOutcome); err != nil || policyOutcome != "succeeded" {
+		t.Fatalf("executor policy after post-release refresh failure = %q, err=%v", policyOutcome, err)
 	}
 	intent, err := fixture.db.IntentByTask(ctx, fixture.task.ID)
 	if err != nil || intent.Command != "pr-release" {

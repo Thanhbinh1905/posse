@@ -1765,7 +1765,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			if err := requireGreenhouseGatePass(ctx.Context, db, project, cfg, task, head, ""); err != nil {
 				return axi.Failure("signal_invalid", "published PR completion requires a passing Greenhouse Verdict for the exact head", false, err.Error(), "Request review for this head with `posse signal done \"<summary>\" --head "+head+"` without --pr")
 			}
-		} else {
+		} else if !noChange {
 			if parsed.Flags["head"] == "" {
 				return axi.Failure("signal_invalid", "Greenhouse full-pipeline done Signals require --head <current Task branch head>", false)
 			}
@@ -2089,7 +2089,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			data["next_action"] = "Greenhouse review requested automatically for the exact Task head; wait for Posse to queue publication"
 		}
 	}
-	if verb == "done" && task.Type == "change" && isFullPipelineTask(task, "") {
+	if verb == "done" && task.Type == "change" && !noChange && isFullPipelineTask(task, "") {
 		if plan, err := task.AdmittedPlan(); err != nil {
 			return admittedPlanFailure(err)
 		} else if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {
