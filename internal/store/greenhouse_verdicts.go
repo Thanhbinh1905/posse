@@ -156,7 +156,7 @@ func (db *DB) CreateGreenhouseNeedsDecisionNoticeOnce(ctx context.Context, proje
 		created = true
 	} else if err != nil {
 		return false, err
-	} else if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=?,delivered_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN delivered_at ELSE NULL END,acked_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN acked_at ELSE NULL END,claim_token=CASE WHEN claim_token LIKE 'uncertain:%' THEN claim_token ELSE '' END,claimed_at=CASE WHEN claim_token LIKE 'uncertain:%' THEN claimed_at ELSE 0 END WHERE id=?`, summary, noticeID); err != nil {
+	} else if _, err := tx.ExecContext(ctx, `UPDATE notices SET summary=? WHERE id=?`, summary, noticeID); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
