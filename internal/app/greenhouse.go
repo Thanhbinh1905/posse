@@ -298,20 +298,23 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			})
 		}
 		var result greenhouse.RoundResult
+		requestAttempted := false
 		for {
 			var attempts int
 			result, attempts, err = reviewGreenhouseWithRetries(ctx.Context, parallelMode, time.Until(deadline), func(attemptWait time.Duration) (greenhouse.RoundResult, error) {
+				requestAttempted = false
 				round.Wait = attemptWait
 				round.Target, err = greenhouseTarget(ctx.Context, member)
 				if err != nil {
 					return greenhouse.RoundResult{}, err
 				}
+				requestAttempted = true
 				if s.greenhouseRound != nil {
 					return s.greenhouseRound(ctx.Context, round)
 				}
 				return daemon.Review(ctx.Context, round)
 			})
-			if attempts > 0 {
+			if attempts > 0 && requestAttempted {
 				requestSettledAt = time.Now().UnixMilli()
 			}
 			if ctx.Context.Err() != nil {
@@ -343,6 +346,16 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			return axi.Failure("greenhouse_protocol", protocolErr.Error(), false, "No Verdict was requested")
 		}
 		if err != nil {
+			if !requestAttempted {
+				if noticeErr := notifyFailure(requestHead, err.Error()); noticeErr != nil {
+					return noticeErr
+				}
+				var failure *axi.Error
+				if errors.As(err, &failure) {
+					return failure
+				}
+				return axi.Failure("greenhouse_target_unavailable", err.Error(), true, "Retry `posse review start "+taskIDString(task.Seq)+"` when the forge is reachable")
+			}
 			failureReason := err.Error()
 			var terminalErr *greenhouse.TerminalReviewError
 			if errors.As(err, &terminalErr) {
@@ -361,7 +374,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 				terminalFailure = terminalFailure || failures >= greenhouseReviewFailureLimit
 			}
 			if terminalFailure {
-				reason := fmt.Sprintf("Greenhouse review failed for %s at %s. Needs a decision: split the change or land it another way. Latest failure: %s", member.name, shortSHA(requestHead), failureReason)
+				reason := fmt.Sprintf("Needs a decision: split the change or land it another way. Latest failure: %s", failureReason)
 				if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx.Context, project.ID, task.ID, member.name, requestHead, reason); err != nil {
 					return err
 				}

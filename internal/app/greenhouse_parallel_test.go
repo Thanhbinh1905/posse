@@ -1192,6 +1192,20 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 	}
 }
 
+func TestReviewGreenhouseWithRetriesRetriesTargetFetchFailure(t *testing.T) {
+	calls := 0
+	result, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Second, func(time.Duration) (greenhouse.RoundResult, error) {
+		calls++
+		if calls == 1 {
+			return greenhouse.RoundResult{}, errors.New("greenhouse_target_unavailable: could not fetch target origin/main")
+		}
+		return greenhouse.RoundResult{Outcome: greenhouse.Settled}, nil
+	})
+	if err != nil || calls != 2 || attempts != 2 || result.Outcome != greenhouse.Settled {
+		t.Fatalf("retry result=%+v calls=%d attempts=%d err=%v; want same review to succeed after target fetch recovers", result, calls, attempts, err)
+	}
+}
+
 func TestAutomaticGreenhouseReviewDoesNotRetrySizeFailures(t *testing.T) {
 	for _, reason := range []string{
 		"intent_too_long: intent is 8193 bytes; maximum is 8192",
