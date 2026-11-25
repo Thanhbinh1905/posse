@@ -337,6 +337,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
 			}
+			if clearErr := greenhouse.ClearPending(pendingPath); clearErr != nil {
+				return clearErr
+			}
 			if noticeErr := notifyFailure(requestHead, protocolErr.Error()); noticeErr != nil {
 				return noticeErr
 			}
@@ -345,7 +348,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if err != nil {
 			failureReason := err.Error()
 			if parallelMode && transientGreenhouseFailure(err) {
-				if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
+				if recordErr := recordRequest("refused", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 					return recordErr
 				}
 				return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "outcome", Value: "retrying"}, {Key: "head", Value: requestHead}})
@@ -356,6 +359,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			}
 			if recordErr := recordRequest("failed", result.Grant, time.Now().UnixMilli()); recordErr != nil {
 				return recordErr
+			}
+			if clearErr := greenhouse.ClearPending(pendingPath); clearErr != nil {
+				return clearErr
 			}
 			terminalFailure := reviewerSizeFailure(err)
 			if parallelMode {

@@ -42,7 +42,7 @@ func TestGreenhouseQuotaFailureRetriesSameHeadWithoutWorkerAction(t *testing.T) 
 if [ "$1" = axi ]; then
     request=$(cat)
     if printf '%%s' "$request" | grep -q '"op":"review"' && [ -e '%s' ]; then
-        printf '{"version":2,"outcome":"error","error":"reviewer quota exceeded"}\n'
+        printf '{"version":2,"outcome":"refused","error":"reviewer quota exceeded"}\n'
         exit 0
     fi
     printf '%%s' "$request" | '%s' axi
