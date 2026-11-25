@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -207,6 +208,14 @@ func reconcileWorkDeferred(ctx context.Context) error {
 	return nil
 }
 
+func taskTeardownInProgress(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	intent, err := db.IntentByTask(ctx, task.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return intent.Command == "teardown", err
+}
+
 func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
 	operation, found, err := db.LatestTaskExecutorPolicy(ctx, task.ID)
 	if err != nil || !found {
@@ -251,6 +260,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 	}
 	if !found {
 		if task.State == store.StateDone || task.State == store.StateMerging {
+			teardownInProgress, err := taskTeardownInProgress(ctx, db, task)
+			if err != nil || teardownInProgress {
+				return nil, err
+			}
 			stoppedIntentionally, err := executorStoppedIntentionally(ctx, db, task)
 			if err != nil || stoppedIntentionally {
 				return nil, err
@@ -294,6 +307,10 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		resumePending := hasRecordedSession(task.AgentSession) && task.AgentServerStartedAt != "" && snapshot.ServerStartedAt != "" && task.AgentServerStartedAt != snapshot.ServerStartedAt
 		if !resumePending && now.Sub(time.UnixMilli(absentSince)) >= AgentAbsentGrace {
 			if task.State == store.StateDone || task.State == store.StateMerging {
+				teardownInProgress, err := taskTeardownInProgress(ctx, db, task)
+				if err != nil || teardownInProgress {
+					return nil, err
+				}
 				stoppedIntentionally, err := executorStoppedIntentionally(ctx, db, task)
 				if err != nil || stoppedIntentionally {
 					return nil, err

@@ -1109,6 +1109,61 @@ func TestGreenhouseBlockingVerdictWithDisposedFindingsDoesNotFail(t *testing.T) 
 	}
 }
 
+func TestGreenhouseReviewDoesNotStartForDoneTaskWithNoCommittedDiff(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=? AND revision=(SELECT MAX(revision) FROM task_plan_revisions WHERE task_id=?)`, encoded, f.task.ID, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	base, err := gitOutput(context.Background(), f.task.WorktreePath, "rev-parse", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.task.WorktreePath, "reset", "--hard", base)
+	if code, output, stderr := f.run("signal", "done", "No change to review", "--no-change", "--head", base); code != 0 {
+		t.Fatalf("no-change done Signal: %d %s %s", code, output, stderr)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(context.Background(), f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(context.Background(), f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("no-change Task requested Greenhouse reviews: %+v", requests)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == f.task.ID && notice.Kind == "greenhouse_review_failed" {
+			t.Fatalf("no-change Task raised a Greenhouse review failure: %+v", notice)
+		}
+	}
+}
+
 func TestGreenhouseReviewDoesNotStartDuringOrAfterTeardown(t *testing.T) {
 	for _, tornDown := range []bool{false, true} {
 		t.Run(map[bool]string{false: "teardown in progress", true: "already torn down"}[tornDown], func(t *testing.T) {

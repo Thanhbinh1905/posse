@@ -2110,7 +2110,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			data["next_action"] = "Greenhouse review requested automatically for the exact Task head; wait for Posse to queue publication"
 		}
 	}
-	if verb == "done" && task.Type == "change" && isFullPipelineTask(task, "") {
+	if verb == "done" && task.Type == "change" && !noChange && isFullPipelineTask(task, "") {
 		if plan, err := task.AdmittedPlan(); err != nil {
 			return admittedPlanFailure(err)
 		} else if plan != nil && plan.ValidationLoops != nil && plan.ValidationLoops.Review.Enabled {

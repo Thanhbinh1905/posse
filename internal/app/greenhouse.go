@@ -741,6 +741,15 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 						continue
 					}
 				}
+				if task.Type == "change" {
+					count, err := commitsAheadOfBase(ctx, task.WorktreePath, task.BaseRef)
+					if err != nil {
+						return err
+					}
+					if count == "0" {
+						continue
+					}
+				}
 				reason := "the latest done Signal has invalid or missing greenhouse_pending_head data"
 				if err := s.noticeSkippedGreenhouseTask(ctx, db, project, task, reason); err != nil {
 					return err
