@@ -102,7 +102,7 @@ func TestCommandsFromSeparateHomesShareMachineSlot(t *testing.T) {
 func TestKilledJobGroupFreesSlot(t *testing.T) {
 	lockDir := configureHeavyProcessTest(t)
 	wrapper := startHeavyProcess(t, "sleep 60")
-	holder := waitForHolder(t, lockDir)
+	holder := waitForHolder(t, lockDir, wrapper.Process.Pid)
 	if holder.PID <= 1 {
 		t.Fatalf("unsafe job pid %d", holder.PID)
 	}
@@ -117,7 +117,7 @@ func TestKilledJobGroupFreesSlot(t *testing.T) {
 func TestWrapperKilledLeavesChildSlotHeldUntilChildExits(t *testing.T) {
 	lockDir := configureHeavyProcessTest(t)
 	wrapper := startHeavyProcess(t, "sleep 60")
-	holder := waitForHolder(t, lockDir)
+	holder := waitForHolder(t, lockDir, wrapper.Process.Pid)
 	if holder.PID <= 1 || wrapper.Process.Pid <= 1 {
 		t.Fatalf("unsafe wrapper or child pid: wrapper=%d child=%d", wrapper.Process.Pid, holder.PID)
 	}
@@ -184,14 +184,14 @@ func startHeavyProcess(t *testing.T, script string) *exec.Cmd {
 	return cmd
 }
 
-func waitForHolder(t *testing.T, lockDir string) record {
+func waitForHolder(t *testing.T, lockDir string, wrapperPID int) record {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(filepath.Join(lockDir, "cpu-0.json"))
 		if err == nil {
 			var holder record
-			if json.Unmarshal(data, &holder) == nil && holder.PID > 1 {
+			if json.Unmarshal(data, &holder) == nil && holder.PID > 1 && holder.PID != wrapperPID {
 				return holder
 			}
 		}
