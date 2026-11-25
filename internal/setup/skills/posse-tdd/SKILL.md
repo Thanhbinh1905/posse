@@ -13,7 +13,7 @@ Your Brief names the entry: bug or feature.
    Done when the test failed for the bug's reason and now passes.
 2. **Feature entry.** Use the seams from the spec's Testing section. One behavior at a time: one failing test through the public interface, the least code to pass it, repeat. Refactor only while green. Write each test just before the code it drives, never a batch first.
    Done when every acceptance criterion has a test that went red, then green.
-3. **Prove it on the real path.** Run the change once the way a user would (the CLI command, UI or flow), not only the tests. For a UI change, attach a screenshot with `posse publish --proof`.
+3. **Prove it on the real path.** Run the change once the way a user would (the CLI command, UI or flow), not only the tests. Wrap heavy commands such as multi-package `go test`, `go test -race`, `scripts/preflight.sh` and E2E shard runs in `posse heavy`. For a UI change, attach a screenshot with `posse publish --proof`.
    Done when the real-path run shows the expected result.
 4. **Report** in `posse publish --verify`: the red-before check with its quoted failure, the green-after run and the real-path run.
    Done when the PR carries all three.

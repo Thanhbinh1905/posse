@@ -1411,6 +1411,43 @@ func TestParallelPendingGrantIdentifiesRequestForFailureRecording(t *testing.T) 
 	}
 }
 
+func TestGreenhouseTransientFailuresDoNotCountTowardRetryLimit(t *testing.T) {
+	for _, reason := range []string{
+		"reviewer quota exceeded; retry after reset",
+		"network connection reset by peer",
+		"dial tcp: i/o timeout",
+		"greenhouse daemon unavailable: socket disappeared",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			if !transientGreenhouseFailure(errors.New(reason)) {
+				t.Fatalf("transientGreenhouseFailure(%q) = false", reason)
+			}
+		})
+	}
+	for _, reason := range []string{
+		"prompt_exceeds_context (12000 tokens > 8192)",
+		"Greenhouse binary is missing",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			if transientGreenhouseFailure(errors.New(reason)) {
+				t.Fatalf("transientGreenhouseFailure(%q) = true", reason)
+			}
+		})
+	}
+	commandErr := exec.Command("sh", "-c", "exit 1").Run()
+	if !transientGreenhouseFailure(fmt.Errorf("greenhouse axi: %w", commandErr)) {
+		t.Fatal("transientGreenhouseFailure(non-zero greenhouse subprocess) = false")
+	}
+	terminalSubprocessErr := fmt.Errorf("greenhouse axi: %w: Greenhouse review ended with status failed: reviewer quota exceeded", commandErr)
+	if transientGreenhouseFailure(terminalSubprocessErr) {
+		t.Fatalf("transientGreenhouseFailure(%q) = true for a terminal subprocess review", terminalSubprocessErr)
+	}
+	terminal := &greenhouse.TerminalReviewError{Status: "failed", Reason: "quota exceeded; service unavailable; gateway timeout"}
+	if transientGreenhouseFailure(terminal) {
+		t.Fatalf("transientGreenhouseFailure(%q) = true for a terminal review", terminal)
+	}
+}
+
 func TestReviewGreenhouseWithRetriesRetriesTargetFetchFailure(t *testing.T) {
 	calls := 0
 	result, attempts, err := reviewGreenhouseWithRetries(context.Background(), true, time.Second, func(time.Duration) (greenhouse.RoundResult, error) {

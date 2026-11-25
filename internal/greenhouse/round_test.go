@@ -237,6 +237,81 @@ printf '%s\n' '{"version":2,"outcome":"error","error":"storage commit in progres
 	}
 }
 
+func TestReviewPreservesPendingRequestAfterTransientRefusal(t *testing.T) {
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, "worktree")
+	for _, args := range [][]string{{"init", "-q", worktree}, {"-C", worktree, "config", "user.email", "test@example.com"}, {"-C", worktree, "config", "user.name", "Test"}, {"-C", worktree, "commit", "-q", "--allow-empty", "-m", "new head"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	head, err := worktreeHead(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "greenhouse")
+	script := `#!/bin/sh
+request=$(cat)
+case "$request" in
+*'"op":"attach"'*) printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","input_id":"input","gate_id":"gate","token":"token","rules_ready":true,"run":{"candidate":"` + head + `"}}' ;;
+*'"op":"review"'*) printf '%s\n' '{"version":2,"outcome":"refused","error":"reviewer quota exceeded"}' ;;
+*'"op":"inspect"'*) printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","run":{"host_grants":[]}}' ;;
+*) printf '%s\n' '{"version":2,"outcome":"ok","run_id":"run","input_id":"input","gate_id":"gate","token":"token","rules_ready":true}' ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.MkdirTemp("/tmp", "gh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	daemon := exec.Command("sleep", "60")
+	daemon.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if err := daemon.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if daemon.Process.Pid <= 1 {
+		_ = daemon.Process.Kill()
+		_ = daemon.Wait()
+		t.Fatalf("daemon test process has invalid PID %d", daemon.Process.Pid)
+	}
+	t.Cleanup(func() { _ = daemon.Process.Kill(); _ = daemon.Wait() })
+	if err := os.WriteFile(filepath.Join(home, "pid"), []byte(strconv.Itoa(daemon.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(home, "socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	state, err := json.Marshal(DaemonState{PID: daemon.Process.Pid, Binary: binary, Range: Range{Min: 1, Max: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, stateFile), state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(dir, "review.pending.json")
+	t.Setenv("POSSE_TASK_ID", "")
+	d := &Daemon{Binary: binary, Home: home, Env: os.Environ(), InTask: func(int) bool { return false }}
+	result, err := d.Review(context.Background(), Round{
+		Worktree: worktree, Host: Host{Name: "posse", ID: "posse/t1/shop"}, GrantPrefix: "posse/t1/shop",
+		Pending: pending, Intent: "review the change", Target: head,
+	})
+	if err == nil || !strings.Contains(err.Error(), "reviewer quota exceeded") {
+		t.Fatalf("Review error = %v; want the quota refusal", err)
+	}
+	if result.Grant != "posse/t1/shop/r1" {
+		t.Fatalf("Review result grant = %q; want the refused grant", result.Grant)
+	}
+	stored, err := readPending(pending)
+	if err != nil || stored == nil || stored.Grant != "posse/t1/shop/r1" {
+		t.Fatalf("pending request = %+v, %v; want the refused grant preserved", stored, err)
+	}
+}
+
 func TestReviewAdvancesPastSpentGrantWhenAttachFailsAndResultWasNotIngested(t *testing.T) {
 	dir := t.TempDir()
 	worktree := filepath.Join(dir, "worktree")
