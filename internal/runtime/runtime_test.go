@@ -16,6 +16,30 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestReconcileDoesNotReportWorkerExitDuringTeardown(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.StartIntent(ctx, project.ID, task.ID, "teardown", "started", `{}`, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, herdr.Snapshot{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+			t.Fatalf("teardown raised worker_exited Notice: %#v", notice)
+		}
+	}
+}
+
 func TestReconcileDoesNotReportIntentionallyStoppedPRExecutors(t *testing.T) {
 	for _, policy := range []string{"suspend", "release", "retain", ""} {
 		t.Run(policy, func(t *testing.T) {
