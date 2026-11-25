@@ -354,6 +354,78 @@ func upAllWithUpProjects(t *testing.T, upProjects string) (string, *herdr.Fake) 
 	return output.String(), fake
 }
 
+func TestUpAllReportsUnadoptableRestoredWorkerAndContinues(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	alphaRoot, betaRoot := filepath.Join(root, "alpha"), filepath.Join(root, "beta")
+	alphaSandbox := filepath.Join(root, "alpha-sandbox")
+	initRepo(t, alphaRoot)
+	initRepo(t, betaRoot)
+	gitTest(t, alphaRoot, "worktree", "add", "-b", "posse/t1", alphaSandbox, "main")
+	home := filepath.Join(root, "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	alpha, err := db.CreateProject(ctx, "alpha", alphaRoot, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := db.CreateProject(ctx, "beta", betaRoot, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range []store.Project{alpha, beta} {
+		if err := db.SetProjectLead(ctx, project.ID, "w-"+project.Name, "w-"+project.Name+":p1", "posse:"+project.Name+":lead"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.RememberProjectServerStartedAt(ctx, alpha.ID, "old-generation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RememberProjectServerStartedAt(ctx, beta.ID, "new-generation"); err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, alpha.ID, store.Task{Seq: 1, Type: "change", Title: "Unadoptable Worker", MergeMode: "local", Branch: "posse/t1", BaseRef: "main", WorktreePath: alphaSandbox, HerdrWorkspaceID: "w-alpha", PaneID: "w-alpha:p2", PaneLabel: "posse:alpha:t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "Worker started"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, alpha.ID, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := task.Observation()
+	observation.AgentServerStartedAt = "old-generation"
+	if err := db.UpdateTaskObservation(ctx, taskID, observation); err != nil {
+		t.Fatal(err)
+	}
+	adapter := herdr.NewFake()
+	adapter.SnapshotValue = herdr.Snapshot{ServerStartedAt: "new-generation", Workspaces: []herdr.Workspace{{WorkspaceID: "w-alpha"}, {WorkspaceID: "w-beta"}}, Panes: []herdr.Pane{
+		{PaneID: "w-alpha:p1", WorkspaceID: "w-alpha", Label: alpha.LeadLabel, Agent: "claude", AgentStatus: "idle"},
+		{PaneID: "w-alpha:p2", WorkspaceID: "w-alpha", TabID: "w-alpha:t1", Label: task.PaneLabel, CWD: alphaSandbox, Agent: "codex", AgentStatus: "working"},
+		{PaneID: "w-beta:p1", WorkspaceID: "w-beta", Label: beta.LeadLabel, Agent: "claude", AgentStatus: "idle"},
+	}}
+	service := testService(home, adapter)
+	output, errorsOut := &bytes.Buffer{}, &bytes.Buffer{}
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, errorsOut
+	t.Chdir(alphaRoot)
+	t.Setenv("HERDR_PANE_ID", "w-alpha:p1")
+	if code := cli.Run([]string{"up", "--all"}); code != 0 {
+		t.Fatalf("up --all failed: code=%d output=%s errors=%s", code, output, errorsOut)
+	}
+	if !strings.Contains(output.String(), "state: partial") || !strings.Contains(output.String(), "deferred_tasks[1]") || !strings.Contains(output.String(), "Unadoptable Worker") || !strings.Contains(output.String(), "alpha") || !strings.Contains(output.String(), "beta") {
+		t.Fatalf("up --all did not report the held Worker and continue to beta: %s", output)
+	}
+}
+
 func TestUpAllWithoutUpProjectsRestoresEveryProject(t *testing.T) {
 	output, fake := upAllWithUpProjects(t, "")
 	if fake.CallCount("agent.start") != 1 || !strings.Contains(output, "restored[1]") || strings.Contains(output, "skipped_projects") {

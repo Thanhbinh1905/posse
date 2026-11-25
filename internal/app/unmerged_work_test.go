@@ -5,10 +5,102 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/thanhbinh1905/posse/internal/store"
 )
+
+func TestTeardownAllowsLocalBranchAlreadyContainedInTargetE2E(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	attachPRFixtureSandbox(t, fixture)
+	gitTest(t, fixture.repo, "branch", "release", "main")
+	target := filepath.Join(fixture.root, "target")
+	gitTest(t, fixture.repo, "worktree", "add", target, "release")
+	gitTest(t, target, "merge", "--ff-only", "refs/heads/posse/t1")
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET target_branch='release' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	removeFixtureTaskPane(fixture)
+
+	code, output, stderr := fixture.run("teardown", "t1")
+	if code != 0 || !strings.Contains(output, "state: torn-down") {
+		t.Fatalf("plain teardown of a local branch already in its target = %d, output=%s stderr=%s", code, output, stderr)
+	}
+	updated, err := fixture.db.TaskByID(context.Background(), fixture.project.ID, fixture.task.ID)
+	if err != nil || updated.State != store.StateTornDown {
+		t.Fatalf("Task after plain teardown = %#v, %v", updated, err)
+	}
+}
+
+func TestTeardownAllowsLocalBranchAlreadyContainedInRemoteTargetE2E(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateDone)
+	attachPRFixtureSandbox(t, fixture)
+	gitTest(t, fixture.repo, "branch", "release", "main")
+	gitTest(t, fixture.repo, "push", "origin", "posse/t1:refs/heads/release")
+	gitTest(t, fixture.repo, "fetch", "origin", "refs/heads/release:refs/remotes/origin/release")
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET target_branch='release' WHERE id=?`, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	removeFixtureTaskPane(fixture)
+
+	code, output, stderr := fixture.run("teardown", "t1")
+	if code != 0 || !strings.Contains(output, "state: torn-down") {
+		t.Fatalf("plain teardown of a local branch already in its remote-tracking target = %d, output=%s stderr=%s", code, output, stderr)
+	}
+	if _, err := gitOutput(context.Background(), fixture.repo, "rev-parse", "--verify", "refs/heads/posse/t1"); err == nil {
+		t.Fatal("teardown kept the Task branch even though the remote-tracking target contains it")
+	}
+}
+
+func TestMergedLocalTaskHasNoUnmergedWork(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	sandbox := filepath.Join(root, "sandbox")
+	home := filepath.Join(root, "posse")
+	initRepo(t, repo)
+	gitTest(t, repo, "branch", "release", "main")
+	gitTest(t, repo, "worktree", "add", "-b", "posse/t1", sandbox, "main")
+	if err := os.WriteFile(filepath.Join(sandbox, "change.txt"), []byte("change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, sandbox, "add", "change.txt")
+	gitTest(t, sandbox, "commit", "-m", "worker change")
+	target := filepath.Join(root, "target")
+	gitTest(t, repo, "worktree", "add", target, "release")
+	gitTest(t, target, "merge", "--ff-only", "posse/t1")
+
+	db, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{
+		Seq: 1, Type: "change", Title: "Already merged",
+		MergeMode: "local", Branch: "posse/t1", BaseRef: "main", TargetBranch: "release", WorktreePath: sandbox,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateSpawning, store.StateWorking, "cli", "started"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, taskID, store.StateWorking, store.StateDone, "worker", "finished"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.Task(ctx, project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work, err := testService(home, nil).unmergedWork(ctx, db, project, task); err != nil || work != "" {
+		t.Fatalf("merged local Task still has unmerged work: work=%q err=%v", work, err)
+	}
+}
 
 func TestNoChangeSignalAndTeardownUseOriginWhenLocalDefaultBranchIsBehind(t *testing.T) {
 	ctx := context.Background()

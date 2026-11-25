@@ -31,9 +31,18 @@ func (s *Service) unmergedWork(ctx context.Context, db *store.DB, project store.
 	if err != nil {
 		return "", err
 	}
-	count, err := commitsAheadOfBase(ctx, task.WorktreePath, baseRef)
+	count := ""
+	contained, err := localBranchContainedInTarget(ctx, project, task)
 	if err != nil {
 		return "", err
+	}
+	if contained {
+		count = "0"
+	} else {
+		count, err = commitsAheadOfBase(ctx, task.WorktreePath, baseRef)
+		if err != nil {
+			return "", err
+		}
 	}
 	if ahead, convErr := strconv.Atoi(count); convErr != nil || ahead != 0 {
 		return fmt.Sprintf("branch has %s commits ahead of %s", count, baseRef), nil
@@ -51,6 +60,41 @@ func (s *Service) unmergedWork(ctx context.Context, db *store.DB, project store.
 		return "", err
 	}
 	return "", nil
+}
+
+func localBranchContainedInTarget(ctx context.Context, project store.Project, task store.Task) (bool, error) {
+	if task.MergeMode != "local" || task.Branch == "" {
+		return false, nil
+	}
+	branchTip, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", "refs/heads/"+task.Branch+"^{commit}")
+	if err != nil {
+		if gitRefMissing(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	worktreeTip, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil || worktreeTip != branchTip {
+		return false, err
+	}
+	target := taskTargetBranch(project, task)
+	for _, ref := range []string{"refs/heads/" + target, "refs/remotes/origin/" + target} {
+		if _, err := gitOutput(ctx, project.Root, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+			if gitRefMissing(err) {
+				continue
+			}
+			return false, err
+		}
+		if _, err := gitOutput(ctx, project.Root, "merge-base", "--is-ancestor", branchTip, ref); err == nil {
+			return true, nil
+		} else {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				return false, err
+			}
+		}
+	}
+	return false, nil
 }
 
 func currentTaskBaseRef(ctx context.Context, project store.Project, task store.Task) (string, error) {
