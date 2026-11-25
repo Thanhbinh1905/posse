@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/herdr"
+	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
@@ -877,7 +880,7 @@ func TestSendSteersPastQueuedHeadDuringPiAutoCompaction(t *testing.T) {
 	}
 }
 
-func TestSendReopensDoneChangeTaskBeforeImmediateSignal(t *testing.T) {
+func TestSendToDoneTaskRaisesIdleNoticeWithBackgroundChild(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
@@ -916,29 +919,25 @@ func TestSendReopensDoneChangeTaskBeforeImmediateSignal(t *testing.T) {
 	var output bytes.Buffer
 	cli := testService(home, fake).CLI()
 	cli.Out = &output
+	var child *exec.Cmd
 	fake.BeforeCall = func(method string) {
 		if method != "agent.prompt" {
 			return
 		}
-		observed, err := store.Open(home)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer observed.Close()
-		task, err := observed.Task(ctx, project.ID, "t1")
-		if err != nil || task.State != store.StateWorking || task.GatedSHA != "" {
-			t.Errorf("instruction became visible before Task was reopened: state=%s gated=%s error=%v", task.State, task.GatedSHA, err)
-			return
-		}
-		turnToken, err := observed.TaskTurnToken(ctx, task.ID)
-		if err != nil {
-			t.Errorf("current Worker turn token: %v", err)
-			return
-		}
-		if state, err := observed.RecordWorkerSignal(ctx, task, "done", "Immediate fix complete", map[string]any{"turn_token": turnToken}, "task_done"); err != nil || state != store.StateDone {
-			t.Errorf("immediate Signal = %s, %v", state, err)
+		child = exec.Command("sleep", "60")
+		child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := child.Start(); err != nil {
+			t.Errorf("start Worker background child: %v", err)
 		}
 	}
+	t.Cleanup(func() {
+		if child != nil && child.Process != nil {
+			if child.Process.Pid > 1 {
+				_ = child.Process.Kill()
+			}
+			_ = child.Wait()
+		}
+	})
 	if code := cli.Run([]string{"send", "t1", "Fix the gate failure"}); code != 0 || !strings.Contains(output.String(), "delivered") {
 		t.Fatalf("send did not deliver to a done Change Task: code=%d output=%s", code, output.String())
 	}
@@ -951,8 +950,19 @@ func TestSendReopensDoneChangeTaskBeforeImmediateSignal(t *testing.T) {
 	}
 	defer db.Close()
 	task, err := db.Task(ctx, project.ID, "t1")
-	if err != nil || task.State != store.StateDone || task.GatedSHA != "" {
-		t.Fatalf("delivery overwrote the immediate Signal or retained gated SHA: %#v, %v", task, err)
+	if err != nil || task.State != store.StateWorking {
+		t.Fatalf("message delivery did not reopen the Task: %#v, %v", task, err)
+	}
+	idleStart := time.Now().Truncate(time.Millisecond)
+	if _, err := runtime.Run(ctx, db, fake, project.ID, 0, time.Minute, idleStart, nil); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Run(ctx, db, fake, project.ID, 0, time.Minute, idleStart.Add(time.Minute-time.Millisecond), nil); err != nil || len(result.Notices) != 0 {
+		t.Fatalf("idle Worker received an early Notice: %#v, %v", result.Notices, err)
+	}
+	result, err := runtime.Run(ctx, db, fake, project.ID, 0, time.Minute, idleStart.Add(time.Minute), nil)
+	if err != nil || len(result.Notices) != 1 || result.Notices[0].Kind != "worker_idle" || result.Notices[0].TaskID != task.ID || result.Notices[0].Summary != task.Title+" is idle without a Signal" {
+		t.Fatalf("idle Worker with a running background child did not receive a task-specific Notice after idle_after: %#v, %v", result.Notices, err)
 	}
 	var status, body string
 	if err := db.QueryRowContext(ctx, `SELECT status,body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, task.ID).Scan(&status, &body); err != nil || status != "delivered" || body != "Fix the gate failure" {
