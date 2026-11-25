@@ -646,6 +646,26 @@ func TestGuardClassifiesATextPosseScriptByItsContents(t *testing.T) {
 	}
 }
 
+func TestGuardRefusesGlobalCoreWorktreeInGitTopLevelSubstitution(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, ".posse")
+	sandbox := filepath.Join(home, "pool", "project-a", "sandbox-1")
+	foreign := filepath.Join(root, "project-b")
+	globalConfig := filepath.Join(root, "global.gitconfig")
+	if err := os.MkdirAll(filepath.Join(sandbox, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(globalConfig, []byte("[core]\n\tworktree = "+foreign+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := append(append([]string(nil), guardEnv...), "GIT_CONFIG_GLOBAL="+globalConfig)
+	scope := guardScope{env: env, cwd: sandbox, workerHome: home, writable: []string{sandbox, filepath.Join(home, "scratch", "project-a", "t1")}}
+	command := "cd \"$(git rev-parse --show-toplevel)\" && git status"
+	if refused, reason := guardCommand(command, scope); !refused {
+		t.Fatalf("guard accepted Git top-level substitution with global core.worktree=%s: %#v", foreign, reason)
+	}
+}
+
 func TestGuardRefusesGitAgainstAnotherProjectCheckout(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, ".posse")
