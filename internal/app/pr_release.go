@@ -409,13 +409,13 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 			return err
 		}
 	}
-	if afterRelease != nil {
-		if err := afterRelease(); err != nil {
+	if onReleased != nil {
+		if err := onReleased(); err != nil {
 			return err
 		}
 	}
-	if onReleased != nil {
-		if err := onReleased(); err != nil {
+	if afterRelease != nil {
+		if err := afterRelease(); err != nil {
 			return err
 		}
 	}

@@ -802,8 +802,21 @@ func TestPRReleaseKeepsRefreshIntentUntilConflictRequeueSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.releaseExecutor(ctx, fixture.db, target, target.cfg, nil, nil, func() error { return errors.New("simulated PR refresh failure") }); err == nil || !strings.Contains(err.Error(), "simulated PR refresh failure") {
+	var policy store.DeliveryOperation
+	beginPolicy := func() error {
+		var err error
+		policy, err = beginExecutorReleasePolicy(ctx, fixture.db, target, "release", fixture.headSHA)
+		return err
+	}
+	completePolicy := func() error {
+		return fixture.db.ResolveDeliveryOperation(ctx, policy.ID, "succeeded", "Executor stopped and Sandbox released")
+	}
+	if err := fixture.service.releaseExecutor(ctx, fixture.db, target, target.cfg, beginPolicy, completePolicy, func() error { return errors.New("simulated PR refresh failure") }); err == nil || !strings.Contains(err.Error(), "simulated PR refresh failure") {
 		t.Fatalf("releaseExecutor error = %v, want simulated PR refresh failure", err)
+	}
+	var policyOutcome string
+	if err := fixture.db.QueryRowContext(ctx, `SELECT outcome FROM delivery_operations WHERE id=?`, policy.ID).Scan(&policyOutcome); err != nil || policyOutcome != "succeeded" {
+		t.Fatalf("executor policy after post-release refresh failure = %q, err=%v", policyOutcome, err)
 	}
 	intent, err := fixture.db.IntentByTask(ctx, fixture.task.ID)
 	if err != nil || intent.Command != "pr-release" {
