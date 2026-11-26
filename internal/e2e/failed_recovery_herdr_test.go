@@ -25,7 +25,7 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	}
 	startsPath := filepath.Join(f.root, "recovery-starts.log")
 	script := strings.Replace(string(agent), "#!/bin/sh\n", "#!/bin/sh\ncase \"$PWD/\" in \"$POSSE_E2E_WORKTREES/\"*) printf 'start\\n' >> \"$POSSE_TEST_ROOT/recovery-starts.log\";; esac\n", 1)
-	script = strings.Replace(script, "    IFS= read -r prompt || exit 0\n", "    IFS= read -r prompt || exit 0\n    if [ -f \"$POSSE_TEST_ROOT/fail-recovery-prompts\" ]; then\n      while IFS= read -r line; do :; done\n      exit 0\n    fi\n", 1)
+	script = strings.Replace(script, "      IFS= read -r prompt || exit 0\n", "      IFS= read -r prompt || exit 0\n    if [ -f \"$POSSE_TEST_ROOT/fail-recovery-prompts\" ]; then\n      while IFS= read -r line; do :; done\n      exit 0\n    fi\n", 1)
 	if err := os.WriteFile(agentPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
