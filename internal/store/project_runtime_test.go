@@ -274,6 +274,50 @@ func TestChangedTaskObservationIsPersisted(t *testing.T) {
 	}
 }
 
+func TestTaskGenerationUpdatePreservesConcurrentObservation(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	writer, err := OpenAt(filepath.Join(home, "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Observation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := TaskObservation{PaneID: "w2:p1", WorkspaceID: "w2", AgentSession: "session-old", AgentSessionKind: "claude", AgentServerStartedAt: "server-old", AgentStatus: "working", AgentStatusSince: 10}
+	if err := db.UpdateTaskObservation(ctx, taskID, stale); err != nil {
+		t.Fatal(err)
+	}
+	concurrent := stale
+	concurrent.AgentSession, concurrent.AgentAbsentSince = "session-new", 20
+	concurrent.IdleSince, concurrent.AgentStatus, concurrent.AgentStatusSince = 30, "idle", 30
+	if err := writer.UpdateTaskObservation(ctx, taskID, concurrent); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTaskAgentServerGeneration(ctx, taskID, "server-new"); err != nil {
+		t.Fatal(err)
+	}
+	var session, server, status string
+	var absent, idle int64
+	if err := db.QueryRowContext(ctx, `SELECT agent_session,agent_server_started_at,agent_status,agent_absent_since,idle_since FROM tasks WHERE id=?`, taskID).Scan(&session, &server, &status, &absent, &idle); err != nil {
+		t.Fatal(err)
+	}
+	if session != "session-new" || server != "server-new" || status != "idle" || absent != 20 || idle != 30 {
+		t.Fatalf("generation update overwrote concurrent observation: session=%q server=%q status=%q absent=%d idle=%d", session, server, status, absent, idle)
+	}
+}
+
 func TestChangedProjectObservationIsPersisted(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(t.TempDir())

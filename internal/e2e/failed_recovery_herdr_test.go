@@ -86,13 +86,16 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var notices int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=?`, after.ID).Scan(&notices); err != nil {
+	var recoveryNotices, interruptedNotices int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='recovery_failed'`, after.ID).Scan(&recoveryNotices); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='worker_interrupted'`, after.ID).Scan(&interruptedNotices); err != nil {
 		t.Fatal(err)
 	}
 	starts := strings.Count(string(startsAfter), "start\n") - strings.Count(string(startsBefore), "start\n")
-	if after.Launches != before.Launches+2 || starts != 2 || state.Attempts != 2 || state.Status != "exhausted" || notices != 1 || !strings.Contains(state.LastError, "prompt") {
-		t.Fatalf("real Herdr failed recovery: launches %d -> %d, process starts=%d state=%#v Notices=%d", before.Launches, after.Launches, starts, state, notices)
+	if after.Launches != before.Launches+2 || starts != 2 || state.Attempts != 2 || state.Status != "exhausted" || recoveryNotices != 1 || interruptedNotices != 0 || !strings.Contains(state.LastError, "prompt") {
+		t.Fatalf("real Herdr failed recovery: launches %d -> %d, process starts=%d state=%#v recovery Notices=%d worker_interrupted Notices=%d", before.Launches, after.Launches, starts, state, recoveryNotices, interruptedNotices)
 	}
-	t.Logf("real Herdr: configured bound=2, launches=%d, Worker process starts=%d, exhaustion Notices=%d; last error=%s", after.Launches-before.Launches, starts, notices, state.LastError)
+	t.Logf("real Herdr: configured bound=2, launches=%d, Worker process starts=%d, recovery Notices=%d; last error=%s", after.Launches-before.Launches, starts, recoveryNotices, state.LastError)
 }

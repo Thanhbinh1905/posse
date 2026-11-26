@@ -3488,7 +3488,10 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		return failure(err)
 	}
 	if err := track("agent.record", func() error {
-		return db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, pane.WorkspaceID, pane.PaneID, task.PaneLabel, workerName)
+		if err := db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, pane.WorkspaceID, pane.PaneID, task.PaneLabel, workerName); err != nil {
+			return err
+		}
+		return db.UpdateTaskAgentServerGeneration(ctx, task.ID, snapshot.ServerStartedAt)
 	}); err != nil {
 		return failure(err)
 	}

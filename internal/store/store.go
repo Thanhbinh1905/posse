@@ -1429,6 +1429,13 @@ func (db *DB) UpdateTaskWorkspace(ctx context.Context, taskID int64, workspaceID
 	return db.PersistTask(ctx, taskID)
 }
 
+func (db *DB) UpdateTaskAgentServerGeneration(ctx context.Context, taskID int64, generation string) error {
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET agent_server_started_at=?,updated_at=? WHERE id=?`, generation, time.Now().UnixMilli(), taskID); err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, taskID)
+}
+
 func (db *DB) RepairBrokenSandbox(ctx context.Context, sandboxID int64) error {
 	tx, err := db.beginTxWithRetry(ctx)
 	if err != nil {
