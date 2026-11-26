@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/heavy"
@@ -209,21 +208,6 @@ func reconcileWorkDeferred(ctx context.Context) error {
 	return nil
 }
 
-func intentProcessAlive(intent store.Intent) bool {
-	if intent.ProcessID <= 1 {
-		return false
-	}
-	err := syscall.Kill(intent.ProcessID, 0)
-	if err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
-	}
-	if intent.ProcessBootID == "" || intent.ProcessStartTime == "" {
-		return true
-	}
-	bootID, startTime, err := store.ProcessIdentityForPID(intent.ProcessID)
-	return err == nil && bootID == intent.ProcessBootID && startTime == intent.ProcessStartTime
-}
-
 func taskTeardownInProgress(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
 	intent, err := db.IntentByTask(ctx, task.ID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -240,7 +224,7 @@ func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.
 	if operation.Subject != "suspend" && operation.Subject != "release" {
 		return false, nil
 	}
-	if operation.Outcome == "pending" {
+	if operation.Outcome == "pending" || operation.Outcome == "failed" {
 		intent, err := db.IntentByTask(ctx, task.ID)
 		if store.IsNotFound(err) {
 			return false, nil
@@ -250,9 +234,6 @@ func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.
 		}
 		step := strings.TrimPrefix(intent.Step, "resuming:")
 		if intent.Command != "pr-release" || step != "in_progress:executor.stop" && step != "done:executor.stop" && step != "in_progress:sandbox.release" && step != "done:sandbox.release" {
-			return false, nil
-		}
-		if !intentProcessAlive(intent) {
 			return false, nil
 		}
 	} else if operation.Outcome != "succeeded" {
