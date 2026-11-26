@@ -1662,11 +1662,6 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			return err
 		}
 	}
-	for _, pending := range conflicts {
-		if err := s.queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
-			return err
-		}
-	}
 	for _, observed := range observations {
 		observed.current = preserveMergeRequest(observed.current, observed.previous, observed.hasBefore)
 		effect := prObservationEffect(project, observed.task, observed.current, observed.failures, observed.previous, observed.hasBefore)
@@ -1736,6 +1731,11 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 					return noticeErr
 				}
 			}
+		}
+	}
+	for _, pending := range conflicts {
+		if err := s.queueConflictTargetSyncInstruction(ctx, db, pending.task, "", pending.freshness, pending.headSHA); err != nil {
+			return err
 		}
 	}
 	if err := s.retrySpecReadyChecks(ctx, db, project, cfg, now); err != nil {

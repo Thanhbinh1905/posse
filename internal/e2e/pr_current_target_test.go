@@ -77,11 +77,11 @@ func TestPRMergeWithoutCurrentTargetRuleMergesBehindPR(t *testing.T) {
 	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "show", "t2")
 
 	fixture.waitTaskState(t, "t3", store.StateWorking)
+	fixture.requireNotice(t, "t3", "pr_conflict")
 	var instruction string
 	if err := fixture.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? ORDER BY id DESC LIMIT 1`, tasks["t3"].ID).Scan(&instruction); err != nil || !strings.Contains(instruction, "Merge origin/main") {
 		t.Fatalf("conflicting PR got no merge-target instruction: body=%q err=%v", instruction, err)
 	}
-	fixture.requireNotice(t, "t3", "pr_conflict")
 
 	// The clean-but-behind PR stays merging with no instruction and merges.
 	if current := fixture.mustTask(t, "t2"); current.State != store.StateMerging {
