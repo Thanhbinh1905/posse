@@ -3,6 +3,7 @@ package heavy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -141,6 +142,110 @@ func TestWaitersAreServedInArrivalOrderAcrossProjects(t *testing.T) {
 	}
 	if got := strings.Fields(string(order)); strings.Join(got, " ") != "holder-start holder-end first second" {
 		t.Fatalf("command order = %q", got)
+	}
+}
+
+func TestAcquireContextCancelsWhileQueueGateIsHeld(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.OpenFile(filepath.Join(lockDir, "queue.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(gate.Fd()), syscall.LOCK_EX); err != nil {
+		gate.Close()
+		t.Fatal(err)
+	}
+	holder, err := tryAcquire(lockDir, "cpu", 1)
+	if err != nil {
+		gate.Close()
+		t.Fatal(err)
+	}
+	if holder == nil {
+		gate.Close()
+		t.Fatal("could not occupy CPU slot")
+	}
+	defer holder.Close()
+	defer gate.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		file, _, err := Acquire(ctx, "cpu", "test")
+		if file != nil {
+			_ = file.Close()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Acquire error = %v, want context deadline", err)
+		}
+	case <-ctx.Done():
+		select {
+		case err := <-result:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Acquire error = %v, want context deadline", err)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err := gate.Close(); err != nil {
+			t.Fatal(err)
+		}
+		err := <-result
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Acquire error after releasing gate = %v, want context deadline", err)
+		}
+		t.Fatal("Acquire did not cancel while queue gate was held")
+	}
+}
+
+func TestAcquirePublishesWaiterAfterTakingQueueGate(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.OpenFile(filepath.Join(lockDir, "queue.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(gate.Fd()), syscall.LOCK_EX); err != nil {
+		gate.Close()
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		file, _, err := Acquire(context.Background(), "cpu", "test")
+		if file != nil {
+			_ = file.Close()
+		}
+		result <- err
+	}()
+	<-started
+	time.Sleep(50 * time.Millisecond)
+	entries, err := os.ReadDir(lockDir)
+	if err != nil {
+		_ = gate.Close()
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "wait-") && strings.HasSuffix(entry.Name(), ".json") {
+			_ = gate.Close()
+			<-result
+			t.Fatalf("waiter %s was published before acquiring queue gate", entry.Name())
+		}
+	}
+	if err := gate.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 }
 

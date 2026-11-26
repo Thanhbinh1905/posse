@@ -144,16 +144,31 @@ func queueEntries(dir, class string) []os.DirEntry {
 	return waiters
 }
 
-func queueGate(dir string) (*os.File, error) {
+func queueGate(ctx context.Context, dir string) (*os.File, error) {
 	file, err := os.OpenFile(filepath.Join(dir, "queue.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
-		file.Close()
-		return nil, err
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return file, nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
+			_ = file.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	return file, nil
 }
 
 func IsWaiting(home, project, task string) bool {
@@ -282,16 +297,16 @@ func Acquire(ctx context.Context, class, command string) (*os.File, time.Duratio
 	}
 	waitingPath := filepath.Join(dir, fmt.Sprintf("wait-%020d-%d.json", started.UnixNano(), os.Getpid()))
 	entry, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: started, Class: class})
+	gate, err := queueGate(ctx, dir)
+	if err != nil {
+		return nil, 0, err
+	}
 	if err := os.WriteFile(waitingPath, entry, 0o600); err != nil {
+		_ = gate.Close()
 		return nil, 0, err
 	}
 	var file *os.File
 	for file == nil {
-		gate, err := queueGate(dir)
-		if err != nil {
-			_ = os.Remove(waitingPath)
-			return nil, 0, err
-		}
 		entries := queueEntries(dir, class)
 		var available []*os.File
 		for i := range count {
@@ -328,6 +343,11 @@ func Acquire(ctx context.Context, class, command string) (*os.File, time.Duratio
 				_ = os.Remove(waitingPath)
 				return nil, 0, ctx.Err()
 			case <-time.After(50 * time.Millisecond):
+			}
+			gate, err = queueGate(ctx, dir)
+			if err != nil {
+				_ = os.Remove(waitingPath)
+				return nil, 0, err
 			}
 		}
 	}
