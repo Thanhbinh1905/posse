@@ -66,7 +66,17 @@ func (s *Service) reconcileIntentsMode(ctx context.Context, db *store.DB, projec
 	for _, intent := range intents {
 		automaticRecovery := false
 		if intent.Command == "pr-release" {
-			// The retry must recheck the current PR and branch before releasing the Sandbox.
+			if !intentProcessAlive(intent) && strings.TrimPrefix(intent.Step, "resuming:") == "started" {
+				claimed, err := db.ClaimIntent(ctx, intent.ID, intent.ProcessID, os.Getpid(), "resuming:"+intent.Step)
+				if err != nil {
+					return err
+				}
+				if claimed {
+					if err := db.FinishIntent(ctx, intent.ID, os.Getpid()); err != nil {
+						return err
+					}
+				}
+			}
 			continue
 		}
 		if !allowNetwork && intent.Command == "merge --open-pr" {

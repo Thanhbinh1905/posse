@@ -856,7 +856,7 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		argsForAgent = append(argsForAgent, "--prompt", openingText)
 	}
 	err = s.runIntentStep(ctx.Context, db, intent, "agent.start", func() error {
-		return s.launchAgent(ctx.Context, opened.PaneID, workerName, kind, argsForAgent, nil, filepath.Join(taskHome, "agent-launch.sh"))
+		return s.launchAgent(ctx.Context, opened.PaneID, workerName, kind, argsForAgent, map[string]string{workerHomeEnv: home}, filepath.Join(taskHome, "agent-launch.sh"))
 	})
 	if err != nil {
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
@@ -3285,19 +3285,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if !store.IsNotFound(sandboxErr) || task.SandboxID != 0 || task.Type != "change" {
 			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
 		}
-		deliveries, err := db.TaskDeliveries(ctx, task.ID)
+		releasedSandbox, err = taskExecutorReleased(ctx, db, task.ID)
 		if err != nil {
 			return failure(err)
-		}
-		for i := len(deliveries) - 1; i >= 0; i-- {
-			policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[i].ID)
-			if err != nil {
-				return failure(err)
-			}
-			if policy == "release" {
-				releasedSandbox = true
-				break
-			}
 		}
 		if !releasedSandbox {
 			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
@@ -3572,7 +3562,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 	}
 	relaunchPrompt := "Read " + relaunchPath + " and follow it."
 	if err := track("agent.start", func() error {
-		return s.launchAgent(ctx, pane.PaneID, workerName, kind, startArgs, nil, filepath.Join(filepath.Dir(relaunchPath), "agent-launch.sh"))
+		return s.launchAgent(ctx, pane.PaneID, workerName, kind, startArgs, map[string]string{workerHomeEnv: home}, filepath.Join(filepath.Dir(relaunchPath), "agent-launch.sh"))
 	}); err != nil {
 		return failure(err)
 	}

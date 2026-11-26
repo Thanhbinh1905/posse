@@ -19,6 +19,73 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+type discardOwnershipAdapter struct {
+	*herdr.Fake
+	snapshot    herdr.Snapshot
+	processInfo json.RawMessage
+}
+
+func (adapter *discardOwnershipAdapter) Snapshot(context.Context) (herdr.Snapshot, error) {
+	return adapter.snapshot, nil
+}
+
+func (adapter *discardOwnershipAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	if method == "pane.process_info" {
+		return adapter.processInfo, nil
+	}
+	return adapter.Fake.Call(ctx, method, params)
+}
+
+func TestDiscardOwnershipChecksForeignProcessOutsideTaskPaneTopology(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateFailed)
+	sandbox := attachPRFixtureSandbox(t, fixture)
+	ctx := context.Background()
+	foreground := startSandboxProcess(t, fixture.worktree)
+	shell := startSandboxProcess(t, fixture.repo)
+	pane := herdr.Pane{PaneID: "w9:p1", WorkspaceID: "w9", TabID: "w9:t1", CWD: fixture.repo, Agent: "claude"}
+	processInfo, _ := json.Marshal(map[string]any{"process_info": map[string]any{
+		"pane_id":                     pane.PaneID,
+		"shell_pid":                   shell.Process.Pid,
+		"foreground_process_group_id": foreground.Process.Pid,
+		"foreground_processes":        []map[string]any{{"pid": foreground.Process.Pid, "name": "claude", "cwd": fixture.repo}},
+	}})
+	adapter := &discardOwnershipAdapter{
+		Fake:        fixture.service.Herdr.(*herdr.Fake),
+		snapshot:    herdr.Snapshot{Panes: []herdr.Pane{pane}},
+		processInfo: processInfo,
+	}
+	fixture.service.Herdr = adapter
+	task, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.verifyDiscardSandboxPaneOwnership(ctx, fixture.db, fixture.project, task); err == nil || !strings.Contains(err.Error(), "unowned pane") {
+		t.Fatalf("foreign pane process outside the Task pane topology was not refused: %v (sandbox %s)", err, sandbox.Path)
+	}
+
+	shellInSandbox := startSandboxProcess(t, fixture.worktree)
+	adapter.processInfo, _ = json.Marshal(map[string]any{"process_info": map[string]any{
+		"pane_id":                     pane.PaneID,
+		"shell_pid":                   shellInSandbox.Process.Pid,
+		"foreground_process_group_id": shellInSandbox.Process.Pid,
+		"foreground_processes":        []map[string]any{},
+	}})
+	if err := fixture.service.verifyDiscardSandboxPaneOwnership(ctx, fixture.db, fixture.project, task); err == nil || !strings.Contains(err.Error(), "unowned pane") {
+		t.Fatalf("foreign pane shell outside the Task pane topology was not refused: %v", err)
+	}
+
+	foregroundGroup := startSandboxProcess(t, fixture.worktree)
+	adapter.processInfo, _ = json.Marshal(map[string]any{"process_info": map[string]any{
+		"pane_id":                     pane.PaneID,
+		"shell_pid":                   shell.Process.Pid,
+		"foreground_process_group_id": foregroundGroup.Process.Pid,
+		"foreground_processes":        []map[string]any{},
+	}})
+	if err := fixture.service.verifyDiscardSandboxPaneOwnership(ctx, fixture.db, fixture.project, task); err == nil || !strings.Contains(err.Error(), "unowned pane") {
+		t.Fatalf("foreign foreground process group omitted from process list was not refused: %v", err)
+	}
+}
+
 func TestUnverifiedSandboxProcessHandleTreatsExitedProcessAsGone(t *testing.T) {
 	root := t.TempDir()
 	child := exec.Command("sleep", "60")

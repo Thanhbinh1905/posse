@@ -680,6 +680,27 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			return err
 		}
 		usesGreenhouse := taskUsesGreenhouseReviewProvider(task, cfg, "") && fullPipelineSelected(task, "")
+		if usesGreenhouse && task.State == store.StateDone && len(signals) > 0 && signals[0].Verb == "done" {
+			intent, intentErr := db.IntentByTask(ctx, task.ID)
+			if intentErr != nil && !store.IsNotFound(intentErr) {
+				return intentErr
+			}
+			var published struct {
+				PRURL string `json:"pr_url"`
+			}
+			isPublished := json.Unmarshal([]byte(signals[0].DataJSON), &published) == nil && published.PRURL != ""
+			if intentErr == nil && intent.Command == "pr-release" && !isPublished {
+				head, err := taskBranchAuthorHead(ctx, project.Root, task.Branch)
+				if err != nil {
+					return err
+				}
+				reason := "publication is blocked by an unfinished pr-release intent; resume with `posse pr release " + taskIDString(task.Seq) + " --policy release` or discard with User approval"
+				if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if len(signals) > 0 && signals[0].Verb == "needs-decision" && usesGreenhouse {
 			head, err := taskBranchAuthorHead(ctx, project.Root, task.Branch)
 			if err != nil {
