@@ -279,7 +279,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		var requestSettledAt int64
 		var result greenhouse.RoundResult
 		recordRequest := func(outcome, grant string, settledAt int64) error {
-			if !parallelMode {
+			if !parallelMode && (result.Result == nil || result.Result.Usage == nil) {
 				return nil
 			}
 			if outcome == "failed" || outcome == "refused" {

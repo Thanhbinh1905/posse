@@ -15,6 +15,12 @@ func TestSummarizeTaskUsage(t *testing.T) {
 	}
 }
 
+func TestStatsHelpUsesRequestedWindow(t *testing.T) {
+	if got := statsHelp(7); len(got) != 1 || got[0] != "No Tasks started in the last 7 days" {
+		t.Fatalf("stats help = %v, want requested 7-day window", got)
+	}
+}
+
 func TestAggregateProfileStats(t *testing.T) {
 	tasks := []statsTask{
 		{profile: "deep", state: store.StateMerged, landed: true, doneSecs: 600, tokens: 1000, tokensSeen: true, relaunches: 1},

@@ -261,6 +261,10 @@ func quantileFloat(values []float64, q float64) float64 {
 	return sorted[max(index, 0)]
 }
 
+func statsHelp(days int) []string {
+	return []string{fmt.Sprintf("No Tasks started in the last %d days", days)}
+}
+
 func (s *Service) stats(ctx *axi.Context, args []string) error {
 	parsed, err := parseArgs("stats", args, map[string]flagSpec{"days": {}})
 	if err != nil {
@@ -303,7 +307,7 @@ func (s *Service) stats(ctx *axi.Context, args []string) error {
 	}
 	help := []string{"Stats inform Profile choice with `posse start --profile <name>`; they never change Dispatch Rules"}
 	if len(rows) == 0 {
-		help = []string{"No Tasks started in the last 30 days"}
+		help = statsHelp(days)
 	}
 	usageStats, err := projectUsageStats(ctx.Context, db, project, days, time.Now())
 	if err != nil {

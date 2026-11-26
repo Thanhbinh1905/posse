@@ -232,6 +232,21 @@ func TestGreenhouseSizeErrorsRaiseNeedsDecision(t *testing.T) {
 	}
 }
 
+func TestGateModeGreenhouseUsageIsPersisted(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	cost := 0.004
+	f.service.greenhouseRound = func(context.Context, greenhouse.Round) (greenhouse.RoundResult, error) {
+		return greenhouse.RoundResult{Outcome: greenhouse.Stale, Result: &greenhouse.HostResult{Usage: &greenhouse.TokenUsage{InputTokens: 10, OutputTokens: 4, CachedInputTokens: 2, CacheWriteTokens: 1, CostUSD: &cost}}}, nil
+	}
+	if code, output, stderr := f.run("_greenhouse", "review", "t1"); code != 0 {
+		t.Fatalf("Greenhouse review: %d %s %s", code, output, stderr)
+	}
+	total, err := f.db.TaskUsageTotal(context.Background(), f.task.ID)
+	if err != nil || !total.Known || !total.KnownCost || total.Input != 30 || total.Output != 12 || total.CacheRead != 6 || total.CacheWrite != 3 || total.CostUSD == nil || *total.CostUSD != cost*3 {
+		t.Fatalf("gate-mode review usage = %+v, err=%v", total, err)
+	}
+}
+
 func TestInconclusiveQuotaFailureIsRecordedAndBackedOff(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
