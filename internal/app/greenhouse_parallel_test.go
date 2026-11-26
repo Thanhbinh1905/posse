@@ -1469,7 +1469,7 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 		if err := os.WriteFile(filepath.Join(binDir, "pi"), []byte(fakeReviewer), 0o700); err != nil {
 			t.Fatal(err)
 		}
-	} else if err := os.WriteFile(filepath.Join(binDir, "greenhouse"), []byte("#!/bin/sh\nsleep 2\nexit 1\n"), 0o700); err != nil {
+	} else if err := os.WriteFile(filepath.Join(binDir, "greenhouse"), []byte("#!/bin/sh\nprintf '%s\\n' 'fixture daemon startup failure' >&2\nsleep 2\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1571,7 +1571,8 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 		time.Sleep(50 * time.Millisecond)
 	}
 	if len(requests) != 1 || requests[0].RequestedHead != head {
-		t.Fatalf("watch pass did not reach the spawned review child: requests=%+v notices=%+v", requests, notices)
+		daemonLog, logErr := os.ReadFile(filepath.Join(greenhouseHome, "posse-daemon.log"))
+		t.Fatalf("watch pass did not reach the spawned review child: requests=%+v notices=%+v daemon log=%q log error=%v", requests, notices, daemonLog, logErr)
 	}
 	if realGreenhouse {
 		if requests[0].Outcome != "verdict" || requests[0].VerdictID == nil {
