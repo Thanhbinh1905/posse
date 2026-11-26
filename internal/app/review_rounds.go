@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -1099,6 +1100,61 @@ func greenhouseReviewFenced(ctx context.Context, db *store.DB, project store.Pro
 	return intent.Command == "teardown", nil
 }
 
+func recordEmptyGreenhouseVerdict(ctx context.Context, db *store.DB, project store.Project, change store.Task, target store.ReviewTarget) (bool, error) {
+	repository := ""
+	if project.IsWorkspace() {
+		repository = target.Repository
+	}
+	if !taskUsesGreenhouseReviewProvider(change, config.Config{}, repository) || !fullPipelineSelected(change, repository) {
+		return false, nil
+	}
+	member, err := greenhouseTaskMember(ctx, db, project, change, target.Repository)
+	if err != nil {
+		return false, err
+	}
+	if change.BaseRef != "" {
+		count, err := commitsAheadOfBase(ctx, member.worktree, change.BaseRef)
+		if err != nil {
+			return false, err
+		}
+		if count == "0" {
+			return false, nil
+		}
+	}
+	branchHead, err := taskBranchAuthorHead(ctx, member.root, change.Branch)
+	if err != nil {
+		return false, err
+	}
+	if branchHead != target.Commit {
+		return false, nil
+	}
+	providerTarget, err := greenhouseTarget(ctx, member)
+	if err != nil {
+		return false, err
+	}
+	reviewBase, err := greenhouseReviewBase(ctx, member.worktree, providerTarget, target.Commit)
+	if err != nil {
+		return false, err
+	}
+	command := exec.CommandContext(ctx, "git", "-C", member.worktree, "diff", "--quiet", reviewBase, target.Commit)
+	if err := command.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("check Greenhouse review diff %s..%s: %w", reviewBase, target.Commit, err)
+	}
+	verdict := store.Verdict{
+		TaskID: change.ID, Repository: target.Repository, Provider: store.GreenhouseReviewProvider,
+		Protocol: "2", Grant: fmt.Sprintf("empty-diff/%d/%s/%s", change.ID, target.Repository, target.Commit),
+		Head: target.Commit, Target: providerTarget, ReviewBase: reviewBase, Outcome: "clean", Mode: "gate",
+	}
+	_, err = db.RecordGreenhouseVerdict(ctx, verdict, func(ctx context.Context) (string, error) {
+		return taskBranchAuthorHead(ctx, member.root, change.Branch)
+	})
+	return err == nil, err
+}
+
 func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget) error {
 	return s.startParallelGreenhouseReviewsTracked(ctx, db, home, project, change, targets, nil, false)
 }
@@ -1109,6 +1165,15 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 		return err
 	}
 	for _, target := range targets {
+		if !explicitStart {
+			empty, err := recordEmptyGreenhouseVerdict(ctx, db, project, change, target)
+			if err != nil {
+				return err
+			}
+			if empty {
+				continue
+			}
+		}
 		failures, _ := repeatedGreenhouseReviewFailures(requests, change.ID, target.Repository, target.Commit)
 		lastFailure, hasFailureNotice, err := db.GreenhouseFailureNoticeSummary(ctx, change.ID, target.Repository, target.Commit)
 		if err != nil {
