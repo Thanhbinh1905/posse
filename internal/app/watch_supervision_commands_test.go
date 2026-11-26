@@ -278,6 +278,7 @@ func TestSystemdWatchSurvivesLaunchingScopeTermination(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := fmt.Sprintf("posse-watch-launch-%d.scope", os.Getpid())
+	t.Cleanup(func() { cleanupTestWatchRuntime(t, fixture.home, fixture.project.ID, scope) })
 	args := []string{"--user", "--scope", "--unit=" + scope, "--setenv=POSSE_TEST_WATCH_SCOPE_HELPER=1", "--setenv=POSSE_TEST_WATCH_HOME=" + fixture.home, "--setenv=POSSE_TEST_WATCH_PROJECT_ID=" + strconv.FormatInt(fixture.project.ID, 10), "--setenv=POSSE_TEST_WATCH_BINARY=" + binary, "--setenv=POSSE_HOME=" + fixture.home, "--working-directory=" + fixture.repo, "--", testBinary, "-test.run=^TestSystemdWatchScopeLauncherHelper$"}
 	launcher := exec.Command("systemd-run", args...)
 	var launcherOutput bytes.Buffer
@@ -291,11 +292,6 @@ func TestSystemdWatchSurvivesLaunchingScopeTermination(t *testing.T) {
 		_ = launcher.Wait()
 		t.Fatalf("wait for Project Watch started in launching scope: %v; launcher output: %s", err, launcherOutput.String())
 	}
-	t.Cleanup(func() {
-		_ = exec.Command("systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", scope).Run()
-		_ = stopSystemdWatch(context.Background(), fixture.home, fixture.project.ID)
-		_ = db.ClearWatchRuntime(context.Background(), fixture.project.ID, watch.PID, watch.Token)
-	})
 	if output, err := exec.Command("systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", scope).CombinedOutput(); err != nil {
 		_ = launcher.Process.Kill()
 		_ = launcher.Wait()
@@ -308,6 +304,57 @@ func TestSystemdWatchSurvivesLaunchingScopeTermination(t *testing.T) {
 	}
 	if !watchPIDRunning(watch.PID) || !systemdWatchUnitActive(context.Background(), fixture.home, fixture.project.ID) {
 		t.Fatalf("Project Watch did not survive termination of launching scope %s: %#v", scope, watch)
+	}
+}
+
+func cleanupTestWatchRuntime(t *testing.T, home string, projectID int64, scope string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if scope != "" {
+		_ = exec.CommandContext(ctx, "systemctl", "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", scope).Run()
+	}
+	if systemdWatchUnitLoaded(ctx, home, projectID) {
+		if err := stopSystemdWatch(ctx, home, projectID); err != nil {
+			t.Errorf("stop test Project Watch unit: %v", err)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		processes, err := systemWatchProcesses(home)
+		if err != nil {
+			t.Errorf("list test Project Watch processes: %v", err)
+			return
+		}
+		found := false
+		for _, process := range processes {
+			if process.WatchProjectID != projectID {
+				continue
+			}
+			found = true
+			if process.PID > 1 {
+				if err := stopStoredWatchRuntimeForDown(ctx, home, process); err != nil {
+					t.Errorf("stop test Project Watch PID %d: %v", process.PID, err)
+				}
+			}
+		}
+		if !found && !systemdWatchUnitActive(ctx, home, projectID) && !systemdWatchUnitLoaded(ctx, home, projectID) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	processes, err := systemWatchProcesses(home)
+	if err != nil {
+		t.Errorf("list test Project Watch processes: %v", err)
+		return
+	}
+	for _, process := range processes {
+		if process.WatchProjectID == projectID {
+			t.Errorf("test Project Watch process survived cleanup: PID %d", process.PID)
+		}
+	}
+	if systemdWatchUnitActive(ctx, home, projectID) || systemdWatchUnitLoaded(ctx, home, projectID) {
+		t.Errorf("test Project Watch systemd unit survived cleanup: %s", systemdWatchUnitName(home, projectID))
 	}
 }
 
@@ -400,6 +447,7 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	fixture := newWorkerWatchFixture(t, root)
+	t.Cleanup(func() { cleanupTestWatchRuntime(t, fixture.home, fixture.project.ID, "") })
 	env := herdr.IsolatedTestEnvironment(root)
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
@@ -508,11 +556,10 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 			t.Fatalf("systemd did not restart Project Watch after crash: %#v", before)
 		}
 	}
-	var watchToStop watchProcess
 	found := false
 	watchDeadline = time.Now().Add(5 * time.Second)
 	for !found && time.Now().Before(watchDeadline) {
-		watchToStop, found = inspectWatchProcess(fixture.home, before.PID)
+		_, found = inspectWatchProcess(fixture.home, before.PID)
 		if !found {
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -520,11 +567,6 @@ func TestWorkerSignalPreservesRunningProjectWatch(t *testing.T) {
 	if !found {
 		t.Fatalf("Project Watch PID %d was not discoverable", before.PID)
 	}
-	t.Cleanup(func() {
-		if err := stopStoredWatchRuntime(context.Background(), fixture.home, watchToStop); err != nil {
-			t.Errorf("stop Project Watch PID %d: %v", before.PID, err)
-		}
-	})
 	heartbeatDeadline := time.Now().Add(10 * time.Second)
 	lastHeartbeat := before.HeartbeatAt
 	heartbeatAdvanced := false
