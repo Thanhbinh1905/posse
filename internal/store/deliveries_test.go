@@ -161,10 +161,41 @@ func TestLatestTaskExecutorPolicyUsesLatestSuccessfulOperation(t *testing.T) {
 		} else if _, err := db.RecordDeliveryOperation(ctx, operation); err != nil {
 			t.Fatal(err)
 		}
-		latest, found, err := db.LatestTaskExecutorPolicy(ctx, taskID)
+		latest, found, err := db.LatestAppliedTaskExecutorPolicy(ctx, taskID)
 		if err != nil || !found || latest.ID != applied.ID {
 			t.Fatalf("latest Task executor policy after %s operation = %#v, found=%t, err=%v; want last succeeded operation %#v", outcome, latest, found, err, applied)
 		}
+	}
+}
+
+func TestLatestTaskExecutorPolicyIncludesPendingOperation(t *testing.T) {
+	ctx := context.Background()
+	db, _, _, taskID := deliveryTestTask(t)
+	delivery, err := db.EnsureDelivery(ctx, taskID, "", "https://github.com/acme/shop/pull/17", "publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordDeliveryOperation(ctx, DeliveryOperation{
+		DeliveryID: delivery.ID,
+		Operation:  "executor_policy",
+		Actor:      "lead",
+		Subject:    "release",
+		Outcome:    "succeeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.BeginDeliveryOperation(ctx, DeliveryOperation{
+		DeliveryID: delivery.ID,
+		Operation:  "executor_policy",
+		Actor:      "lead",
+		Subject:    "release",
+	}, "new-head", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, found, err := db.LatestTaskExecutorPolicy(ctx, taskID)
+	if err != nil || !found || latest.ID != pending.ID || latest.Outcome != "pending" {
+		t.Fatalf("latest Task executor policy = %#v, found=%t, err=%v; want pending operation %#v", latest, found, err, pending)
 	}
 }
 

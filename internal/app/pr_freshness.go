@@ -271,7 +271,7 @@ func (s *Service) relaunchReleasedFullPipelineWorker(ctx context.Context, db *st
 }
 
 func taskExecutorReleased(ctx context.Context, db *store.DB, taskID int64) (bool, error) {
-	operation, found, err := db.LatestTaskExecutorPolicy(ctx, taskID)
+	operation, found, err := db.LatestAppliedTaskExecutorPolicy(ctx, taskID)
 	if err != nil || !found {
 		return false, err
 	}
