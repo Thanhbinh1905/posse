@@ -17,6 +17,13 @@ type taskUsageObservation struct {
 	counts    usage.Counts
 }
 
+func taskUsageRecorder(db *store.DB, cfg config.Config) func(context.Context, store.Task) error {
+	return func(ctx context.Context, task store.Task) error {
+		_, err := recordTaskUsage(ctx, db, task, cfg)
+		return err
+	}
+}
+
 func recordTaskUsage(ctx context.Context, db *store.DB, task store.Task, cfg config.Config) (taskUsageObservation, error) {
 	kind := task.AgentSessionKind
 	if kind == "" {

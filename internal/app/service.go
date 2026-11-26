@@ -451,8 +451,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 			}
 		}
 	}
+	usageRecorder := taskUsageRecorder(db, cfg)
 	run := func() (runtime.RunResult, error) {
-		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress, usageRecorder)
 		if err == nil && !result.GenerationMismatch {
 			err = observeLeadAgent(ctx, db, project, result.Snapshot)
 		}
@@ -733,6 +734,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 	herdrReady := false
 	var skipped error
 	allowNetworkRecovery := options.allowRecovery
+	usageRecorder := taskUsageRecorder(db, cfg)
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {
 			if !isHerdrUnavailable(err) {
@@ -752,14 +754,14 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				if claim.OwnerPID != 0 && processAlive(claim.OwnerPID) {
 					runErr = fmt.Errorf("%w: process %d is recovering the Project", errRecoveryDeferred, claim.OwnerPID)
 				} else {
-					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress, usageRecorder)
 					if runErr == nil && result.GenerationMismatch {
 						adopted, err := s.adoptCurrentGeneration(ctx, db, project, result.Snapshot)
 						if err != nil {
 							return cfg, err
 						}
 						if adopted {
-							result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+							result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress, usageRecorder)
 						}
 					}
 					if runErr == nil && result.GenerationMismatch {

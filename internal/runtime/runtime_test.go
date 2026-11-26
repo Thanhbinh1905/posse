@@ -16,6 +16,31 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestReconcileRecordsUsageForWorkerWithMissingPane(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.NextTaskLaunch(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	observation := task.Observation()
+	observation.AgentSession, observation.AgentSessionKind = `{"session_id":"ended-session"}`, "pi"
+	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
+		t.Fatal(err)
+	}
+	var observed store.Task
+	recorder := func(_ context.Context, got store.Task) error {
+		observed = got
+		return nil
+	}
+	if _, err := reconcileSnapshot(ctx, db, project.ID, herdr.Snapshot{}, time.Now(), 0, recorder); err != nil {
+		t.Fatal(err)
+	}
+	if observed.ID != task.ID || observed.AgentSessionKind != "pi" || !strings.Contains(observed.AgentSession, "ended-session") {
+		t.Fatalf("usage recorder saw Task session %q (%s), want ended session", observed.AgentSession, observed.AgentSessionKind)
+	}
+}
+
 func TestReconcileDoesNotReportWorkerExitDuringTeardown(t *testing.T) {
 	db, project, task := createWorkingTask(t)
 	defer db.Close()
