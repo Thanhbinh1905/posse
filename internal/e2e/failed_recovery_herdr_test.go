@@ -87,7 +87,7 @@ func TestFailedRecoveryBoundWithRealHerdr(t *testing.T) {
 		t.Fatal(err)
 	}
 	var notices int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=?`, after.ID).Scan(&notices); err != nil {
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='recovery_failed'`, after.ID).Scan(&notices); err != nil {
 		t.Fatal(err)
 	}
 	starts := strings.Count(string(startsAfter), "start\n") - strings.Count(string(startsBefore), "start\n")
