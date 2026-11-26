@@ -683,7 +683,31 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 		return result, err
 	}
 	defer release()
-	intent, err := s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests, "review_cap_decision": option.capDecision}))
+	var intent store.Intent
+	payload := marshalJSON(map[string]any{"discard": discardable, "user_quote": quote, "keep_branch": keepBranch, "keep_pull_requests": option.keepPullRequests, "review_cap_decision": option.capDecision})
+	if discardable {
+		err = withSandboxStateLock(ctx, db, func() error {
+			prior, lookupErr := db.IntentByTask(ctx, task.ID)
+			if lookupErr == nil && prior.Command == "pr-release" && strings.TrimPrefix(prior.Step, "resuming:") == "started" && !intentProcessAlive(prior) {
+				claimed, claimErr := db.ClaimIntent(ctx, prior.ID, prior.ProcessID, os.Getpid(), "resuming:"+prior.Step)
+				if claimErr != nil {
+					return claimErr
+				}
+				if claimed {
+					if finishErr := db.FinishIntent(ctx, prior.ID, os.Getpid()); finishErr != nil {
+						return finishErr
+					}
+				}
+			} else if lookupErr != nil && !store.IsNotFound(lookupErr) {
+				return lookupErr
+			}
+			var startErr error
+			intent, startErr = s.startTaskIntentWithPayloadLockedAtStep(ctx, db, project.ID, task.ID, "teardown", payload, "started")
+			return startErr
+		})
+	} else {
+		intent, err = s.startTaskIntentWithPayload(ctx, db, project.ID, task.ID, "teardown", payload)
+	}
 	if err != nil {
 		settled, settleErr := s.finishSettledTeardownIntent(ctx, db, project.ID, task.ID)
 		if settleErr != nil {
