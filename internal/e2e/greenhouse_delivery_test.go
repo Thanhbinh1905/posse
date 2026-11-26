@@ -294,8 +294,93 @@ esac
 		t.Fatalf("verified done Signal did not gate the exact Greenhouse delivery: %+v", done)
 	}
 	watchEnv := setEnv(mergeEnv, "POSSE_WATCH_TOKEN", "")
+	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelRelease()
+	release := exec.CommandContext(releaseCtx, f.binary, "pr", "release", "t1", "--policy", "release")
+	release.Dir, release.Env = f.repo, mergeEnv
+	type releaseResult struct {
+		output []byte
+		err    error
+	}
+	released := make(chan releaseResult, 1)
+	releaseCollected := false
+	defer func() {
+		cancelRelease()
+		if !releaseCollected {
+			<-released
+		}
+	}()
+	go func() {
+		output, err := release.CombinedOutput()
+		released <- releaseResult{output: output, err: err}
+	}()
+	watchDuringRelease := false
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		stateDB, err := store.OpenReadOnly(f.home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		intent, intentErr := stateDB.IntentByTask(context.Background(), task.ID)
+		stateDB.Close()
+		if intentErr == nil && intent.Command == "pr-release" {
+			if output, err := runBinaryAllowFailure(f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+				t.Fatalf("Project Watch during PR release: %v\n%s", err, output)
+			}
+			watchDuringRelease = true
+			break
+		}
+		select {
+		case result := <-released:
+			releaseCollected = true
+			if result.err != nil {
+				t.Fatalf("release Greenhouse-approved PR: %v\n%s", result.err, result.output)
+			}
+			goto releaseFinished
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !watchDuringRelease {
+		t.Fatal("PR release did not create an intent before completing")
+	}
+	select {
+	case result := <-released:
+		releaseCollected = true
+		if result.err != nil {
+			t.Fatalf("release Greenhouse-approved PR: %v\n%s", result.err, result.output)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("PR release did not finish")
+	}
+releaseFinished:
 	if output, err := runBinaryAllowFailure(f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "3000"); err != nil {
-		t.Fatalf("run Project Watch pass: %v\n%s", err, output)
+		t.Fatalf("Project Watch after PR release: %v\n%s", err, output)
+	}
+	stateDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices, err := stateDB.Notices(context.Background(), f.projectID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "greenhouse_review_failed" {
+			t.Fatalf("published, Greenhouse-approved head raised failure Notice during PR release: %+v", notice)
+		}
+		if notice.TaskID == task.ID && notice.Kind == "greenhouse_publish_queued" {
+			t.Fatalf("published, Greenhouse-approved head queued another publication: %+v", notice)
+		}
+	}
+	messages, err := stateDB.TaskMessagesAfter(context.Background(), task.ID, 0, 100)
+	stateDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.Status != "withdrawn" && strings.Contains(message.Body, "posse publish") {
+			t.Fatalf("published, Greenhouse-approved head queued another publication: %+v", message)
+		}
 	}
 	statusOutput := runPosse(t, f.binary, f.repo, mergeEnv, "--json", "list", "--full")
 	if !strings.Contains(statusOutput, `"greenhouse":"PR green"`) {

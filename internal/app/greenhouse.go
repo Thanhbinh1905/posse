@@ -685,7 +685,11 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			if intentErr != nil && !store.IsNotFound(intentErr) {
 				return intentErr
 			}
-			if intentErr == nil && intent.Command == "pr-release" {
+			var published struct {
+				PRURL string `json:"pr_url"`
+			}
+			isPublished := json.Unmarshal([]byte(signals[0].DataJSON), &published) == nil && published.PRURL != ""
+			if intentErr == nil && intent.Command == "pr-release" && !isPublished {
 				head, err := taskBranchAuthorHead(ctx, project.Root, task.Branch)
 				if err != nil {
 					return err
