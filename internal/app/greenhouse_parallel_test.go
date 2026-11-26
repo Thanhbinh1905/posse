@@ -1494,6 +1494,7 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	previousVerifier := watchExecutableVerifier
 	watchExecutableVerifier = func(string) bool { return true }
 	t.Cleanup(func() { watchExecutableVerifier = previousVerifier })
+	t.Cleanup(func() { cleanupTestWatchRuntime(t, f.home, f.project.ID, "") })
 	if err := f.service.startWatchRuntime(context.Background(), f.db, f.home, f.project, binary); err != nil {
 		t.Fatal(err)
 	}
@@ -1513,11 +1514,6 @@ print(json.dumps({"type": "agent_settled", "aborted": False}))
 	if process.PID != watch.PID {
 		t.Fatalf("Project Watch PID %d did not start", watch.PID)
 	}
-	t.Cleanup(func() {
-		if err := stopStoredWatchRuntime(context.Background(), f.home, process); err != nil {
-			t.Errorf("stop Project Watch: %v", err)
-		}
-	})
 	passToken := "greenhouse-watch-pass"
 	if err := writeFile(watchPassRequestPath(f.home, f.project), []byte(passToken+"\n")); err != nil {
 		t.Fatal(err)

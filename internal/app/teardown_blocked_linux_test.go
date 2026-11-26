@@ -15,6 +15,27 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestStableProcessIDsDropsProcessesThatDoNotSurviveRescan(t *testing.T) {
+	for _, test := range []struct {
+		first []int
+		next  []int
+		want  []int
+	}{
+		{first: []int{10, 20}, next: []int{20, 30}, want: []int{20}},
+		{first: []int{10}, next: nil, want: nil},
+	} {
+		got := stableProcessIDs(test.first, test.next)
+		if len(got) != len(test.want) {
+			t.Fatalf("stableProcessIDs(%v, %v) = %v, want %v", test.first, test.next, got, test.want)
+		}
+		for i := range got {
+			if got[i] != test.want[i] {
+				t.Fatalf("stableProcessIDs(%v, %v) = %v, want %v", test.first, test.next, got, test.want)
+			}
+		}
+	}
+}
+
 func TestStableTaskProcessesDropsProcessesThatDoNotSurviveRescan(t *testing.T) {
 	first := []taskProcessDetail{{PID: 10}, {PID: 20}, {PID: 30}}
 	got := stableTaskProcesses(first, func() []taskProcessDetail { return []taskProcessDetail{{PID: 10}, {PID: 30}, {PID: 40}} })
