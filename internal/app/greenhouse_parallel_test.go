@@ -494,6 +494,61 @@ func TestGreenhouseCleanVerdictAfterTargetRefreshQueuesPublicationWithinOneRecon
 	}
 }
 
+func TestGreenhousePublishedPRReleaseDoesNotCreateFailureNotice(t *testing.T) {
+	f := newPRMergeFixture(t, "local", store.StateWorking)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	prURL := "https://github.com/acme/shop/pull/17"
+	if _, err := f.db.AddSignal(ctx, f.task.ID, "done", "Published Greenhouse-reviewed change", map[string]string{"pr_url": prURL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, f.task.ID, store.StateWorking, store.StateDone, "worker", "Published Greenhouse-reviewed change"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.RecordVerifiedPRHead(ctx, f.task.ID, prURL, f.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	verdict := store.Verdict{TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider, Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA, ReviewBase: f.headSHA, Outcome: "clean", Mode: "gate"}
+	if recorded, err := f.db.RecordGreenhouseVerdict(ctx, verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record passing Verdict: recorded=%v err=%v", recorded, err)
+	}
+	if err := f.db.StartIntent(ctx, f.project.ID, f.task.ID, "pr-release", "started", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.reconcileGreenhouseRepositoryPrepublication(ctx, f.db, f.home, f.project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := f.db.Notices(ctx, f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "greenhouse_review_failed" {
+			t.Fatalf("published, approved head created greenhouse_review_failed Notice: %+v", notice)
+		}
+	}
+	messages, err := f.db.UndeliveredTaskMessages(ctx, f.task.ID)
+	if err != nil || len(messages) != 0 {
+		t.Fatalf("published, approved head queued publication: %+v, %v", messages, err)
+	}
+}
+
 func TestGreenhouseDoesNotRepeatPublishWhilePRReleaseIntentBlocksIt(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
@@ -721,9 +776,19 @@ func TestGreenhouseBlockingVerdictQueuesEveryFindingPattern(t *testing.T) {
 	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.service.queueGreenhouseReviewFix(context.Background(), f.db, f.project, f.task); err != nil {
+		t.Fatalf("Watch retry with a pending whole-pattern Review fix: %v", err)
+	}
 	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
 	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "P-1") || !strings.Contains(messages[0].Body, "P-2") {
 		t.Fatalf("Review fix instructions = %+v, err=%v; want both finding patterns", messages, err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "pr_watch_failing") != 0 {
+		t.Fatalf("Watch failure Notices = %+v; want none while the whole-pattern Review fix is pending", notices)
 	}
 }
 
