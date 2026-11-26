@@ -1023,6 +1023,30 @@ func TestApprovedDiscardRecoversDeadPRReleaseIntent(t *testing.T) {
 	}
 }
 
+func TestApprovedDiscardDoesNotClearUnrelatedDeadIntent(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "publish", "candidate.push", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("teardown", "t1", "--discard", "--user-approved", "Discard, làm lại (Recommended)")
+	if code == 0 || !strings.Contains(output+stderr, "intent_active") {
+		t.Fatalf("discard with unrelated dead intent: %d %s %s", code, output, stderr)
+	}
+	intent, err := fixture.db.IntentByTask(ctx, fixture.task.ID)
+	if err != nil || intent.Command != "publish" || intent.Step != "candidate.push" {
+		t.Fatalf("unrelated dead intent after refused discard = %#v, %v", intent, err)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateDone {
+		t.Fatalf("Task after refused discard = %#v, %v", task, err)
+	}
+}
+
 func TestPRReleaseRefusesWhenRemoteHeadDiffersFromPRHead(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()

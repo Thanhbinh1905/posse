@@ -688,7 +688,7 @@ func (s *Service) teardownTask(ctx context.Context, db *store.DB, project store.
 	if discardable {
 		err = withSandboxStateLock(ctx, db, func() error {
 			prior, lookupErr := db.IntentByTask(ctx, task.ID)
-			if lookupErr == nil && !intentProcessAlive(prior) {
+			if lookupErr == nil && prior.Command == "pr-release" && strings.TrimPrefix(prior.Step, "resuming:") == "started" && !intentProcessAlive(prior) {
 				claimed, claimErr := db.ClaimIntent(ctx, prior.ID, prior.ProcessID, os.Getpid(), "resuming:"+prior.Step)
 				if claimErr != nil {
 					return claimErr
