@@ -721,9 +721,19 @@ func TestGreenhouseBlockingVerdictQueuesEveryFindingPattern(t *testing.T) {
 	if err := f.service.handleGreenhouseBlockingVerdict(context.Background(), f.db, f.project, f.task, verdict); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.service.queueGreenhouseReviewFix(context.Background(), f.db, f.project, f.task); err != nil {
+		t.Fatalf("Watch retry with a pending whole-pattern Review fix: %v", err)
+	}
 	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
 	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "P-1") || !strings.Contains(messages[0].Body, "P-2") {
 		t.Fatalf("Review fix instructions = %+v, err=%v; want both finding patterns", messages, err)
+	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countNoticeKind(notices, "pr_watch_failing") != 0 {
+		t.Fatalf("Watch failure Notices = %+v; want none while the whole-pattern Review fix is pending", notices)
 	}
 }
 
