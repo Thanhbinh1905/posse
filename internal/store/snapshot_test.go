@@ -79,6 +79,64 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	}
 }
 
+func TestTaskUsageSurvivesSnapshotRebuild(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Usage", MergeMode: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchCost := 0.01
+	if err := db.RecordTaskLaunchUsage(ctx, TaskLaunchUsage{TaskID: taskID, Launch: 1, SessionID: "pi-session", SessionKind: "pi", Input: 12, Output: 3, CacheRead: 4, CacheWrite: 2, CostUSD: &launchCost, Profile: "author"}); err != nil {
+		t.Fatal(err)
+	}
+	request := GreenhouseReviewRequest{ProjectID: project.ID, TaskID: taskID, Repository: "shop", RequestedHead: strings.Repeat("a", 40), Provider: GreenhouseReviewProvider, RequestedAt: 1, SettledAt: 2, Outcome: "failed", Grant: "shop/t1/shop/r1"}
+	if err := db.RecordGreenhouseReviewRequest(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	reviewCost := 0.02
+	if err := db.RecordTaskReviewUsage(ctx, TaskReviewUsage{TaskID: taskID, Repository: request.Repository, Head: request.RequestedHead, Grant: request.Grant, Input: 5, Output: 2, CacheRead: 1, CacheWrite: 1, CostUSD: &reviewCost, UsageJSON: `{"usage":{"input_tokens":5}}`}); err != nil {
+		t.Fatal(err)
+	}
+	unknownRequest := request
+	unknownRequest.RequestedAt, unknownRequest.SettledAt, unknownRequest.Grant = 3, 4, "shop/t1/shop/r2"
+	if err := db.RecordGreenhouseReviewRequest(ctx, unknownRequest); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := db.RebuildFromSnapshots(ctx, home); err != nil || count != 1 {
+		t.Fatalf("rebuild count = %d, %v", count, err)
+	}
+	total, err := db.TaskUsageTotal(ctx, taskID)
+	if err != nil || !total.Known || total.KnownCost || total.Input != 17 || total.Output != 5 || total.CacheRead != 5 || total.CacheWrite != 3 || total.CostUSD != nil {
+		t.Fatalf("rebuilt Task usage = %+v, err=%v", total, err)
+	}
+	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
+	if err != nil || len(requests) != 2 {
+		t.Fatalf("rebuilt Greenhouse requests = %+v, err=%v", requests, err)
+	}
+	reviewTotal, err := db.ProjectReviewUsageTotal(ctx, project.ID, 0)
+	if err != nil || reviewTotal.Known || reviewTotal.Unknown != 1 {
+		t.Fatalf("rebuilt review usage = %+v, err=%v", reviewTotal, err)
+	}
+	reviews, err := db.TaskReviewUsages(ctx, taskID)
+	if err != nil || len(reviews) != 1 || reviews[0].CostUSD == nil || *reviews[0].CostUSD != reviewCost {
+		t.Fatalf("rebuilt review usage rows = %+v, err=%v", reviews, err)
+	}
+	launches, err := db.TaskLaunchUsages(ctx, taskID)
+	if err != nil || len(launches) != 1 || launches[0].Profile != "author" {
+		t.Fatalf("rebuilt launch usage = %+v, err=%v", launches, err)
+	}
+}
+
 func TestDeleteEmptyProjectRemovesRecoverySnapshot(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

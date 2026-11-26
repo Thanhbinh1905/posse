@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -47,12 +48,15 @@ type TaskSnapshot struct {
 	Deliveries         []Delivery          `toml:"deliveries,omitempty"`
 	DeliveryOperations []DeliveryOperation `toml:"delivery_operations,omitempty"`
 	// Members and TaskRepos are set for a workspace Project only.
-	Members         []ProjectRepo       `toml:"members,omitempty"`
-	TaskRepos       []TaskRepo          `toml:"task_repos,omitempty"`
-	TargetChanges   []TaskTargetChange  `toml:"target_changes,omitempty"`
-	PlanRevisions   []string            `toml:"plan_revisions,omitempty"`
-	BudgetUsage     []BudgetUsageRecord `toml:"budget_usage,omitempty"`
-	BudgetCrossings []BudgetCrossing    `toml:"budget_crossings,omitempty"`
+	Members         []ProjectRepo             `toml:"members,omitempty"`
+	TaskRepos       []TaskRepo                `toml:"task_repos,omitempty"`
+	TargetChanges   []TaskTargetChange        `toml:"target_changes,omitempty"`
+	PlanRevisions   []string                  `toml:"plan_revisions,omitempty"`
+	BudgetUsage     []BudgetUsageRecord       `toml:"budget_usage,omitempty"`
+	BudgetCrossings []BudgetCrossing          `toml:"budget_crossings,omitempty"`
+	LaunchUsage     []TaskLaunchUsage         `toml:"launch_usage,omitempty"`
+	ReviewRequests  []GreenhouseReviewRequest `toml:"greenhouse_review_requests,omitempty"`
+	ReviewUsage     []TaskReviewUsage         `toml:"review_usage,omitempty"`
 	// ReviewTargets and ReviewVerdict are set for a Review Task only.
 	ReviewTargets []ReviewTarget `toml:"review_targets,omitempty"`
 	ReviewVerdict *ReviewVerdict `toml:"review_verdict,omitempty"`
@@ -398,6 +402,24 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 	if err != nil {
 		return err
 	}
+	launchUsage, err := db.TaskLaunchUsages(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	reviewUsage, err := db.TaskReviewUsages(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	projectReviewRequests, err := db.GreenhouseReviewRequests(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	var reviewRequests []GreenhouseReviewRequest
+	for _, request := range projectReviewRequests {
+		if request.TaskID == taskID {
+			reviewRequests = append(reviewRequests, request)
+		}
+	}
 	turnToken, err := db.TaskTurnToken(ctx, taskID)
 	if err != nil {
 		return err
@@ -408,7 +430,7 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, BranchAuthors: branchAuthors, TaskAdoptions: adoptions, InvalidatedReviewVerdicts: invalidatedReviewVerdicts, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, BranchAuthors: branchAuthors, TaskAdoptions: adoptions, InvalidatedReviewVerdicts: invalidatedReviewVerdicts, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings, LaunchUsage: launchUsage, ReviewRequests: reviewRequests, ReviewUsage: reviewUsage}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1133,7 +1155,10 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys=ON`); err != nil {
 		return err
 	}
-	for _, table := range []string{"provider_finding_events", "fix_round_provider_findings", "provider_findings", "provider_finding_patterns", "review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decision_evidence", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
+	if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS greenhouse_review_requests_no_delete`); err != nil {
+		return err
+	}
+	for _, table := range []string{"task_review_usage", "greenhouse_review_requests", "task_launch_usage", "provider_finding_events", "fix_round_provider_findings", "provider_findings", "provider_finding_patterns", "review_cap_grants", "task_adoptions", "merge_queue_entries", "notice_notifications", "approvals", "events", "messages", "notice_delivery_receipts", "notices", "decision_evidence", "decisions", "decision_notice_cursors", "report_acceptances", "report_reviews", "signals", "completed_rider_busy", "transitions", "intents", "resource_leases", "mounts", "project_runtime", "lead_start_claims", "validation_stage_results", "validation_candidates", "validation_fix_rounds", "branch_author_invalidated_verdicts", "branch_authorship", "review_dispositions", "review_carries", "review_finding_events", "review_findings", "review_patterns", "review_rounds", "review_receipts", "review_verdicts", "review_targets", "task_launch_identities", "task_plan_revisions", "task_target_changes", "pr_body_markers", "pr_task_watch_failures", "delivery_operations", "deliveries", "task_repos", "project_repos", "repo_watch_state", "pr_observations", "project_watch_state"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
@@ -1184,6 +1209,30 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks(id,project_id,seq,type,reviews_task_id,title,pr_title,short_name,state,profile,dispatch_rule,landing_mode,autonomy_review,autonomy_land,branch,base_ref,target_branch,worktree_path,herdr_workspace_id,pane_id,pane_label,agent_name,agent_session,agent_session_kind,pr_url,landed_ref,last_output_hash,last_worktree_hash,last_progress_at,agent_absent_since,idle_since,agent_status,agent_status_since,launches,gated_sha,created_at,updated_at,mount_id,plan_json,report_kind,report_digest,report_manifest_json,containment_mode,containment_path,containment_marker,pane_shell_identity,workflow_run_id,plan_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			task.ID, task.ProjectID, task.Seq, task.Type, reviewed, task.Title, task.PRTitle, task.ShortName, task.State, task.Profile, task.DispatchRule, task.MergeMode, task.AutonomyReview, task.AutonomyMerge, task.Branch, task.BaseRef, task.TargetBranch, task.WorktreePath, task.HerdrWorkspaceID, task.PaneID, task.PaneLabel, task.AgentName, task.AgentSession, task.AgentSessionKind, task.PRURL, task.MergedRef, task.LastOutputHash, task.LastWorktreeHash, task.LastProgressAt, task.AgentAbsentSince, task.IdleSince, task.AgentStatus, task.AgentStatusSince, task.Launches, task.GatedSHA, task.CreatedAt, task.UpdatedAt, nullableID(task.SandboxID), task.PlanJSON, task.ReportKind, task.ReportDigest, task.ReportManifestJSON, task.ContainmentMode, task.ContainmentPath, task.ContainmentMarker, task.PaneShellIdentity, storedWorkflowRunID(task.PlanJSON), storedPlanRevision(task.PlanJSON)); err != nil {
 			return err
+		}
+		for _, usage := range snapshot.LaunchUsage {
+			if usage.TaskID != 0 && usage.TaskID != task.ID || usage.Launch < 1 || usage.Launch > max(task.Launches, 1) || usage.SessionID == "" || usage.SessionKind == "" || usage.Input < 0 || usage.Output < 0 || usage.CacheRead < 0 || usage.CacheWrite < 0 || usage.CostUSD != nil && (*usage.CostUSD < 0 || math.IsNaN(*usage.CostUSD) || math.IsInf(*usage.CostUSD, 0)) {
+				return fmt.Errorf("invalid Task launch usage in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_launch_usage(task_id,launch,session_id,session_kind,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,profile,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, task.ID, usage.Launch, usage.SessionID, usage.SessionKind, usage.Input, usage.Output, usage.CacheRead, usage.CacheWrite, usage.CostUSD, usage.Profile, task.UpdatedAt); err != nil {
+				return err
+			}
+		}
+		for _, request := range snapshot.ReviewRequests {
+			if request.TaskID != task.ID || request.ProjectID != task.ProjectID || request.ID < 1 || request.Repository == "" || request.RequestedHead == "" || request.Provider != GreenhouseReviewProvider || request.RequestedAt < 1 || request.SettledAt < request.RequestedAt {
+				return fmt.Errorf("invalid Greenhouse review request in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(id,project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id,failure_count) VALUES(?,?,?,?,?,?,?,?,?,?,NULLIF(?,''),?)`, request.ID, task.ProjectID, task.ID, request.Repository, request.RequestedHead, request.Provider, request.RequestedAt, request.SettledAt, request.Outcome, request.VerdictID, request.Grant, request.FailureCount); err != nil {
+				return err
+			}
+		}
+		for _, usage := range snapshot.ReviewUsage {
+			if usage.TaskID != 0 && usage.TaskID != task.ID || usage.RequestID < 1 || usage.Input < 0 || usage.Output < 0 || usage.CacheRead < 0 || usage.CacheWrite < 0 || usage.UsageJSON == "" || usage.CostUSD != nil && (*usage.CostUSD < 0 || math.IsNaN(*usage.CostUSD) || math.IsInf(*usage.CostUSD, 0)) {
+				return fmt.Errorf("invalid Greenhouse review usage in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_review_usage(request_id,task_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,usage_json) VALUES(?,?,?,?,?,?,?,?)`, usage.RequestID, task.ID, usage.Input, usage.Output, usage.CacheRead, usage.CacheWrite, usage.CostUSD, usage.UsageJSON); err != nil {
+				return err
+			}
 		}
 		for _, a := range snapshot.TaskAdoptions {
 			if a.TaskID != task.ID && a.SourceTaskID != task.ID {
@@ -1570,6 +1619,9 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 		if err := db.RestoreNoticeDeliverySnapshot(ctx, tx, snapshot, project, projectStates[projectID].CapturedAt); err != nil {
 			return fmt.Errorf("restore Notice delivery snapshot for Project %d: %w", projectID, err)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS greenhouse_review_requests_no_delete BEFORE DELETE ON greenhouse_review_requests BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is insert-only'); END`); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

@@ -64,7 +64,10 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 				return nil
 			}
 			_, err = db.ExecContext(ctx, `UPDATE greenhouse_review_requests SET settled_at=?,outcome=?,verdict_id=?,failure_count=failure_count+? WHERE id=?`, request.SettledAt, request.Outcome, verdictID, failureIncrement, existing.ID)
-			return err
+			if err != nil {
+				return err
+			}
+			return db.PersistTask(ctx, request.TaskID)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -72,7 +75,10 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 	}
 	_, err := db.ExecContext(ctx, `INSERT INTO greenhouse_review_requests(project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,grant_id,failure_count) VALUES(?,?,?,?,?,?,?,?,?,NULLIF(?,''),?)`,
 		request.ProjectID, request.TaskID, request.Repository, request.RequestedHead, request.Provider, request.RequestedAt, request.SettledAt, request.Outcome, verdictID, request.Grant, failureIncrement)
-	return err
+	if err != nil {
+		return err
+	}
+	return db.PersistTask(ctx, request.TaskID)
 }
 
 func (db *DB) GreenhouseReviewRequests(ctx context.Context, projectID int64) ([]GreenhouseReviewRequest, error) {

@@ -105,6 +105,7 @@ func parse(kind string, file *os.File) (Counts, error) {
 	scanner.Buffer(make([]byte, 64*1024), 32<<20)
 	claudeMessages := map[string]Counts{}
 	claudeOrder := []string{}
+	piCostUnknown := false
 	lineNumber := 0
 	for scanner.Scan() {
 		lineNumber++
@@ -175,7 +176,9 @@ func parse(kind string, file *os.File) (Counts, error) {
 				counts.Output += u.Output
 				counts.CacheRead += u.Read
 				counts.CacheWrite += u.Write
-				if u.Cost != nil {
+				if u.Cost == nil {
+					piCostUnknown = true
+				} else {
 					value := u.Cost.Total
 					if counts.CostUSD != nil {
 						value += *counts.CostUSD
@@ -188,6 +191,10 @@ func parse(kind string, file *os.File) (Counts, error) {
 		default:
 			return Counts{}, nil
 		}
+	}
+	if kind == "pi" && piCostUnknown {
+		counts.CostKnown = false
+		counts.CostUSD = nil
 	}
 	if kind == "claude" {
 		for _, id := range claudeOrder {

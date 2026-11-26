@@ -146,9 +146,20 @@ kind = "pi"
 			t.Fatalf("Signal did not record %s usage: total=%+v err=%v output=%s", kind, total, err, output)
 		}
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE task_launch_usage SET profile=CASE launch WHEN 2 THEN 'codex' WHEN 3 THEN 'pi' ELSE profile END WHERE task_id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	request := store.GreenhouseReviewRequest{ProjectID: f.projectID, TaskID: task.ID, Repository: "shop", RequestedHead: strings.Repeat("a", 40), Provider: store.GreenhouseReviewProvider, RequestedAt: time.Now().UnixMilli(), SettledAt: time.Now().UnixMilli(), Outcome: "failed", Grant: "shop/t1/shop/r1"}
+	if err := db.RecordGreenhouseReviewRequest(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	reviewCost := 0.004
+	if err := db.RecordTaskReviewUsage(ctx, store.TaskReviewUsage{TaskID: task.ID, Repository: request.Repository, Head: request.RequestedHead, Grant: request.Grant, Input: 10, Output: 4, CacheRead: 2, CacheWrite: 1, CostUSD: &reviewCost, UsageJSON: `{"usage":{"input_tokens":10}}`}); err != nil {
+		t.Fatal(err)
+	}
 	total, err := db.TaskUsageTotal(ctx, task.ID)
-	if err != nil || !total.Known || !total.KnownCost || total.Input < 2 {
-		t.Fatalf("Task usage after relaunches = %+v, err=%v", total, err)
+	if err != nil || !total.Known || !total.KnownCost || total.Input != 70 || total.Output != 10 || total.CacheRead != 5 || total.CacheWrite != 4 || total.CostUSD == nil || *total.CostUSD != 0.014038 {
+		t.Fatalf("Task usage after relaunches and review = %+v, err=%v", total, err)
 	}
 	output := runPosse(t, f.binary, f.repo, env, "stats", "--days", "7", "--json")
 	var result struct {
@@ -158,13 +169,22 @@ kind = "pi"
 				UnknownCostTasks int    `json:"unknown_cost_tasks"`
 				MedianTokens     *int64 `json:"median_tokens"`
 			} `json:"overall"`
+			ByProfile map[string]struct {
+				Tasks        int      `json:"tasks"`
+				MedianTokens *int64   `json:"median_tokens"`
+				MedianCost   *float64 `json:"median_cost_usd"`
+			} `json:"by_profile"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode stats: %v\n%s", err, output)
 	}
-	if result.Usage.Overall.Tasks != 1 || result.Usage.Overall.UnknownCostTasks != 0 || result.Usage.Overall.MedianTokens == nil || *result.Usage.Overall.MedianTokens != 72 {
+	if result.Usage.Overall.Tasks != 1 || result.Usage.Overall.UnknownCostTasks != 0 || result.Usage.Overall.MedianTokens == nil || *result.Usage.Overall.MedianTokens != 89 {
 		t.Fatalf("stats usage = %+v\n%s", result.Usage.Overall, output)
+	}
+	profile := result.Usage.ByProfile["claude"]
+	if profile.Tasks != 1 || profile.MedianTokens == nil || *profile.MedianTokens != 89 || profile.MedianCost == nil || *profile.MedianCost != 0.014038 {
+		t.Fatalf("profile usage = %+v\n%s", profile, output)
 	}
 }
 

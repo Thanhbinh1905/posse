@@ -32,6 +32,7 @@ type TaskLaunchUsage struct {
 }
 
 type TaskReviewUsage struct {
+	RequestID  int64
 	TaskID     int64
 	Repository string
 	Head       string
@@ -42,6 +43,27 @@ type TaskReviewUsage struct {
 	CacheWrite int64
 	CostUSD    *float64
 	UsageJSON  string
+}
+
+func (db *DB) TaskReviewUsages(ctx context.Context, taskID int64) ([]TaskReviewUsage, error) {
+	rows, err := db.QueryContext(ctx, `SELECT request_id,task_id,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,usage_json FROM task_review_usage WHERE task_id=? ORDER BY request_id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskReviewUsage
+	for rows.Next() {
+		var row TaskReviewUsage
+		var cost sql.NullFloat64
+		if err := rows.Scan(&row.RequestID, &row.TaskID, &row.Input, &row.Output, &row.CacheRead, &row.CacheWrite, &cost, &row.UsageJSON); err != nil {
+			return nil, err
+		}
+		if cost.Valid {
+			row.CostUSD = &cost.Float64
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
 }
 
 func (db *DB) RecordTaskReviewUsage(ctx context.Context, usage TaskReviewUsage) error {
@@ -76,7 +98,7 @@ func (db *DB) RecordTaskLaunchUsage(ctx context.Context, record TaskLaunchUsage)
 	if record.TaskID < 1 || record.Launch < 1 || record.SessionID == "" || record.SessionKind == "" || record.Input < 0 || record.Output < 0 || record.CacheRead < 0 || record.CacheWrite < 0 || record.CostUSD != nil && (*record.CostUSD < 0 || math.IsNaN(*record.CostUSD) || math.IsInf(*record.CostUSD, 0)) {
 		return fmt.Errorf("invalid Task launch usage")
 	}
-	_, err := db.ExecContext(ctx, `INSERT INTO task_launch_usage(task_id,launch,session_id,session_kind,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,profile,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(task_id,launch,session_id) DO UPDATE SET input_tokens=MAX(task_launch_usage.input_tokens,excluded.input_tokens),output_tokens=MAX(task_launch_usage.output_tokens,excluded.output_tokens),cache_read_tokens=MAX(task_launch_usage.cache_read_tokens,excluded.cache_read_tokens),cache_write_tokens=MAX(task_launch_usage.cache_write_tokens,excluded.cache_write_tokens),cost_usd=CASE WHEN excluded.cost_usd IS NULL THEN task_launch_usage.cost_usd ELSE MAX(COALESCE(task_launch_usage.cost_usd,0),excluded.cost_usd) END,profile=excluded.profile,updated_at=excluded.updated_at`, record.TaskID, record.Launch, record.SessionID, record.SessionKind, record.Input, record.Output, record.CacheRead, record.CacheWrite, record.CostUSD, record.Profile, time.Now().UnixMilli())
+	_, err := db.ExecContext(ctx, `INSERT INTO task_launch_usage(task_id,launch,session_id,session_kind,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,profile,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(task_id,launch,session_id) DO UPDATE SET input_tokens=MAX(task_launch_usage.input_tokens,excluded.input_tokens),output_tokens=MAX(task_launch_usage.output_tokens,excluded.output_tokens),cache_read_tokens=MAX(task_launch_usage.cache_read_tokens,excluded.cache_read_tokens),cache_write_tokens=MAX(task_launch_usage.cache_write_tokens,excluded.cache_write_tokens),cost_usd=CASE WHEN excluded.cost_usd IS NULL THEN NULL ELSE MAX(COALESCE(task_launch_usage.cost_usd,0),excluded.cost_usd) END,profile=excluded.profile,updated_at=excluded.updated_at`, record.TaskID, record.Launch, record.SessionID, record.SessionKind, record.Input, record.Output, record.CacheRead, record.CacheWrite, record.CostUSD, record.Profile, time.Now().UnixMilli())
 	if err != nil {
 		return err
 	}

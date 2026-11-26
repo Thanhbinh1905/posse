@@ -36,6 +36,14 @@ func TestReadRealHarnessUsageRecords(t *testing.T) {
 	}
 }
 
+func TestPiCostIsUnknownWhenAnyAssistantUsageLacksCost(t *testing.T) {
+	contents := `{"type":"message","message":{"role":"assistant","usage":{"input":12,"output":3,"cost":{"total":0.01}}}}` + "\n" + `{"type":"message","message":{"role":"assistant","usage":{"input":8,"output":2}}}`
+	got := Read("pi", writeFixture(t, contents), "")
+	if !got.Known || got.CostKnown || got.CostUSD != nil {
+		t.Fatalf("Read() = %#v, want known tokens and unknown cost", got)
+	}
+}
+
 func TestSessionWithoutUsageIsUnknown(t *testing.T) {
 	tests := []struct{ kind, contents string }{
 		{"claude", `{"type":"assistant","message":{"id":"m1","content":[]}}`},

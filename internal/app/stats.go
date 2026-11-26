@@ -209,43 +209,7 @@ func projectUsageStats(ctx context.Context, db *store.DB, project store.Project,
 		}
 		all = append(all, sample)
 		byType[task.Type] = append(byType[task.Type], sample)
-		launches, err := db.TaskLaunchUsages(ctx, task.ID)
-		if err != nil {
-			return nil, err
-		}
-		if len(launches) == 0 {
-			byProfile[task.Profile] = append(byProfile[task.Profile], usageSample{})
-			continue
-		}
-		perProfile := map[string]usageSample{}
-		unknownCost := map[string]bool{}
-		for _, launch := range launches {
-			profile := launch.Profile
-			if profile == "" {
-				profile = task.Profile
-			}
-			current, exists := perProfile[profile]
-			if !exists {
-				current.tokensKnown = true
-			}
-			current.tokens += launch.Input + launch.Output + launch.CacheRead + launch.CacheWrite
-			if launch.CostUSD == nil {
-				unknownCost[profile] = true
-			} else if current.cost == nil {
-				value := *launch.CostUSD
-				current.cost = &value
-			} else {
-				value := *current.cost + *launch.CostUSD
-				current.cost = &value
-			}
-			perProfile[profile] = current
-		}
-		for profile, item := range perProfile {
-			if unknownCost[profile] {
-				item.cost = nil
-			}
-			byProfile[profile] = append(byProfile[profile], item)
-		}
+		byProfile[task.Profile] = append(byProfile[task.Profile], sample)
 	}
 	grouped := func(groups map[string][]usageSample) map[string]UsageStats {
 		result := make(map[string]UsageStats, len(groups))

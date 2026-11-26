@@ -431,6 +431,13 @@ func TestTaskUsageTotalsPersistAcrossLaunches(t *testing.T) {
 	if err != nil || !total.Known || !total.KnownCost || total.Input != 30 || total.Output != 11 || total.CacheRead != 5 || total.CacheWrite != 3 || total.CostUSD == nil || *total.CostUSD != 0.03 {
 		t.Fatalf("Task usage total = %+v, err=%v", total, err)
 	}
+	if err := db.RecordTaskLaunchUsage(ctx, store.TaskLaunchUsage{TaskID: task.ID, Launch: 1, SessionID: "pi-one", SessionKind: "pi", Input: 10, Output: 5, CacheRead: 2, CacheWrite: 1, Profile: "primary"}); err != nil {
+		t.Fatal(err)
+	}
+	total, err = db.TaskUsageTotal(ctx, task.ID)
+	if err != nil || !total.Known || total.KnownCost || total.CostUSD != nil {
+		t.Fatalf("unknown revised launch cost did not clear the previous amount: %+v, err=%v", total, err)
+	}
 }
 
 func TestTaskDailyBudgetUsageResetsAtHostLocalDate(t *testing.T) {
