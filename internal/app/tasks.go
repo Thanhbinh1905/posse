@@ -3501,10 +3501,7 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if err := db.UpdateTaskLaunch(ctx, task.ID, task.WorktreePath, pane.WorkspaceID, pane.PaneID, task.PaneLabel, workerName); err != nil {
 			return err
 		}
-		observation := task.Observation()
-		observation.PaneID, observation.WorkspaceID = pane.PaneID, pane.WorkspaceID
-		observation.AgentServerStartedAt = snapshot.ServerStartedAt
-		return db.UpdateTaskObservation(ctx, task.ID, observation)
+		return db.UpdateTaskAgentServerGeneration(ctx, task.ID, snapshot.ServerStartedAt)
 	}); err != nil {
 		return failure(err)
 	}
