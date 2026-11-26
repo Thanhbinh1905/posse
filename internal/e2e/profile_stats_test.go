@@ -79,6 +79,118 @@ func seedStatsHistory(t *testing.T, f *workerTabsFixture, claudeDir string, task
 	}
 }
 
+func TestTaskUsageRecordsFakeHarnessSessionsAcrossRelaunches(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	config := `[lead]
+kind = "claude"
+[defaults]
+merge_mode = "local"
+auto_teardown = "never"
+max_workers = 4
+[profiles.claude]
+kind = "claude"
+[profiles.claude.prices]
+input_per_million = 1.0
+output_per_million = 1.0
+cache_read_per_million = 1.0
+cache_write_per_million = 1.0
+[profiles.codex]
+kind = "codex"
+[profiles.codex.prices]
+input_per_million = 1.0
+output_per_million = 1.0
+cache_read_per_million = 1.0
+cache_write_per_million = 1.0
+[profiles.pi]
+kind = "pi"
+`
+	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeHome := filepath.Join(f.root, "usage-claude")
+	codexHome := filepath.Join(f.root, "usage-codex")
+	piHome := filepath.Join(f.root, "usage-pi")
+	env := setEnv(f.leadEnv, "CLAUDE_CONFIG_DIR", claudeHome)
+	env = setEnv(env, "CODEX_HOME", codexHome)
+	env = setEnv(env, "PI_CODING_AGENT_DIR", piHome)
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	brief := filepath.Join(f.root, "usage.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Usage\ndone_when: the test tears it down\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, f.binary, f.repo, env, "start", "--brief", brief, "--name", "usage", "--profile", "claude"); !strings.Contains(output, "t1") {
+		t.Fatalf("start did not return t1: %s", output)
+	}
+	f.waitState(t, "t1", store.StateWorking)
+	task, err := db.Task(ctx, f.projectID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for launch, kind := range []string{"claude", "codex", "pi"} {
+		launch++
+		sessionID := fmt.Sprintf("%s-t1-l%d", kind, launch)
+		writeFakeHarnessSession(t, kind, sessionID, task.WorktreePath, claudeHome, codexHome, piHome, launch)
+		if _, err := db.ExecContext(ctx, `UPDATE tasks SET launches=?,agent_session=?,agent_session_kind=? WHERE id=?`, launch, sessionID, kind, task.ID); err != nil {
+			t.Fatal(err)
+		}
+		workerEnv := setEnv(env, "HERDR_PANE_ID", task.PaneID)
+		workerEnv = setEnv(workerEnv, "POSSE_WORKER_HOME", f.home)
+		output := runPosse(t, f.binary, task.WorktreePath, workerEnv, "signal", "working", "capture usage")
+		total, err := db.TaskUsageTotal(ctx, task.ID)
+		if err != nil || !total.Known {
+			t.Fatalf("Signal did not record %s usage: total=%+v err=%v output=%s", kind, total, err, output)
+		}
+	}
+	total, err := db.TaskUsageTotal(ctx, task.ID)
+	if err != nil || !total.Known || !total.KnownCost || total.Input < 2 {
+		t.Fatalf("Task usage after relaunches = %+v, err=%v", total, err)
+	}
+	output := runPosse(t, f.binary, f.repo, env, "stats", "--days", "7", "--json")
+	var result struct {
+		Usage struct {
+			Overall struct {
+				Tasks            int    `json:"tasks"`
+				UnknownCostTasks int    `json:"unknown_cost_tasks"`
+				MedianTokens     *int64 `json:"median_tokens"`
+			} `json:"overall"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("decode stats: %v\n%s", err, output)
+	}
+	if result.Usage.Overall.Tasks != 1 || result.Usage.Overall.UnknownCostTasks != 0 || result.Usage.Overall.MedianTokens == nil || *result.Usage.Overall.MedianTokens != 72 {
+		t.Fatalf("stats usage = %+v\n%s", result.Usage.Overall, output)
+	}
+}
+
+func writeFakeHarnessSession(t *testing.T, kind, sessionID, worktree, claudeHome, codexHome, piHome string, launch int) {
+	t.Helper()
+	var directory, filename, contents string
+	switch kind {
+	case "claude":
+		project := filepath.Join(claudeHome, "projects", strings.ReplaceAll(filepath.Clean(worktree), string(os.PathSeparator), "-"))
+		directory, filename = project, sessionID+".jsonl"
+		contents = fmt.Sprintf(`{"type":"assistant","message":{"id":"m%d","usage":{"input_tokens":%d,"output_tokens":2,"cache_read_input_tokens":1,"cache_creation_input_tokens":1}}}`+"\n", launch, 10*launch)
+	case "codex":
+		directory, filename = filepath.Join(codexHome, "sessions", "2026", "11", "26"), "rollout-test-"+sessionID+".jsonl"
+		contents = fmt.Sprintf(`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":1,"cache_write_input_tokens":1,"output_tokens":2,"total_tokens":%d}}}}`+"\n", 10*launch, 12*launch)
+	case "pi":
+		directory, filename = filepath.Join(piHome, "sessions"), "2026-11-26T00-00-00_"+sessionID+".jsonl"
+		contents = fmt.Sprintf(`{"type":"message","message":{"role":"assistant","usage":{"input":%d,"output":2,"cacheRead":1,"cacheWrite":1,"cost":{"total":0.01}}}}`+"\n", 10*launch)
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, filename), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func jsonProfileStats(t *testing.T, output string) map[string]map[string]any {
 	t.Helper()
 	var result struct {

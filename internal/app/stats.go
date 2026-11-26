@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,22 @@ type ProfileStats struct {
 	MedianDoneSeconds *int64  `json:"median_done_seconds"`
 	TokensPerLanded   *int64  `json:"tokens_per_landed"`
 	Relaunches        int     `json:"relaunches"`
+}
+
+type UsageStats struct {
+	Tasks            int      `json:"tasks"`
+	UnknownCostTasks int      `json:"unknown_cost_tasks"`
+	UnknownCostShare float64  `json:"unknown_cost_share"`
+	MedianCostUSD    *float64 `json:"median_cost_usd"`
+	P90CostUSD       *float64 `json:"p90_cost_usd"`
+	MedianTokens     *int64   `json:"median_tokens"`
+	P90Tokens        *int64   `json:"p90_tokens"`
+}
+
+type usageSample struct {
+	cost        *float64
+	tokens      int64
+	tokensKnown bool
 }
 
 type statsTask struct {
@@ -109,8 +126,8 @@ func medianInt64(values []int64) int64 {
 
 // projectProfileStats reads the Project's Task history for the stats window.
 // Token usage is read only for landed Tasks.
-func projectProfileStats(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, now time.Time) ([]ProfileStats, error) {
-	since := now.AddDate(0, 0, -statsWindowDays).UnixMilli()
+func projectProfileStats(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, now time.Time, days int) ([]ProfileStats, error) {
+	since := now.AddDate(0, 0, -days).UnixMilli()
 	all, err := db.Tasks(ctx, project.ID, true)
 	if err != nil {
 		return nil, err
@@ -131,7 +148,7 @@ func projectProfileStats(ctx context.Context, db *store.DB, project store.Projec
 			row.doneSecs = (history.FirstDoneAt - task.CreatedAt) / 1000
 		}
 		if row.landed {
-			counts := taskUsage(task, cfg)
+			counts := taskUsage(ctx, db, task, cfg)
 			row.tokensSeen = counts.Known
 			row.tokens = counts.Input + counts.Output + counts.CacheRead + counts.CacheWrite
 		}
@@ -170,13 +187,131 @@ func statsFor(stats []ProfileStats, profile string) ProfileStats {
 	return ProfileStats{Profile: profile}
 }
 
+func projectUsageStats(ctx context.Context, db *store.DB, project store.Project, days int, now time.Time) (map[string]any, error) {
+	tasks, err := db.Tasks(ctx, project.ID, true)
+	if err != nil {
+		return nil, err
+	}
+	since := now.AddDate(0, 0, -days).UnixMilli()
+	var all []usageSample
+	byType, byProfile := map[string][]usageSample{}, map[string][]usageSample{}
+	for _, task := range tasks {
+		if task.CreatedAt < since || task.State == store.StateQueued {
+			continue
+		}
+		total, err := db.TaskUsageTotal(ctx, task.ID)
+		if err != nil {
+			return nil, err
+		}
+		sample := usageSample{tokens: total.Input + total.Output + total.CacheRead + total.CacheWrite, tokensKnown: total.Known}
+		if total.KnownCost {
+			sample.cost = total.CostUSD
+		}
+		all = append(all, sample)
+		byType[task.Type] = append(byType[task.Type], sample)
+		launches, err := db.TaskLaunchUsages(ctx, task.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(launches) == 0 {
+			byProfile[task.Profile] = append(byProfile[task.Profile], usageSample{})
+			continue
+		}
+		perProfile := map[string]usageSample{}
+		unknownCost := map[string]bool{}
+		for _, launch := range launches {
+			profile := launch.Profile
+			if profile == "" {
+				profile = task.Profile
+			}
+			current, exists := perProfile[profile]
+			if !exists {
+				current.tokensKnown = true
+			}
+			current.tokens += launch.Input + launch.Output + launch.CacheRead + launch.CacheWrite
+			if launch.CostUSD == nil {
+				unknownCost[profile] = true
+			} else if current.cost == nil {
+				value := *launch.CostUSD
+				current.cost = &value
+			} else {
+				value := *current.cost + *launch.CostUSD
+				current.cost = &value
+			}
+			perProfile[profile] = current
+		}
+		for profile, item := range perProfile {
+			if unknownCost[profile] {
+				item.cost = nil
+			}
+			byProfile[profile] = append(byProfile[profile], item)
+		}
+	}
+	grouped := func(groups map[string][]usageSample) map[string]UsageStats {
+		result := make(map[string]UsageStats, len(groups))
+		for key, samples := range groups {
+			result[key] = summarizeUsage(samples)
+		}
+		return result
+	}
+	return map[string]any{"overall": summarizeUsage(all), "by_type": grouped(byType), "by_profile": grouped(byProfile)}, nil
+}
+
+func summarizeUsage(samples []usageSample) UsageStats {
+	stats := UsageStats{Tasks: len(samples)}
+	var costs, tokens []float64
+	var tokenValues []int64
+	for _, sample := range samples {
+		if sample.cost == nil {
+			stats.UnknownCostTasks++
+		} else {
+			costs = append(costs, *sample.cost)
+		}
+		if sample.tokensKnown {
+			tokens = append(tokens, float64(sample.tokens))
+			tokenValues = append(tokenValues, sample.tokens)
+		}
+	}
+	if stats.Tasks > 0 {
+		stats.UnknownCostShare = float64(stats.UnknownCostTasks) / float64(stats.Tasks)
+	}
+	if len(costs) > 0 {
+		median, p90 := quantileFloat(costs, 0.5), quantileFloat(costs, 0.9)
+		stats.MedianCostUSD, stats.P90CostUSD = &median, &p90
+	}
+	if len(tokenValues) > 0 {
+		median := int64(quantileFloat(tokens, 0.5))
+		p90 := int64(quantileFloat(tokens, 0.9))
+		stats.MedianTokens, stats.P90Tokens = &median, &p90
+	}
+	return stats
+}
+
+func quantileFloat(values []float64, q float64) float64 {
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+	if q == 0.5 && len(sorted)%2 == 0 {
+		return (sorted[len(sorted)/2-1] + sorted[len(sorted)/2]) / 2
+	}
+	index := int(math.Ceil(q*float64(len(sorted)))) - 1
+	return sorted[max(index, 0)]
+}
+
 func (s *Service) stats(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("stats", args, map[string]flagSpec{})
+	parsed, err := parseArgs("stats", args, map[string]flagSpec{"days": {}})
 	if err != nil {
 		return err
 	}
 	if len(parsed.Positionals) != 0 {
 		return axi.Usage("stats does not take positional arguments")
+	}
+	days := statsWindowDays
+	if value := parsed.Flags["days"]; value != "" {
+		parsedDays, parseErr := strconv.Atoi(value)
+		if parseErr != nil || parsedDays < 1 || parsedDays > 3650 {
+			return axi.Usage("--days must be an integer from 1 to 3650")
+		}
+		days = parsedDays
 	}
 	db, _, err := s.openDB()
 	if err != nil {
@@ -194,7 +329,7 @@ func (s *Service) stats(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	stats, err := projectProfileStats(ctx.Context, db, project, cfg, time.Now())
+	stats, err := projectProfileStats(ctx.Context, db, project, cfg, time.Now(), days)
 	if err != nil {
 		return err
 	}
@@ -206,9 +341,17 @@ func (s *Service) stats(ctx *axi.Context, args []string) error {
 	if len(rows) == 0 {
 		help = []string{"No Tasks started in the last 30 days"}
 	}
+	usageStats, err := projectUsageStats(ctx.Context, db, project, days, time.Now())
+	if err != nil {
+		return err
+	}
+	reviewUsage, err := db.ProjectReviewUsageTotal(ctx.Context, project.ID, time.Now().AddDate(0, 0, -days).UnixMilli())
+	if err != nil {
+		return err
+	}
 	comparison, err := reviewComparison(ctx.Context, db)
 	if err != nil {
 		return err
 	}
-	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "window_days", Value: statsWindowDays}, {Key: "profiles", Value: rows}, {Key: "review_comparison", Value: comparison}, {Key: "help", Value: help}})
+	return ctx.Print(axi.Object{{Key: "project", Value: project.Name}, {Key: "window_days", Value: days}, {Key: "profiles", Value: rows}, {Key: "usage", Value: usageStats}, {Key: "review_cost_usd", Value: reviewUsage.CostUSD}, {Key: "review_cost_unknown_requests", Value: reviewUsage.Unknown}, {Key: "review_comparison", Value: comparison}, {Key: "help", Value: help}})
 }

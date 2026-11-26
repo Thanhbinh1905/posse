@@ -277,6 +277,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		round.Worktree = reviewMember.worktree
 		parallelAttempt++
 		var requestSettledAt int64
+		var result greenhouse.RoundResult
 		recordRequest := func(outcome, grant string, settledAt int64) error {
 			if !parallelMode {
 				return nil
@@ -291,13 +292,29 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			if requestSettledAt > 0 {
 				settledAt = requestSettledAt
 			}
-			return db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{
+			if grant == "" && result.Result != nil {
+				grant = result.Result.Grant
+			}
+			if err := db.RecordGreenhouseReviewRequest(ctx.Context, store.GreenhouseReviewRequest{
 				ProjectID: project.ID, TaskID: task.ID, Repository: member.name, RequestedHead: requestHead,
 				Provider: store.GreenhouseReviewProvider, RequestedAt: requestedAt, SettledAt: settledAt,
 				Outcome: outcome, Grant: grant,
-			})
+			}); err != nil {
+				return err
+			}
+			if result.Result == nil || result.Result.Usage == nil {
+				return nil
+			}
+			usageJSON, err := json.Marshal(struct {
+				Usage     *greenhouse.TokenUsage      `json:"usage"`
+				Breakdown []greenhouse.UsageBreakdown `json:"usage_breakdown,omitempty"`
+			}{Usage: result.Result.Usage, Breakdown: result.Result.UsageBreakdown})
+			if err != nil {
+				return err
+			}
+			u := result.Result.Usage
+			return db.RecordTaskReviewUsage(ctx.Context, store.TaskReviewUsage{TaskID: task.ID, Repository: member.name, Head: requestHead, Grant: grant, Input: u.InputTokens, Output: u.OutputTokens, CacheRead: u.CachedInputTokens, CacheWrite: u.CacheWriteTokens, CostUSD: u.CostUSD, UsageJSON: string(usageJSON)})
 		}
-		var result greenhouse.RoundResult
 		requestAttempted := false
 		for {
 			var attempts int

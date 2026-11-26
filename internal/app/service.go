@@ -164,7 +164,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decide", Usage: "$ decide <decision> <option> [--to <task>] [--user-approved <quote> | --lead-reason <reason>] [--recover]", Summary: "Record a User answer or YOLO Lead Review-cap resolution.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Decision action.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
-		{Name: "stats", Summary: "Show each Profile's landed rate, median time to done, tokens per landed Task and relaunches over the last 30 days.", Handler: s.stats},
+		{Name: "stats", Usage: "$ stats [--days n]", Summary: "Show Task cost and token percentiles overall, by Task type and Profile, plus each Profile's landed rate and relaunches.", Handler: s.stats},
 		{Name: "start", Usage: "$ start <brief.md> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>] [--queue]", Summary: "Start a Worker from a Brief with an optional display name. Positional paths and `--brief <file>` are accepted. `--user-approved` scopes consent to explicit Brief preferences; `--queue` admits it durably until prerequisites and capacity permit dispatch.", Handler: s.spawn},
 		{Name: "task", Summary: "Manage an admitted Task.", Subcommands: []*axi.Command{
 			{Name: "add-member", Usage: "$ task add-member <task> <repo> --user-approved <quote> [--base <ref>] [--target <ref>]", Summary: "Add a Project Member to a running workspace Change Task with recorded User approval.", Handler: s.taskAddMember},

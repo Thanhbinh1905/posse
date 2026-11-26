@@ -591,6 +591,13 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		fields = append(fields, axi.Field{Key: "help", Value: []any{"Queued Task canceled without allocating a Sandbox, pane or branch"}})
 		return ctx.Print(fields)
 	}
+	cfg, err := config.Load(home, project.Name)
+	if err != nil {
+		return configError(err)
+	}
+	if _, err := recordTaskUsage(ctx.Context, db, task, cfg); err != nil {
+		return err
+	}
 	plan, planErr := task.AdmittedPlan()
 	if planErr != nil {
 		return admittedPlanFailure(planErr)
@@ -609,10 +616,6 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 		}
 		if !store.IsApprovedDiscardSourceState(task.State) || task.State == store.StateMerged {
 			return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be discarded directly", false)
-		}
-		cfg, err := config.Load(home, project.Name)
-		if err != nil {
-			return configError(err)
 		}
 		result, err := s.teardownTask(ctx.Context, db, project, cfg, task, true, quote, teardownOptions{keepBranch: parsed.Bool("keep-branch")})
 		if err != nil {
@@ -643,7 +646,7 @@ func (s *Service) teardown(ctx *axi.Context, args []string) error {
 	} else if !inPlace && !reviewEnded && task.State != store.StateMerged && task.State != store.StateReported {
 		return axi.Failure("teardown_refused", "Task in state "+string(task.State)+" cannot be torn down", false)
 	}
-	cfg, err := s.prepareTaskProject(ctx.Context, db, project, task.ID)
+	cfg, err = s.prepareTaskProject(ctx.Context, db, project, task.ID)
 	if err != nil {
 		return err
 	}

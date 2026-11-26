@@ -81,8 +81,8 @@ func TestOpenAppliesBaselineAsOneMigration(t *testing.T) {
 	}
 	defer db.Close()
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 4 {
-		t.Fatalf("applied migration count = %d, %v; want baseline, review-dispute evidence, greenhouse attempts and refused-request resume migrations", applied, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 5 {
+		t.Fatalf("applied migration count = %d, %v; want the baseline, review-dispute evidence, greenhouse attempts, refused-request resume and Task usage migrations", applied, err)
 	}
 	var version int64
 	if err := db.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied=1 AND version_id=?`, baselineMigrationVersion).Scan(&version); err != nil || version != baselineMigrationVersion {

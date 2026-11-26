@@ -162,11 +162,19 @@ const (
 
 var NoticeDeliveries = []string{NoticeDeliveryPrompt, NoticeDeliveryWatch, NoticeDeliveryCodexQueue, NoticeDeliveryPiExtension, NoticeDeliveryOpenCodePlugin}
 
+type ModelPrices struct {
+	InputPerMillion      *float64 `toml:"input_per_million" json:"input_per_million,omitempty"`
+	OutputPerMillion     *float64 `toml:"output_per_million" json:"output_per_million,omitempty"`
+	CacheReadPerMillion  *float64 `toml:"cache_read_per_million" json:"cache_read_per_million,omitempty"`
+	CacheWritePerMillion *float64 `toml:"cache_write_per_million" json:"cache_write_per_million,omitempty"`
+}
+
 type Profile struct {
-	Kind   string   `toml:"kind" json:"kind"`
-	Model  string   `toml:"model" json:"model"`
-	Effort string   `toml:"effort" json:"effort"`
-	Args   []string `toml:"args" json:"args"`
+	Kind   string      `toml:"kind" json:"kind"`
+	Model  string      `toml:"model" json:"model"`
+	Prices ModelPrices `toml:"prices" json:"prices,omitempty"`
+	Effort string      `toml:"effort" json:"effort"`
+	Args   []string    `toml:"args" json:"args"`
 	// Attribution keeps the agent's commit and PR attribution; off by default.
 	Attribution bool `toml:"attribution" json:"attribution,omitempty"`
 	// Fallback names the Profile a Worker is relaunched with when this

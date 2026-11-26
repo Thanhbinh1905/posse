@@ -20,7 +20,7 @@ import (
 func TestBudgetConfigIsExposedBySchema(t *testing.T) {
 	f := newPreferenceSetFixture(t)
 	output := runPreferenceSetCLI(t, f.service, 0, "config", "schema")
-	for _, key := range []string{"budget.daily_tokens", "budget.task_tokens"} {
+	for _, key := range []string{"budget.daily_tokens", "budget.task_tokens", "profiles.<profile>.prices.input_per_million", "profiles.<profile>.prices.output_per_million", "profiles.<profile>.prices.cache_read_per_million", "profiles.<profile>.prices.cache_write_per_million"} {
 		if !strings.Contains(output, key) {
 			t.Errorf("config schema omits %s: %s", key, output)
 		}
@@ -389,6 +389,47 @@ func TestBudgetUsageSurvivesDatabaseRebuild(t *testing.T) {
 	var tokens int64
 	if err := db.QueryRowContext(ctx, `SELECT SUM(tokens) FROM task_budget_usage WHERE task_id=?`, task.ID).Scan(&tokens); err != nil || tokens != 123 {
 		t.Fatalf("budget usage after rebuild = %d, %v", tokens, err)
+	}
+}
+
+func TestPricedCostRequiresEveryRateAndIncludesCachedTokens(t *testing.T) {
+	rate := 2.0
+	prices := config.ModelPrices{InputPerMillion: &rate, OutputPerMillion: &rate, CacheReadPerMillion: &rate, CacheWritePerMillion: &rate}
+	counts := usage.Counts{Input: 10, Output: 20, CacheRead: 30, CacheWrite: 40, Known: true}
+	cost := pricedCost(counts, prices)
+	if cost == nil || *cost != 0.0002 {
+		t.Fatalf("priced cost = %v, want 0.0002", cost)
+	}
+	prices.CacheWritePerMillion = nil
+	if cost := pricedCost(counts, prices); cost != nil {
+		t.Fatalf("cost with unknown cache-write rate = %v, want unknown", *cost)
+	}
+}
+
+func TestTaskUsageTotalsPersistAcrossLaunches(t *testing.T) {
+	f := newWorkerFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	task, err := db.Task(ctx, f.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCost, secondCost := 0.01, 0.02
+	for _, record := range []store.TaskLaunchUsage{
+		{TaskID: task.ID, Launch: 1, SessionID: "pi-one", SessionKind: "pi", Input: 10, Output: 5, CacheRead: 2, CacheWrite: 1, CostUSD: &firstCost, Profile: "primary"},
+		{TaskID: task.ID, Launch: 2, SessionID: "codex-two", SessionKind: "codex", Input: 20, Output: 6, CacheRead: 3, CacheWrite: 2, CostUSD: &secondCost, Profile: "backup"},
+	} {
+		if err := db.RecordTaskLaunchUsage(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, err := db.TaskUsageTotal(ctx, task.ID)
+	if err != nil || !total.Known || !total.KnownCost || total.Input != 30 || total.Output != 11 || total.CacheRead != 5 || total.CacheWrite != 3 || total.CostUSD == nil || *total.CostUSD != 0.03 {
+		t.Fatalf("Task usage total = %+v, err=%v", total, err)
 	}
 }
 

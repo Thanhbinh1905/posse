@@ -13,11 +13,13 @@ import (
 // Counts contains token totals. Known is false unless the session contains a
 // supported usage record.
 type Counts struct {
-	Input      int64 `json:"input_tokens,omitempty"`
-	Output     int64 `json:"output_tokens,omitempty"`
-	CacheRead  int64 `json:"cache_read_tokens,omitempty"`
-	CacheWrite int64 `json:"cache_write_tokens,omitempty"`
-	Known      bool  `json:"known"`
+	Input      int64    `json:"input_tokens,omitempty"`
+	Output     int64    `json:"output_tokens,omitempty"`
+	CacheRead  int64    `json:"cache_read_tokens,omitempty"`
+	CacheWrite int64    `json:"cache_write_tokens,omitempty"`
+	CostUSD    *float64 `json:"cost_usd"`
+	CostKnown  bool     `json:"cost_known"`
+	Known      bool     `json:"known"`
 }
 
 // Read resolves the recorded session reference inside the selected harness's
@@ -161,6 +163,9 @@ func parse(kind string, file *os.File) (Counts, error) {
 						Output int64 `json:"output"`
 						Read   int64 `json:"cacheRead"`
 						Write  int64 `json:"cacheWrite"`
+						Cost   *struct {
+							Total float64 `json:"total"`
+						} `json:"cost"`
 					} `json:"usage"`
 				} `json:"message"`
 			}
@@ -170,6 +175,14 @@ func parse(kind string, file *os.File) (Counts, error) {
 				counts.Output += u.Output
 				counts.CacheRead += u.Read
 				counts.CacheWrite += u.Write
+				if u.Cost != nil {
+					value := u.Cost.Total
+					if counts.CostUSD != nil {
+						value += *counts.CostUSD
+					}
+					counts.CostUSD = &value
+					counts.CostKnown = true
+				}
 				counts.Known = true
 			}
 		default:

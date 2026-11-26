@@ -7,6 +7,14 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
+func TestSummarizeTaskUsage(t *testing.T) {
+	cost1, cost2 := 1.0, 3.0
+	got := summarizeUsage([]usageSample{{cost: &cost1, tokens: 10, tokensKnown: true}, {cost: nil, tokens: 20, tokensKnown: true}, {cost: &cost2, tokens: 30, tokensKnown: true}})
+	if got.Tasks != 3 || got.UnknownCostTasks != 1 || got.UnknownCostShare != 1.0/3 || got.MedianCostUSD == nil || *got.MedianCostUSD != 2 || got.P90CostUSD == nil || *got.P90CostUSD != 3 || got.MedianTokens == nil || *got.MedianTokens != 20 || got.P90Tokens == nil || *got.P90Tokens != 30 {
+		t.Fatalf("usage stats = %+v", got)
+	}
+}
+
 func TestAggregateProfileStats(t *testing.T) {
 	tasks := []statsTask{
 		{profile: "deep", state: store.StateMerged, landed: true, doneSecs: 600, tokens: 1000, tokensSeen: true, relaunches: 1},

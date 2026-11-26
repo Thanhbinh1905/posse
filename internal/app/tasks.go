@@ -80,7 +80,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 			failure.Help = append([]string{"Task Name: " + name, "Run `" + command + " --profile <name>` after choosing a Profile"}, failure.Help...)
 			var profileErr *dispatch.ProfileError
 			if errors.As(err, &profileErr) && len(profileErr.Candidates) > 0 {
-				if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
+				if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now(), statsWindowDays); historyErr == nil {
 					seen := map[string]bool{}
 					for _, candidate := range profileErr.Candidates {
 						if !seen[candidate.Profile] {
@@ -108,7 +108,7 @@ func (s *Service) dispatch(ctx *axi.Context, args []string) error {
 		{Key: "dispatch_rule", Value: resolution.Rule},
 		{Key: "help", Value: []any{"Run `" + startCommand + "` to start this Worker"}},
 	}
-	if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now()); historyErr == nil {
+	if history, historyErr := projectProfileStats(ctx.Context, db, project, cfg, time.Now(), statsWindowDays); historyErr == nil {
 		result = append(result, axi.Field{Key: "profile_stats", Value: statsFor(history, resolution.Profile)})
 	}
 	result = append(result, launchIdentityFields(resolution, cfg.Kinds)...)
@@ -1638,6 +1638,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 	}
 	if noChange && (verb != "done" || task.Type != "change" || project.IsWorkspace() || parsed.Flags["pr"] != "" || parsed.Flags["resolutions"] != "") {
 		return axi.Failure("signal_invalid", "--no-change is only valid on a done Signal of a single-repository Change Task without --pr or --resolutions", false)
+	}
+	if _, err := recordTaskUsage(ctx.Context, db, task, cfg); err != nil {
+		return err
 	}
 	data := map[string]any{}
 	if noChange {

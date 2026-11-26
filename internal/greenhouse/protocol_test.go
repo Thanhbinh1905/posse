@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestHostResultCarriesUsageAndBreakdown(t *testing.T) {
+	var result HostResult
+	body := `{"usage":{"input_tokens":11,"output_tokens":5,"cached_input_tokens":2,"cache_write_tokens":1,"tokens":19,"cost_usd":0.004,"cost_source":"provider","model_calls":3,"wall_ms":1200},"usage_breakdown":[{"stage":"review","backend":"api","model":"model-x","usage":{"input_tokens":11,"output_tokens":5,"cache_write_tokens":1}}]}`
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 11 || result.Usage.CostUSD == nil || *result.Usage.CostUSD != 0.004 || len(result.UsageBreakdown) != 1 || result.UsageBreakdown[0].Stage != "review" {
+		t.Fatalf("usage result = %#v", result)
+	}
+}
+
+func TestReviewResultMergesUsageFromRunSnapshot(t *testing.T) {
+	var result response
+	if err := json.Unmarshal([]byte(`{"host_result":{"grant":"grant"},"run":{"review":{"usage":{"input_tokens":7,"output_tokens":3,"cost_usd":0.002},"usage_breakdown":[{"stage":"review","usage":{"input_tokens":7}}]}}}`), &result); err != nil {
+		t.Fatal(err)
+	}
+	got := result.reviewResult()
+	if got == nil || got.Usage == nil || got.Usage.InputTokens != 7 || len(got.UsageBreakdown) != 1 {
+		t.Fatalf("review usage = %#v", got)
+	}
+}
+
 func TestReviewResultMergesCoverageFromRunSnapshot(t *testing.T) {
 	var result response
 	if err := json.Unmarshal([]byte(`{"host_result":{"grant":"shop/t1/shop/r1","verdict":"partial"},"run":{"review":{"uncovered":[{"path":"large.sql","reason":"prompt exceeds model context (90000 tokens > 64000)"}],"generated":[{"path":"schema.sql","added":1200,"removed":30,"generators":["tools/schema.go"]}]}}}`), &result); err != nil {

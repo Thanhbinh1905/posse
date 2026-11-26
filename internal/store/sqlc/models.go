@@ -815,6 +815,20 @@ type TaskLaunchIdentity struct {
 	PlanRevision    int64
 }
 
+type TaskLaunchUsage struct {
+	TaskID           int64
+	Launch           int64
+	SessionID        string
+	SessionKind      string
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CostUsd          sql.NullFloat64
+	Profile          string
+	UpdatedAt        int64
+}
+
 type TaskPlanInputMigration struct {
 	ID                 int64
 	Completed          int64
@@ -854,6 +868,17 @@ type TaskRepo struct {
 	MergedRef    string
 	UpdatedAt    int64
 	TargetBranch string
+}
+
+type TaskReviewUsage struct {
+	RequestID        int64
+	TaskID           int64
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CostUsd          sql.NullFloat64
+	UsageJson        string
 }
 
 type TaskSkillUse struct {
