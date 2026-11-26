@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -65,22 +66,30 @@ func lockDirectory() string {
 	return filepath.Join("/tmp", "posse-"+strconv.Itoa(os.Getuid()), "heavy")
 }
 
+func tryAcquireSlot(dir, class string, index int) (*os.File, error) {
+	file, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("%s-%d.lock", class, index)), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil {
+		return file, nil
+	}
+	_ = file.Close()
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
+		return nil, nil
+	}
+	return nil, err
+}
+
 func tryAcquire(dir, class string, count int) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	for i := range count {
-		file, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("%s-%d.lock", class, i)), os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			return nil, err
-		}
-		err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return file, nil
-		}
-		file.Close()
-		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EINTR) {
-			return nil, err
+		file, err := tryAcquireSlot(dir, class, i)
+		if err != nil || file != nil {
+			return file, err
 		}
 	}
 	return nil, nil
@@ -108,6 +117,43 @@ type record struct {
 	Marker  string    `json:"marker"`
 	Command string    `json:"command"`
 	Since   time.Time `json:"since"`
+	Class   string    `json:"class"`
+}
+
+func queueEntries(dir, class string) []os.DirEntry {
+	entries, _ := os.ReadDir(dir)
+	var waiters []os.DirEntry
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "wait-") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		var waiting record
+		if err != nil || json.Unmarshal(data, &waiting) != nil || waiting.PID < 2 {
+			continue
+		}
+		if err := syscall.Kill(waiting.PID, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+			continue
+		}
+		if class == "" || waiting.Class == class {
+			waiters = append(waiters, entry)
+		}
+	}
+	sort.Slice(waiters, func(i, j int) bool { return waiters[i].Name() < waiters[j].Name() })
+	return waiters
+}
+
+func queueGate(dir string) (*os.File, error) {
+	file, err := os.OpenFile(filepath.Join(dir, "queue.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 func IsWaiting(home, project, task string) bool {
@@ -166,13 +212,34 @@ func HolderSummary() []string {
 			continue
 		}
 		slot := strings.TrimSuffix(entry.Name(), ".json")
-		label := fmt.Sprintf("%s pid %d %s", slot, holder.PID, holder.Command)
+		label := fmt.Sprintf("%s pid %d %s held %s", slot, holder.PID, holder.Command, time.Since(holder.Since).Round(time.Second))
 		if holder.Project != "" && holder.Task != "" {
-			label = fmt.Sprintf("%s %s pid %d %s", holder.Project, holder.Task, holder.PID, holder.Command)
+			label = fmt.Sprintf("%s %s pid %d %s held %s", holder.Project, holder.Task, holder.PID, holder.Command, time.Since(holder.Since).Round(time.Second))
 		}
 		holders = append(holders, label)
 	}
 	return holders
+}
+
+func WaiterSummary() []string {
+	dir := lockDirectory()
+	var waiters []string
+	for _, entry := range queueEntries(dir, "") {
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var waiting record
+		if json.Unmarshal(data, &waiting) != nil || waiting.PID < 2 {
+			continue
+		}
+		if err := syscall.Kill(waiting.PID, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+			continue
+		}
+		waiters = append(waiters, fmt.Sprintf("%s %s waiting %s", waiting.Project, waiting.Task, time.Since(waiting.Since).Round(time.Second)))
+	}
+	return waiters
 }
 
 func IsWaitingTask(home, project, task, marker string) bool {
@@ -210,25 +277,59 @@ func Acquire(ctx context.Context, class, command string) (*os.File, time.Duratio
 	}
 	started := time.Now()
 	dir := lockDirectory()
-	file, err := tryAcquire(dir, class, count)
-	if err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, 0, err
 	}
-	waitingPath := filepath.Join(dir, fmt.Sprintf("wait-%d.json", os.Getpid()))
-	if file == nil {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, 0, err
-		}
-		entry, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: started})
-		if err := os.WriteFile(waitingPath, entry, 0o600); err != nil {
-			return nil, 0, err
-		}
-		file, err = acquire(ctx, dir, class, count)
+	waitingPath := filepath.Join(dir, fmt.Sprintf("wait-%020d-%d.json", started.UnixNano(), os.Getpid()))
+	entry, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: started, Class: class})
+	if err := os.WriteFile(waitingPath, entry, 0o600); err != nil {
+		return nil, 0, err
+	}
+	var file *os.File
+	for file == nil {
+		gate, err := queueGate(dir)
 		if err != nil {
 			_ = os.Remove(waitingPath)
 			return nil, 0, err
 		}
-		_ = os.Remove(waitingPath)
+		entries := queueEntries(dir, class)
+		var available []*os.File
+		for i := range count {
+			slot, slotErr := tryAcquireSlot(dir, class, i)
+			if slotErr != nil {
+				_ = gate.Close()
+				_ = os.Remove(waitingPath)
+				return nil, 0, slotErr
+			}
+			if slot != nil {
+				available = append(available, slot)
+			}
+		}
+		position := -1
+		for i, queued := range entries {
+			if queued.Name() == filepath.Base(waitingPath) {
+				position = i
+				break
+			}
+		}
+		if position >= 0 && position < len(available) {
+			file = available[position]
+			_ = os.Remove(waitingPath)
+		}
+		for _, slot := range available {
+			if slot != file {
+				_ = slot.Close()
+			}
+		}
+		_ = gate.Close()
+		if file == nil {
+			select {
+			case <-ctx.Done():
+				_ = os.Remove(waitingPath)
+				return nil, 0, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 	}
 	ownerPath := strings.TrimSuffix(file.Name(), ".lock") + ".json"
 	owner, _ := json.Marshal(record{PID: os.Getpid(), Home: home, Project: os.Getenv("POSSE_PROJECT"), Task: os.Getenv("POSSE_TASK_SEQ"), Marker: os.Getenv("POSSE_TASK_ID"), Command: command, Since: time.Now()})
@@ -250,7 +351,8 @@ func Release(file *os.File) error {
 
 func Run(ctx context.Context, class string, args []string, stdout, stderr io.Writer) error {
 	if class == "status" {
-		_, err := fmt.Fprintln(stdout, strings.Join(HolderSummary(), "\n"))
+		lines := append(HolderSummary(), WaiterSummary()...)
+		_, err := fmt.Fprintln(stdout, strings.Join(lines, "\n"))
 		return err
 	}
 	if class != "cpu" && class != "reviewer" {
