@@ -3285,19 +3285,9 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		if !store.IsNotFound(sandboxErr) || task.SandboxID != 0 || task.Type != "change" {
 			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
 		}
-		deliveries, err := db.TaskDeliveries(ctx, task.ID)
+		releasedSandbox, err = taskExecutorReleased(ctx, db, task.ID)
 		if err != nil {
 			return failure(err)
-		}
-		for i := len(deliveries) - 1; i >= 0; i-- {
-			policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[i].ID)
-			if err != nil {
-				return failure(err)
-			}
-			if policy == "release" {
-				releasedSandbox = true
-				break
-			}
 		}
 		if !releasedSandbox {
 			return failure(axi.Failure("relaunch_sandbox_missing", "Task Sandbox is not held and the Task has prior work, so it cannot be relaunched", false, "Inspect the Task and its Pool Sandbox, or discard the Task"))
