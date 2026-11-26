@@ -104,28 +104,34 @@ func workerIdentityTask(ctx context.Context, db *store.DB, home string) (store.T
 }
 
 func workerAncestorTask(ctx context.Context, db *store.DB, home string) (store.Task, bool, error) {
-	var identity *ancestorProcess
+	var identity store.Task
+	found := false
 	for _, process := range processAncestors(procRoot, os.Getpid()) {
-		if home == "" || process.env[workerHomeEnv] == "" || !samePath(process.env[workerHomeEnv], home) {
+		processHome := process.env[workerHomeEnv]
+		if processHome != "" && !samePath(processHome, home) {
 			continue
 		}
 		agent := process.agent
 		for key, value := range process.env {
 			agent = agent || value != "" && agentEnvironmentKey(key)
 		}
-		if agent {
-			trusted := process
-			identity = &trusted
+		paneID := process.env["HERDR_PANE_ID"]
+		if !agent || paneID == "" {
+			continue
 		}
+		task, err := db.TaskByPane(ctx, paneID)
+		if store.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return store.Task{}, false, err
+		}
+		if processHome == "" && (process.cwd == "" || !pathWithin(task.WorktreePath, process.cwd)) {
+			continue
+		}
+		identity, found = task, true
 	}
-	if identity == nil || identity.env["HERDR_PANE_ID"] == "" {
-		return store.Task{}, false, nil
-	}
-	task, err := db.TaskByPane(ctx, identity.env["HERDR_PANE_ID"])
-	if store.IsNotFound(err) {
-		return store.Task{}, false, nil
-	}
-	return task, err == nil, err
+	return identity, found, nil
 }
 
 func workerOwnTaskRefusal() error {

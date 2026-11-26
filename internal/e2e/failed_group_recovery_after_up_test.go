@@ -34,8 +34,8 @@ esac
 	// later retry use the healthy harness.
 	script := strings.Replace(string(agent), "#!/bin/sh\n", "#!/bin/sh\n"+instrument, 1)
 	script = strings.Replace(script,
-		"    IFS= read -r prompt || exit 0\n",
-		"    IFS= read -r prompt || exit 0\n    if [ -f \"$POSSE_TEST_ROOT/fail-recovery-prompts\" ]; then\n      while IFS= read -r line; do :; done\n      exit 0\n    fi\n", 1)
+		"      IFS= read -r prompt || exit 0\n",
+		"      IFS= read -r prompt || exit 0\n    if [ -f \"$POSSE_TEST_ROOT/fail-recovery-prompts\" ]; then\n      while IFS= read -r line; do :; done\n      exit 0\n    fi\n", 1)
 	if err := os.WriteFile(agentPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

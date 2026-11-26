@@ -487,6 +487,66 @@ type workerTabsOptions struct {
 	prepareFolder func(repo string, env []string)
 }
 
+func TestWorkerOwnTaskReadsFromHarnessAndNestedCommands(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	configPath := filepath.Join(f.home, "config.toml")
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config = append(config, []byte("\n[profiles.pi]\nkind = \"pi\"\n\n[profiles.codex]\nkind = \"codex\"\n")...)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index, kind := range []string{"claude", "pi", "codex"} {
+		id := fmt.Sprintf("t%d", index+1)
+		if err := os.Remove(filepath.Join(f.root, "own-task-results")); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.root, "check-own-task"), []byte(id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if index > 0 {
+			fake, err := os.ReadFile(filepath.Join(f.root, "bin", "claude"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.root, "bin", kind), fake, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		brief := filepath.Join(f.root, "own-task-"+kind+".md")
+		if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Own Task "+kind+"\ndone_when: the E2E verifies own-Task reads\n---\nWait.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args := []string{"start", "--brief", brief, "--name", "own-task-" + kind}
+		if index > 0 {
+			args = append(args, "--profile", kind)
+		}
+		if output := runPosse(t, f.binary, f.repo, f.leadEnv, args...); !strings.Contains(output, id) {
+			t.Fatalf("start %s Worker: %s", kind, output)
+		}
+		f.waitState(t, id, store.StateWorking)
+		var results []byte
+		if !waitForCondition(30*time.Second, func() bool {
+			var err error
+			results, err = os.ReadFile(filepath.Join(f.root, "own-task-results"))
+			return err == nil && strings.Count(string(results), "\n") == 6
+		}) {
+			t.Fatalf("%s Worker harness did not report own-Task reads", kind)
+		}
+		if got, want := strings.TrimSpace(string(results)), "ok\nok\nok\nok\nok\nok"; got != want {
+			home, _ := os.ReadFile(filepath.Join(f.root, "worker-home"))
+			var output strings.Builder
+			for i := 0; i < 6; i++ {
+				data, _ := os.ReadFile(filepath.Join(f.root, fmt.Sprintf("own-task-output-%d", i)))
+				output.Write(data)
+			}
+			t.Fatalf("%s Worker own-Task reads = %q, want %q; POSSE_WORKER_HOME=%q; output=%s", kind, got, want, strings.TrimSpace(string(home)), output.String())
+		}
+	}
+}
+
 func newWorkerTabsFixture(t *testing.T) *workerTabsFixture {
 	return newWorkerTabsFixtureWithOptions(t, workerTabsOptions{})
 }
@@ -549,19 +609,40 @@ func newWorkerTabsFixtureWithOptions(t *testing.T, options workerTabsOptions) *w
 	// The fake Worker stays working until torn down. Keep the fake Lead alive
 	// so its detached startup finalizer can observe the agent.
 	agent := `#!/bin/sh
+agent_kind="${0##*/}"
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*) ;;
   *) while [ -f "$POSSE_TEST_ROOT/hold-lead-start" ]; do sleep 0.05; done ;;
 esac
-herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state idle >/dev/null 2>&1
+herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent "$agent_kind" --state idle >/dev/null 2>&1
 case "$PWD/" in
   "$POSSE_E2E_WORKTREES/"*)
     if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then sleep 3; fi
-    IFS= read -r prompt || exit 0
-    if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then printf '%s\n' "$prompt" >> "$POSSE_TEST_ROOT/focused-launch-prompts"; fi
-    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent claude --state working >/dev/null 2>&1
+    if [ "$agent_kind" != codex ]; then
+      IFS= read -r prompt || exit 0
+    fi
+    if [ -f "$POSSE_TEST_ROOT/focus-spawn" ]; then printf '%s\n' "${prompt:-}" >> "$POSSE_TEST_ROOT/focused-launch-prompts"; fi
+    herdr pane report-agent "$HERDR_PANE_ID" --source posse.fake --agent "$agent_kind" --state working >/dev/null 2>&1
     if [ -f "$POSSE_TEST_ROOT/check-task-env" ]; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$TMPDIR" "$GOTMPDIR" "$TMP" "$TEMP" "$POSSE_TASK_TEMP" "$POSSE_TASK_ID" "$GOCACHE" > "$POSSE_TEST_ROOT/task-environment"
+    fi
+    if [ -f "$POSSE_TEST_ROOT/check-own-task" ]; then
+      task_id=$(cat "$POSSE_TEST_ROOT/check-own-task")
+      printf '%s\n' "$POSSE_WORKER_HOME" > "$POSSE_TEST_ROOT/worker-home"
+      index=0
+      {
+        if posse show "$task_id" > "$POSSE_TEST_ROOT/own-task-output-$index" 2>&1; then printf 'ok\n'; else printf 'fail\n'; fi
+        index=$((index + 1))
+        if (posse show "$task_id") > "$POSSE_TEST_ROOT/own-task-output-$index" 2>&1; then printf 'ok\n'; else printf 'fail\n'; fi
+        index=$((index + 1))
+        if timeout 10 posse show "$task_id" > "$POSSE_TEST_ROOT/own-task-output-$index" 2>&1; then printf 'ok\n'; else printf 'fail\n'; fi
+        index=$((index + 1))
+        if posse review "$task_id" > "$POSSE_TEST_ROOT/own-task-output-$index" 2>&1; then printf 'ok\n'; else printf 'fail\n'; fi
+        index=$((index + 1))
+        if (posse review "$task_id") > "$POSSE_TEST_ROOT/own-task-output-$index" 2>&1; then printf 'ok\n'; else printf 'fail\n'; fi
+        index=$((index + 1))
+        if timeout 10 posse review "$task_id" > "$POSSE_TEST_ROOT/own-task-output-$index" 2>&1; then printf 'ok\n'; else printf 'fail\n'; fi
+      } > "$POSSE_TEST_ROOT/own-task-results"
     fi
     if [ -f "$POSSE_TEST_ROOT/launch-detached-server" ]; then
       printf 'Task-owned server reference\n' > "$TMPDIR/detached-server-reference"
