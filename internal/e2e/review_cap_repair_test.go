@@ -322,6 +322,9 @@ func TestFullPipelineRefreshRelaunchesReleasedWorkerAfterTargetMoves(t *testing.
 	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "pr", "release", "t1", "--policy", "release"); !strings.Contains(output, "sandbox_released: true") {
 		t.Fatalf("release Worker: %s", output)
 	}
+	if _, err := f.db.EnsureDelivery(context.Background(), h.change.ID, "", "https://github.com/acme/shop/pull/18", "publish"); err != nil {
+		t.Fatalf("record later delivery without an executor-policy operation: %v", err)
+	}
 	plan, err := h.change.AdmittedPlan()
 	if err != nil {
 		t.Fatal(err)
