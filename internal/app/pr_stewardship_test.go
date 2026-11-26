@@ -760,6 +760,26 @@ func TestPRReleaseResumesAfterSandboxResetBeforeRelease(t *testing.T) {
 	}
 }
 
+func TestPublishAndApprovedDiscardRecoverDeadPRReleaseIntent(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateWorking)
+	defer fixture.db.Close()
+	attachPRFixtureSandbox(t, fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "started", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+	if code, output, stderr := fixture.run("publish", "Recovered publication"); code != 0 {
+		t.Fatalf("publish after recovering dead pr-release intent: %d %s %s", code, output, stderr)
+	}
+	if _, err := fixture.db.IntentByTask(ctx, fixture.task.ID); !store.IsNotFound(err) {
+		t.Fatalf("publish left a pr-release intent behind: err=%v", err)
+	}
+	removeFixtureTaskPane(fixture)
+	if code, output, stderr := fixture.run("teardown", "t1", "--discard", "--user-approved", "Discard, làm lại (Recommended)"); code != 0 {
+		t.Fatalf("approved discard after publication: %d %s %s", code, output, stderr)
+	}
+}
+
 func TestPRReleaseKeepsRefreshIntentUntilConflictRequeueSucceeds(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()
@@ -945,6 +965,9 @@ func TestPRReleaseRefusesWhenDeliveryPreservationIsUncertain(t *testing.T) {
 	if err := os.WriteFile(fixture.ghState, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.db.StartIntent(context.Background(), fixture.project.ID, fixture.task.ID, "pr-release", "started", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
 
 	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
 	combined := output + stderr
@@ -969,8 +992,58 @@ func TestPRReleaseRefusesWhenDeliveryPreservationIsUncertain(t *testing.T) {
 	if operations != 0 {
 		t.Fatalf("refused release recorded %d applied policy operations", operations)
 	}
+	if _, err := fixture.db.IntentByTask(context.Background(), fixture.task.ID); !store.IsNotFound(err) {
+		t.Fatalf("refused release left an intent behind: err=%v", err)
+	}
 	if cleared := fixture.service.Herdr.(*herdr.Fake).CallCount("pane.clear_agent_authority"); cleared != 0 {
 		t.Fatalf("refused release changed executor authority %d times", cleared)
+	}
+}
+
+func TestApprovedDiscardRecoversDeadPRReleaseIntent(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "pr-release", "started", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("teardown", "t1", "--discard", "--user-approved", "Discard, làm lại (Recommended)")
+	if code != 0 {
+		t.Fatalf("approved discard with dead pr-release intent: %d %s %s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateTornDown {
+		t.Fatalf("Task after approved discard = %#v err=%v", task, err)
+	}
+	if _, err := fixture.db.IntentByTask(ctx, fixture.task.ID); !store.IsNotFound(err) {
+		t.Fatalf("discard left an intent behind: err=%v", err)
+	}
+}
+
+func TestApprovedDiscardDoesNotClearUnrelatedDeadIntent(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	attachPRFixtureSandbox(t, fixture)
+	removeFixtureTaskPane(fixture)
+	ctx := context.Background()
+	if err := fixture.db.StartIntent(ctx, fixture.project.ID, fixture.task.ID, "publish", "candidate.push", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("teardown", "t1", "--discard", "--user-approved", "Discard, làm lại (Recommended)")
+	if code == 0 || !strings.Contains(output+stderr, "intent_active") {
+		t.Fatalf("discard with unrelated dead intent: %d %s %s", code, output, stderr)
+	}
+	intent, err := fixture.db.IntentByTask(ctx, fixture.task.ID)
+	if err != nil || intent.Command != "publish" || intent.Step != "candidate.push" {
+		t.Fatalf("unrelated dead intent after refused discard = %#v, %v", intent, err)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil || task.State != store.StateDone {
+		t.Fatalf("Task after refused discard = %#v, %v", task, err)
 	}
 }
 
