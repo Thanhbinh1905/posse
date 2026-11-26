@@ -14,6 +14,8 @@ func TestReviewCarryProofComparesPatchesAgainstTheTarget(t *testing.T) {
 	ctx := context.Background()
 	repo := filepath.Join(t.TempDir(), "repo")
 	initRepo(t, repo)
+	gitTest(t, repo, "config", "gc.auto", "0")
+	gitTest(t, repo, "config", "maintenance.auto", "false")
 	db, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
