@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -16,6 +18,18 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
+
+func TestPublishMapsDeadlineAfterStaleHeadToRetryableLagTimeout(t *testing.T) {
+	ctx := context.Background()
+	pollCtx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel()
+
+	got := mapPullRequestHeadPollError(context.DeadlineExceeded, ctx, pollCtx, true, true, "previous-head", "expected-head")
+	var failure *axi.Error
+	if !errors.As(got, &failure) || failure.Code != "pr_head_lag_timeout" || !failure.Retryable || !strings.Contains(failure.Message, "expected-head") {
+		t.Fatalf("deadline while waiting for stale head returned %v, want retryable pr_head_lag_timeout", got)
+	}
+}
 
 func TestGreenhousePRReleaseDoesNotRequirePrivateCandidatePromotion(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)

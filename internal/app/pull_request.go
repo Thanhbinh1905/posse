@@ -332,12 +332,15 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	return prURL, opened, nil
 }
 
-func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
+func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (prURL string, opened bool, resultErr error) {
 	args := []string{"pr", "list", "--state", "open", "--head", task.Branch, "--json", "url,headRefName,headRefOid,baseRefName,headRepository", "--limit", "100"}
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
 	var urlValue, lastHead string
 	foundOpenPR, lastHeadLagging := false, false
+	defer func() {
+		resultErr = mapPullRequestHeadPollError(resultErr, ctx, pollCtx, foundOpenPR, lastHeadLagging, lastHead, task.GatedSHA)
+	}()
 	delay := openPullRequestHeadInitialWait
 	for {
 		output, err := runOutputStep(pollCtx, db, intent, "pr.lookup", project.Root, "gh", args...)
@@ -652,6 +655,16 @@ func pullRequestHeadMismatch(intent store.Intent, actual, expected string) error
 		hint = "Push the local Task head to the Task branch and re-run `posse publish`, or signal needs-decision if the request head keeps differing"
 	}
 	return axi.Failure("branch_moved", fmt.Sprintf("open request for the Task branch has head %s; expected %s", actual, expected), false, hint)
+}
+
+func mapPullRequestHeadPollError(err error, ctx, pollCtx context.Context, foundOpenPR, lastHeadLagging bool, lastHead, expectedHead string) error {
+	if err == nil || ctx.Err() != nil || (!errors.Is(err, context.DeadlineExceeded) && pollCtx.Err() == nil) {
+		return err
+	}
+	if foundOpenPR && lastHeadLagging {
+		return pullRequestHeadLagTimeout(lastHead, expectedHead)
+	}
+	return err
 }
 
 func pullRequestHeadLagTimeout(actual, expected string) error {
