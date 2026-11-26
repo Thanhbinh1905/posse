@@ -28,8 +28,24 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 		}
 		var interruptedRelease, withdrawnFreshness bool
 		var err error
+		releaseStarted := false
 		if intent, intentErr := db.IntentByTask(ctx.Context, target.task.ID); intentErr == nil && intent.Command == "pr-release" && !intentProcessAlive(intent) {
+			claimed, claimErr := db.ClaimIntent(ctx.Context, intent.ID, intent.ProcessID, os.Getpid(), "resuming:"+intent.Step)
+			if claimErr != nil {
+				return claimErr
+			}
+			if !claimed {
+				return store.ErrIntentOwned
+			}
 			interruptedRelease = true
+			defer func() {
+				if releaseStarted {
+					return
+				}
+				if finishErr := db.FinishIntent(context.Background(), intent.ID, os.Getpid()); finishErr != nil {
+					returnErr = errors.Join(returnErr, finishErr)
+				}
+			}()
 			retry := "posse pr release " + target.taskLabel() + " --policy release"
 			if policy != "release" {
 				return axi.Failure("pr_release_refused", "an interrupted release must resume with its original policy", true, "Retry with `"+retry+"`")
@@ -141,6 +157,7 @@ func (s *Service) prRelease(ctx *axi.Context, args []string) error {
 				operation.Outcome = "succeeded"
 				return nil
 			}
+			releaseStarted = true
 			if err := s.releaseExecutor(ctx.Context, db, target, target.cfg, beginPolicy, completePolicy, afterRelease); err != nil {
 				if operation.ID > 0 && operation.Outcome == "pending" {
 					if resolveErr := db.ResolveDeliveryOperation(ctx.Context, operation.ID, "failed", err.Error()); resolveErr != nil {
@@ -330,6 +347,13 @@ func (s *Service) releaseExecutor(ctx context.Context, db *store.DB, target stew
 	defer func() {
 		if returnErr == nil {
 			returnErr = s.finishTaskIntent(context.Background(), db, task.ID)
+			return
+		}
+		current, lookupErr := db.IntentByTask(context.Background(), task.ID)
+		if lookupErr == nil && current.ID == intent.ID && strings.TrimPrefix(current.Step, "resuming:") == "started" {
+			if finishErr := db.FinishIntent(context.Background(), intent.ID, intent.ProcessID); finishErr != nil {
+				returnErr = errors.Join(returnErr, finishErr)
+			}
 		}
 	}()
 	sandbox, err := db.SandboxByTask(ctx, task.ID)
