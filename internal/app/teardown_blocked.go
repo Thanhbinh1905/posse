@@ -53,6 +53,20 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 // It exceeds the lifetime of the `sleep 0.1` a polling loop spawns.
 const transientProcessWindow = 200 * time.Millisecond
 
+func stableProcessIDs(first, next []int) []int {
+	present := make(map[int]bool, len(next))
+	for _, pid := range next {
+		present[pid] = true
+	}
+	stable := make([]int, 0, len(first))
+	for _, pid := range first {
+		if present[pid] {
+			stable = append(stable, pid)
+		}
+	}
+	return stable
+}
+
 // stableTaskProcesses keeps the processes that survive a second scan. Short-lived
 // children, such as the `sleep` a polling shell loop spawns each iteration,
 // get a new PID on every scan and would otherwise make the blocking set differ

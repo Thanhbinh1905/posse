@@ -81,6 +81,7 @@ func TestWatchSupervisionPreservesHeartbeatDuringSlowForgePoll(t *testing.T) {
 		t.Fatalf("build Posse CLI: %v\n%s", err, output)
 	}
 
+	t.Cleanup(func() { cleanupTestWatchRuntime(t, fixture.home, fixture.project.ID, "") })
 	if err := fixture.service.startWatchRuntime(ctx, fixture.db, fixture.home, fixture.project, binary); err != nil {
 		t.Fatal(err)
 	}
@@ -100,11 +101,6 @@ func TestWatchSupervisionPreservesHeartbeatDuringSlowForgePoll(t *testing.T) {
 	if watchToStop.PID != before.PID {
 		t.Fatalf("Project Watch PID %d was not discoverable", before.PID)
 	}
-	t.Cleanup(func() {
-		if err := stopStoredWatchRuntime(context.Background(), fixture.home, watchToStop); err != nil {
-			t.Errorf("stop Project Watch PID %d: %v", before.PID, err)
-		}
-	})
 
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
