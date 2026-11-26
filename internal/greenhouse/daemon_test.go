@@ -59,6 +59,20 @@ printf '%s\n' '{"version":1,"outcome":"error","error":"EOF"}'
 	}
 }
 
+func TestDaemonStartErrorIncludesDaemonOutput(t *testing.T) {
+	home := t.TempDir()
+	binary := filepath.Join(t.TempDir(), "greenhouse")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' 'daemon startup diagnostic' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{Binary: binary, Home: home, InTask: func(int) bool { return false }}
+
+	_, err := d.start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "daemon startup diagnostic") {
+		t.Fatalf("start error = %v, want daemon stderr", err)
+	}
+}
+
 func TestEnsureRecordsTheRunningDaemonExecutable(t *testing.T) {
 	home := t.TempDir()
 	process := exec.Command("/bin/sleep", "30")
