@@ -95,6 +95,7 @@ func TestApplyRecoveryDiscardWithPrunedSandbox(t *testing.T) {
 	}
 	fake := f.service.Herdr.(*herdr.Fake)
 	markPRFixtureWorkerExited(fake)
+	fake.Results["pane.process_info"] = []byte(`{"process_info":{"pane_id":"w1:p1","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[]}}`)
 	f.service.Herdr = &changingSnapshotAdapter{Fake: fake, snapshot: fake.SnapshotValue}
 	removeFixtureTaskPane(f)
 	// Simulate a pruned worktree link without touching the Project repository.
