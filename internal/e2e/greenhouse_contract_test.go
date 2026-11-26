@@ -80,6 +80,65 @@ type greenhouseContract struct {
 // case of its fault table runs against the real greenhouse binary with a fake
 // reviewer, an isolated POSSE_HOME and an isolated Herdr server. Every case
 // passes only if no Verdict is recorded for a head that was not reviewed.
+func TestGreenhouseFullPipelineMergeOnlyTaskRecordsEmptyDiffVerdict(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	c.env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
+	projectDB, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := projectDB.ProjectByID(context.Background(), f.projectID)
+	projectDB.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(f.home, "projects", project.Name)
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte(`review_provider = "greenhouse"
+[defaults]
+review = "full-pipeline"
+merge_mode = "local"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.change = f.start(t, "t1", "Merge-only Greenhouse Task", "merge-only-greenhouse")
+	gitTest(t, f.env, c.change.WorktreePath, "checkout", "-b", "source")
+	gitTest(t, f.env, c.change.WorktreePath, "commit", "--allow-empty", "-q", "-m", "source history")
+	gitTest(t, f.env, c.change.WorktreePath, "checkout", c.change.Branch)
+	gitTest(t, f.env, c.change.WorktreePath, "merge", "--no-ff", "--no-edit", "source")
+	head := strings.TrimSpace(gitTest(t, f.env, c.change.WorktreePath, "rev-parse", "HEAD"))
+	gitTest(t, f.env, c.change.WorktreePath, "diff", "--quiet", "main", head)
+	if parents := strings.Fields(gitTest(t, f.env, c.change.WorktreePath, "rev-list", "--parents", "-n", "1", head)); len(parents) != 3 {
+		t.Fatalf("merge-only head has %d parents; want a merge commit", len(parents)-1)
+	}
+	workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+	if output, err := c.posse(workerEnv, c.change.WorktreePath, "signal", "done", "Merge-only Task", "--head", head); err != nil {
+		t.Fatalf("Worker done Signal: %v\n%s", err, output)
+	}
+	if output, err := c.posse(c.env, f.repo, "watch", "--poll-only", "--timeout", "3000"); err != nil {
+		t.Fatalf("Lead Watch: %v\n%s", err, output)
+	}
+	verdicts := c.verdicts(t)
+	if len(verdicts) != 1 || verdicts[0].Head != head || verdicts[0].Outcome != "clean" || verdicts[0].Mode != "gate" || verdicts[0].Target != strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main")) {
+		t.Fatalf("empty-diff Verdicts = %+v; want one exact-head gate Verdict", verdicts)
+	}
+	if _, err := os.Stat(filepath.Join(c.ctl, "invocations")); !os.IsNotExist(err) {
+		t.Fatalf("Greenhouse reviewer was invoked for an empty diff: %v", err)
+	}
+	newHead := c.authorCommit(t)
+	result := c.review(t)
+	if result["head"] != newHead || result["verdict"] != "clean" || result["recorded"] != true {
+		t.Fatalf("changed-head review = %v; want a recorded clean Verdict for %s", result, newHead)
+	}
+	if len(c.verdicts(t)) != 2 {
+		t.Fatalf("Verdicts after changed head = %+v; want the empty-diff and normal review Verdicts", c.verdicts(t))
+	}
+	if c.invocations(t) != 1 {
+		t.Fatalf("Greenhouse reviewer invocations = %d; want one for the changed head", c.invocations(t))
+	}
+}
+
 func TestGreenhouseFullPipelinePrepublicationReviewRunsFromWatch(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	c := newGreenhouseContract(t, f)
