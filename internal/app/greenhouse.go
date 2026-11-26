@@ -868,7 +868,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 func (s *Service) queueGreenhouseReviewFix(ctx context.Context, db *store.DB, project store.Project, task store.Task) (reviewFixQueued, error) {
 	queued, err := s.queueReviewFix(ctx, db, project, task, nil, false)
 	var failure *axi.Error
-	if errors.As(err, &failure) && (failure.Code == "review_fix_empty" || failure.Code == "review_fix_duplicate") {
+	if errors.As(err, &failure) && (failure.Code == "review_fix_empty" || failure.Code == "review_fix_duplicate" || failure.Code == "review_fix_pending") {
 		return reviewFixQueued{}, nil
 	}
 	return queued, err
