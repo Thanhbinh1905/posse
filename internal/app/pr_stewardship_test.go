@@ -965,6 +965,9 @@ func TestPRReleaseRefusesWhenDeliveryPreservationIsUncertain(t *testing.T) {
 	if err := os.WriteFile(fixture.ghState, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.db.StartIntent(context.Background(), fixture.project.ID, fixture.task.ID, "pr-release", "started", `{}`, deadIntentProcessID); err != nil {
+		t.Fatal(err)
+	}
 
 	code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release")
 	combined := output + stderr
