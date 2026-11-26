@@ -1850,6 +1850,23 @@ func sandboxProcessIDs(path string) ([]int, error) {
 	return pids, nil
 }
 
+func processGroupInSandbox(groupID int, root string) (bool, error) {
+	if groupID <= 1 {
+		return false, nil
+	}
+	pids, err := sandboxProcessIDs(root)
+	if err != nil {
+		return false, err
+	}
+	for _, pid := range pids {
+		processGroup, err := sandboxProcessGroupID(pid)
+		if err == nil && processGroup == groupID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func processInSandbox(pid int, root string) bool {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved

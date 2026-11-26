@@ -823,6 +823,15 @@ func (s *Service) verifyDiscardSandboxPaneOwnership(ctx context.Context, db *sto
 		if err != nil {
 			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not inspect process ownership in pane %s before discard", pane.PaneID), true, err.Error())
 		}
+		if info.ForegroundProcessGroup > 1 {
+			inSandbox, err := processGroupInSandbox(info.ForegroundProcessGroup, task.WorktreePath)
+			if err != nil {
+				return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not inspect foreground process group %d in pane %s before discard", info.ForegroundProcessGroup, pane.PaneID), true, err.Error())
+			}
+			if inSandbox {
+				return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("unowned pane %s has foreground process group %d in the held Sandbox", pane.PaneID, info.ForegroundProcessGroup), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
+			}
+		}
 		for _, process := range info.ForegroundProcesses {
 			if pathInside(process.CWD, task.WorktreePath) || process.PID > 1 && processInSandbox(process.PID, task.WorktreePath) {
 				return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("unowned pane %s has foreground PID %d in the held Sandbox", pane.PaneID, process.PID), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")

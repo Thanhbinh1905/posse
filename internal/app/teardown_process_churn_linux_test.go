@@ -73,6 +73,17 @@ func TestDiscardOwnershipChecksForeignProcessOutsideTaskPaneTopology(t *testing.
 	if err := fixture.service.verifyDiscardSandboxPaneOwnership(ctx, fixture.db, fixture.project, task); err == nil || !strings.Contains(err.Error(), "unowned pane") {
 		t.Fatalf("foreign pane shell outside the Task pane topology was not refused: %v", err)
 	}
+
+	foregroundGroup := startSandboxProcess(t, fixture.worktree)
+	adapter.processInfo, _ = json.Marshal(map[string]any{"process_info": map[string]any{
+		"pane_id":                     pane.PaneID,
+		"shell_pid":                   shell.Process.Pid,
+		"foreground_process_group_id": foregroundGroup.Process.Pid,
+		"foreground_processes":        []map[string]any{},
+	}})
+	if err := fixture.service.verifyDiscardSandboxPaneOwnership(ctx, fixture.db, fixture.project, task); err == nil || !strings.Contains(err.Error(), "unowned pane") {
+		t.Fatalf("foreign foreground process group omitted from process list was not refused: %v", err)
+	}
 }
 
 func TestUnverifiedSandboxProcessHandleTreatsExitedProcessAsGone(t *testing.T) {
