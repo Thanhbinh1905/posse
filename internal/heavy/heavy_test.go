@@ -3,6 +3,7 @@ package heavy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,6 +100,155 @@ func TestCommandsFromSeparateHomesShareMachineSlot(t *testing.T) {
 	}
 }
 
+func TestWaitersAreServedInArrivalOrderAcrossProjects(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	release := filepath.Join(filepath.Dir(filepath.Dir(lockDir)), "release")
+	t.Setenv("POSSE_TEST_RELEASE", release)
+	holder := startHeavyProcess(t, `printf 'holder-start\n' >> "$POSSE_TEST_LOG"; while [ ! -e "$POSSE_TEST_RELEASE" ]; do sleep 0.01; done; printf 'holder-end\n' >> "$POSSE_TEST_LOG"`)
+	waitForHolder(t, lockDir, holder.Process.Pid)
+	first := startHeavyProcessForProject(t, "project-one", `printf 'first\n' >> "$POSSE_TEST_LOG"`)
+	waitForWaiter(t, lockDir, "project-one")
+	if first.Process.Pid <= 1 {
+		t.Fatalf("unsafe waiter pid %d", first.Process.Pid)
+	}
+	if err := first.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = first.Process.Signal(syscall.SIGCONT)
+		_ = os.WriteFile(release, nil, 0o600)
+	}()
+	second := startHeavyProcessForProject(t, "project-two", `printf 'second\n' >> "$POSSE_TEST_LOG"`)
+	waitForWaiter(t, lockDir, "project-two")
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if err := first.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	order, err := os.ReadFile(os.Getenv("POSSE_TEST_LOG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Fields(string(order)); strings.Join(got, " ") != "holder-start holder-end first second" {
+		t.Fatalf("command order = %q", got)
+	}
+}
+
+func TestAcquireContextCancelsWhileQueueGateIsHeld(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.OpenFile(filepath.Join(lockDir, "queue.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(gate.Fd()), syscall.LOCK_EX); err != nil {
+		gate.Close()
+		t.Fatal(err)
+	}
+	holder, err := tryAcquire(lockDir, "cpu", 1)
+	if err != nil {
+		gate.Close()
+		t.Fatal(err)
+	}
+	if holder == nil {
+		gate.Close()
+		t.Fatal("could not occupy CPU slot")
+	}
+	defer holder.Close()
+	defer gate.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		file, _, err := Acquire(ctx, "cpu", "test")
+		if file != nil {
+			_ = file.Close()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Acquire error = %v, want context deadline", err)
+		}
+	case <-ctx.Done():
+		select {
+		case err := <-result:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Acquire error = %v, want context deadline", err)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+		if err := gate.Close(); err != nil {
+			t.Fatal(err)
+		}
+		err := <-result
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Acquire error after releasing gate = %v, want context deadline", err)
+		}
+		t.Fatal("Acquire did not cancel while queue gate was held")
+	}
+}
+
+func TestAcquirePublishesWaiterAfterTakingQueueGate(t *testing.T) {
+	lockDir := configureHeavyProcessTest(t)
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := os.OpenFile(filepath.Join(lockDir, "queue.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(gate.Fd()), syscall.LOCK_EX); err != nil {
+		gate.Close()
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		file, _, err := Acquire(context.Background(), "cpu", "test")
+		if file != nil {
+			_ = file.Close()
+		}
+		result <- err
+	}()
+	<-started
+	time.Sleep(50 * time.Millisecond)
+	entries, err := os.ReadDir(lockDir)
+	if err != nil {
+		_ = gate.Close()
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "wait-") && strings.HasSuffix(entry.Name(), ".json") {
+			_ = gate.Close()
+			<-result
+			t.Fatalf("waiter %s was published before acquiring queue gate", entry.Name())
+		}
+	}
+	if err := gate.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestKilledJobGroupFreesSlot(t *testing.T) {
 	lockDir := configureHeavyProcessTest(t)
 	wrapper := startHeavyProcess(t, "sleep 60")
@@ -163,20 +313,25 @@ func configureHeavyProcessTest(t *testing.T) string {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	t.Setenv("POSSE_HOME", filepath.Join(root, "home"))
+	t.Setenv("POSSE_TEST_LOG", filepath.Join(root, "order"))
 	return filepath.Join(runtimeDir, "posse", "heavy")
 }
 
 func startHeavyProcess(t *testing.T, script string) *exec.Cmd {
+	return startHeavyProcessForProject(t, "project", script)
+}
+
+func startHeavyProcessForProject(t *testing.T, project, script string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHeavySubprocess$")
 	for _, value := range os.Environ() {
 		key, _, _ := strings.Cut(value, "=")
-		if key == "POSSE_HEAVY_HELPER" || key == "POSSE_HEAVY_SCRIPT" || key == "XDG_RUNTIME_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_HOME" {
+		if key == "POSSE_HEAVY_HELPER" || key == "POSSE_HEAVY_SCRIPT" || key == "XDG_RUNTIME_DIR" || key == "XDG_CONFIG_HOME" || key == "POSSE_HOME" || key == "POSSE_PROJECT" || key == "POSSE_TASK_SEQ" {
 			continue
 		}
 		cmd.Env = append(cmd.Env, value)
 	}
-	cmd.Env = append(cmd.Env, "POSSE_HEAVY_HELPER=1", "POSSE_HEAVY_SCRIPT="+script, "XDG_RUNTIME_DIR="+os.Getenv("XDG_RUNTIME_DIR"), "XDG_CONFIG_HOME="+os.Getenv("XDG_CONFIG_HOME"), "POSSE_HOME="+os.Getenv("POSSE_HOME"))
+	cmd.Env = append(cmd.Env, "POSSE_HEAVY_HELPER=1", "POSSE_HEAVY_SCRIPT="+script, "XDG_RUNTIME_DIR="+os.Getenv("XDG_RUNTIME_DIR"), "XDG_CONFIG_HOME="+os.Getenv("XDG_CONFIG_HOME"), "POSSE_HOME="+os.Getenv("POSSE_HOME"), "POSSE_PROJECT="+project, "POSSE_TASK_SEQ="+project)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -201,6 +356,26 @@ func waitForHolder(t *testing.T, lockDir string, wrapperPID int) record {
 	return record{}
 }
 
+func waitForWaiter(t *testing.T, lockDir, project string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, _ := os.ReadDir(lockDir)
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "wait-") {
+				continue
+			}
+			data, _ := os.ReadFile(filepath.Join(lockDir, entry.Name()))
+			var waiting record
+			if json.Unmarshal(data, &waiting) == nil && waiting.Project == project {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("project %s did not publish a waiter record", project)
+}
+
 func waitForSlot(t *testing.T, lockDir string) *os.File {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -216,6 +391,31 @@ func waitForSlot(t *testing.T, lockDir string) *os.File {
 	}
 	t.Fatal("slot remained held after the job exited")
 	return nil
+}
+
+func TestWaiterSummaryIncludesProjectTaskAndWaitTime(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", root)
+	dir := filepath.Join(root, "posse", "heavy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waiting := record{PID: os.Getpid(), Project: "project", Task: "t42", Since: time.Now().Add(-3 * time.Second)}
+	data, err := json.Marshal(waiting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "wait-test.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	if err := Run(context.Background(), "status", nil, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "project t42 waiting 3s") {
+		t.Fatalf("waiter status = %q", got)
+	}
 }
 
 func TestSlotsReadsMachineOverrides(t *testing.T) {
