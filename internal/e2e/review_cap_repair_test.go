@@ -322,6 +322,18 @@ func TestFullPipelineRefreshRelaunchesReleasedWorkerAfterTargetMoves(t *testing.
 	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "pr", "release", "t1", "--policy", "release"); !strings.Contains(output, "sandbox_released: true") {
 		t.Fatalf("release Worker: %s", output)
 	}
+	plan, err := h.change.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, h.change.ID); err != nil {
+		t.Fatal(err)
+	}
 	advanceMainWithFile(t, f, "released-worker-target.txt")
 	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
 	if !waitForCondition(20*time.Second, func() bool {
@@ -338,11 +350,20 @@ func TestFullPipelineRefreshRelaunchesReleasedWorkerAfterTargetMoves(t *testing.
 		t.Fatalf("stale validation did not queue refresh and relaunch released Worker: task=%+v notices=%#v", task, notices)
 	}
 	var body string
-	if err := f.db.QueryRowContext(context.Background(), `SELECT body FROM messages WHERE task_id=? AND body LIKE '%Candidate head%' ORDER BY id DESC LIMIT 1`, h.change.ID).Scan(&body); err != nil {
+	if err := f.db.QueryRow(`SELECT body FROM messages WHERE task_id=? AND body LIKE '%Greenhouse-reviewed head%' ORDER BY id DESC LIMIT 1`, h.change.ID).Scan(&body); err != nil {
 		t.Fatalf("relaunch did not preserve the target-refresh instruction: %v", err)
 	}
-	if !strings.Contains(body, "posse publish --refresh") {
-		t.Fatalf("target-refresh message body=%q", body)
+	if !strings.Contains(body, "Greenhouse-reviewed head "+candidate.CandidateSHA+" is missing current target commit") {
+		t.Fatalf("target-refresh instruction does not name Task head %s: %q", candidate.CandidateSHA, body)
+	}
+	decisions, err := f.db.Decisions(context.Background(), f.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == h.change.ID && decision.Kind == "worker_exited" {
+			t.Fatalf("released executor raised worker_exited Decision: %#v", decision)
+		}
 	}
 }
 

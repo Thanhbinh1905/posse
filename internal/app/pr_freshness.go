@@ -147,30 +147,44 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 	if freshness.Root != "" {
 		queuedHead := headSHA
 		checkedHead := headSHA
-		worktreePath := task.WorktreePath
 		if greenhouseFullPipelineTaskWithConfig(task, config.Config{}, member) {
-			if member != "" {
-				repos, err := db.TaskRepos(ctx, task.ID)
+			released := false
+			deliveries, err := db.TaskDeliveries(ctx, task.ID)
+			if err != nil {
+				return targetSync{}, err
+			}
+			if len(deliveries) > 0 {
+				policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
 				if err != nil {
 					return targetSync{}, err
 				}
-				worktreePath = ""
-				for _, repo := range repos {
-					if repo.Repo == member {
-						worktreePath = repo.WorktreePath
-						break
+				released = policy == "release"
+			}
+			if !released {
+				worktreePath := task.WorktreePath
+				if member != "" {
+					repos, err := db.TaskRepos(ctx, task.ID)
+					if err != nil {
+						return targetSync{}, err
+					}
+					worktreePath = ""
+					for _, repo := range repos {
+						if repo.Repo == member {
+							worktreePath = repo.WorktreePath
+							break
+						}
+					}
+					if worktreePath == "" {
+						return targetSync{}, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
 					}
 				}
-				if worktreePath == "" {
-					return targetSync{}, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
+				if worktreePath != "" {
+					currentHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
+					if err != nil {
+						return targetSync{}, err
+					}
+					checkedHead = currentHead
 				}
-			}
-			if worktreePath != "" {
-				currentHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
-				if err != nil {
-					return targetSync{}, err
-				}
-				checkedHead = currentHead
 			}
 		}
 		headSHA = checkedHead
