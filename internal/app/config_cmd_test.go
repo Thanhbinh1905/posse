@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,54 @@ func TestConfigRollbackPreservesOriginalMode(t *testing.T) {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("restored mode = %o, err %v", info.Mode().Perm(), err)
+	}
+}
+
+func TestConfigSetWritesModelPrices(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	initRepo(t, repo)
+	home := filepath.Join(root, "posse")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[profiles.fast]\nkind = \"codex\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(home, herdr.NewFake())
+	t.Chdir(repo)
+	prices := map[string]float64{
+		"input_per_million":      1.25,
+		"output_per_million":     2.5,
+		"cache_read_per_million": 0.125,
+		"cache_write_per_million": 0.75,
+	}
+	for name, price := range prices {
+		code, output := runCLI(t, service, "config", "set", "profiles.fast.prices."+name, fmt.Sprint(price))
+		if code != 0 {
+			t.Fatalf("config set failed for %s: code=%d output=%s", name, code, output)
+		}
+	}
+	cfg, err := config.Load(home, "")
+	if err != nil {
+		t.Fatalf("config after setting model prices is invalid: %v", err)
+	}
+	got := cfg.Profiles["fast"].Prices
+	for name, want := range prices {
+		var actual *float64
+		switch name {
+		case "input_per_million":
+			actual = got.InputPerMillion
+		case "output_per_million":
+			actual = got.OutputPerMillion
+		case "cache_read_per_million":
+			actual = got.CacheReadPerMillion
+		case "cache_write_per_million":
+			actual = got.CacheWritePerMillion
+		}
+		if actual == nil || *actual != want {
+			t.Errorf("%s = %v, want %v", name, actual, want)
+		}
 	}
 }
 
