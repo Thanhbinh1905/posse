@@ -147,30 +147,36 @@ func (s *Service) queuePRTargetSyncInstruction(ctx context.Context, db *store.DB
 	if freshness.Root != "" {
 		queuedHead := headSHA
 		checkedHead := headSHA
-		worktreePath := task.WorktreePath
 		if greenhouseFullPipelineTaskWithConfig(task, config.Config{}, member) {
-			if member != "" {
-				repos, err := db.TaskRepos(ctx, task.ID)
-				if err != nil {
-					return targetSync{}, err
-				}
-				worktreePath = ""
-				for _, repo := range repos {
-					if repo.Repo == member {
-						worktreePath = repo.WorktreePath
-						break
+			released, err := taskExecutorReleased(ctx, db, task.ID)
+			if err != nil {
+				return targetSync{}, err
+			}
+			if !released {
+				worktreePath := task.WorktreePath
+				if member != "" {
+					repos, err := db.TaskRepos(ctx, task.ID)
+					if err != nil {
+						return targetSync{}, err
+					}
+					worktreePath = ""
+					for _, repo := range repos {
+						if repo.Repo == member {
+							worktreePath = repo.WorktreePath
+							break
+						}
+					}
+					if worktreePath == "" {
+						return targetSync{}, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
 					}
 				}
-				if worktreePath == "" {
-					return targetSync{}, fmt.Errorf("workspace Task %d has no repository %q", task.Seq, member)
+				if worktreePath != "" {
+					currentHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
+					if err != nil {
+						return targetSync{}, err
+					}
+					checkedHead = currentHead
 				}
-			}
-			if worktreePath != "" {
-				currentHead, err := gitOutput(ctx, worktreePath, "rev-parse", "HEAD")
-				if err != nil {
-					return targetSync{}, err
-				}
-				checkedHead = currentHead
 			}
 		}
 		headSHA = checkedHead
@@ -236,12 +242,8 @@ func (s *Service) relaunchReleasedFullPipelineWorker(ctx context.Context, db *st
 	if !fullPipelineSelected(task, member) || s.Herdr == nil {
 		return nil
 	}
-	deliveries, err := db.TaskDeliveries(ctx, task.ID)
-	if err != nil || len(deliveries) == 0 {
-		return err
-	}
-	policy, err := db.DeliveryExecutorPolicy(ctx, deliveries[len(deliveries)-1].ID)
-	if err != nil || policy != "release" {
+	released, err := taskExecutorReleased(ctx, db, task.ID)
+	if err != nil || !released {
 		return err
 	}
 	snapshot, err := s.snapshot(ctx)
@@ -266,6 +268,14 @@ func (s *Service) relaunchReleasedFullPipelineWorker(ctx context.Context, db *st
 	}
 	_, err = s.relaunchTask(ctx, db, home, project, cfg, task, "")
 	return err
+}
+
+func taskExecutorReleased(ctx context.Context, db *store.DB, taskID int64) (bool, error) {
+	operation, found, err := db.LatestAppliedTaskExecutorPolicy(ctx, taskID)
+	if err != nil || !found {
+		return false, err
+	}
+	return operation.Outcome == "succeeded" && operation.Subject == "release", nil
 }
 
 func hasCurrentTargetWork(ctx context.Context, db *store.DB, task store.Task, member, targetSHA string) (bool, error) {

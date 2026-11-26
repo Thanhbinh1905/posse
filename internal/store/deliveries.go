@@ -114,9 +114,18 @@ func (db *DB) TaskDeliveries(ctx context.Context, taskID int64) ([]Delivery, err
 	return deliveries, rows.Err()
 }
 
-// LatestTaskExecutorPolicy returns the Task's latest executor policy operation.
+// LatestTaskExecutorPolicy returns the Task's latest executor policy operation, regardless of outcome.
 func (db *DB) LatestTaskExecutorPolicy(ctx context.Context, taskID int64) (DeliveryOperation, bool, error) {
 	operation, err := scanDeliveryOperation(db.QueryRowContext(ctx, `SELECT o.id,o.delivery_id,o.operation,o.actor,o.actor_pane,o.head_sha,o.subject,o.baseline,o.outcome,o.detail,o.created_at,o.updated_at FROM delivery_operations o JOIN deliveries d ON d.id=o.delivery_id WHERE d.task_id=? AND o.operation='executor_policy' ORDER BY o.id DESC LIMIT 1`, taskID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeliveryOperation{}, false, nil
+	}
+	return operation, err == nil, err
+}
+
+// LatestAppliedTaskExecutorPolicy returns the Task's latest successfully applied executor policy.
+func (db *DB) LatestAppliedTaskExecutorPolicy(ctx context.Context, taskID int64) (DeliveryOperation, bool, error) {
+	operation, err := scanDeliveryOperation(db.QueryRowContext(ctx, `SELECT o.id,o.delivery_id,o.operation,o.actor,o.actor_pane,o.head_sha,o.subject,o.baseline,o.outcome,o.detail,o.created_at,o.updated_at FROM delivery_operations o JOIN deliveries d ON d.id=o.delivery_id WHERE d.task_id=? AND o.operation='executor_policy' AND o.outcome='succeeded' ORDER BY o.id DESC LIMIT 1`, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeliveryOperation{}, false, nil
 	}
