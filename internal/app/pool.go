@@ -1102,12 +1102,29 @@ func requireNoSandboxProcesses(path string, approvedDiscard bool) error {
 	if err != nil {
 		return err
 	}
-	pids, err := processIDsInRoots([]ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}})
+	roots := []ownedProcessRoot{{path: root, includeOpenFiles: true, includeMappedFiles: true}}
+	pids, err := processIDsInRoots(roots)
 	if err != nil {
 		return err
 	}
 	if len(pids) == 0 {
 		return nil
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		time.Sleep(transientProcessWindow)
+		next, err := processIDsInRoots(roots)
+		if err != nil {
+			return err
+		}
+		stable := stableProcessIDs(pids, next)
+		if len(stable) > 0 {
+			pids = stable
+			break
+		}
+		if len(next) == 0 {
+			return nil
+		}
+		pids = next
 	}
 	processes := taskOwnedProcessDetails(pids)
 	description := describeTaskProcesses(processes)

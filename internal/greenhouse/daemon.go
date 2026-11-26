@@ -225,10 +225,41 @@ func (d *Daemon) start(ctx context.Context) (int, error) {
 			if pid, live := d.waitLive(2 * time.Second); live {
 				return pid, nil
 			}
-			return 0, fmt.Errorf("the Greenhouse daemon exited before serving: %v; see %s", err, filepath.Join(d.Home, logFile))
+			logPath := filepath.Join(d.Home, logFile)
+			message := fmt.Sprintf("the Greenhouse daemon exited before serving: %v", err)
+			if output := daemonLogTail(logPath); output != "" {
+				message += "; daemon output: " + output
+			}
+			return 0, fmt.Errorf("%s; see %s", message, logPath)
 		case <-ticker.C:
 		}
 	}
+}
+
+func daemonLogTail(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() == 0 {
+		return ""
+	}
+	const maxBytes = 4096
+	offset := info.Size() - maxBytes
+	if offset < 0 {
+		offset = 0
+	}
+	output := make([]byte, info.Size()-offset)
+	if _, err := file.ReadAt(output, offset); err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(string(output))
+	if text != "" && offset > 0 {
+		text = "... (earlier output omitted)\n" + text
+	}
+	return text
 }
 
 func (d *Daemon) waitLive(limit time.Duration) (int, bool) {
