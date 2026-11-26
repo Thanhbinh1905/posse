@@ -816,7 +816,7 @@ func (s *Service) verifyDiscardSandboxPaneOwnership(ctx context.Context, db *sto
 	}
 	for _, pane := range snapshot.Panes {
 		taskPane := ownsTaskPane(snapshot, project, task, tabs, pane) || completedProofs[pane.PaneID] != ""
-		if taskPane || !pathInside(pane.CWD, task.WorktreePath) && !tabs[pane.TabID] && pane.PaneID != task.PaneID {
+		if taskPane {
 			continue
 		}
 		info, err := s.sandboxPaneProcessInfo(ctx, pane.PaneID)
@@ -824,11 +824,11 @@ func (s *Service) verifyDiscardSandboxPaneOwnership(ctx context.Context, db *sto
 			return axi.Failure("sandbox_process_identity_unavailable", fmt.Sprintf("could not inspect process ownership in pane %s before discard", pane.PaneID), true, err.Error())
 		}
 		for _, process := range info.ForegroundProcesses {
-			if pathInside(process.CWD, task.WorktreePath) {
+			if pathInside(process.CWD, task.WorktreePath) || process.PID > 1 && processInSandbox(process.PID, task.WorktreePath) {
 				return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("unowned pane %s has foreground PID %d in the held Sandbox", pane.PaneID, process.PID), false, "Stop or inspect the unrelated pane, preserve its work, then retry Teardown")
 			}
 		}
-		if processInSandbox(info.ShellPID, task.WorktreePath) {
+		if info.ShellPID > 1 && processInSandbox(info.ShellPID, task.WorktreePath) {
 			return axi.Failure("sandbox_process_not_owned", fmt.Sprintf("unowned pane %s shell PID %d still references the held Sandbox", pane.PaneID, info.ShellPID), false, "Move or close the unrelated pane, preserve its work, then retry Teardown")
 		}
 	}
