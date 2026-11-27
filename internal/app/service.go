@@ -140,7 +140,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes] | up --all", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead; --all restores the Lead, Workers and Watch of every Project that is not down.", Handler: s.up},
 		{Name: "attach", Usage: "$ attach --pane <pane-id> --session <session-id>", Summary: "Attach a supported existing Herdr session as this Project's Lead without replacing its conversation.", Handler: s.attach},
 		{Name: "down", Usage: "$ down [--plan | --execute --user-approved <quote>]", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`. --plan previews tearing down every Task; --execute does it.", Handler: s.down},
-		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
+		{Name: "lead", Summary: "Print Lead instructions or message another Project Lead.", Handler: s.lead, Subcommands: []*axi.Command{
+			{Name: "send", Usage: "$ lead send <project> <message>", Summary: "Queue a Notice for another registered Project's Lead.", Handler: s.leadSend},
+		}},
 		{Name: "knowledge", Summary: "Inspect and curate User and Project knowledge.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ knowledge show [<id>] [--project <name>|--user]", Summary: "Show knowledge entries with provenance and the startup budget, or one entry.", Handler: s.knowledgeShow},
 			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
