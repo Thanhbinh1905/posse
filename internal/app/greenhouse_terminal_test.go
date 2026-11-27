@@ -233,6 +233,18 @@ func TestGreenhouseSizeErrorsRaiseNeedsDecision(t *testing.T) {
 }
 
 func TestGateModeGreenhouseUsageIsPersisted(t *testing.T) {
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(truePath, filepath.Join(binDir, "greenhouse")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	cost := 0.004
 	f.service.greenhouseRound = func(context.Context, greenhouse.Round) (greenhouse.RoundResult, error) {

@@ -79,7 +79,7 @@ func (db *DB) RecordTaskReviewUsage(ctx context.Context, usage TaskReviewUsage) 
 		return err
 	}
 	if changed == 0 {
-		return fmt.Errorf("Greenhouse review request not found for usage")
+		return fmt.Errorf("greenhouse review request not found for usage")
 	}
 	return db.PersistTask(ctx, usage.TaskID)
 }

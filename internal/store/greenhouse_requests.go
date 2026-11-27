@@ -57,7 +57,7 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 		err := db.QueryRowContext(ctx, `SELECT id,project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,COALESCE(grant_id,'') FROM greenhouse_review_requests WHERE task_id=? AND repo=? AND grant_id=?`, request.TaskID, request.Repository, request.Grant).Scan(
 			&existing.ID, &existing.ProjectID, &existing.TaskID, &existing.Repository, &existing.RequestedHead, &existing.Provider, &existing.RequestedAt, &existing.SettledAt, &existing.Outcome, &existing.Grant)
 		if err == nil {
-			if existing.ProjectID != request.ProjectID || existing.RequestedHead != request.RequestedHead || existing.RequestedAt != request.RequestedAt {
+			if existing.ProjectID != request.ProjectID || existing.RequestedHead != request.RequestedHead || (existing.RequestedAt != request.RequestedAt && existing.Outcome != "failed" && existing.Outcome != "refused") {
 				return errors.New("greenhouse review grant changed request identity")
 			}
 			if existing.Outcome != "failed" && existing.Outcome != "refused" {
