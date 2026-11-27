@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,7 +117,16 @@ func TestTeardownBlockedNoticeIgnoresProcessesInAReleasedSandbox(t *testing.T) {
 	if err := service.recordTeardownBlocked(ctx, db, project, finished, cause); err != nil {
 		t.Fatal(err)
 	}
-	pid := startSleepIn(t, held)
+	blocker := exec.Command("sleep", "60")
+	blocker.Dir = held
+	if err := blocker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = blocker.Process.Kill()
+		_, _ = blocker.Process.Wait()
+	}()
+	pid := blocker.Process.Pid
 	if err := service.recordTeardownBlocked(ctx, db, project, holder, cause); err != nil {
 		t.Fatal(err)
 	}
@@ -135,5 +145,52 @@ func TestTeardownBlockedNoticeIgnoresProcessesInAReleasedSandbox(t *testing.T) {
 	}
 	if !strings.Contains(blocked[holder.ID], fmt.Sprintf("PID %d", pid)) {
 		t.Fatalf("a process in the Sandbox t2 holds (PID %d) was not reported: %#v", pid, blocked)
+	}
+	if err := blocker.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordTeardownBlocked(ctx, db, project, holder, cause); err != nil {
+		t.Fatal(err)
+	}
+	open, err := db.Notices(ctx, project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.UndeliveredNotices(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range append(open, pending...) {
+		if notice.TaskID == holder.ID && notice.Kind == "teardown_blocked" {
+			t.Fatalf("cleared teardown blocker remained open or undelivered: %#v", notice)
+		}
+	}
+	replacement := exec.Command("sleep", "60")
+	replacement.Dir = held
+	if err := replacement.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = replacement.Process.Kill()
+		_, _ = replacement.Process.Wait()
+	}()
+	if err := service.recordTeardownBlocked(ctx, db, project, holder, cause); err != nil {
+		t.Fatal(err)
+	}
+	open, err = db.Notices(ctx, project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundReplacement := false
+	for _, notice := range open {
+		if notice.TaskID == holder.ID && notice.Kind == "teardown_blocked" && strings.Contains(notice.Summary, fmt.Sprintf("PID %d", replacement.Process.Pid)) {
+			foundReplacement = true
+		}
+	}
+	if !foundReplacement {
+		t.Fatalf("new blocker did not raise an open teardown Notice: %#v", open)
 	}
 }

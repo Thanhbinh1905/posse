@@ -26,6 +26,21 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 	}
 	processes := stableTaskProcesses(collect(), collect)
 	if len(processes) == 0 {
+		notices, err := db.Notices(ctx, project.ID, false)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0)
+		for _, notice := range notices {
+			if notice.TaskID == task.ID && notice.Kind == "teardown_blocked" {
+				ids = append(ids, fmt.Sprint(notice.ID))
+			}
+		}
+		if len(ids) > 0 {
+			if _, err := db.AckNotices(ctx, project.ID, ids); err != nil {
+				return err
+			}
+		}
 		if _, err := db.ExecContext(ctx, `UPDATE notices SET data_json=json_set(data_json,'$.cleared',true) WHERE project_id=? AND task_id=? AND kind='teardown_blocked'`, project.ID, task.ID); err != nil {
 			return err
 		}
