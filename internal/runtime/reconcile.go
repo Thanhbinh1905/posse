@@ -479,9 +479,15 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			return notices, err
 		}
 		notices = append(notices, notice)
-	} else if task.State == store.StateBlocked && pane.AgentStatus != "blocked" && agentPresent {
-		if err := db.Transition(ctx, task.ID, store.StateBlocked, store.StateWorking, "herdr", "Herdr reports Worker unblocked"); err != nil {
+	} else if task.State == store.StateBlocked {
+		hadDependency, err := db.ReconcileDependencyWait(ctx, task.ID)
+		if err != nil {
 			return notices, err
+		}
+		if !hadDependency && pane.AgentStatus != "blocked" && agentPresent {
+			if err := db.Transition(ctx, task.ID, store.StateBlocked, store.StateWorking, "herdr", "Herdr reports Worker unblocked"); err != nil {
+				return notices, err
+			}
 		}
 	}
 	return notices, nil
