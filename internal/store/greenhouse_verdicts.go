@@ -202,6 +202,46 @@ func (db *DB) CreateGreenhousePartialNoticeOnce(ctx context.Context, projectID, 
 	return true, db.PersistProject(ctx, projectID)
 }
 
+type GreenhouseRecoveryOutcome struct {
+	Repository string `json:"repo"`
+	Head       string `json:"head"`
+	Grant      string `json:"grant"`
+	Run        string `json:"run"`
+	RecoveryID string `json:"recovery_id"`
+	Status     string `json:"status"`
+	Detail     string `json:"detail"`
+}
+
+func (db *DB) RecordGreenhouseReviewRecovery(ctx context.Context, projectID, taskID int64, outcome GreenhouseRecoveryOutcome) error {
+	data, err := json.Marshal(outcome)
+	if err != nil {
+		return err
+	}
+	summary := fmt.Sprintf("Greenhouse recovery %s for %s at %s: %s", outcome.RecoveryID, outcome.Repository, outcome.Head, outcome.Detail)
+	inserted, err := db.ExecContext(ctx, `INSERT INTO notices(project_id, task_id, kind, summary, data_json, created_at)
+		SELECT ?, ?, 'greenhouse_review_recovery', ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_review_recovery' AND data_json=?)`,
+		projectID, taskID, summary, string(data), time.Now().UnixMilli(), taskID, string(data))
+	if err != nil {
+		return err
+	}
+	rows, err := inserted.RowsAffected()
+	if err != nil || rows == 0 {
+		return err
+	}
+	return db.PersistProject(ctx, projectID)
+}
+
+func (db *DB) GreenhouseReviewRestartedSince(ctx context.Context, taskID int64, repository, head, grant string, lastFailure int64) (bool, error) {
+	var restarted bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM notices WHERE task_id=? AND kind='greenhouse_review_recovery' AND created_at>=?
+		AND json_extract(data_json,'$.repo')=? AND json_extract(data_json,'$.head')=?
+		AND json_extract(data_json,'$.grant')=? AND json_extract(data_json,'$.status')='restarted'
+	)`, taskID, lastFailure, repository, head, grant).Scan(&restarted)
+	return restarted, err
+}
+
 // CreateGreenhouseRecoveryNoticeOnce raises one Notice per parked Greenhouse
 // recovery of a Task Member.
 func (db *DB) CreateGreenhouseRecoveryNoticeOnce(ctx context.Context, projectID, taskID int64, repository, recoveryID, summary string) (bool, error) {

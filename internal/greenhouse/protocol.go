@@ -125,8 +125,13 @@ type HostResult struct {
 // Recovery is set while a run waits for recovery after an interruption.
 type Recovery struct {
 	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
 	Reason  string   `json:"reason"`
 	Options []string `json:"options"`
+	Outcome string   `json:"outcome"`
+	Answer  struct {
+		Action string `json:"action"`
+	} `json:"answer"`
 }
 
 type review struct {
@@ -137,13 +142,15 @@ type review struct {
 }
 
 type run struct {
-	ID         string    `json:"id"`
-	Status     string    `json:"status"`
-	Candidate  string    `json:"candidate"`
-	HostGrants []string  `json:"host_grants"`
-	ReviewUsed int       `json:"review_used"`
-	Recovery   *Recovery `json:"recovery"`
-	Review     *review   `json:"review"`
+	ID         string     `json:"id"`
+	Status     string     `json:"status"`
+	Candidate  string     `json:"candidate"`
+	Host       *Host      `json:"host"`
+	HostGrants []string   `json:"host_grants"`
+	ReviewUsed int        `json:"review_used"`
+	Recovery   *Recovery  `json:"recovery"`
+	Recoveries []Recovery `json:"recoveries"`
+	Review     *review    `json:"review"`
 }
 
 type defaults struct {

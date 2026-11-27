@@ -42,6 +42,8 @@ if os.path.exists(os.path.join(ctl, 'prefix-input')):
     request, _ = json.JSONDecoder().raw_decode(raw.lstrip())
 else:
     request = json.loads(raw)
+with open(os.path.join(ctl, 'reviewer-pids'), 'w') as log:
+    log.write(f'{os.getppid()} {os.getpid()}')
 with open(os.path.join(ctl, 'invocations'), 'a') as log:
     log.write(request['Head'] + '\n')
 while os.path.exists(os.path.join(ctl, 'hold')):
@@ -876,6 +878,140 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 			t.Fatalf("doctor does not report the excluded range:\n%s", doctor)
 		}
 	})
+}
+
+func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
+	f := newWorkerTabsFixture(t)
+	c := newGreenhouseContract(t, f)
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.ctl, "prefix-input"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.change = f.start(t, "t1", "Recover an interrupted review", "greenhouse-recover")
+	f.start(t, "t2", "Bystander Task", "recovery-bystander")
+	head := c.authorCommit(t)
+	c.hold(t)
+	shortReview := c.reviewArgs()
+	shortReview[len(shortReview)-2] = "50"
+	for range 2 {
+		output, err := c.posse(c.env, f.repo, shortReview...)
+		if err != nil || decodeGreenhouseOutput(t, output)["outcome"] != "running" {
+			t.Fatalf("review did not time out on the pending grant: %v\n%s", err, output)
+		}
+	}
+	c.waitInvocations(t, 1)
+	done := c.reviewAsync(c.env)
+	ownerPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse", "shop.parallel-owner.json")
+	if !waitForCondition(10*time.Second, func() bool {
+		data, err := os.ReadFile(ownerPath)
+		var owner struct{ PID int }
+		return err == nil && json.Unmarshal(data, &owner) == nil && owner.PID > 1
+	}) {
+		t.Fatal("Posse did not resume the pending grant")
+	}
+	pids, err := os.ReadFile(filepath.Join(c.ctl, "reviewer-pids"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runner, reviewer int
+	if _, err := fmt.Sscan(string(pids), &runner, &reviewer); err != nil {
+		t.Fatal(err)
+	}
+	daemon := c.daemonPID(t)
+	if daemon <= 1 {
+		t.Fatalf("invalid fixture daemon PID %d", daemon)
+	}
+	if err := syscall.Kill(daemon, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	parked := c.finish(t, done)
+	recovery, _ := parked["recovery"].(string)
+	if parked["outcome"] != "recovery-required" || recovery == "" {
+		t.Fatalf("interrupted review = %v; want recovery-required", parked)
+	}
+	args := []string{"review", "recover", "t1", "--head", head, "--recovery", recovery, "--json"}
+	if output, err := c.posse(c.env, f.repo, args...); err == nil || !strings.Contains(output, "wait for the interrupted executor to exit") {
+		t.Fatalf("recovery while the executor still holds its lease: %v\n%s", err, output)
+	}
+	for _, pid := range []int{runner, reviewer} {
+		if pid <= 1 {
+			t.Fatalf("invalid fixture PID %d", pid)
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.release(t)
+	if again := c.review(t); again["outcome"] != "recovery-required" || again["recovery"] != recovery || len(c.hostGrants(t)) != 1 ||
+		!strings.Contains(fmt.Sprint(again["help"]), "posse review recover t1 --repo shop --head "+head+" --recovery "+recovery) {
+		t.Fatalf("ordinary review did not stay parked with an exact recovery command: %v", again)
+	}
+	c.requireNoVerdictFor(t, head)
+	t.Logf("ordinary review remains recovery-required after the daemon and executor exit: %s", recovery)
+
+	workerEnv := setEnv(setEnv(c.env, "HERDR_PANE_ID", c.change.PaneID), "POSSE_TASK_ID", c.change.ContainmentMarker)
+	base := strings.TrimSpace(gitTest(t, f.env, f.repo, "rev-parse", "main"))
+	for _, test := range []struct {
+		name, dir, code string
+		env             []string
+		args            []string
+	}{
+		{"worker", c.change.WorktreePath, "worker_forbidden", workerEnv, args},
+		{"other Task", f.repo, "greenhouse_head_mismatch", c.env, []string{"review", "recover", "t2", "--head", head, "--recovery", recovery, "--json"}},
+		{"other repo", f.repo, "usage", c.env, append(append([]string(nil), args...), "--repo", "other")},
+		{"other head", f.repo, "greenhouse_head_mismatch", c.env, []string{"review", "recover", "t1", "--head", base, "--recovery", recovery, "--json"}},
+		{"stale recovery id", f.repo, "greenhouse_recovery_refused", c.env, []string{"review", "recover", "t1", "--head", head, "--recovery", "expired", "--json"}},
+	} {
+		output, err := c.posse(test.env, test.dir, test.args...)
+		if err == nil || !strings.Contains(output, `"code":"`+test.code+`"`) {
+			t.Fatalf("recovery for %s: %v\n%s\nwant %s", test.name, err, output, test.code)
+		}
+	}
+	if retry := c.review(t); retry["recovery"] != recovery || c.invocations(t) != 1 {
+		t.Fatalf("refused commands changed the parked review: %v, %d reviewer invocations", retry, c.invocations(t))
+	}
+	output, err := c.posse(c.env, f.repo, args...)
+	if err != nil {
+		t.Fatalf("posse review recover: %v\n%s", err, output)
+	}
+	result := decodeGreenhouseOutput(t, output)
+	if result["outcome"] != "restarted" || result["grant"] != parked["grant"] || result["head"] != head || result["detail"] == "" {
+		t.Fatalf("recovery = %v; want restarted at the original head and grant with recorded detail", result)
+	}
+	replayed, err := c.posse(c.env, f.repo, args...)
+	if err != nil || replayed != output {
+		t.Fatalf("recovery retry = %v\n%s\nwant the same outcome: %s", err, replayed, output)
+	}
+	c.requireNoVerdictFor(t, head)
+	if notices := c.notices(t, "greenhouse_review_recovery"); notices != 1 {
+		t.Fatalf("recorded recovery notices = %d; want one", notices)
+	}
+	if output, err := c.posse(c.env, f.repo, "review", "start", "t1"); err != nil {
+		t.Fatalf("posse review start after recovery: %v\n%s", err, output)
+	}
+	var verdicts []store.Verdict
+	if !waitForCondition(15*time.Second, func() bool {
+		verdicts = c.verdicts(t)
+		return len(verdicts) > 0
+	}) {
+		t.Fatal("restarted review did not record a Verdict")
+	}
+	if len(verdicts) != 1 || verdicts[0].Grant != parked["grant"] || verdicts[0].Head != head || verdicts[0].Mode != "gate" || verdicts[0].Outcome != "clean" || c.invocations(t) != 2 || len(c.hostGrants(t)) != 1 {
+		t.Fatalf("want one fresh reviewer execution and gate Verdict under the original grant; got %+v, invocations %d", verdicts, c.invocations(t))
+	}
+	inspection := c.greenhouse(t, map[string]any{"version": 2, "op": "inspect"})
+	run, _ := inspection["run"].(map[string]any)
+	records, _ := run["recoveries"].([]any)
+	if len(records) != 1 {
+		t.Fatalf("run recovery history = %v; want one recorded recovery", records)
+	}
+	record, _ := records[0].(map[string]any)
+	if record["id"] != recovery || record["outcome"] != result["detail"] {
+		t.Fatalf("recorded recovery = %v; want %s with outcome %v", record, recovery, result["detail"])
+	}
+	t.Logf("review recover restarted %v; a fresh review then recorded the Verdict at %s", result["grant"], head)
 }
 
 func newGreenhouseContract(t *testing.T, f *workerTabsFixture) *greenhouseContract {
