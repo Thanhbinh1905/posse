@@ -1006,6 +1006,7 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse down` | User | stop the Project's Lead and Watch until the next `posse up` (section 16) |
 | `posse down --plan` / `--execute --user-approved "<quote>"` | User, Lead | preview, then tear down every Task and stop the Project (section 16) |
 | `posse lead` | Lead | print the composed Lead instructions, current preferences and a `pending` block: pending Decision IDs, `needs-decision` Task IDs, the unacked Notice count, the `drafts` path and a `posse-catch-up` pointer |
+| `posse lead send <project> "<message>"` | Lead | queue an attributed `lead_message` Notice for another registered Project's Lead. The returned `notice_id` confirms queueing, not delivery. A missing receiver leaves the Notice pending; an unknown Project returns `project_unknown`. The target Lead receives and acknowledges the Notice through its normal delivery path. |
 | `posse handoff write --file <file.md>` | User, Lead | queue a bounded Project conversation handoff for the next Lead startup |
 | `posse preferences show [--project <name>]` | User, Lead | show effective Lead and Worker preferences with source headers |
 | `posse preferences path <lead\|worker> [--project <name>]` | User, Lead | show canonical and legacy User and Project source paths |

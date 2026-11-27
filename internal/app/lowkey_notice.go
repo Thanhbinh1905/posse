@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -17,7 +18,20 @@ func noticeWakeMessage(ctx context.Context, db *store.DB, notices []store.Notice
 	parts := make([]string, 0, len(notices))
 	ids := make([]string, 0, len(notices))
 	budget := 500
+	messageBudget := 4000
 	for _, notice := range notices {
+		if notice.Kind == leadMessageNoticeKind {
+			entry := fmt.Sprintf("Notice %d: %s", notice.ID, strconv.Quote(notice.Summary))
+			if len(entry)+2 > messageBudget {
+				entry = fmt.Sprintf("Notice %d: Lead message (read the full text with `posse --full`)", notice.ID)
+			}
+			if len(entry)+2 <= messageBudget {
+				parts = append(parts, entry)
+				ids = append(ids, fmt.Sprint(notice.ID))
+				messageBudget -= len(entry) + 2
+			}
+			continue
+		}
 		if budget <= 0 {
 			continue
 		}
@@ -36,7 +50,8 @@ func noticeWakeMessage(ctx context.Context, db *store.DB, notices []store.Notice
 			prefix = ""
 		}
 		if utf8.RuneCountInString(prefix) >= budget {
-			break
+			budget = 0
+			continue
 		}
 		entry := prefix + clipRunes(summary, min(150, budget-utf8.RuneCountInString(prefix)))
 		parts = append(parts, entry)
