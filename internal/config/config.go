@@ -293,6 +293,10 @@ func Load(home, projectName string) (Config, error) {
 	return loadConfig(home, projectName, true)
 }
 
+func LoadReadOnly(home, projectName string) (Config, error) {
+	return loadConfig(home, projectName, false)
+}
+
 // ValidateAll checks every stored User and Project config without writing
 // vocabulary migrations or markers.
 func ValidateAll(home string) error {

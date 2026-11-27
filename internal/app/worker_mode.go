@@ -16,11 +16,12 @@ const workerHomeEnv = "POSSE_WORKER_HOME"
 
 // workerCommands are the only commands a Worker may run against its own posse
 // home.
-const workerAllowedCommands = "`posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse heavy`, `posse show <own-task>`, `posse review <own-task>`, `posse candidate abandon`, `posse _context`, `posse research <list|show|cancel|start|wait|follow-up>` for own children, `posse knowledge show` and `posse config <show|schema>`"
+const workerAllowedCommands = "`posse brief`, `posse status`, `posse signal`, `posse publish`, `posse validate`, `posse heavy`, `posse show <own-task>` or the assigned Change for Review Workers, `posse review <own-task>`, `posse review followups` for assigned findings, `posse candidate abandon`, `posse _context`, `posse research <list|show|cancel|start|wait|follow-up>` for own children, `posse knowledge show` and `posse config <show|schema>`"
 
 var workerCommands = map[string]bool{
 	"show":               true,
 	"review":             true,
+	"review followups":   true,
 	"brief":              true,
 	"status":             true,
 	"signal":             true,
@@ -80,6 +81,19 @@ func (s *Service) refuseWorker(ctx context.Context, command string) error {
 		"Report what the Lead should do with `posse signal needs-decision`")
 }
 
+func (s *Service) openInspectionDB(ctx context.Context) (*store.DB, string, bool, error) {
+	home, err := s.homePath()
+	if err != nil {
+		return nil, "", false, err
+	}
+	if s.workerCaller(ctx, home) {
+		db, err := store.OpenReadOnly(home)
+		return db, home, true, schemaFailure(err)
+	}
+	db, _, err := s.openDB()
+	return db, home, false, err
+}
+
 func (s *Service) requireWorkerOwnTask(ctx context.Context, db *store.DB, project store.Project, task store.Task) error {
 	home, err := s.homePath()
 	if err != nil {
@@ -135,7 +149,7 @@ func workerAncestorTask(ctx context.Context, db *store.DB, home string) (store.T
 }
 
 func workerOwnTaskRefusal() error {
-	return axi.Failure("worker_forbidden", "`posse show` and `posse review` did not run; Workers may inspect only their own Task. Allowed Posse commands: "+workerAllowedCommands, false)
+	return axi.Failure("worker_forbidden", "The command did not run; Workers may inspect only their own Task or use `posse show` for the Change they are assigned to review. Allowed Posse commands: "+workerAllowedCommands, false)
 }
 
 // workerCaller reports whether this process runs on behalf of a Worker of

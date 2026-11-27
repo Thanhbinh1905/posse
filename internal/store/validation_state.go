@@ -595,7 +595,7 @@ func (db *DB) validationStateForTask(ctx context.Context, taskID int64) (validat
 		return state, err
 	}
 
-	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,follow_up_url,inherited_from FROM review_findings WHERE ship_task_id=? ORDER BY seq`, taskID)
+	rows, err = db.QueryContext(ctx, `SELECT id,ship_task_id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,state,COALESCE(follow_up_url,''),inherited_from FROM review_findings WHERE ship_task_id=? ORDER BY seq`, taskID)
 	if err != nil {
 		return state, err
 	}
