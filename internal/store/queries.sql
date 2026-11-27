@@ -392,7 +392,11 @@ WHERE t.project_id=? AND m.status='queued' AND t.state NOT IN ('failed','lost') 
 GROUP BY t.id ORDER BY t.seq;
 
 -- name: QueuedTaskIDs :many
-SELECT id FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id = ? AND state = 'queued' ORDER BY seq;
+SELECT id FROM tasks INDEXED BY tasks_project_state_idx WHERE project_id = ? AND state = 'queued' ORDER BY queue_priority, seq;
+
+-- name: MoveQueuedTaskToFront :execrows
+UPDATE tasks SET queue_priority=(SELECT COALESCE(MIN(queued.queue_priority), 0)-1 FROM tasks AS queued WHERE queued.project_id=? AND queued.state='queued')
+WHERE tasks.project_id=? AND tasks.id=? AND tasks.state='queued';
 
 -- name: LiveTasks :many
 SELECT id, project_id, seq, type, reviews_task_id, title, state, profile, dispatch_rule, landing_mode, autonomy_review, autonomy_land, branch, base_ref, worktree_path, herdr_workspace_id, pane_id, pane_label, agent_name, agent_session, pr_url, landed_ref, last_output_hash, last_worktree_hash, last_progress_at, agent_absent_since, created_at, updated_at, mount_id, launches, gated_sha, agent_server_started_at, idle_since, short_name, agent_session_kind, target_branch, pr_title, '' AS plan_json, report_kind, report_digest, report_manifest_json, containment_mode, containment_path, containment_marker, pane_shell_identity, agent_status, agent_status_since, plan_revision,

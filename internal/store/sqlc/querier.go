@@ -52,6 +52,7 @@ type Querier interface {
 	MarkResourceLeaseForRecovery(ctx context.Context, arg MarkResourceLeaseForRecoveryParams) (sql.Result, error)
 	MergedTaskCandidates(ctx context.Context, projectID int64) ([]MergedTaskCandidatesRow, error)
 	MoveProject(ctx context.Context, arg MoveProjectParams) error
+	MoveQueuedTaskToFront(ctx context.Context, arg MoveQueuedTaskToFrontParams) (int64, error)
 	NextSandboxNumber(ctx context.Context, projectID int64) (int64, error)
 	NextTaskSeq(ctx context.Context, projectID int64) (int64, error)
 	Notices(ctx context.Context, projectID int64) ([]NoticesRow, error)

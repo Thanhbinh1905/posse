@@ -79,6 +79,38 @@ func TestTaskSnapshotsRebuildStateAndDailyBackupRetention(t *testing.T) {
 	}
 }
 
+func TestQueuedTaskPrioritySurvivesSnapshotRebuild(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "First", State: StateQueued})
+	if err != nil {
+		t.Fatal(err)
+	}
+	movedID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Moved", State: StateQueued})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveQueuedTaskToFront(ctx, project.ID, movedID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RebuildFromSnapshots(ctx, home); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	queued, err := db.QueuedTaskIDs(ctx, project.ID)
+	if err != nil || !reflect.DeepEqual(queued, []int64{movedID, firstID}) {
+		t.Fatalf("queued Task order after rebuild = %v, %v; want moved Task %d before %d", queued, err, movedID, firstID)
+	}
+}
+
 func TestTaskUsageSurvivesSnapshotRebuild(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
