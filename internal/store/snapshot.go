@@ -28,10 +28,11 @@ import (
 )
 
 type TaskSnapshot struct {
-	Version         int     `toml:"version"`
-	Project         Project `toml:"project"`
-	Task            Task    `toml:"task"`
-	WorkerTurnToken string  `toml:"worker_turn_token,omitempty"`
+	Version          int     `toml:"version"`
+	Project          Project `toml:"project"`
+	Task             Task    `toml:"task"`
+	WorkerTurnToken  string  `toml:"worker_turn_token,omitempty"`
+	DependencyTaskID int64   `toml:"dependency_task_id,omitempty"`
 	// LaunchIdentities retain the configured author and reviewer identity for
 	// every recorded Task launch. Missing numbers are left missing so rebuilds
 	// can report legacy or interrupted history as unknown rather than infer it.
@@ -430,7 +431,15 @@ func (db *DB) persistTask(ctx context.Context, taskID int64, persistProject bool
 		}
 		plans = plans[:admitted.Revision]
 	}
-	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, LaunchIdentities: identities, BranchAuthors: branchAuthors, TaskAdoptions: adoptions, InvalidatedReviewVerdicts: invalidatedReviewVerdicts, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings, LaunchUsage: launchUsage, ReviewRequests: reviewRequests, ReviewUsage: reviewUsage}
+	var dependencyID int64
+	if task.State == StateBlocked {
+		wait, err := db.dependencyWait(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		dependencyID = wait.id
+	}
+	snapshot := TaskSnapshot{Version: 1, Project: project, Task: task, WorkerTurnToken: turnToken, DependencyTaskID: dependencyID, LaunchIdentities: identities, BranchAuthors: branchAuthors, TaskAdoptions: adoptions, InvalidatedReviewVerdicts: invalidatedReviewVerdicts, ReportReviews: reportReviews, ReportAcceptance: reportAcceptance, PRBodyMarkers: markers, PRWatchFailures: watchFailures, Deliveries: deliveries, DeliveryOperations: deliveryOperations, TargetChanges: targetChanges, PlanRevisions: plans, BudgetUsage: budgetUsage, BudgetCrossings: budgetCrossings, LaunchUsage: launchUsage, ReviewRequests: reviewRequests, ReviewUsage: reviewUsage}
 	if task.Type == "review" {
 		if snapshot.ReviewTargets, err = db.ReviewTargets(ctx, taskID); err != nil {
 			return err
@@ -1191,6 +1200,15 @@ func (db *DB) rebuild(ctx context.Context, snapshots []TaskSnapshot, projects ma
 	}
 	for _, snapshot := range snapshots {
 		task := snapshot.Task
+		if snapshot.DependencyTaskID != 0 {
+			dependency, found := snapshotTasks[snapshot.DependencyTaskID]
+			if task.State != StateBlocked || !found || task.ProjectID != dependency.Task.ProjectID || dependency.Task.Type != "change" || task.ID == dependency.Task.ID {
+				return fmt.Errorf("invalid dependency wait in snapshot for t%d", task.Seq)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_dependency_waits(task_id,dependency_id) VALUES(?,?)`, task.ID, dependency.Task.ID); err != nil {
+				return err
+			}
+		}
 		if task.PlanJSON != "" {
 			task.PlanJSON, err = db.externalizePlanJSON(task.PlanJSON)
 			if err != nil {

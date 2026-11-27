@@ -614,6 +614,12 @@ func addTaskDetails(ctx context.Context, db *store.DB, home string, project stor
 			return err
 		}
 		row.WaitReason = reason
+	} else if task.State == store.StateBlocked {
+		reason, err := db.TaskDependencyWait(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		row.WaitReason = reason
 	}
 	brief, err := readTaskBrief(home, project, task)
 	if err != nil && !os.IsNotExist(err) {
@@ -920,9 +926,17 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			"next_attempt_at": modelEpisode.NextAttemptAt,
 		}
 	}
-	if task.State == store.StateBlocked && task.PaneID != "" {
-		if dialog := runtime.BlockedDialog(ctx.Context, s.Herdr, task.PaneID); dialog != "" {
-			view["blocked_dialog"] = dialog
+	if task.State == store.StateBlocked {
+		waitingOn, err := db.TaskDependencyWait(ctx.Context, task.ID)
+		if err != nil {
+			return err
+		}
+		if waitingOn != "" {
+			view["wait_reason"] = waitingOn
+		} else if task.PaneID != "" {
+			if dialog := runtime.BlockedDialog(ctx.Context, s.Herdr, task.PaneID); dialog != "" {
+				view["blocked_dialog"] = dialog
+			}
 		}
 	}
 	issues, refs, err := taskIssueReferences(home, project, task)
@@ -1052,7 +1066,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 			help = append(help, "Run `posse merge "+commandName+"` to record the merge head and check delivery readiness")
 		}
 	}
-	if task.State == store.StateNeedsDecision || task.State == store.StateBlocked {
+	if task.State == store.StateNeedsDecision || task.State == store.StateBlocked && view["wait_reason"] == nil {
 		help = append(help, "Run `posse send "+commandName+" <message>` to answer or steer this Worker")
 	}
 	if parsed.Bool("full") {
