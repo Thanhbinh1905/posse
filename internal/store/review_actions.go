@@ -94,7 +94,7 @@ func (db *DB) InheritReviewLedger(ctx context.Context, sourceTaskID, destination
 			}
 		}
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,follow_up_url FROM review_findings WHERE ship_task_id=? ORDER BY seq`, sourceTaskID)
+	rows, err = tx.QueryContext(ctx, `SELECT id,seq,pattern_id,fingerprint,round,repository,path,symbol,excerpt,line_at_report,head_sha,severity,origin,in_scope,COALESCE(follow_up_url,'') FROM review_findings WHERE ship_task_id=? ORDER BY seq`, sourceTaskID)
 	if err != nil {
 		return err
 	}

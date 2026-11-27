@@ -229,6 +229,22 @@ func TestBriefRejectsInvalidTypedTaskDependencies(t *testing.T) {
 	}
 }
 
+func TestBriefFollowupsRequireExactResearchAssignments(t *testing.T) {
+	const source = "---\ntype: research\ntitle: Verify findings\ndone_when: findings verified\nfollowups: "
+	brief, err := ParseBriefText(source + "[t12/F-3, t14/F-1]\n---\n")
+	if err != nil || len(brief.Followups) != 2 || brief.Followups[0] != (Followup{TaskID: "t12", Finding: 3}) || brief.Followups[1] != (Followup{TaskID: "t14", Finding: 1}) {
+		t.Fatalf("followups=%#v err=%v", brief.Followups, err)
+	}
+	for _, value := range []string{"[]", "[other/t12/F-3]", "[t12]", "[t12/P-3]", "[t12/F-3, t12/F-3]"} {
+		if _, err := ParseBriefText(source + value + "\n---\n"); err == nil {
+			t.Errorf("accepted invalid followups value %q", value)
+		}
+	}
+	if _, err := ParseBriefText(strings.Replace(source, "type: research", "type: change", 1) + "[t12/F-3]\n---\n"); err == nil {
+		t.Error("accepted followups on a Change Task")
+	}
+}
+
 func TestBriefParsesPublicationBoundReportKind(t *testing.T) {
 	for _, kind := range []string{"spec", "tickets"} {
 		source := "---\ntype: research\ntitle: Planning Report\ndone_when: findings are complete\nreport_kind: " + kind + "\n---\n"
