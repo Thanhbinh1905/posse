@@ -1197,14 +1197,28 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			_ = releaseParallelReviewLock(lock)
 			return err
 		}
-		failures, _ := repeatedGreenhouseReviewFailures(requests, change.ID, target.Repository, target.Commit)
+		failures, lastFailedAt := repeatedGreenhouseReviewFailures(requests, change.ID, target.Repository, target.Commit)
 		lastFailure, hasFailureNotice, err := db.GreenhouseFailureNoticeSummary(ctx, change.ID, target.Repository, target.Commit)
 		if err != nil {
 			_ = releaseParallelReviewLock(lock)
 			return err
 		}
 		latestFailure := greenhouseLatestFailure(lastFailure)
-		if failures >= greenhouseReviewFailureLimit && !transientGreenhouseFailure(errors.New(latestFailure)) {
+		pendingPath := filepath.Join(roundDir, target.Repository+".pending.json")
+		pendingGrant, err := parallelPendingGrant(pendingPath)
+		if err != nil {
+			_ = releaseParallelReviewLock(lock)
+			return err
+		}
+		restarted := false
+		if pendingGrant != "" {
+			restarted, err = db.GreenhouseReviewRestartedSince(ctx, change.ID, target.Repository, target.Commit, pendingGrant, lastFailedAt)
+			if err != nil {
+				_ = releaseParallelReviewLock(lock)
+				return err
+			}
+		}
+		if !restarted && failures >= greenhouseReviewFailureLimit && !transientGreenhouseFailure(errors.New(latestFailure)) {
 			reason := "Needs a decision: split the change or land it another way. Latest failure: " + latestFailure
 			if !hasFailureNotice {
 				reason = "Needs a decision: split the change or land it another way. The latest Greenhouse review failed, but Posse could not retrieve its failure reason."
@@ -1221,7 +1235,7 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			continue
 		}
 		retryBackoff := !explicitStart || transientGreenhouseFailure(errors.New(latestFailure)) || greenhouseReviewHasRefusedRequest(requests, change.ID, target.Repository, target.Commit)
-		if retryBackoff && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+		if !restarted && retryBackoff && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
 			_ = releaseParallelReviewLock(lock)
 			continue
 		}
@@ -1232,7 +1246,7 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 				break
 			}
 		}
-		hasPending, err := parallelReviewPending(filepath.Join(roundDir, target.Repository+".pending.json"))
+		hasPending, err := parallelReviewPending(pendingPath)
 		if err != nil {
 			_ = releaseParallelReviewLock(lock)
 			return err
@@ -1261,6 +1275,9 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			return err
 		}
 		args := []string{"_greenhouse", "review", taskIDString(change.Seq), "--head", target.Commit, "--parallel-owner", ownerPath, "--parallel-lock-fd", "3"}
+		if restarted {
+			args = append(args, "--follow-grant", pendingGrant)
+		}
 		if token := os.Getenv(watchRuntimeTokenEnv); token != "" {
 			watch, err := db.WatchRuntime(ctx, project.ID)
 			if err != nil {
