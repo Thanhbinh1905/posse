@@ -47,6 +47,7 @@ type Service struct {
 	taskContainmentSetup func(context.Context, store.Task, string, string) (string, error)
 	checkQueuedBranch    func(context.Context, *store.DB, store.Project, string, []taskMember) error
 	greenhouseRound      func(context.Context, greenhouse.Round) (greenhouse.RoundResult, error)
+	waitForPRPollRetry   func(context.Context) error
 	// DetachQueuedLaunch runs each queued Task start in its own session. The
 	// posse binary sets it; unit tests keep the start in-process.
 	DetachQueuedLaunch bool
@@ -55,6 +56,7 @@ type Service struct {
 func New(home string, adapter herdr.Adapter) *Service {
 	return &Service{
 		Home: home, Herdr: adapter, Progress: runtime.SystemProgress{}, herdrContext: insideHerdr,
+		waitForPRPollRetry: waitForPRPollRetry,
 		removeSandbox: func(ctx context.Context, root, path string) error {
 			_, err := gitOutput(ctx, root, "worktree", "remove", path)
 			return err

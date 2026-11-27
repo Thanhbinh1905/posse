@@ -1233,10 +1233,16 @@ func (s *Service) pollProjectPullRequestsWithMergedCallback(ctx context.Context,
 	return s.pollProjectPullRequestsPass(ctx, db, project, cfg, true, nil, nil)
 }
 
-var (
-	prPollContendedRetry    = 50 * time.Millisecond
-	errProjectPollClaimHeld = errors.New("project poll claim remained held")
-)
+var errProjectPollClaimHeld = errors.New("project poll claim remained held")
+
+func waitForPRPollRetry(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(50 * time.Millisecond):
+		return nil
+	}
+}
 
 // refreshProjectPullRequests is a forced poll whose result a caller guards
 // on. While another poller, such as the Project watch, holds the poll claim,
@@ -1257,10 +1263,8 @@ func (s *Service) refreshProjectPullRequests(ctx context.Context, db *store.DB, 
 		if !contended {
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("%w: %w", errProjectPollClaimHeld, ctx.Err())
-		case <-time.After(prPollContendedRetry):
+		if err := s.waitForPRPollRetry(ctx); err != nil {
+			return fmt.Errorf("%w: %w", errProjectPollClaimHeld, err)
 		}
 	}
 }

@@ -174,51 +174,78 @@ func addStewardPollPRs(t *testing.T, f *prMergeFixture) {
 	}
 }
 
-func startSlowStewardProjectPoll(t *testing.T, f *prMergeFixture) <-chan error {
+func startSlowStewardProjectPoll(t *testing.T, f *prMergeFixture) {
 	t.Helper()
-	t.Setenv("POSSE_TEST_GH_DELAY", "1")
-	t.Setenv("POSSE_TEST_GH_DELAY_ONCE", filepath.Join(f.root, "slow-poll-once"))
+	gate := filepath.Join(f.root, "finish-poll")
+	t.Setenv("POSSE_TEST_GH_POLL_GATE", gate)
 	cfg, err := config.Load(f.home, f.project.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
+	var pollErr error
+	done := make(chan struct{})
+	releasePoll := func() error { return os.WriteFile(gate, nil, 0o600) }
+	firstWait := true
+	released := false
+	f.service.waitForPRPollRetry = func(ctx context.Context) error {
+		if firstWait {
+			firstWait = false
+			return context.DeadlineExceeded
+		}
+		if err := releasePoll(); err != nil {
+			return err
+		}
+		released = true
+		select {
+		case <-done:
+			return pollErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	go func() {
-		done <- f.service.pollProjectPullRequests(context.Background(), f.db, f.project, cfg, true)
+		defer close(done)
+		pollErr = f.service.pollProjectPullRequests(t.Context(), f.db, f.project, cfg, true)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		log, err := os.ReadFile(f.ghLog)
-		if err == nil && strings.Contains(string(log), "api graphql") {
-			if !strings.Contains(string(log), "pr2: pullRequest(number: 18)") || !strings.Contains(string(log), "pr3: pullRequest(number: 19)") {
-				t.Fatalf("Project poll did not query all three PRs: %s", log)
+	t.Cleanup(func() {
+		if !released {
+			if !t.Failed() {
+				t.Error("steward command did not retry while the Project poll held its claim")
 			}
-			return done
+			if err := releasePoll(); err != nil {
+				t.Errorf("release the Project poll during cleanup: %v", err)
+			}
+		}
+		<-done
+	})
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		query, err := os.ReadFile(gate + ".started")
+		if err == nil && len(query) > 0 {
+			if !strings.Contains(string(query), "pr2: pullRequest(number: 18)") || !strings.Contains(string(query), "pr3: pullRequest(number: 19)") {
+				t.Fatalf("Project poll did not query all three PRs: %s", query)
+			}
+			return
 		}
 		select {
-		case err := <-done:
-			t.Fatalf("Project poll finished before querying PRs: %v", err)
-		default:
+		case <-done:
+			t.Fatalf("Project poll finished before its GraphQL request was released: %v", pollErr)
+		case <-deadline.C:
+			t.Fatal("Project poll did not start its GraphQL request")
+		case <-tick.C:
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("Project poll did not start its GraphQL request")
-	return nil
 }
 
 func TestPRInspectWaitsForSlowProjectPollOfSeveralPRs(t *testing.T) {
 	f, _ := stewardPollFixture(t)
-	defer f.db.Close()
 	addStewardPollPRs(t, f)
-	previousBudget := stewardObserveBudget
-	stewardObserveBudget = 300 * time.Millisecond
-	defer func() { stewardObserveBudget = previousBudget }()
-	pollDone := startSlowStewardProjectPoll(t, f)
+	startSlowStewardProjectPoll(t, f)
 	started := time.Now().UnixMilli()
 	code, output, stderr := f.run("pr", "inspect", "t1")
-	if err := <-pollDone; err != nil {
-		t.Fatalf("Project poll: %v", err)
-	}
 	if code != 0 {
 		t.Fatalf("pr inspect: %d %s %s", code, output, stderr)
 	}
@@ -234,7 +261,6 @@ func TestPRInspectWaitsForSlowProjectPollOfSeveralPRs(t *testing.T) {
 
 func TestPRReleaseWaitsForSlowProjectPollOfSeveralPRs(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
-	defer f.db.Close()
 	f.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", f.headSHA)
 	if code, output, stderr := f.run("merge", "t1"); code != 0 {
 		t.Fatalf("open PR: %d %s %s", code, output, stderr)
@@ -242,15 +268,9 @@ func TestPRReleaseWaitsForSlowProjectPollOfSeveralPRs(t *testing.T) {
 	attachPRFixtureSandbox(t, f)
 	removeFixtureTaskPane(f)
 	addStewardPollPRs(t, f)
-	previousBudget := stewardObserveBudget
-	stewardObserveBudget = 300 * time.Millisecond
-	defer func() { stewardObserveBudget = previousBudget }()
-	pollDone := startSlowStewardProjectPoll(t, f)
+	startSlowStewardProjectPoll(t, f)
 	started := time.Now().UnixMilli()
 	code, output, stderr := f.run("pr", "release", "t1", "--policy", "release")
-	if err := <-pollDone; err != nil {
-		t.Fatalf("Project poll: %v", err)
-	}
 	if code != 0 {
 		t.Fatalf("pr release: %d %s %s", code, output, stderr)
 	}
@@ -1117,11 +1137,15 @@ func TestForgeUnavailableNamesAProjectPollClaimThatIsNeverReleased(t *testing.T)
 		t.Fatalf("watch claim=%q err=%v", holder, err)
 	}
 	previous, previousWait := stewardObserveBudget, stewardObserveWaitBudget
-	stewardObserveBudget, stewardObserveWaitBudget = 300*time.Millisecond, 300*time.Millisecond
+	stewardObserveBudget, stewardObserveWaitBudget = 5*time.Second, 5*time.Second
 	defer func() { stewardObserveBudget, stewardObserveWaitBudget = previous, previousWait }()
+	f.service.waitForPRPollRetry = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	code, output, stderr := f.run("pr", "inspect", "t1")
 	combined := output + stderr
-	if code == 0 || !strings.Contains(combined, "forge_unavailable") || !strings.Contains(combined, "poll claim") {
+	if code == 0 || !strings.Contains(combined, "forge_unavailable") || !strings.Contains(combined, "poll claim remained held: context deadline exceeded") {
 		t.Fatalf("pr inspect: %d %s; want forge_unavailable naming the poll claim", code, combined)
 	}
 }

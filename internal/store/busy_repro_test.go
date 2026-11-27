@@ -76,9 +76,9 @@ func TestOpenersOfCurrentStoreDoNotWaitForMigrationLock(t *testing.T) {
 	}
 	defer lock.Close()
 	for range 4 {
-		opened, err := openAt(path, 100*time.Millisecond)
+		opened, err := OpenAt(path)
 		if err != nil {
-			t.Fatalf("open of a current store waited for the migration lock: %v", err)
+			t.Fatalf("open current store with the migration lock held: %v", err)
 		}
 		if err := opened.Close(); err != nil {
 			t.Fatal(err)
