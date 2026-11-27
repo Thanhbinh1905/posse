@@ -197,6 +197,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the recorded head to include the target branch.", Handler: s.merge},
 		{Name: "review", Usage: "$ review <change> [--full]", Summary: "Inspect Review Rounds, findings, carries and remaining budget.", Handler: s.reviewStatus, Subcommands: []*axi.Command{
 			{Name: "start", Usage: "$ review start <task> [--profile <name>] [--name <short>]", Summary: "Review a completed Change Task or publication-bound Report.", Handler: s.reviewStart},
+			{Name: "recover", Usage: "$ review recover <task> [--repo <member>] --head <full-sha> --recovery <id>", Summary: "Restart an interrupted Greenhouse review under its existing grant.", Handler: s.reviewRecover},
 			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
 			{Name: "waive", Usage: "$ review waive <change> [--repo <member>] --head <sha> --user-approved <quote>", Summary: "Waive Greenhouse review for one exact PR-delivery head. Forge CI is still required.", Handler: s.reviewWaive},
 			{Name: "carry", Usage: "$ review carry <change> <passed-head> <candidate-head>", Summary: "Record a Review-only carry for a tree-identical private candidate merge.", Handler: s.reviewCarry},

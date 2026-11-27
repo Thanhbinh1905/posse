@@ -391,7 +391,7 @@ func nextGrantNumber(current *run) int {
 
 func terminalReviewStatus(status string) bool {
 	switch status {
-	case "cancelled", "failed", "inconclusive", "timeout", "timed-out", "unconfigured", "refused":
+	case "cancelled", "failed", "inconclusive", "timeout", "timed-out", "unconfigured", "refused", "recovery-discarded":
 		return true
 	default:
 		return false
@@ -403,6 +403,9 @@ func (d *Daemon) attach(ctx context.Context, round Round) (response, error) {
 	v, err := d.axi(ctx, round.Worktree, request)
 	if err != nil {
 		return v, err
+	}
+	if v.Outcome == "refused" && (v.Protocol == nil || v.Protocol.Includes(Protocol)) && v.Run != nil && v.Run.Host != nil && *v.Run.Host == round.Host && v.Run.Recovery != nil {
+		return v, nil
 	}
 	return v, v.refusal("attach")
 }
