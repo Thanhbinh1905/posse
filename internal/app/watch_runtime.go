@@ -1094,8 +1094,43 @@ func stopParkedWatchSystemd(ctx *axi.Context, home string, project store.Project
 	}
 }
 
-func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal, watch *store.WatchRuntime) error {
-	loopCtx := ctx.Context
+func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Project, timeout time.Duration, stopSignals <-chan os.Signal, watch *store.WatchRuntime) (result error) {
+	loopCtx, cancel := context.WithCancel(ctx.Context)
+	stopped := make(chan struct{})
+	signalDone := make(chan struct{})
+	forwarded := make(chan os.Signal, 1)
+	go func(loopCtx context.Context) {
+		defer close(signalDone)
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case sig, ok := <-stopSignals:
+				if !ok {
+					return
+				}
+				if sig == syscall.SIGTERM {
+					close(stopped)
+					cancel()
+					return
+				}
+				select {
+				case forwarded <- sig:
+				case <-loopCtx.Done():
+					return
+				}
+			}
+		}
+	}(loopCtx)
+	defer func() {
+		cancel()
+		<-signalDone
+		select {
+		case <-stopped:
+			result = s.reportWatchStopped(ctx, project, true)
+		default:
+		}
+	}()
 	if watch != nil {
 		stopHeartbeat := startWatchRuntimeHeartbeat(loopCtx, db, project.ID, *watch, func(err error) {
 			fmt.Fprintf(ctx.ErrOut, "Watch progress heartbeat failed for %s: %v\n", project.Name, err)
@@ -1142,10 +1177,8 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 		}
 		select {
-		case sig := <-stopSignals:
-			if sig == syscall.SIGTERM {
-				return s.reportWatchStopped(ctx, project, true)
-			}
+		case <-loopCtx.Done():
+			return loopCtx.Err()
 		default:
 		}
 		fresh, err := db.ProjectByID(loopCtx, project.ID)
@@ -1158,7 +1191,11 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 			return nil
 		}
-		if err := s.reconcileGreenhousePrepublication(loopCtx, db, home, fresh); err != nil {
+		err = s.reconcileGreenhousePrepublication(loopCtx, db, home, fresh)
+		if loopCtx.Err() != nil {
+			return loopCtx.Err()
+		}
+		if err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Greenhouse review dispatch failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "Greenhouse review", err)
 		}
@@ -1173,6 +1210,9 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 		}
 		_, blocked, err := s.prepareProjectWatchObservation(loopCtx, db, fresh)
+		if loopCtx.Err() != nil {
+			return loopCtx.Err()
+		}
 		trackWatchReconcileBlock(ctx, db, fresh, blocked)
 		if observed, readErr := db.ProjectByID(loopCtx, project.ID); readErr == nil && observed.IsParked() {
 			stopParkedWatchSystemd(ctx, home, project, watch)
@@ -1182,7 +1222,11 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			fmt.Fprintf(ctx.ErrOut, "Watch reconciliation failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}
-		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
+		err = s.maintainProjectWatch(loopCtx, db, fresh)
+		if loopCtx.Err() != nil {
+			return loopCtx.Err()
+		}
+		if err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch maintenance failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "maintenance", err)
 		} else {
@@ -1208,12 +1252,9 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return nil
 		}
-		sig, err := waitForWatchPass(ctx.Context, home, project, servedPass, stopSignals)
+		sig, err := waitForWatchPass(loopCtx, home, project, servedPass, forwarded)
 		if err != nil {
 			return err
-		}
-		if sig == syscall.SIGTERM {
-			return s.reportWatchStopped(ctx, project, true)
 		}
 		if sig == nil && watch == nil {
 			if err := s.handleLeadWatchUpdate(ctx, project); err != nil {

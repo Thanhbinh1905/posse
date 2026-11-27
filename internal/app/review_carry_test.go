@@ -13,6 +13,7 @@ import (
 func TestReviewCarryProofComparesPatchesAgainstTheTarget(t *testing.T) {
 	ctx := context.Background()
 	repo := filepath.Join(t.TempDir(), "repo")
+	guardGitProcesses(t, repo)
 	initRepo(t, repo)
 	gitTest(t, repo, "config", "gc.auto", "0")
 	gitTest(t, repo, "config", "maintenance.auto", "false")
