@@ -151,7 +151,7 @@ func TestQueuedTaskWaitReasonNamesTheRealBlocker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := reason(); got != "waiting for a Worker slot" {
+	if got := reason(); got != "waiting for a Worker slot: 2 in use (max_workers=2)" {
 		t.Fatalf("full wait_reason = %q", got)
 	}
 }

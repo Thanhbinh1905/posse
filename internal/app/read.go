@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -588,7 +589,7 @@ func queuedTaskWaitReason(ctx context.Context, db *store.DB, project store.Proje
 		return "", err
 	}
 	if active >= cfg.Defaults.MaxWorkers {
-		return "waiting for a Worker slot", nil
+		return fmt.Sprintf("waiting for a Worker slot: %d in use (max_workers=%d)", active, cfg.Defaults.MaxWorkers), nil
 	}
 	block, err := db.ReconcileBlock(ctx, project.ID)
 	if err != nil {

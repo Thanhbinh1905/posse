@@ -147,6 +147,42 @@ func TestQueuedTaskAdmittedByOneWatchPoll(t *testing.T) {
 	f.waitState(t, "t2", store.StateWorking)
 }
 
+func TestWatchAdmitsQueuedTaskAfterDoneWorkerReleasesSlot(t *testing.T) {
+	f := newPRLifecycleFixtureWithManualWatchOwner(t)
+	t.Cleanup(func() { _ = f.db.Close() })
+	runPosse(t, f.binary, f.repo, f.leadEnv, "config", "set", "defaults.max_workers", "1")
+	brief := filepath.Join(f.root, "change.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Change\ndone_when: committed change exists\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := f.startAndComplete(t, brief, "t1")
+	head := strings.TrimSpace(gitTest(t, f.env, done.WorktreePath, "rev-parse", "HEAD"))
+	f.writeGraphQLPulls(t, fakePull{alias: "pr1", state: "OPEN", checks: "PENDING", review: "REVIEW_REQUIRED", mergeable: "MERGEABLE", head: head})
+	runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "queued-change", "--queue")
+	watchEnv := setEnv(f.leadEnv, "POSSE_WATCH_TOKEN", "")
+	runPosse(t, f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "1")
+	if queued := f.mustTask(t, "t2"); queued.State != store.StateQueued || queued.SandboxID != 0 || queued.PaneID != "" || queued.Branch != "" {
+		t.Fatalf("Watch admitted t2 while done t1 still held its slot: state=%s sandbox=%d pane=%q branch=%q", queued.State, queued.SandboxID, queued.PaneID, queued.Branch)
+	}
+	if show := runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t2"); !strings.Contains(show, "waiting for a Worker slot: 1 in use (max_workers=1)") {
+		t.Errorf("queue wait did not name the configured limit: %s", show)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "pr", "release", "t1", "--policy", "release"); !strings.Contains(output, "sandbox_released: true") {
+		t.Fatalf("release did not free t1's Sandbox: %s", output)
+	}
+	if count, err := f.db.ActiveWorkerCount(t.Context(), f.project.ID); err != nil || count != 0 {
+		t.Fatalf("after release, slot accounting = %d, want 0: %v", count, err)
+	}
+	runPosse(t, f.binary, f.repo, watchEnv, "watch", "--poll-only", "--timeout", "1")
+	if queued := f.mustTask(t, "t2"); queued.State == store.StateQueued {
+		t.Fatalf("Watch left t2 queued after t1 released its Worker and Sandbox:\n%s", runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t2"))
+	}
+	f.waitTaskState(t, "t2", store.StateWorking)
+	if active := f.mustTask(t, "t2"); active.Launches != 1 || active.SandboxID == 0 || active.PaneID == "" {
+		t.Fatalf("Watch did not launch exactly one Worker with a Sandbox: launches=%d sandbox=%d pane=%q", active.Launches, active.SandboxID, active.PaneID)
+	}
+}
+
 // TestHeldProjectWatchPollNamesTheGenerationBlocker records a Herdr generation
 // the live server no longer has, as a missed `posse up --all` leaves it, with a
 // block episode already three minutes old. The held Project stays inert per

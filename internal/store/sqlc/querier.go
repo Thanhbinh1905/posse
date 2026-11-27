@@ -13,7 +13,7 @@ type Querier interface {
 	AckAllNotices(ctx context.Context, arg AckAllNoticesParams) (sql.Result, error)
 	AckNotice(ctx context.Context, arg AckNoticeParams) (sql.Result, error)
 	AcquireIdleSandbox(ctx context.Context, arg AcquireIdleSandboxParams) (sql.Result, error)
-	ActiveWorkerCount(ctx context.Context, projectID int64) (int64, error)
+	ActiveWorkerCount(ctx context.Context, arg ActiveWorkerCountParams) (int64, error)
 	AllResourceLeases(ctx context.Context) ([]AllResourceLeasesRow, error)
 	AllTasks(ctx context.Context, projectID int64) ([]Task, error)
 	AllocateLeadLaunch(ctx context.Context, id int64) (int64, error)

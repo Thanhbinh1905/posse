@@ -247,15 +247,16 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return axi.Failure("dependency_invalid", err.Error(), false)
 	}
-	count, err := db.ActiveWorkerCount(ctx.Context, project.ID)
+	var excludedTaskID int64
+	if adoption != nil {
+		excludedTaskID = adoption.SourceTaskID
+	}
+	count, err := db.ActiveWorkerCountExcept(ctx.Context, project.ID, excludedTaskID)
 	if err != nil {
 		return err
 	}
-	// Review Rounds are exempt from max_workers: done Change Tasks hold slots
-	// until merge, so gating the rounds that unblock those merges deadlocks.
-	if adoptionSource != nil && (adoptionSource.State == store.StateDone || adoptionSource.State == store.StateWorking || adoptionSource.State == store.StateSpawning || adoptionSource.State == store.StateStalled || adoptionSource.State == store.StateBlocked || adoptionSource.State == store.StateNeedsDecision) {
-		count--
-	}
+	// Review Rounds are exempt from max_workers: done Change Tasks can hold
+	// slots, so gating the rounds that unblock their merges can deadlock.
 	atCapacity := count >= cfg.Defaults.MaxWorkers && generated == nil
 	if atCapacity && !parsed.Bool("queue") && len(unmetDependencies) == 0 {
 		return axi.Failure("worker_limit", fmt.Sprintf("%s already runs %d Workers (max_workers=%d)", project.Name, count, cfg.Defaults.MaxWorkers), false, "Wait for a Task to finish or raise max_workers in the Project config; use `--queue` to admit it without starting")
