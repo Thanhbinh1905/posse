@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ type ValueType string
 const (
 	TypeString      ValueType = "string"
 	TypeInteger     ValueType = "integer"
+	TypeNumber      ValueType = "number"
 	TypeBoolean     ValueType = "boolean"
 	TypeDuration    ValueType = "duration"
 	TypeStringArray ValueType = "array of strings"
@@ -111,6 +113,10 @@ var keySpecs = []KeySpec{
 	{Key: "kinds.<kind>.prepare", Type: TypeString, Allowed: []string{"", "claude-trust", "codex-trust"}, Default: "", Meaning: "Built-in preparation step run before starting an agent.", UserOnly: true},
 	{Key: "profiles.<profile>.kind", Type: TypeString, Meaning: "Agent kind used by this Profile.", UserOnly: true},
 	{Key: "profiles.<profile>.model", Type: TypeString, Default: "", Meaning: "Model argument value supplied through the kind template."},
+	{Key: "profiles.<profile>.prices.input_per_million", Type: TypeNumber, Meaning: "Input token price per million for this Profile's model; omit any unknown rate and cost remains unknown."},
+	{Key: "profiles.<profile>.prices.output_per_million", Type: TypeNumber, Meaning: "Output token price per million for this Profile's model; omit any unknown rate and cost remains unknown."},
+	{Key: "profiles.<profile>.prices.cache_read_per_million", Type: TypeNumber, Meaning: "Cache-read token price per million for this Profile's model; omit any unknown rate and cost remains unknown."},
+	{Key: "profiles.<profile>.prices.cache_write_per_million", Type: TypeNumber, Meaning: "Cache-write token price per million for this Profile's model; omit any unknown rate and cost remains unknown."},
 	{Key: "profiles.<profile>.effort", Type: TypeString, Default: "", Meaning: "Reasoning effort supplied through the kind template."},
 	{Key: "profiles.<profile>.args", Type: TypeStringArray, Default: []string{}, Meaning: "Additional arguments passed to this Profile's agent.", UserOnly: true},
 	{Key: "profiles.<profile>.attribution", Type: TypeBoolean, Default: false, Meaning: "Keep the agent's commit co-author trailer and PR attribution. When false, Claude launches get attribution disabled and publish refuses commits with agent attribution trailers.", UserOnly: true},
@@ -123,6 +129,19 @@ var keySpecs = []KeySpec{
 }
 
 var namePart = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func numericValue(value any) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case int64:
+		return float64(number), true
+	case int:
+		return float64(number), true
+	default:
+		return 0, false
+	}
+}
 
 func Schema() []KeySpec {
 	return schema(false)
@@ -220,6 +239,8 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 		case int64, int, int32:
 			valid = true
 		}
+	case TypeNumber:
+		_, valid = numericValue(value)
 	case TypeBoolean:
 		_, valid = value.(bool)
 	case TypeStringArray:
@@ -231,6 +252,9 @@ func ValidateSetting(key string, value any, projectFile bool) error {
 	}
 	if !valid {
 		return fmt.Errorf("%s must be %s", key, spec.Type)
+	}
+	if number, ok := numericValue(value); ok && (math.IsNaN(number) || math.IsInf(number, 0) || number < 0) {
+		return fmt.Errorf("%s must be a non-negative finite number", key)
 	}
 	if text, ok := value.(string); ok {
 		if strings.HasSuffix(key, ".notice_delivery") && text == "lookout" {

@@ -164,7 +164,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "decide", Usage: "$ decide <decision> <option> [--to <task>] [--user-approved <quote> | --lead-reason <reason>] [--recover]", Summary: "Record a User answer or YOLO Lead Review-cap resolution.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Decision action.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
-		{Name: "stats", Summary: "Show each Profile's landed rate, median time to done, tokens per landed Task and relaunches over the last 30 days.", Handler: s.stats},
+		{Name: "stats", Usage: "$ stats [--days n]", Summary: "Show Task cost and token percentiles overall, by Task type and Profile, plus each Profile's landed rate and relaunches.", Handler: s.stats},
 		{Name: "start", Usage: "$ start <brief.md> [--name <short>] [--profile p] [--from-orphan <decision>] [--user-approved <quote>] [--queue]", Summary: "Start a Worker from a Brief with an optional display name. Positional paths and `--brief <file>` are accepted. `--user-approved` scopes consent to explicit Brief preferences; `--queue` admits it durably until prerequisites and capacity permit dispatch.", Handler: s.spawn},
 		{Name: "task", Summary: "Manage an admitted Task.", Subcommands: []*axi.Command{
 			{Name: "add-member", Usage: "$ task add-member <task> <repo> --user-approved <quote> [--base <ref>] [--target <ref>]", Summary: "Add a Project Member to a running workspace Change Task with recorded User approval.", Handler: s.taskAddMember},
@@ -451,8 +451,9 @@ func (s *Service) reconcileProject(ctx context.Context, db *store.DB, project st
 			}
 		}
 	}
+	usageRecorder := taskUsageRecorder(db, cfg)
 	run := func() (runtime.RunResult, error) {
-		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+		result, err := runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress, usageRecorder)
 		if err == nil && !result.GenerationMismatch {
 			err = observeLeadAgent(ctx, db, project, result.Snapshot)
 		}
@@ -733,6 +734,7 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 	herdrReady := false
 	var skipped error
 	allowNetworkRecovery := options.allowRecovery
+	usageRecorder := taskUsageRecorder(db, cfg)
 	if s.Herdr != nil {
 		if err := s.Herdr.CheckProtocol(ctx); err != nil {
 			if !isHerdrUnavailable(err) {
@@ -752,14 +754,14 @@ func (s *Service) prepareProjectWithOptions(ctx context.Context, db *store.DB, p
 				if claim.OwnerPID != 0 && processAlive(claim.OwnerPID) {
 					runErr = fmt.Errorf("%w: process %d is recovering the Project", errRecoveryDeferred, claim.OwnerPID)
 				} else {
-					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+					result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress, usageRecorder)
 					if runErr == nil && result.GenerationMismatch {
 						adopted, err := s.adoptCurrentGeneration(ctx, db, project, result.Snapshot)
 						if err != nil {
 							return cfg, err
 						}
 						if adopted {
-							result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress)
+							result, runErr = runtime.Run(ctx, db, s.Herdr, project.ID, duration(cfg.Defaults.StallAfter), duration(cfg.Defaults.IdleAfter), time.Now(), s.Progress, usageRecorder)
 						}
 					}
 					if runErr == nil && result.GenerationMismatch {

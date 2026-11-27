@@ -45,7 +45,7 @@ type ProgressSource interface {
 
 type SystemProgress struct{}
 
-func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int64, stallAfter, idleAfter time.Duration, now time.Time, progress ProgressSource) (result RunResult, returnedErr error) {
+func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int64, stallAfter, idleAfter time.Duration, now time.Time, progress ProgressSource, usageRecorders ...func(context.Context, store.Task) error) (result RunResult, returnedErr error) {
 	budgetCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
 	defer cancel()
 	defer func() { returnedErr = reconcileError(returnedErr) }()
@@ -77,7 +77,11 @@ func Run(ctx context.Context, db *store.DB, adapter herdr.Adapter, projectID int
 			returnedErr = fmt.Errorf("remember Project server observation: %w", err)
 		}
 	}
-	notices, err := ReconcileSnapshot(withTurnEndBaselines(context.WithValue(budgetCtx, herdrAdapterKey{}, adapter), baselines), db, projectID, snapshot, now, idleAfter)
+	var usageRecorder func(context.Context, store.Task) error
+	if len(usageRecorders) > 0 {
+		usageRecorder = usageRecorders[0]
+	}
+	notices, err := reconcileSnapshot(withTurnEndBaselines(context.WithValue(budgetCtx, herdrAdapterKey{}, adapter), baselines), db, projectID, snapshot, now, idleAfter, usageRecorder)
 	result.Notices = append(result.Notices, notices...)
 	if err != nil {
 		return result, errors.Join(returnedErr, err)
@@ -105,14 +109,18 @@ func snapshotMatchesProjectGeneration(ctx context.Context, db *store.DB, project
 	return generation == "" || snapshot.ServerStartedAt == "" || generation == snapshot.ServerStartedAt, err
 }
 
-func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) (notices []store.Notice, returnedErr error) {
-	defer func() { returnedErr = reconcileError(returnedErr) }()
-	ctx, cancelBudget := context.WithTimeout(ctx, ReconcileBudget)
-	defer cancelBudget()
+func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfterValues ...time.Duration) ([]store.Notice, error) {
 	idleAfter := time.Duration(0)
 	if len(idleAfterValues) > 0 {
 		idleAfter = idleAfterValues[0]
 	}
+	return reconcileSnapshot(ctx, db, projectID, snapshot, now, idleAfter, nil)
+}
+
+func reconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration, usageRecorder func(context.Context, store.Task) error) (notices []store.Notice, returnedErr error) {
+	defer func() { returnedErr = reconcileError(returnedErr) }()
+	ctx, cancelBudget := context.WithTimeout(ctx, ReconcileBudget)
+	defer cancelBudget()
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -155,7 +163,7 @@ func ReconcileSnapshot(ctx context.Context, db *store.DB, projectID int64, snaps
 		// Each admitted Task gets a fresh short context. Never start work with
 		// an expired pass context, or give it a budget beyond the pass deadline.
 		taskCtx, cancel := context.WithTimeout(ctx, ReconcileBudget)
-		taskNotices, err := reconcileTask(taskCtx, db, project, task, snapshot, now, idleAfter)
+		taskNotices, err := reconcileTask(taskCtx, db, project, task, snapshot, now, idleAfter, usageRecorder)
 		cancel()
 		notices = append(notices, taskNotices...)
 		if err != nil && !isStateRace(err) {
@@ -245,7 +253,7 @@ func executorStoppedIntentionally(ctx context.Context, db *store.DB, task store.
 	return task.Launches <= 1, nil
 }
 
-func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration) ([]store.Notice, error) {
+func reconcileTask(ctx context.Context, db *store.DB, project store.Project, task store.Task, snapshot herdr.Snapshot, now time.Time, idleAfter time.Duration, usageRecorder func(context.Context, store.Task) error) ([]store.Notice, error) {
 	var notices []store.Notice
 	waitingHeavy := heavy.IsWaitingTask(filepath.Dir(db.Path), project.Name, taskID(task.Seq), task.ContainmentMarker)
 	if task.State == store.StateSpawning && task.PaneID == "" {
@@ -274,6 +282,11 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		task.IdleSince = 0
 	}
 	if !found {
+		if usageRecorder != nil {
+			if err := usageRecorder(ctx, task); err != nil {
+				return nil, err
+			}
+		}
 		if task.State == store.StateDone || task.State == store.StateMerging {
 			teardownInProgress, err := taskTeardownInProgress(ctx, db, task)
 			if err != nil || teardownInProgress {
@@ -362,6 +375,13 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 		AgentAbsentSince: absentSince, IdleSince: idleSince, AgentServerStartedAt: serverStartedAt,
 	}
 	observation.AgentStatus, observation.AgentStatusSince = observedStatus, agentStatusSince(task, observedStatus, now)
+	if usageRecorder != nil {
+		observedTask := task
+		observedTask.AgentSession, observedTask.AgentSessionKind = observation.AgentSession, observation.AgentSessionKind
+		if err := usageRecorder(ctx, observedTask); err != nil {
+			return notices, err
+		}
+	}
 	if err := db.UpdateTaskObservation(ctx, task.ID, observation); err != nil {
 		return nil, observationFailure(err)
 	}

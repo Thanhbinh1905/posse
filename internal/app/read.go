@@ -516,7 +516,7 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	now := time.Now()
 	rows := make([]taskSummary, 0, len(tasks))
 	for _, task := range tasks {
-		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(task, cfg)}
+		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(ctx.Context, db, task, cfg)}
 		row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
 		if err != nil {
 			return err
@@ -687,7 +687,7 @@ func withoutBriefSection(body, heading string) string {
 	return strings.Join(kept, "")
 }
 
-func taskUsage(task store.Task, cfg config.Config) usage.Counts {
+func sessionTaskUsage(task store.Task, cfg config.Config) usage.Counts {
 	kind := task.AgentSessionKind
 	if kind == "" {
 		if plan, err := task.AdmittedPlan(); err == nil && plan != nil {
@@ -697,6 +697,14 @@ func taskUsage(task store.Task, cfg config.Config) usage.Counts {
 		}
 	}
 	return usage.Read(kind, agentSessionID(kind, task.AgentSession), task.WorktreePath)
+}
+
+func taskUsage(ctx context.Context, db *store.DB, task store.Task, cfg config.Config) usage.Counts {
+	total, err := db.TaskUsageTotal(ctx, task.ID)
+	if err != nil || !total.Known {
+		return sessionTaskUsage(task, cfg)
+	}
+	return usage.Counts{Input: total.Input, Output: total.Output, CacheRead: total.CacheRead, CacheWrite: total.CacheWrite, CostUSD: total.CostUSD, CostKnown: total.KnownCost, Known: true}
 }
 
 func (s *Service) show(ctx *axi.Context, args []string) error {
@@ -745,7 +753,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		return err
 	}
 	id := taskIDString(task.Seq)
-	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(task, cfg)}
+	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(ctx.Context, db, task, cfg)}
 	if parsed.Bool("full") {
 		decisions, err := db.Decisions(ctx.Context, project.ID, false)
 		if err != nil {

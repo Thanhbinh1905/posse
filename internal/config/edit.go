@@ -167,6 +167,12 @@ func encodeSettingValue(key string, kind ValueType, value any) (string, error) {
 			return "", fmt.Errorf("value must be %s", kind)
 		}
 		return strconv.FormatInt(integer, 10), nil
+	case TypeNumber:
+		number, ok := numericValue(value)
+		if !ok {
+			return "", fmt.Errorf("value must be %s", kind)
+		}
+		return strconv.FormatFloat(number, 'f', -1, 64), nil
 	case TypeBoolean:
 		boolean, ok := value.(bool)
 		if !ok {

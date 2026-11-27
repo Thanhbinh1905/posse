@@ -6,6 +6,8 @@ import (
 	"testing"
 )
 
+func floatPtr(value float64) *float64 { return &value }
+
 func writeFixture(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -22,14 +24,23 @@ func TestReadRealHarnessUsageRecords(t *testing.T) {
 	}{
 		{"claude", `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":12,"output_tokens":5,"cache_read_input_tokens":4,"cache_creation_input_tokens":2}}}`, Counts{Input: 12, Output: 5, CacheRead: 4, CacheWrite: 2, Known: true}},
 		{"codex", `{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":5,"cache_write_input_tokens":2,"output_tokens":8,"reasoning_output_tokens":1,"total_tokens":28}}}}` + "\n" + `{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"cached_input_tokens":7,"cache_write_input_tokens":3,"output_tokens":12,"reasoning_output_tokens":2,"total_tokens":42}}}}`, Counts{Input: 30, Output: 12, CacheRead: 7, CacheWrite: 3, Known: true}},
-		{"pi", `{"type":"message","message":{"role":"assistant","usage":{"input":12,"output":3,"cacheRead":4,"cacheWrite":2,"totalTokens":21,"cost":{"total":0.01}}}}`, Counts{Input: 12, Output: 3, CacheRead: 4, CacheWrite: 2, Known: true}},
+		{"pi", `{"type":"message","message":{"role":"assistant","usage":{"input":12,"output":3,"cacheRead":4,"cacheWrite":2,"totalTokens":21,"cost":{"total":0.01}}}}`, Counts{Input: 12, Output: 3, CacheRead: 4, CacheWrite: 2, CostUSD: floatPtr(0.01), CostKnown: true, Known: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind, func(t *testing.T) {
-			if got := Read(tt.kind, writeFixture(t, tt.contents), ""); got != tt.want {
+			got := Read(tt.kind, writeFixture(t, tt.contents), "")
+			if got.Input != tt.want.Input || got.Output != tt.want.Output || got.CacheRead != tt.want.CacheRead || got.CacheWrite != tt.want.CacheWrite || got.CostKnown != tt.want.CostKnown || got.Known != tt.want.Known || (got.CostUSD == nil) != (tt.want.CostUSD == nil) || got.CostUSD != nil && *got.CostUSD != *tt.want.CostUSD {
 				t.Fatalf("Read() = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPiCostIsUnknownWhenAnyAssistantUsageLacksCost(t *testing.T) {
+	contents := `{"type":"message","message":{"role":"assistant","usage":{"input":12,"output":3,"cost":{"total":0.01}}}}` + "\n" + `{"type":"message","message":{"role":"assistant","usage":{"input":8,"output":2}}}`
+	got := Read("pi", writeFixture(t, contents), "")
+	if !got.Known || got.CostKnown || got.CostUSD != nil {
+		t.Fatalf("Read() = %#v, want known tokens and unknown cost", got)
 	}
 }
 

@@ -80,24 +80,46 @@ type GeneratedPath struct {
 }
 
 // HostResult is the exact-head review result of a host run.
+type TokenUsage struct {
+	InputTokens       int64    `json:"input_tokens"`
+	OutputTokens      int64    `json:"output_tokens"`
+	CachedInputTokens int64    `json:"cached_input_tokens"`
+	CacheWriteTokens  int64    `json:"cache_write_tokens"`
+	Tokens            int64    `json:"tokens"`
+	CostUSD           *float64 `json:"cost_usd"`
+	CostSource        string   `json:"cost_source"`
+	ModelCalls        int      `json:"model_calls"`
+	WallMS            int64    `json:"wall_ms"`
+}
+
+type UsageBreakdown struct {
+	Stage   string     `json:"stage"`
+	Name    string     `json:"name,omitempty"`
+	Backend string     `json:"backend,omitempty"`
+	Model   string     `json:"model,omitempty"`
+	Usage   TokenUsage `json:"usage"`
+}
+
 type HostResult struct {
-	Grant        string          `json:"grant"`
-	ReviewID     string          `json:"review_id"`
-	Head         string          `json:"head"`
-	Target       string          `json:"target"`
-	ReviewBase   string          `json:"review_base"`
-	Status       string          `json:"status"`
-	Verdict      string          `json:"verdict"`
-	Current      bool            `json:"current"`
-	Findings     []Finding       `json:"findings"`
-	Uncovered    []UncoveredPath `json:"uncovered"`
-	Generated    []GeneratedPath `json:"generated"`
-	RulesDigest  string          `json:"rules_digest"`
-	ConfigDigest string          `json:"config_digest"`
-	InputDigest  string          `json:"input_digest"`
-	Backend      string          `json:"backend"`
-	Model        string          `json:"model"`
-	Reason       string          `json:"reason"`
+	Usage          *TokenUsage      `json:"usage"`
+	UsageBreakdown []UsageBreakdown `json:"usage_breakdown,omitempty"`
+	Grant          string           `json:"grant"`
+	ReviewID       string           `json:"review_id"`
+	Head           string           `json:"head"`
+	Target         string           `json:"target"`
+	ReviewBase     string           `json:"review_base"`
+	Status         string           `json:"status"`
+	Verdict        string           `json:"verdict"`
+	Current        bool             `json:"current"`
+	Findings       []Finding        `json:"findings"`
+	Uncovered      []UncoveredPath  `json:"uncovered"`
+	Generated      []GeneratedPath  `json:"generated"`
+	RulesDigest    string           `json:"rules_digest"`
+	ConfigDigest   string           `json:"config_digest"`
+	InputDigest    string           `json:"input_digest"`
+	Backend        string           `json:"backend"`
+	Model          string           `json:"model"`
+	Reason         string           `json:"reason"`
 }
 
 // Recovery is set while a run waits for recovery after an interruption.
@@ -108,8 +130,10 @@ type Recovery struct {
 }
 
 type review struct {
-	Uncovered []UncoveredPath `json:"uncovered"`
-	Generated []GeneratedPath `json:"generated"`
+	Uncovered      []UncoveredPath  `json:"uncovered"`
+	Generated      []GeneratedPath  `json:"generated"`
+	Usage          *TokenUsage      `json:"usage"`
+	UsageBreakdown []UsageBreakdown `json:"usage_breakdown"`
 }
 
 type run struct {
@@ -139,6 +163,12 @@ func (v response) reviewResult() *HostResult {
 		}
 		if len(result.Generated) == 0 {
 			result.Generated = v.Run.Review.Generated
+		}
+		if result.Usage == nil {
+			result.Usage = v.Run.Review.Usage
+		}
+		if len(result.UsageBreakdown) == 0 {
+			result.UsageBreakdown = v.Run.Review.UsageBreakdown
 		}
 	}
 	return result

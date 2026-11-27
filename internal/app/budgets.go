@@ -8,7 +8,61 @@ import (
 
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/usage"
 )
+
+type taskUsageObservation struct {
+	kind      string
+	sessionID string
+	counts    usage.Counts
+}
+
+func taskUsageRecorder(db *store.DB, cfg config.Config) func(context.Context, store.Task) error {
+	return func(ctx context.Context, task store.Task) error {
+		_, err := recordTaskUsage(ctx, db, task, cfg)
+		return err
+	}
+}
+
+func recordTaskUsage(ctx context.Context, db *store.DB, task store.Task, cfg config.Config) (taskUsageObservation, error) {
+	kind := task.AgentSessionKind
+	if kind == "" {
+		if plan, err := task.AdmittedPlan(); err == nil && plan != nil {
+			kind = plan.Launch.Profile.Kind
+		} else if profile, ok := cfg.Profiles[task.Profile]; ok {
+			kind = profile.Kind
+		}
+	}
+	sessionID := agentSessionID(kind, task.AgentSession)
+	observation := taskUsageObservation{kind: kind, sessionID: sessionID}
+	if sessionID == "" {
+		return observation, nil
+	}
+	observation.counts = sessionTaskUsage(task, cfg)
+	if !observation.counts.Known {
+		return observation, nil
+	}
+	profileName := task.Profile
+	identities, err := db.TaskLaunchIdentities(ctx, task.ID)
+	if err != nil {
+		return taskUsageObservation{}, err
+	}
+	for _, identity := range identities {
+		if identity.LaunchNumber == max(task.Launches, 1) && identity.Profile != "" {
+			profileName = identity.Profile
+			break
+		}
+	}
+	profile := cfg.Profiles[profileName]
+	cost := observation.counts.CostUSD
+	if kind != "pi" {
+		cost = pricedCost(observation.counts, profile.Prices)
+	}
+	if err := db.RecordTaskLaunchUsage(ctx, store.TaskLaunchUsage{TaskID: task.ID, Launch: max(task.Launches, 1), SessionID: sessionID, SessionKind: kind, Input: observation.counts.Input, Output: observation.counts.Output, CacheRead: observation.counts.CacheRead, CacheWrite: observation.counts.CacheWrite, CostUSD: cost, Profile: profileName}); err != nil {
+		return taskUsageObservation{}, err
+	}
+	return observation, nil
+}
 
 func (s *Service) evaluateBudgets(ctx context.Context, db *store.DB, project store.Project, cfg config.Config) error {
 	tasks, err := db.Tasks(ctx, project.ID, true)
@@ -22,27 +76,15 @@ func (s *Service) evaluateBudgets(ctx context.Context, db *store.DB, project sto
 		if plan != nil && plan.Version >= 7 {
 			taskLimit = plan.BudgetTokens
 		}
-		if taskLimit <= 0 && cfg.Budget.DailyTokens <= 0 {
+		observation, err := recordTaskUsage(ctx, db, task, cfg)
+		if err != nil {
+			return err
+		}
+		if observation.sessionID == "" || !observation.counts.Known || taskLimit <= 0 && cfg.Budget.DailyTokens <= 0 {
 			continue
 		}
-		kind := task.AgentSessionKind
-		if kind == "" {
-			if plan != nil {
-				kind = plan.Launch.Profile.Kind
-			} else if profile, ok := cfg.Profiles[task.Profile]; ok {
-				kind = profile.Kind
-			}
-		}
-		sessionID := agentSessionID(kind, task.AgentSession)
-		if sessionID == "" {
-			continue
-		}
-		counts := taskUsage(task, cfg)
-		if !counts.Known {
-			continue
-		}
-		tokens := counts.Input + counts.Output + counts.CacheRead + counts.CacheWrite
-		taskTotal, dailyTotal, err := db.RecordTaskBudgetUsage(ctx, project.ID, task.ID, max(task.Launches, 1), sessionID, kind, localDay, tokens)
+		tokens := observation.counts.Input + observation.counts.Output + observation.counts.CacheRead + observation.counts.CacheWrite
+		taskTotal, dailyTotal, err := db.RecordTaskBudgetUsage(ctx, project.ID, task.ID, max(task.Launches, 1), observation.sessionID, observation.kind, localDay, tokens)
 		if err != nil {
 			return err
 		}
@@ -58,6 +100,18 @@ func (s *Service) evaluateBudgets(ctx context.Context, db *store.DB, project sto
 		}
 	}
 	return nil
+}
+
+func pricedCost(counts usage.Counts, prices config.ModelPrices) *float64 {
+	rates := []*float64{prices.InputPerMillion, prices.OutputPerMillion, prices.CacheReadPerMillion, prices.CacheWritePerMillion}
+	for _, rate := range rates {
+		if rate == nil || *rate < 0 {
+			return nil
+		}
+	}
+	cost := float64(counts.Input)*(*rates[0]) + float64(counts.Output)*(*rates[1]) + float64(counts.CacheRead)*(*rates[2]) + float64(counts.CacheWrite)*(*rates[3])
+	cost /= 1_000_000
+	return &cost
 }
 
 func recordBudgetCrossing(ctx context.Context, db *store.DB, project store.Project, task store.Task, scope, key string, usage, limit int64) error {

@@ -76,6 +76,52 @@ BEGIN SELECT RAISE(ABORT, 'Greenhouse review request is immutable'); END;`); err
 	}
 }
 
+func TestFailedGreenhouseGrantCanResumeWithFreshRequestTime(t *testing.T) {
+	f := newReviewVerdictFixture(t, nil)
+	task := f.task(t, f.change)
+	request := GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 10, SettledAt: 20, Outcome: "failed", Grant: "shop/t1/shop/r1"}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.RequestedAt, request.SettledAt = 30, 40
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatalf("resuming failed grant with a new process timestamp: %v", err)
+	}
+	requests, err := f.db.GreenhouseReviewRequests(f.ctx, task.ProjectID)
+	if err != nil || len(requests) != 1 || requests[0].RequestedAt != 10 || requests[0].SettledAt != 40 || requests[0].FailureCount != 2 {
+		t.Fatalf("resumed grant records = %+v, err=%v", requests, err)
+	}
+}
+
+func TestTaskReviewUsagePersistsAndAggregates(t *testing.T) {
+	f := newReviewVerdictFixture(t, nil)
+	task := f.task(t, f.change)
+	request := GreenhouseReviewRequest{ProjectID: task.ProjectID, TaskID: task.ID, Repository: "shop", RequestedHead: reviewShaA, Provider: GreenhouseReviewProvider, RequestedAt: 10, SettledAt: 20, Outcome: "failed", Grant: "shop/t1/shop/r1"}
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	cost := 0.004
+	if err := f.db.RecordTaskReviewUsage(f.ctx, TaskReviewUsage{TaskID: task.ID, Repository: "shop", Head: reviewShaA, Grant: request.Grant, Input: 10, Output: 4, CacheRead: 2, CacheWrite: 1, CostUSD: &cost, UsageJSON: `{"usage":{"input_tokens":10},"usage_breakdown":[{"stage":"review"}]}`}); err != nil {
+		t.Fatal(err)
+	}
+	total, err := f.db.TaskUsageTotal(f.ctx, task.ID)
+	if err != nil || !total.Known || !total.KnownCost || total.Input != 10 || total.Output != 4 || total.CostUSD == nil || *total.CostUSD != cost {
+		t.Fatalf("Task review usage total = %+v, err=%v", total, err)
+	}
+	projectTotal, err := f.db.ProjectReviewUsageTotal(f.ctx, task.ProjectID, 0)
+	if err != nil || !projectTotal.Known || projectTotal.CostUSD == nil || *projectTotal.CostUSD != cost {
+		t.Fatalf("Project review usage total = %+v, err=%v", projectTotal, err)
+	}
+	request.Grant, request.RequestedAt, request.SettledAt = "shop/t1/shop/r2", 30, 40
+	if err := f.db.RecordGreenhouseReviewRequest(f.ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	projectTotal, err = f.db.ProjectReviewUsageTotal(f.ctx, task.ProjectID, 0)
+	if err != nil || projectTotal.Known || projectTotal.Unknown != 1 {
+		t.Fatalf("missing review usage = %+v, err=%v", projectTotal, err)
+	}
+}
+
 func TestGreenhouseReviewRequestLinksGateModeVerdict(t *testing.T) {
 	f := newReviewVerdictFixture(t, []ReviewTarget{{Repository: "shop", Commit: reviewShaA}})
 	verdict := greenhouseVerdict(f.change, "shop/t1/shop/r1", reviewShaA)
