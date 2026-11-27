@@ -206,7 +206,11 @@ func greenhouseBlockAt(task store.Task) string {
 func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.Project, cfg config.Config, task store.Task, commit, repository string) error {
 	var targets []store.ReviewTarget
 	var err error
-	if greenhouseFullPipelineTaskWithConfig(task, cfg, "") && !project.IsWorkspace() {
+	if commit != "" && repository != "" {
+		targets = []store.ReviewTarget{{Repository: repository, Commit: commit}}
+	} else if commit != "" && !project.IsWorkspace() {
+		targets = []store.ReviewTarget{{Repository: project.Name, Commit: commit}}
+	} else if greenhouseFullPipelineTaskWithConfig(task, cfg, "") && !project.IsWorkspace() {
 		head, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
 		if err != nil {
 			return err
@@ -222,33 +226,59 @@ func requireGreenhouseGatePass(ctx context.Context, db *store.DB, project store.
 		filtered := targets[:0]
 		for _, target := range targets {
 			if target.Repository == repository {
-				if commit != "" {
-					target.Commit = commit
-				}
 				filtered = append(filtered, target)
 			}
 		}
 		targets = filtered
-	} else if !project.IsWorkspace() && commit != "" {
-		targets = []store.ReviewTarget{{Repository: project.Name, Commit: commit}}
+	}
+	members := map[string]store.TaskRepo{}
+	if project.IsWorkspace() && repository == "" {
+		repos, err := db.TaskRepos(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		for _, repo := range repos {
+			members[repo.Repo] = repo
+		}
 	}
 	for _, target := range targets {
-		passed, err := db.GreenhouseGatePass(ctx, task.ID, target.Repository, target.Commit, greenhouseBlockAt(task))
+		allowWaiver := true
+		if member, ok := members[target.Repository]; ok {
+			if member.State == store.TaskRepoMerged {
+				continue
+			}
+			ahead, err := commitsAhead(ctx, member.WorktreePath, member.BaseRef, target.Commit)
+			if err != nil {
+				return memberFailure(member.Repo, err)
+			}
+			if ahead == 0 {
+				continue
+			}
+			allowWaiver = task.State != store.StateMerging || member.GatedSHA == target.Commit
+		}
+		passed, err := greenhouseGateSatisfied(ctx, db, task, target.Repository, target.Commit, allowWaiver)
 		if err != nil {
 			return err
 		}
 		if !passed {
-			accepted, err := greenhouseAcceptHeadDisposition(ctx, db, task, target.Repository, target.Commit)
-			if err != nil {
-				return err
-			}
-			if accepted {
-				continue
-			}
-			return axi.Failure("greenhouse_verdict_required", "Task "+taskIDString(task.Seq)+" has no current passing Greenhouse Verdict or exact-head acceptance for "+target.Repository+" at "+shortSHA(target.Commit), false, "Wait for the Greenhouse Verdict or apply the exact-head review-cap acceptance before publication or Merge")
+			return axi.Failure("greenhouse_verdict_required", "Task "+taskIDString(task.Seq)+" has no current passing Greenhouse Verdict, exact-head acceptance or waiver for "+target.Repository+" at "+shortSHA(target.Commit), false, "Wait for the Greenhouse Verdict or obtain User approval for the exact head before publication or Merge")
 		}
 	}
 	return nil
+}
+
+func greenhouseGateSatisfied(ctx context.Context, db *store.DB, task store.Task, repository, head string, allowWaiver bool) (bool, error) {
+	if allowWaiver {
+		waived, err := hasReviewWaiver(ctx, db, task.ID, repository, head)
+		if err != nil || waived {
+			return waived, err
+		}
+	}
+	passed, err := db.GreenhouseGatePass(ctx, task.ID, repository, head, greenhouseBlockAt(task))
+	if err != nil || passed {
+		return passed, err
+	}
+	return greenhouseAcceptHeadDisposition(ctx, db, task, repository, head)
 }
 
 func requireReviewPass(ctx context.Context, db *store.DB, project store.Project, change store.Task, commit string) error {

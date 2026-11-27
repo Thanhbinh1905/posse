@@ -709,6 +709,8 @@ func (db *DB) readProjectHistorySnapshot(ctx context.Context, projectID int64, s
 			FROM notices INDEXED BY notices_open_idx WHERE project_id=? AND acked_at IS NULL`, []any{projectID}},
 		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at,command_notified_at
 			FROM notices INDEXED BY notices_project_id_idx WHERE project_id=? ORDER BY id DESC LIMIT ?`, []any{projectID, projectSnapshotHistoryLimit}},
+		{`SELECT id,project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at,command_notified_at
+			FROM notices INDEXED BY notices_task_kind_idx WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?) AND kind='review_waived'`, []any{projectID}},
 	} {
 		noticeRows, err := db.QueryContext(ctx, query.sql, query.args...)
 		if err != nil {

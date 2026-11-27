@@ -175,6 +175,13 @@ func greenhouseWorkspacePendingHeads(ctx context.Context, db *store.DB, project 
 		if err != nil {
 			return nil, fmt.Errorf("resolve Task branch for workspace member %s: %w", repo.Repo, err)
 		}
+		ahead, err := commitsAhead(ctx, root, repo.BaseRef, head)
+		if err != nil {
+			return nil, memberFailure(repo.Repo, err)
+		}
+		if ahead == 0 {
+			continue
+		}
 		heads = append(heads, greenhousePendingMember{Repository: repo.Repo, Head: head})
 	}
 	if len(heads) == 0 {
@@ -184,7 +191,24 @@ func greenhouseWorkspacePendingHeads(ctx context.Context, db *store.DB, project 
 }
 
 func workspaceGreenhouseHeadsNeedReview(ctx context.Context, db *store.DB, task store.Task, heads []greenhousePendingMember) (bool, error) {
+	repos, err := db.TaskRepos(ctx, task.ID)
+	if err != nil {
+		return false, err
+	}
+	published := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		published[repo.Repo] = repo.PRURL != ""
+	}
 	for _, member := range heads {
+		if published[member.Repository] {
+			waived, err := hasReviewWaiver(ctx, db, task.ID, member.Repository, member.Head)
+			if err != nil {
+				return false, err
+			}
+			if waived {
+				continue
+			}
+		}
 		passed, err := db.GreenhouseGatePass(ctx, task.ID, member.Repository, member.Head, greenhouseBlockAt(task))
 		if err != nil {
 			return false, err

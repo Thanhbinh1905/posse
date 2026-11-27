@@ -522,6 +522,10 @@ func TestProjectSnapshotBoundsHistoricalNoticeAndDecisionHistory(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO notices(project_id,kind,summary,data_json,created_at) VALUES(?,'worker_question','active notice','{}',?)`, project.ID, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
+	waiver := `{"repository":"shop","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_quote":"Use CI only for this head"}`
+	if _, err := db.ExecContext(ctx, `INSERT INTO notices(project_id,task_id,kind,summary,data_json,created_at,delivered_at,acked_at) VALUES(?,?,'review_waived','User waived review',?,1,1,1)`, project.ID, taskID, waiver); err != nil {
+		t.Fatal(err)
+	}
 	insertHistory := func(start, count int) {
 		t.Helper()
 		for index := start; index < start+count; index++ {
@@ -546,8 +550,11 @@ func TestProjectSnapshotBoundsHistoricalNoticeAndDecisionHistory(t *testing.T) {
 	if _, err := toml.Decode(string(first), &firstSnapshot); err != nil {
 		t.Fatal(err)
 	}
-	if len(firstSnapshot.State.Decisions) != projectSnapshotHistoryLimit+1 || len(firstSnapshot.State.Notices) != projectSnapshotHistoryLimit+1 {
-		t.Fatalf("bounded Project history = decisions %d, Notices %d; want %d each plus the active record", len(firstSnapshot.State.Decisions), len(firstSnapshot.State.Notices), projectSnapshotHistoryLimit)
+	if len(firstSnapshot.State.Decisions) != projectSnapshotHistoryLimit+1 || len(firstSnapshot.State.Notices) != projectSnapshotHistoryLimit+2 {
+		t.Fatalf("bounded Project history = decisions %d, Notices %d; want %d each plus the active records and waiver", len(firstSnapshot.State.Decisions), len(firstSnapshot.State.Notices), projectSnapshotHistoryLimit)
+	}
+	if saved := firstSnapshot.State.Notices[1]; saved.Kind != "review_waived" || saved.TaskID != taskID || saved.DataJSON != waiver {
+		t.Fatalf("snapshot lost the acknowledged waiver: %+v", saved)
 	}
 	if firstSnapshot.State.Decisions[0].Origin != "active-decision" || firstSnapshot.State.Notices[0].Summary != "active notice" {
 		t.Fatalf("actionable history was pruned: decisions=%#v notices=%#v", firstSnapshot.State.Decisions[0], firstSnapshot.State.Notices[0])
@@ -569,7 +576,7 @@ func TestProjectSnapshotBoundsHistoricalNoticeAndDecisionHistory(t *testing.T) {
 	if _, err := toml.Decode(string(second), &secondSnapshot); err != nil {
 		t.Fatal(err)
 	}
-	if len(secondSnapshot.State.Decisions) != projectSnapshotHistoryLimit+1 || len(secondSnapshot.State.Notices) != projectSnapshotHistoryLimit+1 {
+	if len(secondSnapshot.State.Decisions) != projectSnapshotHistoryLimit+1 || len(secondSnapshot.State.Notices) != projectSnapshotHistoryLimit+2 {
 		t.Fatalf("Project history grew after another batch: decisions %d, Notices %d", len(secondSnapshot.State.Decisions), len(secondSnapshot.State.Notices))
 	}
 	legacySecondSize, err := unboundedProjectSnapshotSize(ctx, db, project)

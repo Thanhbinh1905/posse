@@ -579,7 +579,20 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 			}
 			continue
 		}
-		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, targets); err != nil {
+		waivedMembers := make(map[string]bool)
+		var pending []store.ReviewTarget
+		for _, target := range targets {
+			waived, err := hasReviewWaiver(ctx, db, task.ID, target.Repository, target.Commit)
+			if err != nil {
+				return err
+			}
+			if waived {
+				waivedMembers[target.Repository] = true
+			} else {
+				pending = append(pending, target)
+			}
+		}
+		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, pending); err != nil {
 			return err
 		}
 		verdicts, err := db.VerdictsFor(ctx, task.ID)
@@ -589,7 +602,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 		allPassed := true
 		acceptedMembers := make(map[string]bool)
 		var failed *store.Verdict
-		for _, target := range targets {
+		for _, target := range pending {
 			var latest *store.Verdict
 			for index := len(verdicts) - 1; index >= 0; index-- {
 				verdict := verdicts[index]
@@ -649,10 +662,18 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 			continue
 		}
 		var body strings.Builder
-		body.WriteString("Greenhouse passed or the User accepted coverage for these exact Member heads. Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
+		summary := "Greenhouse passed all changed Member heads; Posse queued publication"
+		intro := "Greenhouse passed or the User accepted coverage for these exact Member heads."
+		if len(waivedMembers) > 0 {
+			summary = "All changed Member heads cleared the publication gate; Posse queued publication"
+			intro = "These exact Member heads are cleared for publication."
+		}
+		body.WriteString(intro + " Publish each unchanged head with the command shown, then signal done after all changed Members are published:\n\n")
 		for _, target := range targets {
 			status := "Greenhouse passed"
-			if acceptedMembers[target.Repository] {
+			if waivedMembers[target.Repository] {
+				status = "User waived Greenhouse review; forge CI is still required"
+			} else if acceptedMembers[target.Repository] {
 				status = "User accepted coverage"
 			}
 			fmt.Fprintf(&body, "- %s: %s at %s: `posse publish --repo %s \"<summary>\"`\n", target.Repository, status, shortSHA(target.Commit), target.Repository)
@@ -662,7 +683,7 @@ func (s *Service) reconcileGreenhouseWorkspacePrepublication(ctx context.Context
 			return err
 		}
 		if queued {
-			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: "Greenhouse passed all changed Member heads; Posse queued publication", DataJSON: marshalJSON(map[string]any{"members": targets})}); err != nil {
+			if _, err := db.CreateNotice(ctx, store.Notice{ProjectID: project.ID, TaskID: task.ID, Kind: "greenhouse_publish_queued", Summary: summary, DataJSON: marshalJSON(map[string]any{"members": targets})}); err != nil {
 				return err
 			}
 		}
@@ -679,6 +700,16 @@ func (s *Service) noticeSkippedGreenhouseTask(ctx context.Context, db *store.DB,
 	reason += "; run `posse review start " + taskIDString(task.Seq) + "` to request a Greenhouse Verdict"
 	_, err = db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, head, reason)
 	return err
+}
+
+func queueWaivedReviewPublication(ctx context.Context, db *store.DB, task store.Task, repository, head string, since int64) (bool, error) {
+	waived, err := hasReviewWaiver(ctx, db, task.ID, repository, head)
+	if err != nil || !waived {
+		return waived, err
+	}
+	body := fmt.Sprintf("User waived Greenhouse review for Task head %s. Publish it unchanged with `posse publish \"<summary>\"`, then signal done with the PR URL. Forge CI is still required.", head)
+	_, _, err = db.QueueMessageOnceAfter(ctx, task.ID, body, true, since)
+	return true, err
 }
 
 func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Context, db *store.DB, home string, project store.Project, cfg config.Config) error {
@@ -723,6 +754,11 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			if err != nil {
 				return err
 			}
+			if waived, err := queueWaivedReviewPublication(ctx, db, task, project.Name, head, signals[0].At-1); err != nil {
+				return err
+			} else if waived {
+				continue
+			}
 			verdicts, err := db.VerdictsFor(ctx, task.ID)
 			if err != nil {
 				return err
@@ -765,15 +801,9 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 					if err != nil {
 						return err
 					}
-					passed, err := db.GreenhouseGatePass(ctx, task.ID, project.Name, head, greenhouseBlockAt(task))
+					passed, err := greenhouseGateSatisfied(ctx, db, task, project.Name, head, true)
 					if err != nil {
 						return err
-					}
-					if !passed {
-						passed, err = greenhouseAcceptHeadDisposition(ctx, db, task, project.Name, head)
-						if err != nil {
-							return err
-						}
 					}
 					if verified && passed {
 						continue
@@ -811,6 +841,11 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			if _, err := db.CreateGreenhouseFailureNoticeOnce(ctx, project.ID, task.ID, project.Name, data.Head, reason); err != nil {
 				return err
 			}
+			continue
+		}
+		if waived, err := queueWaivedReviewPublication(ctx, db, task, project.Name, head, signals[0].At-1); err != nil {
+			return err
+		} else if waived {
 			continue
 		}
 		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, []store.ReviewTarget{{Repository: project.Name, Commit: head}}); err != nil {
@@ -932,6 +967,10 @@ func (s *Service) handleGreenhouseBlockingVerdict(ctx context.Context, db *store
 		if head != verdict.Head {
 			return nil
 		}
+	}
+	waived, err := hasReviewWaiver(ctx, db, current.ID, verdict.Repository, verdict.Head)
+	if err != nil || waived {
+		return err
 	}
 	if current.State == store.StateMerging {
 		if err := db.Transition(ctx, current.ID, store.StateMerging, store.StateDone, "cli", "Greenhouse found blocking Review findings at "+shortSHA(verdict.Head)); err != nil {
