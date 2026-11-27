@@ -261,6 +261,70 @@ func TestWorkspaceReviewCapRaisesDecisionBoundToEveryMemberCandidate(t *testing.
 	}
 }
 
+func TestWorkspaceReviewCapDecisionRefreshesWhenOneMemberSubmitsANewerCandidate(t *testing.T) {
+	h := startWorkspaceCapChange(t)
+	oldID, oldOrigin := h.openCapDecision(t)
+	before := h.candidates(t)
+	f := h.f
+	repos, err := f.db.TaskRepos(context.Background(), h.change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authorPath string
+	for _, repo := range repos {
+		if repo.Repo == "api" {
+			authorPath = repo.WorktreePath
+		}
+	}
+	if code, output := runReleaseCLI(t, f.binary, authorPath, h.workerEnv, "signal", "working", "Submit the revised API candidate"); code != 0 {
+		t.Fatalf("reopen Change Task: %d %s", code, output)
+	}
+	gitTest(t, f.env, authorPath, "merge", "--ff-only", before["api"].CandidateSHA)
+	if err := os.WriteFile(filepath.Join(authorPath, "change.txt"), []byte("revised API operation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, f.env, authorPath, "commit", "-am", "revise the API candidate")
+	if code, output := runReleaseCLI(t, f.binary, authorPath, h.workerEnv, "publish", "--repo", "api", "Revised API candidate"); code != 1 || !strings.Contains(output, "candidate_author_moved") {
+		t.Fatalf("invalidate the previous API candidate: %d %s", code, output)
+	}
+	if code, output := runReleaseCLI(t, f.binary, authorPath, h.workerEnv, "publish", "--repo", "api", "Revised API candidate", "--refresh"); code != 0 {
+		t.Fatalf("submit refreshed API candidate: %d %s", code, output)
+	}
+	current := h.candidates(t)
+	if current["api"].CandidateSHA == before["api"].CandidateSHA || current["web"].CandidateSHA != before["web"].CandidateSHA {
+		t.Fatal("publish must change only the API candidate")
+	}
+	if code, output := h.lead(t, "decide", fmt.Sprint(oldID), "accept-head", "--user-approved", "Accept the previous workspace candidate heads."); code != 1 || !strings.Contains(output, "Review candidate head changed") {
+		t.Fatalf("publish must retire the stale Decision before it can be answered: %d %s", code, output)
+	}
+	newID, newOrigin := h.openCapDecision(t)
+	if newID == oldID || newOrigin == oldOrigin {
+		t.Fatalf("API submission did not replace Decision %d (%s)", oldID, oldOrigin)
+	}
+	for _, member := range []string{"api", "web"} {
+		if code, output := runReleaseCLI(t, f.binary, current[member].WorktreePath, h.workerEnv, "validate", "status", "--repo", member); code != 0 || !strings.Contains(output, "review_pass: false") {
+			t.Fatalf("refresh must not approve %s automatically: %d %s", member, code, output)
+		}
+	}
+	if code, output := h.lead(t, "decide", fmt.Sprint(newID), "accept-head", "--user-approved", "<lời bạn>"); code != 1 || !strings.Contains(output, "user_approval_placeholder") {
+		t.Fatalf("placeholder approval must leave the replacement Decision unanswered: %d %s", code, output)
+	}
+	h.answer(t, newID, "accept-head", "Accept both current workspace candidate heads.", "accepted-head")
+	for _, member := range []string{"web", "api"} {
+		candidate := current[member]
+		recordCandidateStages(t, f, h.workerEnv, candidate, func(string) {}, "--repo", member)
+		if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "validate", "status", "--repo", member); code != 0 || !strings.Contains(output, candidate.CandidateSHA) || !strings.Contains(output, "review_pass: true") || !strings.Contains(output, "publication_ready: true") {
+			t.Fatalf("accepted %s candidate should be ready to publish: %d %s", member, code, output)
+		}
+		if code, output := runReleaseCLI(t, f.binary, candidate.WorktreePath, h.workerEnv, "publish", "--repo", member, "Promote the accepted candidate"); code != 0 || !strings.Contains(output, "promoted: candidate") {
+			t.Fatalf("promote accepted %s candidate: %d %s", member, code, output)
+		}
+	}
+	if published := gitRef(t, f, f.remote, "refs/heads/"+h.change.Branch); published != current["api"].CandidateSHA {
+		t.Fatalf("published API head=%s, want accepted head %s", published, current["api"].CandidateSHA)
+	}
+}
+
 func TestWorkspaceReviewCapAcceptanceShowsPerMemberValidationSteps(t *testing.T) {
 	h := startWorkspaceCapChangeWithReviewModes(t, true)
 	plan, err := h.change.AdmittedPlan()
