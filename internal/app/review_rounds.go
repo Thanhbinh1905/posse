@@ -1160,10 +1160,6 @@ func (s *Service) startParallelGreenhouseReviews(ctx context.Context, db *store.
 }
 
 func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db *store.DB, home string, project store.Project, change store.Task, targets []store.ReviewTarget, started *bool, explicitStart bool) error {
-	requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
-	if err != nil {
-		return err
-	}
 	for _, target := range targets {
 		if !explicitStart {
 			waived, err := hasReviewWaiver(ctx, db, change.ID, target.Repository, target.Commit)
@@ -1181,50 +1177,7 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 				continue
 			}
 		}
-		failures, _ := repeatedGreenhouseReviewFailures(requests, change.ID, target.Repository, target.Commit)
-		lastFailure, hasFailureNotice, err := db.GreenhouseFailureNoticeSummary(ctx, change.ID, target.Repository, target.Commit)
-		if err != nil {
-			return err
-		}
-		latestFailure := greenhouseLatestFailure(lastFailure)
-		if failures >= greenhouseReviewFailureLimit && !transientGreenhouseFailure(errors.New(latestFailure)) {
-			reason := "Needs a decision: split the change or land it another way. Latest failure: " + latestFailure
-			if !hasFailureNotice {
-				reason = "Needs a decision: split the change or land it another way. The latest Greenhouse review failed, but Posse could not retrieve its failure reason."
-			}
-			if _, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx, project.ID, change.ID, target.Repository, target.Commit, reason); err != nil {
-				return err
-			}
-			continue
-		}
-		if hasFailureNotice && reviewerSizeFailure(errors.New(latestFailure)) {
-			continue
-		}
-		retryBackoff := !explicitStart || transientGreenhouseFailure(errors.New(latestFailure)) || greenhouseReviewHasRefusedRequest(requests, change.ID, target.Repository, target.Commit)
-		if retryBackoff && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
-			continue
-		}
-		fenced, err := greenhouseReviewFenced(ctx, db, project, change)
-		if err != nil {
-			return err
-		}
-		if fenced {
-			continue
-		}
-		exists := false
-		for _, request := range requests {
-			if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" {
-				exists = true
-				break
-			}
-		}
 		roundDir := filepath.Join(home, "projects", project.Name, "tasks", taskIDString(change.Seq), "greenhouse")
-		pending := filepath.Join(roundDir, target.Repository+".pending.json")
-		_, pendingErr := os.Stat(pending)
-		hasPending := pendingErr == nil
-		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-			return pendingErr
-		}
 		lock, busy, err := acquireParallelReviewLock(parallelReviewLockPath(roundDir, target.Repository))
 		if err != nil {
 			return err
@@ -1238,6 +1191,51 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 				return err
 			}
 			continue
+		}
+		requests, err := db.GreenhouseReviewRequests(ctx, project.ID)
+		if err != nil {
+			_ = releaseParallelReviewLock(lock)
+			return err
+		}
+		failures, _ := repeatedGreenhouseReviewFailures(requests, change.ID, target.Repository, target.Commit)
+		lastFailure, hasFailureNotice, err := db.GreenhouseFailureNoticeSummary(ctx, change.ID, target.Repository, target.Commit)
+		if err != nil {
+			_ = releaseParallelReviewLock(lock)
+			return err
+		}
+		latestFailure := greenhouseLatestFailure(lastFailure)
+		if failures >= greenhouseReviewFailureLimit && !transientGreenhouseFailure(errors.New(latestFailure)) {
+			reason := "Needs a decision: split the change or land it another way. Latest failure: " + latestFailure
+			if !hasFailureNotice {
+				reason = "Needs a decision: split the change or land it another way. The latest Greenhouse review failed, but Posse could not retrieve its failure reason."
+			}
+			_, err := db.CreateGreenhouseNeedsDecisionNoticeOnce(ctx, project.ID, change.ID, target.Repository, target.Commit, reason)
+			_ = releaseParallelReviewLock(lock)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if hasFailureNotice && reviewerSizeFailure(errors.New(latestFailure)) {
+			_ = releaseParallelReviewLock(lock)
+			continue
+		}
+		retryBackoff := !explicitStart || transientGreenhouseFailure(errors.New(latestFailure)) || greenhouseReviewHasRefusedRequest(requests, change.ID, target.Repository, target.Commit)
+		if retryBackoff && time.Now().UnixMilli() < greenhouseReviewRetryAt(requests, change.ID, target.Repository, target.Commit) {
+			_ = releaseParallelReviewLock(lock)
+			continue
+		}
+		exists := false
+		for _, request := range requests {
+			if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" {
+				exists = true
+				break
+			}
+		}
+		hasPending, err := parallelReviewPending(filepath.Join(roundDir, target.Repository+".pending.json"))
+		if err != nil {
+			_ = releaseParallelReviewLock(lock)
+			return err
 		}
 		ownerPath := parallelReviewOwnerPath(roundDir, target.Repository)
 		owner, err := readParallelReviewOwner(ownerPath)
