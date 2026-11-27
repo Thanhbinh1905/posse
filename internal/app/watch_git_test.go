@@ -48,4 +48,13 @@ func TestWatchShutdownStopsInFlightGitFetch(t *testing.T) {
 	if processes := repositoryGitProcesses(f.root); len(processes) != 0 {
 		t.Errorf("Watch shutdown left git children: %v", processes)
 	}
+	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.Kind == "pr_watch_failing" {
+			t.Errorf("Watch shutdown created a failure Notice: %s", notice.Summary)
+		}
+	}
 }

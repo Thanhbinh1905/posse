@@ -1191,7 +1191,11 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 			return nil
 		}
-		if err := s.reconcileGreenhousePrepublication(loopCtx, db, home, fresh); err != nil {
+		err = s.reconcileGreenhousePrepublication(loopCtx, db, home, fresh)
+		if loopCtx.Err() != nil {
+			return loopCtx.Err()
+		}
+		if err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Greenhouse review dispatch failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "Greenhouse review", err)
 		}
@@ -1206,6 +1210,9 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			}
 		}
 		_, blocked, err := s.prepareProjectWatchObservation(loopCtx, db, fresh)
+		if loopCtx.Err() != nil {
+			return loopCtx.Err()
+		}
 		trackWatchReconcileBlock(ctx, db, fresh, blocked)
 		if observed, readErr := db.ProjectByID(loopCtx, project.ID); readErr == nil && observed.IsParked() {
 			stopParkedWatchSystemd(ctx, home, project, watch)
@@ -1215,7 +1222,11 @@ func (s *Service) runWatchLoop(ctx *axi.Context, db *store.DB, project store.Pro
 			fmt.Fprintf(ctx.ErrOut, "Watch reconciliation failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "reconcile", err)
 		}
-		if err := s.maintainProjectWatch(loopCtx, db, fresh); err != nil {
+		err = s.maintainProjectWatch(loopCtx, db, fresh)
+		if loopCtx.Err() != nil {
+			return loopCtx.Err()
+		}
+		if err != nil {
 			fmt.Fprintf(ctx.ErrOut, "Watch maintenance failed for %s: %v\n", project.Name, err)
 			recordWatchFailure(ctx, db, project.ID, lastFailures, "maintenance", err)
 		} else {
