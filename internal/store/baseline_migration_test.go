@@ -22,6 +22,7 @@ func prepareSupportedHomeAtVersion(t *testing.T, db *DB, version int64) {
 		`DROP INDEX IF EXISTS tasks_project_pane_label_idx`,
 		`DROP INDEX IF EXISTS tasks_project_workflow_idx`,
 		`DROP TABLE IF EXISTS task_plan_input_migration`,
+		`ALTER TABLE tasks DROP COLUMN queue_priority`,
 		`ALTER TABLE tasks DROP COLUMN plan_revision`,
 		`ALTER TABLE tasks DROP COLUMN workflow_run_id`,
 		`DELETE FROM goose_db_version`,
@@ -81,8 +82,8 @@ func TestOpenAppliesBaselineAsOneMigration(t *testing.T) {
 	}
 	defer db.Close()
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 5 {
-		t.Fatalf("applied migration count = %d, %v; want the baseline, review-dispute evidence, greenhouse attempts, refused-request resume and Task usage migrations", applied, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 6 {
+		t.Fatalf("applied migration count = %d, %v; want the baseline, review-dispute evidence, greenhouse attempts, refused-request resume, Task usage and queue priority migrations", applied, err)
 	}
 	var version int64
 	if err := db.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied=1 AND version_id=?`, baselineMigrationVersion).Scan(&version); err != nil || version != baselineMigrationVersion {

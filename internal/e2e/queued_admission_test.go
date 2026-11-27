@@ -92,6 +92,49 @@ func TestQueuedTaskAdmittedAtFreedSlotStarts(t *testing.T) {
 	}
 }
 
+func TestMovedQueuedTaskIsAdmittedFirst(t *testing.T) {
+	f := newQueuedAdmissionFixture(t)
+	brief := filepath.Join(f.root, "later.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: Later worker\ndone_when: the test tears it down\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", brief, "--name", "later-worker", "--queue"); !strings.Contains(output, "queued") {
+		t.Fatalf("start --queue did not queue t3: %s", output)
+	}
+	f.waitState(t, "t3", store.StateQueued)
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "queue", "move", "t3"); !strings.Contains(output, "t3") {
+		t.Fatalf("queue move did not move t3: %s", output)
+	}
+	laterBrief := filepath.Join(f.root, "latest.md")
+	if err := os.WriteFile(laterBrief, []byte("---\ntype: change\ntitle: Latest worker\ndone_when: the test tears it down\n---\nWait.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output := runPosse(t, f.binary, f.repo, f.leadEnv, "start", "--brief", laterBrief, "--name", "latest-worker", "--queue"); !strings.Contains(output, "queued") {
+		t.Fatalf("start --queue did not queue t4: %s", output)
+	}
+	db, err := store.OpenReadOnly(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedIDs, err := db.QueuedTaskIDs(t.Context(), f.projectID)
+	db.Close()
+	if err != nil || len(queuedIDs) != 3 {
+		t.Fatalf("queued order=%v err=%v", queuedIDs, err)
+	}
+	for i, want := range []int64{f.task(t, "t3").ID, f.task(t, "t2").ID, f.task(t, "t4").ID} {
+		if queuedIDs[i] != want {
+			t.Fatalf("queued order=%v, want t3, t2, t4", queuedIDs)
+		}
+	}
+	runPosseExpectingFailure(t, f.workerTabsFixture, f.repo, f.leadEnv, "queued", "queue", "move", "t1")
+	f.freeSlot(t)
+	runPosse(t, f.binary, f.repo, f.leadEnv, "list")
+	f.waitState(t, "t3", store.StateWorking)
+	if task := f.task(t, "t2"); task.State != store.StateQueued {
+		t.Fatalf("moving t3 changed relative order: t2 state=%s", task.State)
+	}
+}
+
 // TestQueuedTaskAdmittedByOneWatchPoll frees the slot and runs no reconciling
 // command; a single Project watch poll must admit and start the queued Task.
 func TestQueuedTaskAdmittedByOneWatchPoll(t *testing.T) {

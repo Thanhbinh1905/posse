@@ -783,6 +783,7 @@ type Task struct {
 	AgentStatusSince     int64
 	WorkflowRunID        string
 	PlanRevision         int64
+	QueuePriority        int64
 }
 
 type TaskAdoption struct {

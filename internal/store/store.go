@@ -3491,6 +3491,21 @@ func (db *DB) QueuedTaskIDs(ctx context.Context, projectID int64) ([]int64, erro
 	return db.queries.QueuedTaskIDs(ctx, projectID)
 }
 
+func (db *DB) MoveQueuedTaskToFront(ctx context.Context, projectID, taskID int64) error {
+	rows, err := db.queries.MoveQueuedTaskToFront(ctx, dbgen.MoveQueuedTaskToFrontParams{ProjectID: projectID, ProjectID_2: projectID, ID: taskID})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		task, err := db.TaskByID(ctx, projectID, taskID)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("Task t%d is %s, not queued", task.Seq, task.State)
+	}
+	return nil
+}
+
 func (db *DB) PendingGroupRecoveryTaskIDs(ctx context.Context, projectID int64, now int64) ([]int64, error) {
 	return db.queries.PendingGroupRecoveryTaskIDs(ctx, dbgen.PendingGroupRecoveryTaskIDsParams{ProjectID: projectID, NextAttemptAt: now})
 }
