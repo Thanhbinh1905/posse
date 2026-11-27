@@ -184,25 +184,18 @@ func startSlowStewardProjectPoll(t *testing.T, f *prMergeFixture) {
 	}
 	var pollErr error
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		pollErr = f.service.pollProjectPullRequests(t.Context(), f.db, f.project, cfg, true)
-	}()
-	t.Cleanup(func() {
-		<-done
-		if _, err := os.Stat(gate); err != nil && !t.Failed() {
-			t.Errorf("steward command did not retry while the Project poll held its claim: %v", err)
-		}
-	})
+	releasePoll := func() error { return os.WriteFile(gate, nil, 0o600) }
 	firstWait := true
+	released := false
 	f.service.waitForPRPollRetry = func(ctx context.Context) error {
 		if firstWait {
 			firstWait = false
 			return context.DeadlineExceeded
 		}
-		if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		if err := releasePoll(); err != nil {
 			return err
 		}
+		released = true
 		select {
 		case <-done:
 			return pollErr
@@ -210,6 +203,21 @@ func startSlowStewardProjectPoll(t *testing.T, f *prMergeFixture) {
 			return ctx.Err()
 		}
 	}
+	go func() {
+		defer close(done)
+		pollErr = f.service.pollProjectPullRequests(t.Context(), f.db, f.project, cfg, true)
+	}()
+	t.Cleanup(func() {
+		if !released {
+			if !t.Failed() {
+				t.Error("steward command did not retry while the Project poll held its claim")
+			}
+			if err := releasePoll(); err != nil {
+				t.Errorf("release the Project poll during cleanup: %v", err)
+			}
+		}
+		<-done
+	})
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
