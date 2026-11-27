@@ -448,12 +448,21 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			}
 			quotaHandled = err == nil
 		}
-		if !exists && !modelErrorHandled && !quotaHandled {
-			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d,"idle_since":%d}`, task.Launches, idleSince), now)
+		if !modelErrorHandled && !quotaHandled {
+			failure, handled, err := observeCodexIdleFailure(ctx, db, task, pane, idleSince, now)
 			if err != nil {
-				return nil, err
+				return notices, err
 			}
-			notices = append(notices, notice)
+			if failure != nil {
+				notices = append(notices, *failure)
+			}
+			if !exists && !handled {
+				notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d,"idle_since":%d}`, task.Launches, idleSince), now)
+				if err != nil {
+					return nil, err
+				}
+				notices = append(notices, notice)
+			}
 		}
 	}
 	if task.State == store.StateWorking && pane.AgentStatus == "blocked" {
