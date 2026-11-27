@@ -26,7 +26,10 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 	}
 	processes := stableTaskProcesses(collect(), collect)
 	if len(processes) == 0 {
-		return nil
+		if _, err := db.ExecContext(ctx, `UPDATE notices SET data_json=json_set(data_json,'$.cleared',true) WHERE project_id=? AND task_id=? AND kind='teardown_blocked'`, project.ID, task.ID); err != nil {
+			return err
+		}
+		return db.PersistProject(ctx, project.ID)
 	}
 	remedy := "Stop the listed processes or move their cwd and open files outside the Sandbox, then retry Teardown."
 	summary := fmt.Sprintf("%s teardown blocked by residual processes: %s. Remedy: %s", taskDisplayName(task), describeTaskProcesses(processes), remedy)
@@ -35,7 +38,14 @@ func (s *Service) recordTeardownBlocked(ctx context.Context, db *store.DB, proje
 		return err
 	}
 	for _, notice := range notices {
-		if notice.TaskID == task.ID && notice.Kind == "teardown_blocked" && notice.AckedAt == 0 && notice.Summary == summary {
+		if notice.TaskID != task.ID || notice.Kind != "teardown_blocked" || notice.Summary != summary {
+			continue
+		}
+		var cleared bool
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(json_extract(data_json,'$.cleared'),false) FROM notices WHERE id=?`, notice.ID).Scan(&cleared); err != nil {
+			return err
+		}
+		if !cleared {
 			return nil
 		}
 	}
