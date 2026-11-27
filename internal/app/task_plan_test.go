@@ -223,6 +223,9 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	if err != nil || !strings.Contains(string(launch), "Original preference.") || strings.Contains(string(launch), "Edited preference.") || !strings.Contains(string(launch), "other evidence in English in a neutral voice") {
 		t.Fatalf("crash restore used edited preferences: %s %v", launch, err)
 	}
+	if want := "Original Brief: `" + filepath.Join(plan.Paths.Output, "brief.md") + "`"; !strings.Contains(string(launch), want) {
+		t.Fatalf("restored launch Brief lacks %q", want)
+	}
 }
 
 func TestStartFreezesValidationLoopSettingsAndBriefTightening(t *testing.T) {

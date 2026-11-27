@@ -373,7 +373,8 @@ func (s *Service) applyDecision(out *axi.Context, args []string) error {
 			return err
 		}
 		if actual.Head != expectedHead {
-			return axi.Failure("decision_refused", "the reviewed candidate head changed after this Review cap Decision; refresh the cap Notice before applying it", false)
+			return axi.Failure("decision_refused", "the candidate head changed after this Review cap Decision", false,
+				"Run `posse decisions` to find the Review cap Decision for the current candidate. It needs a separate answer.")
 		}
 		switch decision.Answer {
 		case "accept-head":
