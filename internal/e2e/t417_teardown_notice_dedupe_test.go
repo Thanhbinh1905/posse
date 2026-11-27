@@ -54,6 +54,46 @@ func TestTeardownBlockedNoticeIgnoresTransientChildren(t *testing.T) {
 		if err == nil || !strings.Contains(string(output), "teardown_incomplete") {
 			t.Fatalf("attempt %d: Teardown should be blocked by the residual loop: err=%v\n%s", attempt, err, output)
 		}
+		if attempt == 1 {
+			notices, err := store.Open(f.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := notices.Notices(context.Background(), f.projectID, false)
+			found := false
+			if err == nil {
+				for _, notice := range created {
+					if notice.TaskID == task.ID && notice.Kind == "teardown_blocked" {
+						_, err = notices.AckNotices(context.Background(), f.projectID, []string{strconv.FormatInt(notice.ID, 10)})
+						found = true
+						break
+					}
+				}
+			}
+			_ = notices.Close()
+			if err != nil {
+				t.Fatalf("acknowledge first blocker Notice: %v", err)
+			}
+			if !found {
+				t.Fatal("first Teardown attempt did not create a blocker Notice")
+			}
+		}
+	}
+
+	changedBlocker := exec.Command("tail", "-f", "/dev/null")
+	changedBlocker.Dir = task.WorktreePath
+	if err := changedBlocker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = changedBlocker.Process.Kill()
+		_, _ = changedBlocker.Process.Wait()
+	})
+	teardown := exec.Command(f.binary, "teardown", "t1")
+	teardown.Dir, teardown.Env = f.repo, f.leadEnv
+	output, err := teardown.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "teardown_incomplete") {
+		t.Fatalf("Teardown should remain blocked after the blocker changes: err=%v\n%s", err, output)
 	}
 
 	db, err := store.OpenReadOnly(f.home)
@@ -86,8 +126,8 @@ func TestTeardownBlockedNoticeIgnoresTransientChildren(t *testing.T) {
 			}
 		}
 	}
-	if blocked != 1 {
-		t.Fatalf("teardown_blocked Notices = %d after 6 retries, want 1: %#v", blocked, notices)
+	if blocked != 2 {
+		t.Fatalf("teardown_blocked Notices = %d after an acknowledged blocker and a changed blocker, want 2: %#v", blocked, notices)
 	}
 	if incomplete > 1 {
 		t.Fatalf("teardown_incomplete Notices = %d after 6 retries, want at most 1: %#v", incomplete, notices)
