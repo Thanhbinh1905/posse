@@ -79,7 +79,7 @@ func TestPushWithCredentialRetryRecoversFromTransientHelperFailure(t *testing.T)
 	previous := pushCredentialRetryDelay
 	pushCredentialRetryDelay = time.Millisecond
 	t.Cleanup(func() { pushCredentialRetryDelay = previous })
-	if err := pushWithCredentialRetry(ctx, repo, "refs/heads/main"); err != nil {
+	if err := pushWithCredentialRetry(ctx, repo, "refs/heads/main:refs/heads/main"); err != nil {
 		t.Fatalf("push did not recover: %v", err)
 	}
 }

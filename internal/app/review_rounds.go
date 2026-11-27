@@ -1166,6 +1166,13 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 	}
 	for _, target := range targets {
 		if !explicitStart {
+			waived, err := hasReviewWaiver(ctx, db, change.ID, target.Repository, target.Commit)
+			if err != nil {
+				return err
+			}
+			if waived {
+				continue
+			}
 			empty, err := recordEmptyGreenhouseVerdict(ctx, db, project, change, target)
 			if err != nil {
 				return err

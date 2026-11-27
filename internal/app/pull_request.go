@@ -193,7 +193,10 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 			return err
 		}
 		workerPR := task.PRURL != ""
-		if fullPipelineSelected(task, "") && !greenhouseFullPipelineTaskWithConfig(task, cfg, "") && !workerPR {
+		if fullPipelineSelected(task, "") && !workerPR {
+			if greenhouseFullPipelineTaskWithConfig(task, cfg, "") {
+				return axi.Failure("publish_required", "the Worker must publish this Greenhouse full-pipeline head before Merge", false)
+			}
 			return axi.Failure("candidate_promotion_required", "full-pipeline Tasks must publish through the validated private candidate promotion path", false, "Complete local validation and run `posse publish` from the private candidate checkout")
 		}
 		if workerPR {
@@ -951,6 +954,10 @@ func mergeCommitSubject(title string, number int) string {
 // including an older one, never qualify.
 func requireGreenObservation(ctx context.Context, db *store.DB, task store.Task) error {
 	observation, err := db.LatestPRObservation(ctx, task.ID)
+	return checkGreenObservation(task, observation, err)
+}
+
+func checkGreenObservation(task store.Task, observation store.PRObservation, err error) error {
 	if err != nil && !store.IsNotFound(err) {
 		return err
 	}
