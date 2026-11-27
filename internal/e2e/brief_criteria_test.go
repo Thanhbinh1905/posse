@@ -4,8 +4,10 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,7 +29,14 @@ func TestBriefTicketReferencesInDoneWhen(t *testing.T) {
 		t.Helper()
 		env := setEnv(f.env, "HERDR_PANE_ID", task.PaneID)
 		env = setEnv(env, "POSSE_WORKER_HOME", f.home)
-		return runPosse(t, f.binary, task.WorktreePath, env, "brief")
+		output := runPosse(t, f.binary, task.WorktreePath, env, "brief", "--json")
+		var response struct {
+			Brief string `json:"brief"`
+		}
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			t.Fatalf("decode posse brief output: %v\n%s", err, output)
+		}
+		return response.Brief
 	}
 	tasks := func(t *testing.T) []store.Task {
 		t.Helper()
@@ -48,7 +57,7 @@ func TestBriefTicketReferencesInDoneWhen(t *testing.T) {
 		}
 		output := workerBrief(t, f.mustTask(t, "t1"))
 		want := "Done when: Use the exact-head waiver option in #1087, then verify its scope.; Verify #1144 before changing final-fix behavior.; Keep existing coverage"
-		if !strings.Contains(output, want+`\n`) {
+		if !slices.Contains(strings.Split(output, "\n"), want) {
 			t.Errorf("posse brief lost criteria or included comments: %s", output)
 		}
 		originalPath := filepath.Join(f.home, "projects", f.project.Name, "tasks", "t1", "brief.md")
@@ -70,7 +79,7 @@ func TestBriefTicketReferencesInDoneWhen(t *testing.T) {
 			code, output := runReviewIdentityCLI(t, f, "start", path, "--profile", "author")
 			after := tasks(t)
 			if code == 0 {
-				if len(after) > len(before) && strings.Contains(workerBrief(t, after[len(after)-1]), "Done when: "+tc.truncated+`\n`) {
+				if len(after) > len(before) && slices.Contains(strings.Split(workerBrief(t, after[len(after)-1]), "\n"), "Done when: "+tc.truncated) {
 					t.Fatalf("start admitted %s; posse brief shows truncated criteria %q", tc.ticket, tc.truncated)
 				}
 				t.Fatalf("start admitted ambiguous criterion containing %s", tc.ticket)
