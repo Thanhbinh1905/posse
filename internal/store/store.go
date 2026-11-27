@@ -456,8 +456,9 @@ func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxW
 	if state != StateQueued || branch != "" && sequence != taskSequence {
 		return false, nil
 	}
-	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
+	q := db.queries.WithTx(tx.Tx)
+	active, err := activeWorkerCount(ctx, q, projectID, 0)
+	if err != nil {
 		return false, err
 	}
 	if active >= maxWorkers {
@@ -472,7 +473,7 @@ func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxW
 			return false, ErrTaskBranchExists
 		}
 	}
-	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, StateQueued, StateSpawning, "cli", "Worker capacity became available"); err != nil {
+	if err := transitionTx(ctx, q, taskID, StateQueued, StateSpawning, "cli", "Worker capacity became available"); err != nil {
 		return false, err
 	}
 	if branch != "" {
@@ -1114,18 +1115,13 @@ func (db *DB) createTaskWithSequence(ctx context.Context, projectID int64, proje
 		}
 	}
 	if maxWorkers > 0 && task.State != StateQueued {
-		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging'))`, projectID).Scan(&active); err != nil {
-			return 0, 0, err
-		}
+		var excludedTaskID int64
 		if task.Adoption != nil {
-			var counted bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE id=? AND project_id=? AND (state IN ('spawning','working','needs-decision','blocked','stalled') OR type='change' AND state IN ('done','merging')))`, task.Adoption.SourceTaskID, projectID).Scan(&counted); err != nil {
-				return 0, 0, err
-			}
-			if counted {
-				active--
-			}
+			excludedTaskID = task.Adoption.SourceTaskID
+		}
+		active, err := activeWorkerCount(ctx, db.queries.WithTx(tx.Tx), projectID, excludedTaskID)
+		if err != nil {
+			return 0, 0, err
 		}
 		if active >= maxWorkers {
 			return 0, 0, ErrWorkerLimit
@@ -1883,7 +1879,15 @@ func (db *DB) NextTaskSeq(ctx context.Context, projectID int64) (int, error) {
 }
 
 func (db *DB) ActiveWorkerCount(ctx context.Context, projectID int64) (int, error) {
-	count, err := db.queries.ActiveWorkerCount(ctx, projectID)
+	return db.ActiveWorkerCountExcept(ctx, projectID, 0)
+}
+
+func (db *DB) ActiveWorkerCountExcept(ctx context.Context, projectID, excludedTaskID int64) (int, error) {
+	return activeWorkerCount(ctx, db.queries, projectID, excludedTaskID)
+}
+
+func activeWorkerCount(ctx context.Context, q *dbgen.Queries, projectID, excludedTaskID int64) (int, error) {
+	count, err := q.ActiveWorkerCount(ctx, dbgen.ActiveWorkerCountParams{ProjectID: projectID, ExcludedTaskID: excludedTaskID})
 	return int(count), err
 }
 

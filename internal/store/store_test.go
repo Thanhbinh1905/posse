@@ -1252,10 +1252,30 @@ func TestActiveWorkerCountReleasesDoneChangeWithoutSandbox(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE tasks SET pane_id='' WHERE id=?`, firstID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AcquireSandbox(ctx, project.ID, firstID, t.TempDir()); err != nil {
+	sandbox, err := db.AcquireSandbox(ctx, project.ID, firstID, t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
 	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 1 {
 		t.Fatalf("done Change with a held Sandbox must hold a slot: count=%d err=%v", count, err)
+	}
+	if err := db.BeginSandboxRelease(ctx, sandbox.ID, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := db.ActiveWorkerCount(ctx, project.ID); err != nil || count != 1 {
+		t.Fatalf("done Change must hold its slot until Sandbox release finishes: count=%d err=%v", count, err)
+	}
+	start := func() error {
+		_, _, err := db.CreateTaskWithSequenceAndIntentWithinLimit(ctx, project.ID, project.Name, Task{Type: "change", Title: "Next", ShortName: "next"}, "start", os.Getpid(), 1, func(int) (bool, error) { return false, nil })
+		return err
+	}
+	if err := start(); !errors.Is(err, ErrWorkerLimit) {
+		t.Fatalf("ordinary start did not respect the slot held during release: %v", err)
+	}
+	if err := db.FinishSandboxRelease(ctx, sandbox.ID, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if err := start(); err != nil {
+		t.Fatalf("ordinary start refused the slot after release finished: %v", err)
 	}
 }
