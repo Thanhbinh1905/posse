@@ -226,6 +226,9 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	if want := "Original Brief: `" + filepath.Join(plan.Paths.Output, "brief.md") + "`"; !strings.Contains(string(launch), want) {
 		t.Fatalf("restored launch Brief lacks %q", want)
 	}
+	if !strings.Contains(string(launch), "\nTicket: #12\n") {
+		t.Fatal("restored launch Brief lacks admitted ticket #12")
+	}
 }
 
 func TestStartFreezesValidationLoopSettingsAndBriefTightening(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -47,20 +48,51 @@ func TestBriefTicketReferencesInDoneWhen(t *testing.T) {
 		return items
 	}
 
+	start := func(t *testing.T, path string) (store.Task, string) {
+		t.Helper()
+		if code, out := runReviewIdentityCLI(t, f, "start", path, "--profile", "author"); code != 0 {
+			t.Fatalf("start rejected the Brief: %s", out)
+		}
+		items := tasks(t)
+		task := items[len(items)-1]
+		taskPath := filepath.Join(f.home, "projects", f.project.Name, "tasks", "t"+strconv.Itoa(task.Seq))
+		return task, taskPath
+	}
+
+	t.Run("linked ticket in Worker Brief", func(t *testing.T) {
+		path, original := writeBrief(t, "ticket: 1328\nrefs: [1144]\ndone_when: Verify the linked ticket")
+		task, taskPath := start(t, path)
+		launch := readTestFile(t, filepath.Join(taskPath, "launch.md"))
+		output := workerBrief(t, task)
+		for _, view := range []struct{ name, text string }{{"launch.md", launch}, {"posse brief", output}} {
+			if !slices.Contains(strings.Split(view.text, "\n"), "Ticket: #1328") {
+				t.Errorf("%s lacks Ticket: #1328", view.name)
+			}
+			if strings.Contains(view.text, "#1144") {
+				t.Errorf("%s promotes the non-closing reference", view.name)
+			}
+		}
+		if got := readTestFile(t, filepath.Join(taskPath, "brief.md")); got != original {
+			t.Errorf("stored original Brief changed: %q", got)
+		}
+	})
+
 	t.Run("quoted criteria and original Brief", func(t *testing.T) {
-		path, original := writeBrief(t, `done_when: # acceptance criteria
+		path, original := writeBrief(t, `refs: [1328]
+done_when: # acceptance criteria
   - "Use the exact-head waiver option in #1087, then verify its scope." # reviewer note
   - 'Verify #1144 before changing final-fix behavior.' # follow-up
   - Keep existing coverage # 2 suites`)
-		if code, out := runReviewIdentityCLI(t, f, "start", path, "--profile", "author"); code != 0 {
-			t.Fatalf("start rejected quoted criteria: %s", out)
+		task, taskPath := start(t, path)
+		output := workerBrief(t, task)
+		if strings.Contains(output, "\nTicket:") {
+			t.Error("posse brief rendered a ticket for a refs-only Brief")
 		}
-		output := workerBrief(t, f.mustTask(t, "t1"))
 		want := "Done when: Use the exact-head waiver option in #1087, then verify its scope.; Verify #1144 before changing final-fix behavior.; Keep existing coverage"
 		if !slices.Contains(strings.Split(output, "\n"), want) {
 			t.Errorf("posse brief lost criteria or included comments: %s", output)
 		}
-		originalPath := filepath.Join(f.home, "projects", f.project.Name, "tasks", "t1", "brief.md")
+		originalPath := filepath.Join(taskPath, "brief.md")
 		if !strings.Contains(output, "Original Brief: `"+originalPath+"`") {
 			t.Errorf("posse brief does not point to the original Brief at %s", originalPath)
 		}
