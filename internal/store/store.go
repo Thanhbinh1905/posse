@@ -963,6 +963,7 @@ type Task struct {
 	planJSONFingerprint      [32]byte                                  `toml:"-"`
 	planJSONFingerprintValid bool                                      `toml:"-"`
 	PlanRevision             int                                       `toml:"-"`
+	QueuePriority            int64                                     `toml:"queue_priority,omitempty"`
 
 	ID             int64  `toml:"id"`
 	ProjectID      int64  `toml:"project_id"`
@@ -3503,7 +3504,7 @@ func (db *DB) MoveQueuedTaskToFront(ctx context.Context, projectID, taskID int64
 		}
 		return fmt.Errorf("Task t%d is %s, not queued", task.Seq, task.State)
 	}
-	return nil
+	return db.PersistTask(ctx, taskID)
 }
 
 func (db *DB) PendingGroupRecoveryTaskIDs(ctx context.Context, projectID int64, now int64) ([]int64, error) {
@@ -3578,7 +3579,7 @@ func (db *DB) taskFromDB(row dbgen.Task) Task {
 		LastWorktreeHash: row.LastWorktreeHash, LastProgressAt: row.LastProgressAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		ReportKind: row.ReportKind, ReportDigest: row.ReportDigest, ReportManifestJSON: row.ReportManifestJson,
 		ContainmentMode: row.ContainmentMode, ContainmentPath: row.ContainmentPath, ContainmentMarker: row.ContainmentMarker,
-		PaneShellIdentity: row.PaneShellIdentity}
+		PaneShellIdentity: row.PaneShellIdentity, QueuePriority: row.QueuePriority}
 	db.attachPlanLoader(&task, false)
 	return task
 }
