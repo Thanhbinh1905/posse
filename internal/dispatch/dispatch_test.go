@@ -303,6 +303,41 @@ func TestBriefParsesDoneWhenList(t *testing.T) {
 	}
 }
 
+func TestBriefDoneWhenTicketReferences(t *testing.T) {
+	for _, tc := range []struct{ field, want string }{
+		{`done_when: Verify #42 before release`, ""},
+		{"done_when: #42 comes first", ""},
+		{"done_when:\n  - Verify\t#42 before release", ""},
+		{"done_when:\n  - #42 comes first", ""},
+		{`done_when: "Verify #42 before release" #123 is a separate note`, "Verify #42 before release"},
+		{`done_when: 'Verify #42 before release' # evidence`, "Verify #42 before release"},
+		{`done_when: Verify member#42 before release # see logs`, "Verify member#42 before release"},
+		{`done_when: Verify releases # 42 cases`, "Verify releases"},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			source := "---\ntype: change\ntitle: Tickets\n" + tc.field + "\n---\n"
+			brief, err := ParseBriefText(source)
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "quote the entire criterion to keep #42") {
+					t.Fatalf("want quoting guidance for #42, got DoneWhen=%q, err=%v", brief.DoneWhen, err)
+				}
+			} else if err != nil || brief.DoneWhen != tc.want {
+				t.Fatalf("DoneWhen=%q, err=%v; want %q", brief.DoneWhen, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestStoredBriefsWithUnquotedDoneWhenTicketRemainReadable(t *testing.T) {
+	source := "---\ntype: change\ntitle: Existing Brief\ndone_when:\n  - Verify #42 before release\n---\n"
+	for _, parse := range []func(string) (Brief, error){ParseStoredBriefText, ParseHistoricalBriefText} {
+		brief, err := parse(source)
+		if err != nil || brief.DoneWhen != "Verify" {
+			t.Fatalf("stored Brief changed: DoneWhen=%q, err=%v", brief.DoneWhen, err)
+		}
+	}
+}
+
 func TestBriefRejectsInvalidDoneWhenList(t *testing.T) {
 	for _, frontmatter := range []string{
 		"done_when:\n",
