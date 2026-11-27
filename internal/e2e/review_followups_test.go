@@ -60,6 +60,27 @@ func TestReviewFollowupsResolveRecordsVerifiedOutcomes(t *testing.T) {
 	}
 }
 
+func TestReviewFollowupsAcceptNullIssueLinks(t *testing.T) {
+	f := reviewFollowupsFixture(t)
+	ctx := context.Background()
+	for _, query := range []string{
+		`ALTER TABLE review_findings DROP COLUMN follow_up_url`,
+		`ALTER TABLE review_findings ADD COLUMN follow_up_url TEXT`,
+	} {
+		if _, err := f.db.ExecContext(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{
+		{"review", "followups", "resolve", "t1", "F-2", "fixed", "--reason", "Verified on main"},
+		{"review", "dispose", "t1", "P-3", "accept"},
+	} {
+		if code, output := runReviewIdentityCLI(t, f, args...); code != 0 {
+			t.Errorf("disposition of a finding without an issue: %d %s", code, output)
+		}
+	}
+}
+
 func TestReviewFollowupsWorkerReadsAreScoped(t *testing.T) {
 	f := reviewFollowupsFixture(t)
 	ctx := context.Background()

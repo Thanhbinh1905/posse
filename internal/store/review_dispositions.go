@@ -63,7 +63,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 			if seq < 1 {
 				return fmt.Errorf("invalid finding sequence")
 			}
-			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0),follow_up_url FROM review_findings WHERE ship_task_id=? AND seq=?`, taskID, seq); err != nil {
+			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0),COALESCE(follow_up_url,'') FROM review_findings WHERE ship_task_id=? AND seq=?`, taskID, seq); err != nil {
 				return err
 			}
 		}
@@ -77,7 +77,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 			if err := tx.QueryRowContext(ctx, `SELECT id FROM review_patterns WHERE ship_task_id=? AND seq=?`, taskID, seq).Scan(&patternID); err != nil {
 				return err
 			}
-			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0),follow_up_url FROM review_findings WHERE ship_task_id=? AND pattern_id=? OR ship_task_id=? AND pattern_id IN (SELECT id FROM review_patterns WHERE merged_into=?)`, taskID, patternID, taskID, patternID); err != nil {
+			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0),COALESCE(follow_up_url,'') FROM review_findings WHERE ship_task_id=? AND pattern_id=? OR ship_task_id=? AND pattern_id IN (SELECT id FROM review_patterns WHERE merged_into=?)`, taskID, patternID, taskID, patternID); err != nil {
 				return err
 			}
 		}
