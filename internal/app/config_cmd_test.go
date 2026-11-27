@@ -55,9 +55,9 @@ func TestConfigSetWritesModelPrices(t *testing.T) {
 	service := testService(home, herdr.NewFake())
 	t.Chdir(repo)
 	prices := map[string]float64{
-		"input_per_million":      1.25,
-		"output_per_million":     2.5,
-		"cache_read_per_million": 0.125,
+		"input_per_million":       1.25,
+		"output_per_million":      2.5,
+		"cache_read_per_million":  0.125,
 		"cache_write_per_million": 0.75,
 	}
 	for name, price := range prices {
