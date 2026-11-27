@@ -20,24 +20,30 @@ import (
 const codexInterruptRejected = "unsupported websocket request type: response.interrupt"
 const codexRolloutTailBytes = 2 << 20
 
-func codexIdleFailure(ctx context.Context, db *store.DB, task store.Task, pane herdr.Pane, now time.Time) (string, error) {
+func observeCodexIdleFailure(ctx context.Context, db *store.DB, task store.Task, pane herdr.Pane, idleSince int64, now time.Time) (*store.Notice, bool, error) {
 	if pane.Agent != "codex" || pane.PaneID != task.PaneID {
-		return "", nil
-	}
-	session := sessionref.Sanitize("codex", string(pane.AgentSession))
-	if session == "" || filepath.IsAbs(session) {
-		return "", nil
+		return nil, false, nil
 	}
 	messageID, submittedAt, err := db.CurrentSteerableInstructionSubmission(ctx, task.ID)
 	if err != nil || messageID == 0 {
-		return "", err
+		return nil, false, err
+	}
+	reportedIdleSince, err := db.CodexInterruptRejectedNoticeIdleSince(ctx, task.ID, messageID)
+	if err != nil || reportedIdleSince != 0 {
+		return nil, reportedIdleSince == idleSince, err
+	}
+	session := sessionref.Sanitize("codex", string(pane.AgentSession))
+	if session == "" {
+		return nil, false, nil
 	}
 	turn := latestCodexInterruptFailure(session)
 	at := time.UnixMilli(submittedAt)
 	if turn.id == "" || turn.started.After(at) || turn.completed.Before(at) || turn.completed.After(now) {
-		return "", nil
+		return nil, false, nil
 	}
-	return fmt.Sprintf("%s is idle without a Signal: Codex recorded a failed turn (HTTP 400: %s). Herdr accepted instruction #%d; execution is unconfirmed. Inspect `posse peek t%d` before resending.", task.Title, codexInterruptRejected, messageID, task.Seq), nil
+	summary := fmt.Sprintf("%s is idle without a Signal: Codex recorded a failed turn (HTTP 400: %s). Herdr accepted instruction #%d; execution is unconfirmed. Inspect `posse peek t%d` before resending.", task.Title, codexInterruptRejected, messageID, task.Seq)
+	notice, err := db.CreateCodexInterruptRejectedNotice(ctx, task, messageID, idleSince, turn.id, summary, now)
+	return notice, err == nil, err
 }
 
 type codexTurnFailure struct {
@@ -48,26 +54,30 @@ type codexTurnFailure struct {
 func latestCodexInterruptFailure(session string) codexTurnFailure {
 	home := os.Getenv("CODEX_HOME")
 	if home == "" {
+		home = ".codex"
+	}
+	if !filepath.IsAbs(home) {
 		userHome, err := os.UserHomeDir()
 		if err != nil {
 			return codexTurnFailure{}
 		}
-		home = filepath.Join(userHome, ".codex")
+		home = filepath.Join(userHome, home)
 	}
-	root, err := os.OpenRoot(filepath.Join(home, "sessions"))
+	sessions := filepath.Join(home, "sessions")
+	root, err := os.OpenRoot(sessions)
 	if err != nil {
 		return codexTurnFailure{}
 	}
 	defer root.Close()
-	matches, err := fs.Glob(root.FS(), "*/*/*/rollout-*-"+session+".jsonl")
-	if err != nil || len(matches) != 1 {
+	path, err := codexRolloutPath(root, sessions, session)
+	if err != nil || path == "" {
 		return codexTurnFailure{}
 	}
-	info, err := root.Lstat(matches[0])
+	info, err := root.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return codexTurnFailure{}
 	}
-	file, err := root.Open(matches[0])
+	file, err := root.Open(path)
 	if err != nil {
 		return codexTurnFailure{}
 	}
@@ -80,6 +90,17 @@ func latestCodexInterruptFailure(session string) codexTurnFailure {
 		}
 	}
 	return parseCodexInterruptFailure(reader)
+}
+
+func codexRolloutPath(root *os.Root, sessions, session string) (string, error) {
+	if filepath.IsAbs(session) {
+		return filepath.Rel(sessions, session)
+	}
+	matches, err := fs.Glob(root.FS(), "*/*/*/rollout-*-"+session+".jsonl")
+	if err != nil || len(matches) != 1 {
+		return "", err
+	}
+	return matches[0], nil
 }
 
 func parseCodexInterruptFailure(reader io.Reader) codexTurnFailure {

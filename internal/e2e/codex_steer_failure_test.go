@@ -15,6 +15,11 @@ import (
 )
 
 func TestCodexSteerFailureAppearsInIdleNotice(t *testing.T) {
+	t.Run("rollout present", func(t *testing.T) { testCodexSteerFailureNotice(t, false) })
+	t.Run("rollout arrives late", func(t *testing.T) { testCodexSteerFailureNotice(t, true) })
+}
+
+func testCodexSteerFailureNotice(t *testing.T, late bool) {
 	f := newPRLifecycleFixture(t)
 	t.Cleanup(func() { _ = f.db.Close() })
 	ctx := t.Context()
@@ -80,8 +85,14 @@ func TestCodexSteerFailureAppearsInIdleNotice(t *testing.T) {
 {"timestamp":%q,"type":"event_msg","payload":{"type":"task_started","turn_id":%q}}
 {"timestamp":%q,"type":"event_msg","payload":{"type":"task_complete","turn_id":%q,"error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"unsupported websocket request type: response.interrupt\",\"type\":\"invalid_request_error\"}}","codex_error_info":"other"}}}
 `, session, f.repo, started.UTC().Format(time.RFC3339Nano), turn, time.Now().UTC().Format(time.RFC3339Nano), turn)
-	if err := os.WriteFile(filepath.Join(dir, "rollout-fixture-"+session+".jsonl"), []byte(rollout), 0600); err != nil {
-		t.Fatal(err)
+	writeRollout := func() {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "rollout-fixture-"+session+".jsonl"), []byte(rollout), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !late {
+		writeRollout()
 	}
 	if _, err := client.Run(ctx, "pane", "report-agent-session", paneID, "--source", "herdr:codex", "--agent", "codex", "--agent-session-id", session, "--session-start-source", "startup"); err != nil {
 		t.Fatal(err)
@@ -89,30 +100,46 @@ func TestCodexSteerFailureAppearsInIdleNotice(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "finish-codex-turn"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	var summary string
-	if !waitForCondition(10*time.Second, func() bool {
+	noticesOfKind := func(kind string) []store.Notice {
+		t.Helper()
 		notices, err := f.db.Notices(ctx, f.project.ID, false)
 		if err != nil {
 			t.Fatal(err)
 		}
+		var matching []store.Notice
 		for _, notice := range notices {
-			if notice.TaskID == taskID && notice.Kind == "worker_idle" {
-				summary = notice.Summary
-				return true
+			if notice.TaskID == taskID && notice.Kind == kind {
+				matching = append(matching, notice)
 			}
 		}
-		return false
-	}) || !strings.Contains(summary, "unsupported websocket request type: response.interrupt") || !strings.Contains(summary, "execution is unconfirmed") {
-		message, _ := f.db.MessageByID(ctx, 1)
-		token, _ := f.db.TaskTurnToken(ctx, taskID)
-		agent, _ := client.Run(ctx, "agent", "get", paneID)
-		t.Fatalf("idle Notice did not surface the recorded failure without claiming execution: %q, agent=%s, message=%+v, token=%s", summary, agent, message, token)
+		return matching
+	}
+	if late {
+		if !waitForCondition(15*time.Second, func() bool { return len(noticesOfKind("worker_idle")) == 1 }) {
+			t.Fatal("generic idle Notice was not raised before the rollout arrived")
+		}
+		idle := noticesOfKind("worker_idle")[0]
+		runPosse(t, f.binary, f.repo, f.leadEnv, "ack", fmt.Sprint(idle.ID))
+		writeRollout()
+	}
+	if !waitForCondition(15*time.Second, func() bool { return len(noticesOfKind("codex_interrupt_rejected")) > 0 }) {
+		t.Fatalf("recorded failure never surfaced; generic idle Notices: %+v", noticesOfKind("worker_idle"))
+	}
+	summary := noticesOfKind("codex_interrupt_rejected")[0].Summary
+	if !strings.Contains(summary, "unsupported websocket request type: response.interrupt") || !strings.Contains(summary, "execution is unconfirmed") {
+		t.Fatalf("failure Notice did not distinguish receipt from execution: %q", summary)
 	}
 	t.Log(summary)
 	if !strings.Contains(sent, "execution is unconfirmed") {
 		t.Fatalf("Codex steer output did not distinguish receipt from execution: %s", sent)
 	}
 	runPosse(t, f.binary, f.repo, f.leadEnv, "show", "t1")
+	if got := len(noticesOfKind("codex_interrupt_rejected")); got != 1 {
+		t.Fatalf("failure Notices = %d, want one", got)
+	}
+	if got := len(noticesOfKind("worker_idle")); (!late && got != 0) || (late && got != 1) {
+		t.Fatalf("unexpected number of generic idle Notices: %d (late rollout: %t)", got, late)
+	}
 	data, err := os.ReadFile(inputs)
 	if err != nil || strings.Count(string(data), "Correct the current turn") != 1 || strings.Contains(string(data), "codex:continue") {
 		t.Fatalf("Posse replayed the instruction or prompted a retry: %q (%v)", data, err)
