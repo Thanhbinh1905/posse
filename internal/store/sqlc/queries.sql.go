@@ -78,18 +78,23 @@ func (q *Queries) AcquireIdleSandbox(ctx context.Context, arg AcquireIdleSandbox
 
 const activeWorkerCount = `-- name: ActiveWorkerCount :one
 SELECT COUNT(*) FROM tasks
-WHERE tasks.project_id = ? AND (
+WHERE tasks.project_id = ?1 AND tasks.id != ?2 AND (
   state IN ('spawning', 'working', 'needs-decision', 'blocked', 'stalled')
   OR type = 'change' AND state IN ('done', 'merging') AND (
     (pane_id != '' AND agent_absent_since = 0) OR EXISTS (
-      SELECT 1 FROM mounts WHERE mounts.task_id = tasks.id AND mounts.state = 'held'
+      SELECT 1 FROM mounts WHERE mounts.task_id = tasks.id AND mounts.state IN ('held', 'releasing')
     )
   )
 )
 `
 
-func (q *Queries) ActiveWorkerCount(ctx context.Context, projectID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, activeWorkerCount, projectID)
+type ActiveWorkerCountParams struct {
+	ProjectID      int64
+	ExcludedTaskID int64
+}
+
+func (q *Queries) ActiveWorkerCount(ctx context.Context, arg ActiveWorkerCountParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, activeWorkerCount, arg.ProjectID, arg.ExcludedTaskID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err

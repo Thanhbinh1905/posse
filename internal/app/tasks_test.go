@@ -2318,6 +2318,9 @@ func TestDoneChangeTaskKeepsWorkerSlotAgainstQueuedRefill(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := db.UpdateTaskWorkspace(ctx, changeID, "worker-workspace", "worker-pane"); err != nil {
+		t.Fatal(err)
+	}
 	// The done Change Task keeps its Worker, so the refill must not reuse its slot.
 	if err := service.retryPendingLaunches(ctx, db, project, cfg, fixture.fake.SnapshotValue); err != nil {
 		t.Fatalf("refill: %v", err)
