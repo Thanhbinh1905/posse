@@ -23,7 +23,7 @@ func (d *Daemon) RecoverReview(ctx context.Context, round Round, head, recoveryI
 	if err != nil {
 		return RecoveredReview{}, err
 	}
-	if pending == nil || !strings.HasPrefix(pending.Grant, round.Host.ID+"/r") {
+	if pending == nil || !strings.HasPrefix(pending.Grant, d.GrantPrefix(round.Host)+"/r") {
 		return RecoveredReview{}, fmt.Errorf("no pending Greenhouse grant for this Task Member")
 	}
 	var request struct {

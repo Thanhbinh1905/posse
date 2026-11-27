@@ -199,7 +199,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "merge", Usage: "$ merge <task> [--execute] [--user-approved <quote>]", Summary: "Merge a completed Change Task; PR merges require the recorded head to include the target branch.", Handler: s.merge},
 		{Name: "review", Usage: "$ review <change> [--full]", Summary: "Inspect Review Rounds, findings, carries and remaining budget.", Handler: s.reviewStatus, Subcommands: []*axi.Command{
 			{Name: "start", Usage: "$ review start <task> [--profile <name>] [--name <short>]", Summary: "Review a completed Change Task or publication-bound Report.", Handler: s.reviewStart},
-			{Name: "recover", Usage: "$ review recover <task> [--repo <member>] --head <full-sha> --recovery <id>", Summary: "Restart an interrupted Greenhouse review under its existing grant.", Handler: s.reviewRecover},
+			{Name: "recover", Usage: "$ review recover <task> [--repo <member>] --head <full-sha> --recovery <id> [" + greenhouseRuntimeFlags + "]", Summary: "Restart an interrupted Greenhouse review under its existing grant.", Handler: s.reviewRecover},
 			{Name: "fix", Usage: "$ review fix <change> [--pattern P-n]...", Summary: "Queue one whole-pattern fix instruction for the Change Worker.", Handler: s.reviewFix},
 			{Name: "waive", Usage: "$ review waive <change> [--repo <member>] --head <sha> --user-approved <quote>", Summary: "Waive Greenhouse review for one exact PR-delivery head. Forge CI is still required.", Handler: s.reviewWaive},
 			{Name: "carry", Usage: "$ review carry <change> <passed-head> <candidate-head>", Summary: "Record a Review-only carry for a tree-identical private candidate merge.", Handler: s.reviewCarry},
@@ -243,7 +243,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "update", Usage: "$ update [--check] [--version vX.Y.Z] [--force] [--stop-watches]", Summary: "Check or install a verified GitHub release.", Handler: s.update},
 		{Name: "_update-preflight", Hidden: true, Handler: s.updatePreflight},
 		{Name: "_greenhouse", Summary: "Request Greenhouse host-mode review (contract stage; no gate reads it).", Hidden: true, Subcommands: []*axi.Command{
-			{Name: "review", Usage: "$ _greenhouse review <task> [--repo <member>] [--rule <name>]... [--reviewer-backend <b>] [--reviewer-model <m>] [--timeout ms]", Summary: "Request or continue one Greenhouse review of a Change Task Member's exact head and record its Verdict.", Hidden: true, Handler: s.greenhouseReview},
+			{Name: "review", Usage: "$ _greenhouse review <task> [--repo <member>] [--rule <name>]... [--reviewer-backend <b>] [--reviewer-model <m>] [--timeout ms] [" + greenhouseRuntimeFlags + "]", Summary: "Request or continue one Greenhouse review of a Change Task Member's exact head and record its Verdict.", Hidden: true, Handler: s.greenhouseReview},
 			{Name: "stop", Usage: "$ _greenhouse stop", Summary: "Stop the Posse-owned Greenhouse daemon once its reviews settle, unless a Project comes up.", Hidden: true, Handler: s.greenhouseStop},
 		}},
 		{Name: "setup", Summary: "Install or update the Herdr plugin and hooks; Posse skills load at launch, with optional global install/removal (--check previews; --human prints a checklist).", Handler: s.setup},

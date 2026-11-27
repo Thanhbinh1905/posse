@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -70,12 +71,13 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
 `
 
 type greenhouseContract struct {
-	f      *workerTabsFixture
-	ctl    string
-	home   string
-	env    []string
-	change store.Task
-	commit int
+	f            *workerTabsFixture
+	ctl          string
+	home         string
+	env          []string
+	change       store.Task
+	commit       int
+	runtimeFlags []string
 }
 
 // TestGreenhouseAdapterContract is stage G0 of the Direction 2 design: each
@@ -881,8 +883,20 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 }
 
 func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
+	testGreenhouseRecoverInterruptedReview(t, false)
+}
+
+func TestGreenhouseRecoverInterruptedIsolatedReview(t *testing.T) {
+	testGreenhouseRecoverInterruptedReview(t, true)
+}
+
+func testGreenhouseRecoverInterruptedReview(t *testing.T, isolated bool) {
+	t.Helper()
 	f := newWorkerTabsFixture(t)
 	c := newGreenhouseContract(t, f)
+	if isolated {
+		c, _ = newIsolatedGreenhouseContract(t, c)
+	}
 	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +908,7 @@ func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
 	head := c.authorCommit(t)
 	c.hold(t)
 	shortReview := c.reviewArgs()
-	shortReview[len(shortReview)-2] = "50"
+	shortReview[slices.Index(shortReview, "--timeout")+1] = "50"
 	for range 2 {
 		output, err := c.posse(c.env, f.repo, shortReview...)
 		if err != nil || decodeGreenhouseOutput(t, output)["outcome"] != "running" {
@@ -931,7 +945,7 @@ func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
 	if parked["outcome"] != "recovery-required" || recovery == "" {
 		t.Fatalf("interrupted review = %v; want recovery-required", parked)
 	}
-	args := []string{"review", "recover", "t1", "--head", head, "--recovery", recovery, "--json"}
+	args := append([]string{"review", "recover", "t1", "--head", head, "--recovery", recovery, "--json"}, c.runtimeFlags...)
 	if output, err := c.posse(c.env, f.repo, args...); err == nil || !strings.Contains(output, "wait for the interrupted executor to exit") {
 		t.Fatalf("recovery while the executor still holds its lease: %v\n%s", err, output)
 	}
@@ -962,11 +976,16 @@ func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
 		{"other Task", f.repo, "greenhouse_head_mismatch", c.env, []string{"review", "recover", "t2", "--head", head, "--recovery", recovery, "--json"}},
 		{"other repo", f.repo, "usage", c.env, append(append([]string(nil), args...), "--repo", "other")},
 		{"other head", f.repo, "greenhouse_head_mismatch", c.env, []string{"review", "recover", "t1", "--head", base, "--recovery", recovery, "--json"}},
-		{"stale recovery id", f.repo, "greenhouse_recovery_refused", c.env, []string{"review", "recover", "t1", "--head", head, "--recovery", "expired", "--json"}},
+		{"stale recovery id", f.repo, "greenhouse_recovery_refused", c.env, append([]string{"review", "recover", "t1", "--head", head, "--recovery", "expired", "--json"}, c.runtimeFlags...)},
 	} {
 		output, err := c.posse(test.env, test.dir, test.args...)
 		if err == nil || !strings.Contains(output, `"code":"`+test.code+`"`) {
 			t.Fatalf("recovery for %s: %v\n%s\nwant %s", test.name, err, output, test.code)
+		}
+	}
+	if isolated {
+		if output, err := c.posse(c.env, f.repo, args[:len(args)-len(c.runtimeFlags)]...); err == nil || !strings.Contains(output, `"code":"greenhouse_runtime_conflict"`) {
+			t.Fatalf("recover isolated review without flags: %v\n%s; want runtime conflict", err, output)
 		}
 	}
 	if retry := c.review(t); retry["recovery"] != recovery || c.invocations(t) != 1 {
@@ -988,7 +1007,14 @@ func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
 	if notices := c.notices(t, "greenhouse_review_recovery"); notices != 1 {
 		t.Fatalf("recorded recovery notices = %d; want one", notices)
 	}
-	if output, err := c.posse(c.env, f.repo, "review", "start", "t1"); err != nil {
+	if isolated {
+		if output, err := c.posse(c.env, f.repo, "review", "start", "t1", "--json"); err == nil || !strings.Contains(output, `"code":"greenhouse_runtime_conflict"`) {
+			t.Fatalf("shared review start after isolated recovery: %v\n%s; want runtime conflict", err, output)
+		}
+		if result := c.review(t); result["grant"] != parked["grant"] || result["recorded"] != true {
+			t.Fatalf("isolated review after recovery = %v; want a Verdict for the original grant", result)
+		}
+	} else if output, err := c.posse(c.env, f.repo, "review", "start", "t1"); err != nil {
 		t.Fatalf("posse review start after recovery: %v\n%s", err, output)
 	}
 	var verdicts []store.Verdict
@@ -1053,7 +1079,7 @@ func newGreenhouseContract(t *testing.T, f *workerTabsFixture) *greenhouseContra
 }
 
 func (c *greenhouseContract) reviewArgs() []string {
-	return []string{"_greenhouse", "review", "t1", "--reviewer-backend", "pi", "--reviewer-model", "fixture/model", "--timeout", "60000", "--json"}
+	return append([]string{"_greenhouse", "review", "t1", "--reviewer-backend", "pi", "--reviewer-model", "fixture/model", "--timeout", "60000", "--json"}, c.runtimeFlags...)
 }
 
 func (c *greenhouseContract) posse(env []string, dir string, args ...string) (string, error) {

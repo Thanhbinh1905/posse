@@ -23,11 +23,13 @@ const (
 	logFile   = "posse-daemon.log"
 )
 
-// Daemon is the Posse-owned Greenhouse daemon. Home is GREENHOUSE_HOME, always
-// <POSSE_HOME>/greenhouse, never the User's own Greenhouse home.
+var ErrRuntimeMismatch = errors.New("isolated Greenhouse runtime mismatch")
+
+// Daemon runs Greenhouse in the selected GREENHOUSE_HOME.
 type Daemon struct {
-	Binary string
-	Home   string
+	Binary   string
+	Home     string
+	Isolated bool
 	// Env is the caller's environment. Task markers and Posse and Herdr
 	// variables are removed before the daemon or a client sees it.
 	Env []string
@@ -115,8 +117,20 @@ func (d *Daemon) Ensure(ctx context.Context) (DaemonState, error) {
 			return DaemonState{}, err
 		}
 	}
+	if d.Isolated {
+		want, err := os.Stat(d.Binary)
+		if err != nil {
+			return DaemonState{}, err
+		}
+		got, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+		if err != nil || !os.SameFile(want, got) {
+			return DaemonState{}, fmt.Errorf("%w: the daemon serving %s does not run %s; use a different home or stop that daemon once idle", ErrRuntimeMismatch, d.Home, d.Binary)
+		}
+	}
 	if err := d.verifyPlacement(pid); err != nil {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		if !d.Isolated {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
 		return DaemonState{}, err
 	}
 	state, err := ReadState(d.Home)
