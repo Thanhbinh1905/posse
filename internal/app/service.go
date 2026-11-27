@@ -140,7 +140,9 @@ func (s *Service) commands() *axi.Command {
 		{Name: "up", Usage: "$ up [--<kind>] [--replace] [--name <n>] [--yes] | up --all", Summary: "Register a repository or workspace folder after one confirmation, and start its Lead; --all restores the Lead, Workers and Watch of every Project that is not down.", Handler: s.up},
 		{Name: "attach", Usage: "$ attach --pane <pane-id> --session <session-id>", Summary: "Attach a supported existing Herdr session as this Project's Lead without replacing its conversation.", Handler: s.attach},
 		{Name: "down", Usage: "$ down [--plan | --execute --user-approved <quote>]", Summary: "Stop this Project's Lead and Watch; nothing restarts them until `posse up`. --plan previews tearing down every Task; --execute does it.", Handler: s.down},
-		{Name: "lead", Summary: "Print the Lead's instructions and Identity.", Handler: s.lead},
+		{Name: "lead", Summary: "Print Lead instructions or message another Project Lead.", Handler: s.lead, Subcommands: []*axi.Command{
+			{Name: "send", Usage: "$ lead send <project> <message>", Summary: "Queue a Notice for another registered Project's Lead.", Handler: s.leadSend},
+		}},
 		{Name: "knowledge", Summary: "Inspect and curate User and Project knowledge.", Subcommands: []*axi.Command{
 			{Name: "show", Usage: "$ knowledge show [<id>] [--project <name>|--user]", Summary: "Show knowledge entries with provenance and the startup budget, or one entry.", Handler: s.knowledgeShow},
 			{Name: "set", Usage: "$ knowledge set <id> --file <file> --source <user|report:<task>|ref:<reference>> [--when <condition>] [--verified <YYYY-MM-DD>] [--project <name>|--user]", Summary: "Write one knowledge entry within the startup budget; Workers cannot write.", Handler: s.knowledgeSet},
@@ -206,8 +208,9 @@ func (s *Service) commands() *axi.Command {
 			{Name: "dispose", Usage: "$ review dispose <change> <F-n|P-n>... <fix|accept|defer|withdraw|reclassify> [--severity P0|P1|P2|P3] [--issue <url>] [--reason <text>] [--user-approved <quote>]", Summary: "Record a finding disposition or queue a whole-pattern fix.", Handler: s.reviewDispose},
 			{Name: "dispute", Usage: "$ review dispute <change> <F-n> --evidence <file>", Summary: "Request a User Decision to withdraw a disproved P0/P1 Greenhouse finding.", Handler: s.reviewDispute},
 			{Name: "merge", Usage: "$ review merge <change> <P-n> <P-n>...", Summary: "Merge duplicate Finding Patterns into the first pattern.", Handler: s.reviewMergePatterns},
-			{Name: "followups", Usage: "$ review followups", Summary: "List the Project's non-blocking findings with no follow-up issue, grouped by repository and directory.", Handler: s.reviewFollowups, Subcommands: []*axi.Command{
+			{Name: "followups", Usage: "$ review followups", Summary: "List the Project's unlinked non-blocking findings or the Worker's assigned findings.", Handler: s.reviewFollowups, Subcommands: []*axi.Command{
 				{Name: "defer", Usage: "$ review followups defer --area <dir> [--repo <repository>] --issue <url>", Summary: "Defer every listed finding of one area to its rolling follow-up issue.", Handler: s.reviewFollowupsDefer},
+				{Name: "resolve", Usage: "$ review followups resolve <change> <F-n> <fixed|obsolete> --reason <evidence>", Summary: "Record why a verified non-blocking finding no longer needs follow-up.", Handler: s.reviewFollowupsResolve},
 			}},
 		}},
 		{Name: "research", Summary: "Inspect and control bounded read-only native research children of the Lead or a Task.", Subcommands: []*axi.Command{

@@ -664,6 +664,7 @@ merge_mode: pr            # optional; lighter delivery needs scoped User choice
 # base: staging              # optional branch to start the Task from
 # target: staging            # optional PR/MR target; workspace may use {backend: staging}
 # review_of: t12            # review only
+# followups: [t12/F-3, t14/F-1]  # research only
 # supersedes: t12           # Change only; requires a User-approved Review-cap rethink
 # adopt: t12                # Change only; continue this Task's open PR branch
 # report_kind: spec         # Research only: spec | tickets
@@ -1005,6 +1006,7 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse down` | User | stop the Project's Lead and Watch until the next `posse up` (section 16) |
 | `posse down --plan` / `--execute --user-approved "<quote>"` | User, Lead | preview, then tear down every Task and stop the Project (section 16) |
 | `posse lead` | Lead | print the composed Lead instructions, current preferences and a `pending` block: pending Decision IDs, `needs-decision` Task IDs, the unacked Notice count, the `drafts` path and a `posse-catch-up` pointer |
+| `posse lead send <project> "<message>"` | Lead | queue an attributed `lead_message` Notice for another registered Project's Lead. The returned `notice_id` confirms queueing, not delivery. A missing receiver leaves the Notice pending; an unknown Project returns `project_unknown`. The target Lead receives and acknowledges the Notice through its normal delivery path. |
 | `posse handoff write --file <file.md>` | User, Lead | queue a bounded Project conversation handoff for the next Lead startup |
 | `posse preferences show [--project <name>]` | User, Lead | show effective Lead and Worker preferences with source headers |
 | `posse preferences path <lead\|worker> [--project <name>]` | User, Lead | show canonical and legacy User and Project source paths |
@@ -1014,7 +1016,7 @@ Commands print TOON on stdout when piped (JSON with `--json`), use lowercase sna
 | `posse knowledge set <id> --file <file> --source <source> [--when <condition>] [--verified <date>] [--project <name>\|--user]` | User, Lead | write one entry atomically when knowledge is enabled and the startup budget allows it |
 | `posse knowledge archive <id> --reason <why> [--project <name>\|--user]` | User, Lead | move an entry to the never-loaded archive with its provenance |
 | `posse list [--full] [--all]` | Lead, User | Tasks with their observed `agent` status, with issue links and branches under `--full`, or every Project |
-| `posse show <task> [--full]` | Lead | Task detail, observed `agent` status, undelivered messages, PR state, last Signals, transitions |
+| `posse show <task> [--full]` | Lead, Worker (own Task or the Change assigned by `review_of`) | Task detail, observed `agent` status, undelivered messages, PR state, last Signals, transitions |
 | `posse ask <task> <question> --option <choice> --option <choice>` | Lead | raise a Decision from a Worker question |
 | `posse decisions [--all]` | Lead, User | list pending or all Decisions |
 | `posse decide <id> <option> [--user-approved <quote>]` | Lead with User quote, User | record an answer and raise a Notice |
@@ -1397,7 +1399,11 @@ The Change done Signal is refused with `review_resolution_missing` until every p
 - With `autonomy.review = "lead"`, the Lead may `fix`, `defer` (with `--issue`), `withdraw` (with `--reason`) or reclassify non-blocking findings. With `ask`, the Lead raises the existing `review` Decision with the round summary. A disputed P0/P1 Greenhouse finding uses a separate User-only `review_dispute` Decision created by `posse review dispute <change> <F-n> --evidence <file>`; its `withdraw` and `keep` answer is bound to that finding, exact head and the SHA-256 digest of the stored evidence bytes. Evidence larger than 64 KiB is refused. `posse decisions` renders the evidence bytes and digest for User review. `posse apply` refuses a changed head or evidence digest, records a User-approved withdrawal, and proceeds to publication only when no other blocking Greenhouse finding remains.
 - `--issue` records the follow-up URL. The Lead files the issue; Posse never creates forge issues.
 
-**Rolling follow-up issues.** Non-blocking findings are deferred to one rolling follow-up issue per area, not one issue each. An area is a repository and the directory of the finding's `path` (a Go package, for example). `posse review followups` lists, across every Change Task of the Project, the findings that still need an issue: non-blocking, in state `open` or `deferred`, not inherited, and with no `follow_up_url`. Each area shows the last issue one of its findings was deferred to. The Lead lists the area's findings in that issue, or files a new one when it is closed, then runs `posse review followups defer --area <dir> [--repo <repository>] --issue <url>`, which defers each listed finding of that area and records the URL on it. The Lead clears the issue in a later Change Task.
+**Rolling follow-up issues.** Use one rolling issue per area: a repository and the directory of the finding's `path`. For the Lead and User, `posse review followups` lists unlinked, non-blocking findings that are `open` or `deferred` and not inherited. Each area shows its last linked issue. `posse review followups defer --area <dir> [--repo <repository>] --issue <url>` links the area's remaining findings to an open issue and marks them `deferred`.
+
+**Follow-up resolution.** After verifying a finding on the target branch, the Lead or User runs `posse review followups resolve <change> <F-n> <fixed|obsolete> --reason <evidence>`. The command accepts one open or deferred non-blocking finding, even if linked to an issue. `fixed` records state `fixed`; `obsolete` records state `withdrawn`. The ledger keeps the outcome, actor, reason, timestamp, and any existing issue link. `posse review <change> --full` shows the last follow-up resolution. The command does not change GitHub issues or grant a review pass.
+
+**Follow-up assignments.** A Research Brief may list exact findings in `followups: [t12/F-3, t14/F-1]`. Posse checks that the findings belong to the Project and freezes the list at admission. `posse review followups` shows the Worker only those findings that are still open or deferred, including linked findings. The Worker can read the ledger details without the original Review report but cannot defer or resolve findings.
 
 ### 25.7 Severity and blocking
 
@@ -1453,8 +1459,9 @@ Finding IDs (`F-<seq>`) and pattern IDs (`P-<seq>`) are per Change Task and neve
 | `posse review fix <change> [--pattern P-n]...` | Lead | queue one fix round |
 | `posse review dispose <change> <ids>... <action> [...]` | Lead, User | record a disposition (25.6) |
 | `posse review merge <change> <P-n> <P-n>...` | Lead | merge patterns |
-| `posse review followups` | Lead, User | non-blocking findings with no follow-up issue, grouped by area (25.6) |
+| `posse review followups` | Lead, User, assigned Research Worker | list unlinked or assigned non-blocking findings, grouped by area (25.6) |
 | `posse review followups defer --area <dir> [--repo r] --issue <url>` | Lead, User | defer an area's listed findings to its rolling issue |
+| `posse review followups resolve <change> <F-n> <fixed\|obsolete> --reason <evidence>` | Lead, User | close one verified follow-up and record the reason |
 | `posse signal done ... --findings <file>` | Review Worker | loop round findings (25.4) |
 | `posse signal done ... --resolutions <file>` | Change Worker | answers to a fix round (25.5) |
 | `posse validate <stage> [--repo <member>]` | Change Worker | inspect or record ordered local validation; `test` needs repeated `--verify` and `--proof`, `docs` needs `--no-comments passed` and `--proof`, plus `--no-owner-doc-change` when no owner docs changed; `lint` needs `--proof` and `--coverage` |
