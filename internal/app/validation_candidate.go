@@ -497,7 +497,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 					if err != nil {
 						return err
 					}
-					if err := refreshReviewCapNoticeForCandidate(ctx, db, project, task); err != nil {
+					if err := refreshReviewCapNoticeForCandidate(ctx, db, lane.owner, lane.ownerTask); err != nil {
 						return err
 					}
 					return printCandidateSubmission(out, lane, candidate, true, missing, submittedReviewCarry(ctx, db, lane))
@@ -584,7 +584,7 @@ func (s *Service) submitPrivateCandidate(out *axi.Context, db *store.DB, home st
 	if err != nil {
 		return err
 	}
-	if err := refreshReviewCapNoticeForCandidate(ctx, db, project, task); err != nil {
+	if err := refreshReviewCapNoticeForCandidate(ctx, db, lane.owner, lane.ownerTask); err != nil {
 		return err
 	}
 	return printCandidateSubmission(out, lane, candidate, false, missing, submittedReviewCarry(ctx, db, lane))
