@@ -681,11 +681,15 @@ autonomy: { merge: ask }     # optional, tighten only
 
 Brief frontmatter is a flat `key: value` subset of YAML. `done_when` also accepts a block list of items, which Posse joins with `;` followed by a space into one criterion; every other field rejects a YAML list with `YAML lists are unsupported`, whatever the item text. Use inline `[a, b]` lists where a field takes several values.
 
+Quote the entire `done_when` value or list item when it contains a ticket reference such as `#42`. `posse start` rejects an unquoted criterion if the reference would be read as a comment. Start a comment with `# ` to distinguish it from a ticket reference.
+
 ```yaml
 done_when:
-  - tests pass
-  - "Root cause at foo_test.go:178 is identified"
+  - tests pass # see CI logs
+  - "Verify #42 before release"
 ```
+
+The Worker can find the path to the original `brief.md` in `posse brief`.
 
 **Maintenance adoption.** A repository Change Brief may set `adopt: t12` to continue a known Task's open PR or MR. Adoption is opt-in and preserves that Task's branch, base, and target. It requires PR delivery and Sandbox execution; it cannot be queued or combined with `base:`, `target:`, `supersedes:`, or `--from-orphan`. Workspace adoption is not supported. Before admission, Posse checks the exclusive branch claim, matching expected local, remote, and forge heads, an open request in the Project repository, and a stopped previous executor, including contained and detached processes. A source with an unanswered Decision, active command, unresolved forge operation, or uncommitted Sandbox changes cannot transfer custody.
 

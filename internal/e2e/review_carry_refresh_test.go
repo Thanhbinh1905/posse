@@ -119,6 +119,14 @@ func TestReviewCapDecisionRefreshesWhenPublishSubmitsANewerCandidate(t *testing.
 	_, candidatePath, changeSeq := startPrivateReviewChange(t, f, "1")
 	recordBlockingRepairThenFinding(t, f, changeSeq, "")
 	change := f.mustTask(t, changeSeq)
+	var previousDecision int64
+	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0 AND obsolete_at=0`, change.ID).Scan(&previousDecision); err != nil {
+		t.Fatal(err)
+	}
+	const quote = "Accept only the previous candidate head."
+	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(previousDecision), "accept-head", "--user-approved", quote); code != 0 {
+		t.Fatalf("answer the original cap Decision: %d %s", code, output)
+	}
 	if err := os.WriteFile(filepath.Join(candidatePath, "review-issue.txt"), []byte("changed after the final review\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +139,13 @@ func TestReviewCapDecisionRefreshesWhenPublishSubmitsANewerCandidate(t *testing.
 	}
 	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "publish", "New candidate"); code != 0 {
 		t.Fatalf("publish new candidate: %d %s", code, output)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "apply", fmt.Sprint(previousDecision)); code != 1 || !strings.Contains(output, "decision_refused") || !strings.Contains(output, "posse decisions") {
+		t.Fatalf("applying the old answer must refuse and name the recovery command: %d %s", code, output)
+	}
+	previous, err := f.db.Decision(context.Background(), f.project.ID, previousDecision)
+	if err != nil || previous.Answer != "accept-head" || previous.UserQuote != quote {
+		t.Fatalf("original answer was not preserved: %+v, %v", previous, err)
 	}
 	candidate, err := f.db.LatestValidationCandidate(context.Background(), change.ID, "")
 	if err != nil {

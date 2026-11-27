@@ -92,7 +92,7 @@ func ParseHistoricalBriefText(contents string) (Brief, error) {
 	return parseBriefText(contents, true, true)
 }
 
-func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes bool) (Brief, error) {
+func parseBriefText(contents string, allowHistoricalMultiIssue, stored bool) (Brief, error) {
 	lines := strings.Split(strings.ReplaceAll(contents, "\r\n", "\n"), "\n")
 	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
 		return Brief{}, &BriefError{Field: "frontmatter", Reason: "must start with --- and include a closing ---"}
@@ -121,9 +121,14 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 			return Brief{}, &BriefError{Field: "frontmatter", Reason: fmt.Sprintf("line %d must be key: value", i+1)}
 		}
 		key = strings.TrimSpace(key)
-		value = stripTrailingComment(value)
+		value, comment := splitTrailingComment(value)
+		if key == "done_when" && !stored {
+			if err := validateDoneWhenComment(value, comment, i+1); err != nil {
+				return Brief{}, err
+			}
+		}
 		if key == "done_when" && value == "" {
-			items, next, err := parseDoneWhenList(lines, i+1, closing)
+			items, next, err := parseDoneWhenList(lines, i+1, closing, stored)
 			if err != nil {
 				return Brief{}, err
 			}
@@ -345,7 +350,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 	if brief.Execution == "in-place" && len(brief.Paths) == 0 {
 		return Brief{}, &BriefError{Field: "paths", Reason: "must list at least one directory-relative path for in-place execution"}
 	}
-	if brief.MergeMode != "" && !(allowNoMistakes && brief.MergeMode == config.NoMistakes) {
+	if brief.MergeMode != "" && !(stored && brief.MergeMode == config.NoMistakes) {
 		if err := config.ValidateMergeMode(brief.MergeMode); err != nil {
 			return Brief{}, &BriefError{Field: "merge_mode", Reason: err.Error()}
 		}
@@ -358,7 +363,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, allowNoMistakes 
 			return Brief{}, &BriefError{Field: "report_kind", Reason: "must be spec or tickets"}
 		}
 	}
-	if brief.Review != "" && !(allowHistoricalMultiIssue && config.LegacyReview(brief.Review)) && !(allowNoMistakes && brief.Review == config.NoMistakes) {
+	if brief.Review != "" && !(allowHistoricalMultiIssue && config.LegacyReview(brief.Review)) && !(stored && brief.Review == config.NoMistakes) {
 		if err := config.ValidateReview(brief.Review); err != nil {
 			return Brief{}, &BriefError{Field: "review", Reason: err.Error()}
 		}
@@ -379,7 +384,7 @@ func isListItem(line string) bool {
 
 // parseDoneWhenList reads the block list under `done_when:` starting at line index start.
 // It returns the items and the index of the first line after the list.
-func parseDoneWhenList(lines []string, start, closing int) ([]string, int, error) {
+func parseDoneWhenList(lines []string, start, closing int, stored bool) ([]string, int, error) {
 	var items []string
 	next := start
 	for ; next < closing; next++ {
@@ -393,7 +398,13 @@ func parseDoneWhenList(lines []string, start, closing int) ([]string, int, error
 		if !isListItem(line) {
 			break
 		}
-		item := unquote(stripTrailingComment(strings.TrimPrefix(line, "-")))
+		value, comment := splitTrailingComment(strings.TrimPrefix(line, "-"))
+		if !stored {
+			if err := validateDoneWhenComment(value, comment, next+1); err != nil {
+				return nil, 0, err
+			}
+		}
+		item := unquote(value)
 		if item == "" {
 			return nil, 0, &BriefError{Field: "done_when", Reason: fmt.Sprintf("line %d is an empty list item", next+1)}
 		}
@@ -403,6 +414,15 @@ func parseDoneWhenList(lines []string, start, closing int) ([]string, int, error
 		return nil, start, nil
 	}
 	return items, next, nil
+}
+
+var commentTicket = regexp.MustCompile(`^#[0-9]+\b`)
+
+func validateDoneWhenComment(value, comment string, line int) error {
+	if ticket := commentTicket.FindString(comment); ticket != "" && value == unquote(value) {
+		return &BriefError{Field: "done_when", Reason: fmt.Sprintf("line %d treats %s as a comment; quote the entire criterion to keep %s", line, ticket, ticket)}
+	}
+	return nil
 }
 
 func parseDependencies(raw string) ([]Dependency, error) {
@@ -589,7 +609,7 @@ func parseRepos(raw string) ([]string, error) {
 	return repos, nil
 }
 
-func stripTrailingComment(value string) string {
+func splitTrailingComment(value string) (string, string) {
 	doubleQuoted, singleQuoted, escaped := false, false, false
 	for index := 0; index < len(value); index++ {
 		character := value[index]
@@ -624,11 +644,11 @@ func stripTrailingComment(value string) string {
 			singleQuoted = true
 		case '#':
 			if index == 0 || value[index-1] == ' ' || value[index-1] == '\t' {
-				return strings.TrimSpace(value[:index])
+				return strings.TrimSpace(value[:index]), value[index:]
 			}
 		}
 	}
-	return strings.TrimSpace(value)
+	return strings.TrimSpace(value), ""
 }
 
 type briefAutonomy struct{ Review, Merge string }
