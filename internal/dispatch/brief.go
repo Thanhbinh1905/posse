@@ -35,10 +35,11 @@ type Brief struct {
 	RootContext string
 	Ticket      *IssueRef
 	// Issues preserves the legacy `issues:` field, including historical multi-issue Briefs.
-	Issues []IssueRef
-	Refs   []IssueRef
-	After  []Dependency
-	Body   string
+	Issues    []IssueRef
+	Refs      []IssueRef
+	After     []Dependency
+	Followups []Followup
+	Body      string
 }
 
 var taskIDPattern = regexp.MustCompile(`^t[1-9][0-9]*$`)
@@ -51,6 +52,11 @@ type IssueRef struct {
 type Dependency struct {
 	TaskID    string
 	Milestone string
+}
+
+type Followup struct {
+	TaskID  string
+	Finding int
 }
 
 func (ref IssueRef) String() string {
@@ -179,7 +185,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, stored bool) (Br
 			}
 			continue
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after", "followups") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -207,6 +213,16 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, stored bool) (Br
 			return Brief{}, err
 		}
 		brief.After = dependencies
+	}
+	if raw, found := values["followups"]; found {
+		if brief.Type != "research" {
+			return Brief{}, &BriefError{Field: "followups", Reason: "is valid only for a Research Task"}
+		}
+		followups, err := parseFollowups(raw)
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Followups = followups
 	}
 	if raw, found := values["budget_tokens"]; found {
 		limit, err := strconv.ParseInt(unquote(raw), 10, 64)
@@ -454,6 +470,29 @@ func parseDependencies(raw string) ([]Dependency, error) {
 		return nil, &BriefError{Field: "after", Reason: "must list at least one typed Task prerequisite"}
 	}
 	return dependencies, nil
+}
+
+func parseFollowups(raw string) ([]Followup, error) {
+	if !strings.HasPrefix(raw, "[") || !strings.HasSuffix(raw, "]") {
+		return nil, &BriefError{Field: "followups", Reason: "must be a list such as [t12/F-3, t14/F-1]"}
+	}
+	var followups []Followup
+	seen := map[Followup]bool{}
+	for _, item := range strings.Split(raw[1:len(raw)-1], ",") {
+		value := unquote(strings.TrimSpace(item))
+		task, finding, found := strings.Cut(value, "/F-")
+		seq, err := strconv.Atoi(finding)
+		if !found || !taskIDPattern.MatchString(task) || !issueNumber.MatchString(finding) || err != nil {
+			return nil, &BriefError{Field: "followups", Reason: fmt.Sprintf("%q must name one finding as t12/F-3", value)}
+		}
+		ref := Followup{TaskID: task, Finding: seq}
+		if seen[ref] {
+			return nil, &BriefError{Field: "followups", Reason: value + " is listed more than once"}
+		}
+		seen[ref] = true
+		followups = append(followups, ref)
+	}
+	return followups, nil
 }
 
 var repoName = regexp.MustCompile(`^[a-z0-9_-]+$`)

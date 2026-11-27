@@ -292,7 +292,8 @@ func TestLeadCanDeferP2FindingWithIssue(t *testing.T) {
 	}
 }
 
-func TestReviewFollowupsDefersAnAreasNonBlockingFindingsToOneIssue(t *testing.T) {
+func reviewFollowupsFixture(t *testing.T) *prLifecycleFixture {
+	t.Helper()
 	f := reviewIdentityFixture(t)
 	_, _, changeSeq := startPrivateReviewChange(t, f, "3")
 	if code, output := runReviewIdentityCLI(t, f, "review", "start", changeSeq, "--profile", "reviewer"); code != 0 {
@@ -316,6 +317,11 @@ func TestReviewFollowupsDefersAnAreasNonBlockingFindingsToOneIssue(t *testing.T)
 		t.Fatal(err)
 	}
 	signalReviewPolicyTask(t, f, review, "--report", report, "--findings", findings, "--verdict", "changes_requested")
+	return f
+}
+
+func TestReviewFollowupsDefersAnAreasNonBlockingFindingsToOneIssue(t *testing.T) {
+	f := reviewFollowupsFixture(t)
 	code, output := runReviewIdentityCLI(t, f, "review", "followups")
 	if code != 0 || !strings.Contains(output, "F-2") || !strings.Contains(output, "F-3") || strings.Contains(output, "F-1") {
 		t.Fatalf("followups must list the unlinked P2 and P3 findings and not the blocking P1: %d %s", code, output)
