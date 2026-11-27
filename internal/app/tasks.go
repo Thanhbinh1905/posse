@@ -2619,7 +2619,11 @@ func (s *Service) send(ctx *axi.Context, args []string) (returnErr error) {
 		}
 		return ctx.Print(result)
 	}
-	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}}})
+	help := []any{"Run `posse peek " + taskIDString(task.Seq) + "` to inspect the Worker's response"}
+	if sendPane.Agent == "codex" && reason == "steered" {
+		help = append(help, "Herdr accepted the prompt; instruction execution is unconfirmed")
+	}
+	return ctx.Print(axi.Object{{Key: "task", Value: taskIDString(task.Seq)}, {Key: "message", Value: messageID}, {Key: "state", Value: state}, {Key: "reason", Value: reason}, {Key: "help", Value: help}})
 }
 
 // completedChangeTask reports a Change Task whose Worker finished but still

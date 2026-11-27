@@ -2414,6 +2414,17 @@ FROM messages WHERE task_id=? AND status='delivered' AND created_at>=? ORDER BY 
 	return messages, nil
 }
 
+func (db *DB) CurrentSteerableInstructionSubmission(ctx context.Context, taskID int64) (messageID, submittedAt int64, err error) {
+	err = db.QueryRowContext(ctx, `SELECT m.id, t.updated_at
+FROM task_turn_tokens t
+JOIN messages m ON m.id=CAST(substr(t.token, length('message:')+1) AS INTEGER) AND m.task_id=t.task_id
+WHERE t.task_id=? AND t.token='message:' || m.id AND m.status='delivered' AND m.wait_for_idle=0`, taskID).Scan(&messageID, &submittedAt)
+	if IsNotFound(err) {
+		return 0, 0, nil
+	}
+	return messageID, submittedAt, err
+}
+
 func (db *DB) DeliveredTaskMessagesThrough(ctx context.Context, taskID, deliveredAt int64) ([]Message, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, task_id, body, created_at, COALESCE(delivered_at, 0), status, wait_for_idle
 FROM messages WHERE task_id=? AND status='delivered' AND delivered_at<=? ORDER BY delivered_at, id`, taskID, deliveredAt)

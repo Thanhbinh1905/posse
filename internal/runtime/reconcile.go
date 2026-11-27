@@ -449,7 +449,15 @@ func reconcileTask(ctx context.Context, db *store.DB, project store.Project, tas
 			quotaHandled = err == nil
 		}
 		if !exists && !modelErrorHandled && !quotaHandled {
-			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", task.Title+" is idle without a Signal", fmt.Sprintf(`{"launch":%d,"idle_since":%d}`, task.Launches, idleSince), now)
+			summary := task.Title + " is idle without a Signal"
+			failure, err := codexIdleFailure(ctx, db, task, pane, now)
+			if err != nil {
+				return notices, err
+			}
+			if failure != "" {
+				summary = failure
+			}
+			notice, err := createNoticeWithData(ctx, db, task.ProjectID, task.ID, "worker_idle", summary, fmt.Sprintf(`{"launch":%d,"idle_since":%d}`, task.Launches, idleSince), now)
 			if err != nil {
 				return nil, err
 			}
