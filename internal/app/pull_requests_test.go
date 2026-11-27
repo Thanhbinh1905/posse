@@ -1535,6 +1535,7 @@ func newLegacyNoMistakesFixture(t *testing.T, state store.State) *prMergeFixture
 func newPRMergeFixture(t *testing.T, mode string, state store.State) *prMergeFixture {
 	t.Helper()
 	root := t.TempDir()
+	guardGitProcesses(t, root)
 	repo := filepath.Join(root, "repo")
 	remote := filepath.Join(root, "origin.git")
 	worktree := filepath.Join(root, "sandbox")
