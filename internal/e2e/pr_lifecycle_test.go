@@ -1147,6 +1147,76 @@ released:
 	}
 }
 
+func TestInterruptedPRReleaseDoesNotRaiseWorkerExited(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	brief := filepath.Join(fixture.root, "done-open-pr.md")
+	if err := os.WriteFile(brief, []byte("---\ntype: change\ntitle: PR lifecycle change\ndone_when: committed change exists\n---\nCreate a completed Task with a recorded open PR.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.startAndComplete(t, brief, "t1")
+	const prURL = "https://github.com/acme/shop/pull/17"
+	if err := fixture.db.UpdateTaskMerge(context.Background(), task.ID, prURL, ""); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(gitTest(t, fixture.env, task.WorktreePath, "rev-parse", task.Branch))
+	fixture.writeGraphQL(t, "pr1", "OPEN", "PENDING", "REVIEW_REQUIRED", "MERGEABLE", "", head)
+
+	marker := filepath.Join(fixture.root, "pr-release-paused")
+	releaseEnv := setEnv(fixture.leadEnv, "POSSE_INTENT_PAUSE_AT", "pr-release:after:executor.stop")
+	releaseEnv = setEnv(releaseEnv, "POSSE_INTENT_PAUSE_FILE", marker)
+	release := exec.Command(fixture.binary, "pr", "release", "t1", "--policy", "release")
+	release.Dir, release.Env = fixture.repo, releaseEnv
+	var releaseOutput strings.Builder
+	release.Stdout, release.Stderr = &releaseOutput, &releaseOutput
+	if err := release.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForCondition(20*time.Second, func() bool { _, err := os.Stat(marker); return err == nil }) {
+		t.Fatalf("PR release did not reach executor.stop: %s", releaseOutput.String())
+	}
+	if release.Process.Pid <= 1 {
+		t.Fatalf("PR release PID = %d, want a valid child process", release.Process.Pid)
+	}
+	if err := release.Process.Kill(); err != nil {
+		t.Fatalf("interrupt PR release: %v", err)
+	}
+	if err := release.Wait(); err == nil {
+		t.Fatal("interrupted PR release unexpectedly succeeded")
+	}
+	operation, found, err := fixture.db.LatestTaskExecutorPolicy(context.Background(), task.ID)
+	if err != nil || !found {
+		t.Fatalf("read interrupted executor policy: found=%t err=%v", found, err)
+	}
+	if err := fixture.db.ResolveDeliveryOperation(context.Background(), operation.ID, "failed", "pr_release_incomplete: simulated leaked process"); err != nil {
+		t.Fatalf("record incomplete release: %v", err)
+	}
+	stopBackgroundWatch(t, fixture)
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
+	if output := runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "pr", "release", "t1", "--policy", "release"); !strings.Contains(output, "sandbox_released: true") {
+		t.Fatalf("resume PR release: %s", output)
+	}
+	runPosse(t, fixture.binary, fixture.repo, fixture.leadEnv, "list")
+	notices, err := fixture.db.Notices(context.Background(), fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+			t.Fatalf("interrupted then completed release raised worker_exited Notice: %#v", notice)
+		}
+	}
+	decisions, err := fixture.db.Decisions(context.Background(), fixture.project.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decision := range decisions {
+		if decision.TaskID == task.ID && decision.Kind == "worker_exited" {
+			t.Fatalf("interrupted then completed release raised worker_exited Decision: %#v", decision)
+		}
+	}
+}
+
 func TestWorkerExitedDoneTaskWithOpenPRCanBeDiscarded(t *testing.T) {
 	fixture := newPRLifecycleFixture(t)
 	defer fixture.db.Close()

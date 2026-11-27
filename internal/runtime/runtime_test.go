@@ -173,6 +173,51 @@ func TestReconcileUsesPendingExecutorPolicyOnlyDuringActiveRelease(t *testing.T)
 	}
 }
 
+func TestReconcileSuppressesExitDuringInterruptedFailedRelease(t *testing.T) {
+	db, project, task := createWorkingTask(t)
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.NextTaskLaunch(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	task.Launches = 1
+	if err := db.Transition(ctx, task.ID, store.StateWorking, store.StateDone, "worker", "done"); err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := db.EnsureDelivery(ctx, task.ID, "", "https://github.com/acme/shop/pull/17", "publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := db.BeginDeliveryOperation(ctx, store.DeliveryOperation{
+		DeliveryID: delivery.ID,
+		Operation:  "executor_policy",
+		Actor:      "lead",
+		Subject:    "release",
+		Baseline:   strconv.Itoa(task.Launches),
+	}, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ResolveDeliveryOperation(ctx, operation.ID, "failed", "pr_release_incomplete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.StartIntent(ctx, project.ID, task.ID, "pr-release", "done:executor.stop", `{}`, 99999999); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReconcileSnapshot(ctx, db, project.ID, herdr.Snapshot{}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := db.Notices(ctx, project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, notice := range notices {
+		if notice.TaskID == task.ID && notice.Kind == "worker_exited" {
+			t.Fatalf("interrupted release raised worker_exited Notice: %#v", notice)
+		}
+	}
+}
+
 func TestReconcileUsesTaskWideExecutorPolicyAcrossDeliveries(t *testing.T) {
 	for _, policy := range []string{"suspend", "release"} {
 		t.Run(policy, func(t *testing.T) {
