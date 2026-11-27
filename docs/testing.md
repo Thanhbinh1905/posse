@@ -12,6 +12,17 @@ List which test belongs to which shard with `scripts/run-race-shard.sh --plan` a
 
 A single package without sharding needs a longer timeout: `go test ./internal/app -timeout 45m -run <pattern>`.
 
+## Run the full race suite in a Worker
+
+On Linux with a systemd user manager, run this from the repo root:
+
+```sh
+posse heavy -- systemd-run --user --scope -p TasksMax=400 -p MemoryMax=6G \
+  env GOMAXPROCS=4 go test -race -p 2 -parallel 2 -count=1 -timeout 35m ./...
+```
+
+`-p` limits concurrent package builds and test binaries. `-parallel` limits tests that use `t.Parallel` within each binary. `GOMAXPROCS` also limits how many subprocesses the unfiltered `internal/app` suite starts. Keep all three limits: the scope counts threads and subprocesses, not just package test binaries.
+
 ## Codex memory regression
 
 `go test -tags=e2e ./internal/e2e -run '^TestCodexMemoryCannotReopenCompletedAuthorDuringReview$' -count=1 -v` uses the installed Codex CLI, an isolated Herdr server, and a loopback Responses provider. It makes no paid model calls and uses synthetic memory state. CLI 0.166.0 generates the real Phase 2 prompt in a separate memory thread. A request barrier holds its tool response until the author completes and Review starts. The response policy does not inspect launch flags. The test also delivers an authorized Lead follow-up to the root Worker.
