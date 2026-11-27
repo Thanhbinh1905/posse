@@ -230,6 +230,159 @@ func TestGreenhouseFullPipelinePrepublicationReviewRunsFromWatch(t *testing.T) {
 	}
 }
 
+func TestGreenhouseWatchDoesNotReviewPublishedHeadAgain(t *testing.T) {
+	f := newWorkerTabsFixtureWithManualWatchOwner(t)
+	c := newGreenhouseContract(t, f)
+	c.env = setEnv(c.env, "GREENHOUSE_HOME", c.home)
+	remote := filepath.Join(f.root, "origin.git")
+	origin := "https://github.com/acme/shop.git"
+	gitTest(t, f.env, f.repo, "remote", "set-url", "origin", origin)
+	gitTest(t, f.env, f.repo, "config", "url.file://"+remote+".insteadOf", origin)
+	forge, err := os.ReadFile("testdata/t205_fake_forge.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "gh"), forge, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte(`review_provider = "greenhouse"
+[defaults]
+review = "full-pipeline"
+merge_mode = "pr"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.env = setEnv(c.env, "POSSE_TEST_REMOTE", remote)
+	watchEnv := setEnv(c.env, "POSSE_WATCH_TOKEN", "")
+	watchArgs := []string{"watch", "--poll-only", "--timeout", "1"}
+	c.change = f.start(t, "t1", "Keep the passing Verdict", "keep-passing-verdict")
+	head := c.authorCommit(t)
+	const prURL = "https://github.com/acme/shop/pull/17"
+	writeJSONFile(t, filepath.Join(f.root, "gh-state.json"), map[string]any{"data": map[string]any{"repo1": map[string]any{"pr1": map[string]any{
+		"url": prURL, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "mergeable": "MERGEABLE",
+		"statusCheckRollup": map[string]any{"state": "PENDING"},
+	}}}})
+	workerEnv := setEnv(c.env, "POSSE_TASK_ID", c.change.ContainmentMarker)
+	workerEnv = setEnv(workerEnv, "HERDR_PANE_ID", c.change.PaneID)
+	signal := func(args ...string) {
+		t.Helper()
+		runPosse(t, f.binary, c.change.WorktreePath, workerEnv, append([]string{"signal"}, args...)...)
+	}
+	poll := func() {
+		t.Helper()
+		runPosse(t, f.binary, f.repo, watchEnv, watchArgs...)
+	}
+	signal("done", "Request review", "--head", head, "--turn", "launch:1")
+	c.hold(t)
+	poll()
+	c.waitInvocations(t, 1)
+
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused := filepath.Join(f.root, "watch-paused")
+	resume := filepath.Join(f.root, "watch-resume")
+	gate := fmt.Sprintf(`#!/bin/sh
+if [ "${PAUSE_WATCH_DIFF:-}" = 1 ] && [ "$1" = -C ] && [ "$3" = diff ] && [ "$4" = --quiet ]; then
+  : > %s
+  while [ ! -e %s ]; do sleep 0.05; done
+fi
+exec %s "$@"
+`, shellQuote(paused), shellQuote(resume), shellQuote(git))
+	if err := os.WriteFile(filepath.Join(f.root, "bin", "git"), []byte(gate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	watch := exec.CommandContext(ctx, f.binary, watchArgs...)
+	watch.Dir, watch.Env = f.repo, setEnv(watchEnv, "PAUSE_WATCH_DIFF", "1")
+	finished := make(chan struct{})
+	var watchOutput []byte
+	var watchErr error
+	go func() {
+		defer close(finished)
+		watchOutput, watchErr = watch.CombinedOutput()
+	}()
+	defer func() {
+		_ = os.WriteFile(resume, nil, 0o600)
+		cancel()
+		<-finished
+	}()
+	if !waitForCondition(10*time.Second, func() bool {
+		_, err := os.Stat(paused)
+		return err == nil
+	}) {
+		t.Fatal("overlapping Watch did not reach its Git diff check")
+	}
+	c.release(t)
+	lockPath := filepath.Join(f.home, "projects", "shop", "tasks", "t1", "greenhouse", "shop.parallel.lock")
+	waitForReview := func() {
+		t.Helper()
+		lock, err := os.Open(lockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		if !waitForCondition(20*time.Second, func() bool {
+			return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil
+		}) {
+			t.Fatal("Greenhouse review did not release its lock")
+		}
+	}
+	waitForReview()
+	verdicts := c.verdicts(t)
+	if len(verdicts) != 1 || !verdicts[0].Qualifies(head) {
+		t.Fatalf("prepublication Verdicts = %+v; want one pass for %s", verdicts, head)
+	}
+	if _, err := f.client.Run(context.Background(), "pane", "report-agent", c.change.PaneID, "--source", "posse.fake", "--agent", "claude", "--state", "idle"); err != nil {
+		t.Fatal(err)
+	}
+	poll()
+	if count := c.notices(t, "greenhouse_publish_queued"); count != 1 {
+		t.Fatalf("publication notices = %d, want 1", count)
+	}
+	if output := runPosse(t, f.binary, c.change.WorktreePath, workerEnv, "publish", "Publish the reviewed change"); !strings.Contains(output, prURL) {
+		t.Fatalf("publish did not open the PR: %s", output)
+	}
+	if pushed := strings.TrimSpace(gitTest(t, f.env, f.repo, "ls-remote", "origin", "refs/heads/"+c.change.Branch)); !strings.HasPrefix(pushed, head+"\t") {
+		t.Fatalf("published ref %q does not match reviewed head %s", pushed, head)
+	}
+	signal("done", "Report publication", "--pr", prURL, "--turn", greenhouseTaskTurn(t, f, c.change.ID))
+	c.setMode(t, "findings")
+	if err := os.WriteFile(resume, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	<-finished
+	if watchErr != nil || !strings.Contains(string(watchOutput), "Watch poll completed") {
+		t.Fatalf("overlapping Watch: %v\n%s", watchErr, watchOutput)
+	}
+	poll()
+	waitForReview()
+	if got := c.invocations(t); got != 1 {
+		t.Fatalf("Watch opened a duplicate Greenhouse grant after publication of %s: reviewer invoked %d times, want 1", head, got)
+	}
+	if got := c.verdicts(t); len(got) != 1 || got[0].Grant != verdicts[0].Grant || !got[0].Qualifies(head) {
+		t.Fatalf("published head lost its original passing Verdict: %+v", got)
+	}
+
+	c.setMode(t, "clean")
+	if explicit := c.review(t); explicit["head"] != head || explicit["grant"] == verdicts[0].Grant || explicit["recorded"] != true {
+		t.Fatalf("explicit review did not record a new Verdict for %s: %v", head, explicit)
+	}
+	signal("working", "Change the published head")
+	newHead := c.authorCommit(t)
+	if output, err := c.posse(workerEnv, c.change.WorktreePath, "publish", "Try publishing the changed head"); err == nil || !strings.Contains(output, "requires a passing Greenhouse Verdict for this head") {
+		t.Fatalf("publish of unreviewed head was not refused: %v\n%s", err, output)
+	}
+	signal("done", "Request review of the changed head", "--head", newHead, "--turn", greenhouseTaskTurn(t, f, c.change.ID))
+	poll()
+	c.waitInvocations(t, 3)
+	waitForReview()
+	if got := c.verdicts(t); len(got) != 3 || !got[2].Qualifies(newHead) {
+		t.Fatalf("Watch did not record a passing Verdict for the changed head %s: %+v", newHead, got)
+	}
+}
+
 func TestGreenhousePrepublicationReconcilesMultipleDoneTasks(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	c := newGreenhouseContract(t, f)
