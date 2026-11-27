@@ -16,8 +16,13 @@ var ErrReviewCapDecisionRequired = errors.New("blocking Review finding at the sp
 // ApplyReviewDisposition appends the disposition event and updates the current
 // finding projection in one transaction.
 func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingSeqs, patternSeqs []int, action, severity, issue, reason, quote, actor, blockAt string, capSpent bool) error {
-	if taskID < 1 || !oneOf(action, "accept", "defer", "withdraw", "reclassify") || !oneOf(blockAt, "P0", "P1", "P2") {
+	resolveFollowup := oneOf(action, "followup_fixed", "followup_obsolete")
+	deferFollowup := action == "defer_followup"
+	if taskID < 1 || !(resolveFollowup || deferFollowup || oneOf(action, "accept", "defer", "withdraw", "reclassify")) || !oneOf(blockAt, "P0", "P1", "P2") {
 		return fmt.Errorf("invalid Review disposition")
+	}
+	if resolveFollowup && (len(findingSeqs) != 1 || len(patternSeqs) != 0 || strings.TrimSpace(reason) == "" || !oneOf(actor, "lead", "user")) {
+		return fmt.Errorf("follow-up resolution requires one finding and a reason from the Lead or User")
 	}
 	if action == "reclassify" && !oneOf(severity, "P0", "P1", "P2", "P3") {
 		return fmt.Errorf("reclassify requires a severity P0, P1, P2 or P3")
@@ -40,7 +45,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 			var f ReviewFinding
 			var inScope int
 			var inherited int64
-			if err := rows.Scan(&f.ID, &f.Seq, &f.PatternID, &f.Severity, &f.Origin, &inScope, &f.State, &inherited); err != nil {
+			if err := rows.Scan(&f.ID, &f.Seq, &f.PatternID, &f.Severity, &f.Origin, &inScope, &f.State, &inherited, &f.FollowUpURL); err != nil {
 				rows.Close()
 				return err
 			}
@@ -58,7 +63,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 			if seq < 1 {
 				return fmt.Errorf("invalid finding sequence")
 			}
-			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0) FROM review_findings WHERE ship_task_id=? AND seq=?`, taskID, seq); err != nil {
+			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0),follow_up_url FROM review_findings WHERE ship_task_id=? AND seq=?`, taskID, seq); err != nil {
 				return err
 			}
 		}
@@ -72,7 +77,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 			if err := tx.QueryRowContext(ctx, `SELECT id FROM review_patterns WHERE ship_task_id=? AND seq=?`, taskID, seq).Scan(&patternID); err != nil {
 				return err
 			}
-			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0) FROM review_findings WHERE ship_task_id=? AND pattern_id=? OR ship_task_id=? AND pattern_id IN (SELECT id FROM review_patterns WHERE merged_into=?)`, taskID, patternID, taskID, patternID); err != nil {
+			if err := addRows(`SELECT id,seq,pattern_id,severity,origin,in_scope,state,COALESCE(inherited_from,0),follow_up_url FROM review_findings WHERE ship_task_id=? AND pattern_id=? OR ship_task_id=? AND pattern_id IN (SELECT id FROM review_patterns WHERE merged_into=?)`, taskID, patternID, taskID, patternID); err != nil {
 				return err
 			}
 		}
@@ -88,8 +93,15 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		f := selected[id]
-		blocking := f.Origin == "introduced" && f.InScope && oneOf(f.State, "open", "fix_claimed", "unverified", "disputed", "regressed") &&
+		blockingClass := f.Origin == "introduced" && f.InScope &&
 			(f.Severity == "unclassified" || map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}[f.Severity] <= threshold)
+		if (resolveFollowup || deferFollowup) && (blockingClass || f.InheritedFrom > 0 || !oneOf(f.State, "open", "deferred")) {
+			return fmt.Errorf("finding F-%d is not an open or deferred non-blocking follow-up", f.Seq)
+		}
+		if deferFollowup && f.FollowUpURL != "" {
+			return fmt.Errorf("finding F-%d already has a follow-up issue", f.Seq)
+		}
+		blocking := blockingClass && oneOf(f.State, "open", "fix_claimed", "unverified", "disputed", "regressed")
 		if capSpent && blocking && (action != "reclassify" || map[string]int{"P0": 0, "P1": 1, "P2": 2, "P3": 3}[severity] > threshold) {
 			return fmt.Errorf("%w: F-%d", ErrReviewCapDecisionRequired, f.Seq)
 		}
@@ -100,10 +112,12 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 		switch action {
 		case "accept":
 			state = "accepted"
-		case "defer":
-			state = "deferred"
-		case "withdraw":
+		case "defer", "defer_followup":
+			state, event = "deferred", "defer"
+		case "withdraw", "followup_obsolete":
 			state = "withdrawn"
+		case "followup_fixed":
+			state = "fixed"
 		case "reclassify":
 			state = f.State
 			note = "severity " + severity
@@ -115,7 +129,7 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 			if _, err := tx.ExecContext(ctx, `UPDATE review_findings SET severity=? WHERE id=?`, severity, id); err != nil {
 				return err
 			}
-		} else if _, err := tx.ExecContext(ctx, `UPDATE review_findings SET state=?,follow_up_url=CASE WHEN ?='defer' THEN ? ELSE follow_up_url END WHERE id=?`, state, action, issue, id); err != nil {
+		} else if _, err := tx.ExecContext(ctx, `UPDATE review_findings SET state=?,follow_up_url=CASE WHEN ?='defer' THEN ? ELSE follow_up_url END WHERE id=?`, state, event, issue, id); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO review_finding_events(finding_id,round,event,actor,note,user_quote,at) VALUES(?,0,?,?,?,?,?)`, id, event, actor, note, quote, time.Now().UnixMilli()); err != nil {
@@ -126,6 +140,34 @@ func (db *DB) ApplyReviewDisposition(ctx context.Context, taskID int64, findingS
 		return err
 	}
 	return db.PersistTask(ctx, taskID)
+}
+
+type FollowupResolution struct {
+	Outcome string `json:"outcome"`
+	Actor   string `json:"actor"`
+	Reason  string `json:"reason"`
+	At      int64  `json:"at"`
+}
+
+func (db *DB) LastFollowupResolutions(ctx context.Context, taskID int64) (map[int]FollowupResolution, error) {
+	rows, err := db.QueryContext(ctx, `SELECT f.seq,e.event,e.actor,e.note,e.at
+FROM review_findings f JOIN review_finding_events e ON e.finding_id=f.id
+WHERE f.ship_task_id=? AND e.event IN ('followup_fixed','followup_obsolete') ORDER BY e.id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	resolutions := map[int]FollowupResolution{}
+	for rows.Next() {
+		var seq int
+		var resolution FollowupResolution
+		if err := rows.Scan(&seq, &resolution.Outcome, &resolution.Actor, &resolution.Reason, &resolution.At); err != nil {
+			return nil, err
+		}
+		resolution.Outcome = strings.TrimPrefix(resolution.Outcome, "followup_")
+		resolutions[seq] = resolution
+	}
+	return resolutions, rows.Err()
 }
 
 // MergeReviewPatterns folds each later pattern into the first selected pattern

@@ -311,6 +311,19 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 		return axi.Failure("remote_missing", "Project "+project.Name+" has no origin remote to open a pull request against", false,
 			"Add one with `git remote add origin <url>` and push "+project.DefaultBranch+", or remove `merge_mode: pr` from the Brief to Merge locally")
 	}
+	if len(brief.Followups) > 0 {
+		areas, err := reviewFollowupAreas(ctx.Context, db, project, brief.Followups)
+		if err != nil {
+			return err
+		}
+		assigned := 0
+		for _, area := range areas {
+			assigned += len(area.Findings)
+		}
+		if assigned != len(brief.Followups) {
+			return axi.Failure("brief_invalid", "followups must name open or deferred non-blocking findings in this Project", false)
+		}
+	}
 	baseRef := project.DefaultBranch
 	var reviewsTaskID int64
 	var reviewedTask *store.Task

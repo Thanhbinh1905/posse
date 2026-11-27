@@ -715,7 +715,7 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if len(parsed.Positionals) != 1 {
 		return axi.Usage("show requires one Task id", "Run `posse list` to list Tasks")
 	}
-	db, home, err := s.openDB()
+	db, home, workerReadOnly, err := s.openInspectionDB(ctx.Context)
 	if err != nil {
 		return err
 	}
@@ -724,21 +724,29 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(home, project.Name)
-	if err != nil {
-		return configError(err)
+	var worker store.Task
+	if workerReadOnly {
+		worker, err = workerIdentityTask(ctx.Context, db, home)
+		if err != nil || worker.ProjectID != project.ID {
+			return workerOwnTaskRefusal()
+		}
+	} else if err := s.requireLead(ctx.Context, db, project); err != nil {
+		return err
 	}
 	task, err := s.currentTask(ctx.Context, db, project, parsed.Positionals[0])
 	if err != nil {
 		return err
 	}
-	workerReadOnly := s.workerCaller(ctx.Context, home)
+	if workerReadOnly && worker.ID != task.ID && !(worker.Type == "review" && task.Type == "change" && worker.ReviewsTaskID == task.ID) {
+		return workerOwnTaskRefusal()
+	}
+	loadConfig := config.Load
 	if workerReadOnly {
-		if err := s.requireWorkerOwnTask(ctx.Context, db, project, task); err != nil {
-			return err
-		}
-	} else if err := s.requireLead(ctx.Context, db, project); err != nil {
-		return err
+		loadConfig = config.LoadReadOnly
+	}
+	cfg, err := loadConfig(home, project.Name)
+	if err != nil {
+		return configError(err)
 	}
 	var preparationErr error
 	if !workerReadOnly && project.IsWorkspace() {
@@ -749,8 +757,10 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 	if err := deferObservationContention(ctx, preparationErr, "Project observations were deferred; showing the last recorded state."); err != nil {
 		return err
 	}
-	if task, err = s.currentTask(ctx.Context, db, project, parsed.Positionals[0]); err != nil {
-		return err
+	if !workerReadOnly {
+		if task, err = s.currentTask(ctx.Context, db, project, parsed.Positionals[0]); err != nil {
+			return err
+		}
 	}
 	id := taskIDString(task.Seq)
 	view := map[string]any{"id": id, "type": task.Type, "state": string(task.State), "title": task.Title, "name": taskDisplayName(task), "profile": task.Profile, "usage": taskUsage(ctx.Context, db, task, cfg)}

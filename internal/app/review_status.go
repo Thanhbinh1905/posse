@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
+	"github.com/thanhbinh1905/posse/internal/store"
 )
 
 func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
@@ -72,6 +73,13 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 		RootCause string           `json:"root_cause,omitempty"`
 		Findings  []map[string]any `json:"findings"`
 	}
+	var resolutions map[int]store.FollowupResolution
+	if parsed.Bool("full") {
+		resolutions, err = db.LastFollowupResolutions(ctx.Context, change.ID)
+		if err != nil {
+			return err
+		}
+	}
 	patterns := map[int]*patternStatus{}
 	for _, finding := range findings {
 		pattern := patterns[finding.PatternSeq]
@@ -93,6 +101,9 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 		if parsed.Bool("full") {
 			row["excerpt"] = finding.Excerpt
 			row["fix_guidance"] = finding.FixGuidance
+			if resolution, ok := resolutions[finding.FindingSeq]; ok {
+				row["last_followup_resolution"] = resolution
+			}
 		}
 		pattern.Findings = append(pattern.Findings, row)
 	}
