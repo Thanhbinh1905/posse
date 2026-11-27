@@ -2,6 +2,7 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"sort"
 	"strconv"
 
@@ -181,6 +182,37 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	var waivers []any
+	rows, err = db.QueryContext(ctx.Context, `SELECT data_json,created_at FROM notices WHERE task_id=? AND kind='review_waived' ORDER BY id`, change.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var data string
+		var at int64
+		if err := rows.Scan(&data, &at); err != nil {
+			rows.Close()
+			return err
+		}
+		var waiver map[string]any
+		if err := json.Unmarshal([]byte(data), &waiver); err != nil {
+			rows.Close()
+			return err
+		}
+		if parsed.Bool("full") {
+			waiver["at"] = at
+		} else {
+			delete(waiver, "user_quote")
+		}
+		waivers = append(waivers, waiver)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	validation, err := validationSummaryFor(ctx.Context, db, change, "")
 	if err != nil {
 		return err
@@ -199,5 +231,6 @@ func (s *Service) reviewStatus(ctx *axi.Context, args []string) error {
 		{Key: "patterns", Value: patternRows},
 		{Key: "carries", Value: carries},
 		{Key: "dispositions", Value: dispositions},
+		{Key: "waivers", Value: waivers},
 	})
 }

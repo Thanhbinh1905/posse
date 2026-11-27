@@ -268,6 +268,9 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 					return prefixFailure(repo.Repo, err)
 				}
 			} else {
+				if greenhouseFullPipelineTaskWithConfig(task, cfg, repo.Repo) {
+					return axi.Failure("publish_required", repo.Repo+": the Worker must publish this Greenhouse full-pipeline Member before Merge", false)
+				}
 				if isFullPipelineTask(task, repo.Repo) {
 					return axi.Failure("candidate_promotion_required", repo.Repo+": full-pipeline Members must publish through validated private candidate promotion", false, "Complete local validation and use `posse publish --repo "+repo.Repo+"` from the private candidate checkout")
 				}
@@ -458,6 +461,16 @@ func (s *Service) mergeMemberPullRequest(ctx context.Context, db *store.DB, proj
 	}
 	if err := s.requirePRTargetFresh(ctx, db, member.project, cfg, member.task, repo.Repo, repo.MergeMode, repo.GatedSHA); err != nil {
 		return prefixFailure(repo.Repo, err)
+	}
+	waived, err := hasReviewWaiver(ctx, db, task.ID, repo.Repo, repo.GatedSHA)
+	if err != nil {
+		return err
+	}
+	if waived {
+		observation, err := db.LatestMemberPRObservation(ctx, task.ID, repo.Repo)
+		if err := checkGreenObservation(member.task, observation, err); err != nil {
+			return prefixFailure(repo.Repo, err)
+		}
 	}
 	method := defaultValue(cfg.Defaults.MergeMethod, "squash")
 	if forge.Kind == "gitlab" {

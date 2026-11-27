@@ -319,7 +319,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 			return err
 		}
 	}
-	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, ref, pushOptions...); err != nil {
+	if err := pushWithCredentialRetry(out.Context, task.WorktreePath, sha+":"+ref, pushOptions...); err != nil {
 		return axi.Failure("pr_push_failed", "could not push the Task branch", true, pushFailureHelp(out.Context, task.WorktreePath, err)...)
 	}
 	if err := recordWorkerBranchAuthorHead(out.Context, db, task, expectedAuthorHead, sha, rewrite, allowUnpublishedRebase); err != nil {
@@ -615,8 +615,8 @@ func isCredentialPromptFailure(err error) bool {
 	return strings.Contains(message, "could not read Username") || strings.Contains(message, "could not read Password")
 }
 
-func pushWithCredentialRetry(ctx context.Context, worktree, ref string, options ...string) error {
-	args := append(append([]string{"push"}, options...), "origin", ref+":"+ref)
+func pushWithCredentialRetry(ctx context.Context, worktree, refspec string, options ...string) error {
+	args := append(append([]string{"push"}, options...), "origin", refspec)
 	var err error
 	for attempt := 0; attempt <= pushCredentialRetries; attempt++ {
 		if _, err = gitOutput(ctx, worktree, args...); err == nil || !isCredentialPromptFailure(err) {
