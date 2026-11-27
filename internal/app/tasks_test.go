@@ -50,6 +50,18 @@ func TestRelaunchPlanRevisionRequiresEffectiveChanges(t *testing.T) {
 	}
 }
 
+func TestWorkspaceWorkerBriefQualifiesTicketWithMember(t *testing.T) {
+	brief, err := dispatch.ParseBriefText("---\ntype: change\ntitle: Fix checkout\ndone_when: checked\nrepos: [backend, worker]\nticket: worker#12\nrefs: [backend#12]\n---\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := store.Project{Name: "stack", Kind: store.ProjectKindWorkspace}
+	protocol := workerProtocol(t.TempDir(), project, store.Task{Seq: 7, Type: "change"}, brief, "/brief.md", "/scratch", "")
+	if !strings.Contains(protocol, "\nTicket: worker#12\n") || strings.Contains(protocol, "backend#12") {
+		t.Fatalf("launch Brief must identify only the owning member's ticket:\n%s", protocol)
+	}
+}
+
 func TestResearchAndReviewWorkerProtocolsKeepAttachmentListingWithLead(t *testing.T) {
 	project := store.Project{Name: "shop"}
 	brief := dispatch.Brief{DoneWhen: "Report is complete"}
