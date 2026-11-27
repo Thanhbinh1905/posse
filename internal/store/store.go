@@ -524,6 +524,11 @@ func (db *DB) Transition(ctx context.Context, taskID int64, expected, next State
 		return err
 	}
 	defer tx.Rollback()
+	if expected == StateBlocked && next == StateWorking {
+		if err := refuseDependencyWait(ctx, tx, taskID); err != nil {
+			return err
+		}
+	}
 	if err := transitionTx(ctx, db.queries.WithTx(tx.Tx), taskID, expected, next, source, note); err != nil {
 		return err
 	}
@@ -1305,7 +1310,7 @@ func (db *DB) UnmetTaskDependencies(ctx context.Context, projectID int64, depend
 			}
 			ready = accepted
 		case "landed":
-			ready = state == StateMerged || state == StateTornDown && mergedRef != ""
+			ready = taskDependencyLanded(state, mergedRef)
 		}
 		if !ready {
 			reason := dependency.TaskID + ":" + dependency.Milestone
@@ -2051,6 +2056,19 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 		return "", err
 	}
 	current := State(state)
+	if verb == "blocked" {
+		if taskType == "review" {
+			return "", fmt.Errorf("%w: Review Task readiness comes from review_of", ErrInvalidTaskDependency)
+		}
+		if !oneOfState(current, StateWorking, StateStalled) {
+			return "", fmt.Errorf("%w: Task %d is %q", ErrStateRace, task.ID, current)
+		}
+		fields, _ := data.(map[string]any)
+		dependency, _ := fields["on"].(string)
+		if err := recordTaskDependencyWait(ctx, tx, task, dependency); err != nil {
+			return "", err
+		}
+	}
 	if verb == "done" {
 		var currentTurn string
 		err := tx.QueryRowContext(ctx, `SELECT token FROM task_turn_tokens WHERE task_id=?`, task.ID).Scan(&currentTurn)
@@ -2201,6 +2219,8 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 	}
 	next := StateWorking
 	switch verb {
+	case "blocked":
+		next = StateBlocked
 	case "needs-decision":
 		next = StateNeedsDecision
 	case "failed":
@@ -2989,6 +3009,11 @@ func (db *DB) MarkMessageSubmitting(ctx context.Context, messageID int64, token 
 	}
 	if !taskAcceptsInstruction(State(state), taskType) {
 		return ErrStateRace
+	}
+	if State(state) == StateBlocked {
+		if err := refuseDependencyWait(ctx, tx, taskID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE messages SET status='submitting' WHERE id=? AND status IN ('claimed','interrupting') AND claim_token=?`, messageID, token); err != nil {
 		return err

@@ -807,6 +807,11 @@ type TaskBudgetUsage struct {
 	DayTokens   int64
 }
 
+type TaskDependencyWait struct {
+	TaskID       int64
+	DependencyID int64
+}
+
 type TaskLaunchIdentity struct {
 	TaskID          int64
 	LaunchNumber    int64
