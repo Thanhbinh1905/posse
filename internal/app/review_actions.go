@@ -101,7 +101,7 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 		}
 		for _, finding := range stored {
 			findings = append(findings, store.ReviewFindingDetail{FindingSeq: finding.FindingSeq, PatternSeq: finding.PatternSeq, PatternKey: finding.PatternKey,
-				Title: finding.Title, Rule: finding.Rule, FixGuidance: finding.FixGuidance, Repository: finding.Repository, Path: finding.Path,
+				Title: finding.Title, Rule: finding.Rule, FixGuidance: finding.Guidance, Repository: finding.Repository, Path: finding.Path,
 				Excerpt: finding.Excerpt, Severity: finding.Severity, Origin: "introduced", InScope: true, State: finding.State})
 		}
 	} else {
