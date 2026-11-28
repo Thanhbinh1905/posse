@@ -1235,6 +1235,13 @@ func TestGreenhouseBlockingVerdictWithDisposedFindingsDoesNotFail(t *testing.T) 
 func TestGreenhouseReviewDoesNotStartForDoneTaskWithNoCommittedDiff(t *testing.T) {
 	f := newPRMergeFixture(t, "local", store.StateWorking)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	installRoleSkills(t, f, "posse-deslop", "posse-no-comments")
+	if err := os.MkdirAll(filepath.Dir(skillHookMarkerPath(f)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillHookMarkerPath(f), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	plan, err := f.task.AdmittedPlan()
 	if err != nil {
 		t.Fatal(err)
