@@ -65,6 +65,14 @@ func (s *Service) reviewRecover(out *axi.Context, args []string) error {
 		return axi.Failure("greenhouse_in_flight", "Posse is already handling this Member's Greenhouse review", true)
 	}
 	defer releaseParallelReviewLock(lock)
+	task, err = db.TaskByID(ctx, project.ID, task.ID)
+	if err != nil {
+		return err
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return admittedPlanFailure(err)
+	}
 	if fenced, err := greenhouseReviewFenced(ctx, db, project, task); err != nil {
 		return err
 	} else if fenced || task.State == store.StateMerged {
@@ -123,7 +131,7 @@ func (s *Service) reviewRecover(out *axi.Context, args []string) error {
 		return err
 	}
 	round := greenhouse.Round{
-		Worktree: checkout, Host: greenhouseReviewHost(project, task, member), Pending: pending,
+		Worktree: checkout, Host: greenhouseReviewHost(project, task, member), Pending: pending, ScopeRevision: plan.ScopeRevision(),
 	}
 	result, err := daemon.RecoverReview(ctx, round, head, recovery)
 	if err != nil {

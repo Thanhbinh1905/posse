@@ -118,7 +118,7 @@ esac
 	t.Setenv("POSSE_TASK_ID", "")
 	d := &Daemon{Binary: binary, Home: home, InTask: func(int) bool { return false }}
 	result, err := d.Review(context.Background(), Round{
-		Worktree: worktree, Host: Host{Name: "shop", ID: "shop/t1/shop"}, GrantPrefix: "shop/t1/shop", Pending: pending,
+		Worktree: worktree, Host: Host{Name: "shop", ID: "shop/t1/shop"}, Pending: pending,
 	})
 	var terminalErr *TerminalReviewError
 	if !errors.As(err, &terminalErr) || terminalErr.Status != "inconclusive" || terminalErr.Reason != "review timed out" {
@@ -297,7 +297,7 @@ esac
 	t.Setenv("POSSE_TASK_ID", "")
 	d := &Daemon{Binary: binary, Home: home, Env: os.Environ(), InTask: func(int) bool { return false }}
 	result, err := d.Review(context.Background(), Round{
-		Worktree: worktree, Host: Host{Name: "posse", ID: "posse/t1/shop"}, GrantPrefix: "posse/t1/shop",
+		Worktree: worktree, Host: Host{Name: "posse", ID: "posse/t1/shop"},
 		Pending: pending, Intent: "review the change", Target: head,
 	})
 	if err == nil || !strings.Contains(err.Error(), "reviewer quota exceeded") {
@@ -379,7 +379,7 @@ esac
 	t.Setenv("POSSE_TASK_ID", "")
 	d := &Daemon{Binary: binary, Home: home, InTask: func(int) bool { return false }}
 	result, err := d.Review(context.Background(), Round{
-		Worktree: worktree, Host: Host{Name: "posse", ID: "posse/t143/greenhouse"}, GrantPrefix: "posse/t143/greenhouse",
+		Worktree: worktree, Host: Host{Name: "posse", ID: "posse/t143/greenhouse"},
 		Pending: pending, Wait: time.Second,
 	})
 	if err != nil {

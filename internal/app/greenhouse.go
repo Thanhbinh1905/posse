@@ -186,7 +186,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	round := greenhouse.Round{
-		Worktree: member.worktree, MinimumGrantNumber: 1,
+		Worktree: member.worktree, MinimumGrantNumber: 1, ScopeRevision: plan.ScopeRevision(),
 		Intent:   greenhouseIntent(task, plan),
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
@@ -240,10 +240,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	round.Host = greenhouseReviewHost(project, task, member)
-	round.GrantPrefix = daemon.GrantPrefix(round.Host)
-	if revision := plan.ScopeRevision(); revision > 0 {
-		round.GrantPrefix += "/scope-" + strconv.Itoa(revision)
-	}
 	if followGrant != "" {
 		pendingGrant, err := parallelPendingGrant(pendingPath)
 		if err != nil {
@@ -272,7 +268,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, round.GrantPrefix)
+		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, daemon.GrantPrefix(round))
 		ownerHead, ownerStarted := parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
 		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: ownerHead, RequestedAt: ownerStarted}); err != nil {
 			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
