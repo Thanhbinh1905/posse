@@ -688,6 +688,9 @@ func TestReleasedPRMergeDoesNotTouchReusedSandbox(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()
 	ctx := context.Background()
+	if _, err := fixture.db.EnsureDelivery(ctx, fixture.task.ID, "", "https://github.com/acme/shop/pull/16", "publish"); err != nil {
+		t.Fatal(err)
+	}
 	attachPRFixtureSandbox(t, fixture)
 	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
 	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
@@ -704,6 +707,15 @@ func TestReleasedPRMergeDoesNotTouchReusedSandbox(t *testing.T) {
 	removeFixtureTaskPane(fixture)
 	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
 		t.Fatalf("release executor: %d %s %s", code, output, stderr)
+	}
+	deliveries, err := fixture.db.TaskDeliveries(ctx, fixture.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delivery := range deliveries {
+		if delivery.PRURL == fixture.task.PRURL && delivery.ID == fixture.task.ID {
+			t.Fatalf("regression fixture must separate Task ID %d from its Delivery ID", fixture.task.ID)
+		}
 	}
 	otherID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "reuse released Sandbox", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
 	if err != nil {

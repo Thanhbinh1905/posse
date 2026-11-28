@@ -1415,11 +1415,8 @@ func taskSandboxAvailable(ctx context.Context, db *store.DB, task store.Task) (b
 	if err != nil || held {
 		return held, err
 	}
-	policy, err := db.DeliveryExecutorPolicy(ctx, task.ID)
-	if err == nil {
-		return task.SandboxID == 0 && policy != "release", nil
-	}
-	if !store.IsNotFound(err) {
+	released, err := taskExecutorReleased(ctx, db, task.ID)
+	if err != nil || released {
 		return false, err
 	}
 	return task.SandboxID == 0, nil
