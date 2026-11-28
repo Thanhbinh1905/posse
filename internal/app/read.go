@@ -1126,6 +1126,13 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		view["worktree_path"] = task.WorktreePath
 		view["herdr_workspace_id"] = task.HerdrWorkspaceID
+		if s.Herdr != nil && task.State == store.StateWorking {
+			if snapshot, snapshotErr := s.snapshot(ctx.Context); snapshotErr == nil {
+				if pane, found := findTaskPane(snapshot.Panes, task); found && isLegacyWorkerWorkspace(snapshot, project, task, pane) {
+					view["worker_workspace_layout"] = "legacy-worktree-open"
+				}
+			}
+		}
 		view["pane_id"] = task.PaneID
 		view["pr_url"] = task.PRURL
 	}

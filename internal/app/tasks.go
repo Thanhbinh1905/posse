@@ -3475,13 +3475,45 @@ func (s *Service) relaunchTaskAttempt(ctx context.Context, db *store.DB, home st
 		}
 		pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
 	}
-	if pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
-		if err := track("agent.stop", func() error {
-			return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
-		}); err != nil {
-			return failure(err)
+	legacyWorkspace := isLegacyWorkerWorkspace(snapshot, project, task, pane)
+	if pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) || legacyWorkspace {
+		if pane.Agent != "" || s.paneHasAgentAuthority(ctx, pane.PaneID) {
+			if err := track("agent.stop", func() error {
+				return s.stopPaneAgent(ctx, pane.PaneID, pane.Agent)
+			}); err != nil {
+				return failure(err)
+			}
 		}
-		if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
+		if legacyWorkspace {
+			if err := track("workspace.migrate.close", func() error {
+				current, snapshotErr := s.snapshot(ctx)
+				if snapshotErr != nil {
+					return snapshotErr
+				}
+				currentPane, exists := findTaskPane(current.Panes, task)
+				if !exists || currentPane.PaneID != pane.PaneID || currentPane.WorkspaceID != pane.WorkspaceID {
+					return axi.Failure("worker_workspace_identity_changed", "legacy Worker workspace identity changed during relaunch", false)
+				}
+				for _, candidate := range current.Panes {
+					if candidate.WorkspaceID == pane.WorkspaceID && candidate.PaneID != pane.PaneID {
+						return axi.Failure("worker_workspace_occupied", "legacy Worker workspace contains another pane", false, candidate.PaneID)
+					}
+				}
+				_, closeErr := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": pane.WorkspaceID})
+				return closeErr
+			}); err != nil {
+				return failure(err)
+			}
+			var opened openedTab
+			if err := track("workspace.migrate.open", func() error {
+				var openErr error
+				opened, openErr = s.openWorkerTab(ctx, db, home, project, task, task.WorktreePath, kind)
+				return openErr
+			}); err != nil {
+				return failure(err)
+			}
+			pane = herdr.Pane{PaneID: opened.PaneID, WorkspaceID: opened.WorkspaceID, TabID: opened.TabID, Label: task.PaneLabel}
+		} else if s.paneKeepsDetectedAgent(ctx, pane.PaneID) {
 			if err := track("pane.replace", func() error {
 				fresh, replaceErr := s.replaceWorkerPane(ctx, db, home, project, task, pane, kind)
 				pane = fresh
