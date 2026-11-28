@@ -1,6 +1,7 @@
 package app
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/axi"
@@ -21,6 +22,12 @@ var publishBodySections = []string{
 	"## Proof",
 	"## Risk And Rollback",
 	"## Documentation",
+}
+
+type publishDescription struct {
+	summary, verification, proof, risk string
+	refreshLegacy                      bool
+	retainEvidence                     []string
 }
 
 func publishBodyMarker(edge, token string) string {
@@ -68,7 +75,7 @@ func refreshPublishBody(existing, next, token string, refreshLegacy bool) (strin
 	return "", legacyPublishConflict("description has no Posse ownership markers and is not a recognized legacy template")
 }
 
-func preserveOmittedPublishBodyFields(existing, next, token string) string {
+func preserveOmittedPublishBodyFields(existing, next, token string, retainEvidence []string) string {
 	startMarker, endMarker := publishBodyMarker("start", token), publishBodyMarker("end", token)
 	if token == "" || strings.Count(existing, startMarker) != 1 || strings.Count(existing, endMarker) != 1 {
 		return next
@@ -83,14 +90,21 @@ func preserveOmittedPublishBodyFields(existing, next, token string) string {
 		"Proof":             "_No proof supplied._",
 		"Risk And Rollback": "Risk: not stated\nRollback: revert this PR",
 	}
+	const historical = "_Retained from a previous publication. Do not treat this as evidence for a new head._"
 	for heading, placeholder := range defaults {
-		current, found := publishSection(next, heading)
-		if !found || current != placeholder {
+		if retainEvidence != nil {
+			if !slices.Contains(retainEvidence, heading) {
+				continue
+			}
+		} else if current, found := publishSection(next, heading); !found || current != placeholder {
 			continue
 		}
 		prior, found := publishSection(previous, heading)
 		if !found || prior == "" || prior == placeholder {
 			continue
+		}
+		if retainEvidence != nil && heading != "Risk And Rollback" && !strings.HasPrefix(prior, historical+"\n\n") {
+			prior = historical + "\n\n" + prior
 		}
 		next = replacePublishSection(next, heading, prior)
 	}

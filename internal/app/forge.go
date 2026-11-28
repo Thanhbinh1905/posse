@@ -185,7 +185,7 @@ type gitlabMergeRequest struct {
 	} `json:"head_pipeline"`
 }
 
-func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
+func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member string, description publishDescription, previousRemoteHead string) (string, bool, error) {
 	endpoint := "projects/" + url.PathEscape(forge.Path) + "/merge_requests?state=opened&source_branch=" + url.QueryEscape(task.Branch) + "&per_page=100"
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
@@ -230,8 +230,8 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 				if err := validateWorkerPullRequest(ctx, project, task, forge, mr.WebURL, task.GatedSHA); err != nil {
 					return "", false, err
 				}
-				if summary != "" {
-					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, mr.WebURL, member, summary, verification, proof, risk, refreshLegacy); err != nil {
+				if description.summary != "" {
+					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, mr.WebURL, member, description); err != nil {
 						return "", false, err
 					}
 				}
@@ -293,7 +293,7 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 	if err != nil {
 		return "", false, err
 	}
-	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
+	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, description.summary, description.verification, description.proof, description.risk)
 	if err != nil {
 		return "", false, err
 	}
