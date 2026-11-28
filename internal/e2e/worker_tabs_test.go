@@ -87,14 +87,14 @@ func TestListHoldsRestartUntilUpAll(t *testing.T) {
 	if after.HerdrWorkspaceID == lead.WorkspaceID {
 		t.Fatalf("recovered Worker was placed in the Lead workspace: task=%#v Lead=%#v", after, lead)
 	}
-	foundChild := false
+	foundWorkspace := false
 	for _, workspace := range recoveredSnapshot.Workspaces {
-		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == after.WorktreePath {
-			foundChild = true
+		if workspace.WorkspaceID == after.HerdrWorkspaceID && workspace.Label == workerWorkspaceLabelForE2E(after) && !workspace.Worktree.IsLinkedWorktree {
+			foundWorkspace = true
 		}
 	}
-	if !foundChild {
-		t.Fatalf("recovered Worker lost linked-child grouping: %#v", recoveredSnapshot.Workspaces)
+	if !foundWorkspace {
+		t.Fatalf("recovered Worker lost its labeled workspace: %#v", recoveredSnapshot.Workspaces)
 	}
 	assertLeadSidebarPresentation(t, fixture.client, lead.WorkspaceID, lead.PaneID, "Lead:shop")
 	db, err = store.OpenReadOnly(fixture.home)

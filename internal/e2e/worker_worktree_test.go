@@ -171,12 +171,10 @@ func TestLegacyLinkedWorkerChildTearsDownWithoutClosingLeadOrSibling(t *testing.
 	}
 }
 
-// A real attached Herdr 0.9.0 client must render the grouped names without
-// any Posse-specific sidebar configuration.
-func assertNativeWorktreeSidebar(t *testing.T, f *workerTabsFixture, names ...string) []byte {
+func assertNativeWorkerWorkspaceSidebar(t *testing.T, f *workerTabsFixture, names ...string) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("script"); err != nil {
-		t.Log("script unavailable; snapshot still verifies grouping")
+		t.Log("script unavailable; snapshot still verifies the workspace layout")
 		return nil
 	}
 	var output []byte
