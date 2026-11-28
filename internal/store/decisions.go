@@ -507,7 +507,12 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 }
 
 const resolvedDecisionPredicate = `
-		(d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode IN ('pr','greenhouse') AND NOT EXISTS(
+		(d.kind NOT IN ('orphan','teardown_dependants') AND t.state='torn-down')
+		OR (d.kind='teardown_dependants' AND NOT EXISTS(
+			SELECT 1 FROM tasks dependant WHERE dependant.project_id=d.project_id AND dependant.state='queued'
+			AND INSTR(','||SUBSTR(d.origin, INSTR(d.origin, ':')+INSTR(SUBSTR(d.origin, INSTR(d.origin, ':')+1), ':')+1)||',', ',t'||dependant.seq||',')>0
+		))
+		OR (d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode IN ('pr','greenhouse') AND NOT EXISTS(
 			SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url
 			AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url)
 			AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS'
@@ -592,8 +597,10 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
 		WHEN 'budget' THEN 'Budget Decision no longer applies to this Worker launch, Task state or Project day'
 		WHEN 'dependency' THEN 'Queued Task or prerequisite state changed'
-		ELSE 'Task no longer failed or lost' END
-		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','budget','dependency')
+		WHEN 'teardown_dependants' THEN 'No named dependants remain queued'
+		ELSE CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE id=d.task_id AND state='torn-down') THEN 'Task was torn down' ELSE 'Task no longer failed or lost' END END
+		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0
+		AND d.kind<>'workflow_stage' AND (d.kind<>'orphan' OR d.origin LIKE 'orphan:unrecoverable:%')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=d.task_id AND (`+resolvedDecisionPredicate+`))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
 		return err
@@ -606,13 +613,16 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" {
-		return "", nil
-	}
 	var state State
 	var launches int
 	if err := tx.QueryRowContext(ctx, `SELECT state,launches FROM tasks WHERE id=? AND project_id=?`, decision.TaskID, decision.ProjectID).Scan(&state, &launches); err != nil {
 		return "", err
+	}
+	if decision.Kind != "orphan" && decision.Kind != "teardown_dependants" && state == StateTornDown {
+		return "Task was torn down", nil
+	}
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" && decision.Kind != "teardown_dependants" {
+		return "", nil
 	}
 	if decision.Kind == "merge_ready" {
 		var ready bool
@@ -628,6 +638,19 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "recovery" && (state != StateFailed && state != StateLost || launches != decision.TaskLaunches) {
 		return "Task no longer failed or lost", nil
+	}
+	if decision.Kind == "teardown_dependants" {
+		parts := strings.Split(decision.Origin, ":")
+		if len(parts) != 3 || parts[0] != "teardown-dependants" {
+			return "", nil
+		}
+		var queued bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks dependant WHERE dependant.project_id=? AND dependant.state='queued' AND INSTR(','||?||',', ',t'||dependant.seq||',')>0)`, decision.ProjectID, parts[2]).Scan(&queued); err != nil {
+			return "", err
+		}
+		if !queued {
+			return "No named dependants remain queued", nil
+		}
 	}
 	if decision.Kind == "dependency" {
 		parts := strings.Split(decision.Origin, ":")

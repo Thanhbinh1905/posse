@@ -189,7 +189,7 @@ func admittedChangeBrief(plan *taskplan.Plan) (dispatch.Brief, error) {
 		if input.Role != "brief" {
 			continue
 		}
-		brief, err := dispatch.ParseBriefText(string(input.Bytes))
+		brief, err := dispatch.ParseHistoricalBriefText(string(input.Bytes))
 		if err != nil {
 			return dispatch.Brief{}, err
 		}

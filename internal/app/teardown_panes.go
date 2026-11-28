@@ -113,7 +113,11 @@ func (s *Service) autoTeardownMergedTasks(ctx context.Context, db *store.DB, pro
 }
 
 func safeMergedPRWorktree(ctx context.Context, db *store.DB, project store.Project, task store.Task, observation store.PRObservation) (bool, error) {
-	if observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.MergedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
+	sandboxAvailable, err := taskSandboxAvailable(ctx, db, task)
+	if err != nil {
+		return false, err
+	}
+	if !sandboxAvailable || observation.PRURL != task.PRURL || observation.HeadSHA == "" || observation.MergeCommit == "" || task.MergedRef != observation.MergeCommit || task.Branch == "" || task.WorktreePath == "" {
 		return false, nil
 	}
 	branchSHA, err := gitOutput(ctx, project.Root, "rev-parse", "refs/heads/"+task.Branch)

@@ -475,7 +475,7 @@ func TestNoticeSourcesRaiseDecisionsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err = db.Decisions(ctx, project.ID, true)
-	if err != nil || len(pending) != 2 {
-		t.Fatalf("torn-down Task still has pending Decision: %#v %v", pending, err)
+	if err != nil || len(pending) != 1 || pending[0].Kind != "review" || pending[0].TaskID != review.ID {
+		t.Fatalf("unexpected pending Decisions after teardown: %#v %v", pending, err)
 	}
 }

@@ -22,6 +22,7 @@ type ProviderFindingDetail struct {
 	Path        string
 	Line        int
 	Excerpt     string
+	Guidance    string
 	Severity    string
 	Origin      string
 	State       string
@@ -74,8 +75,16 @@ func recordProviderFindingsTx(ctx context.Context, tx *sql.Tx, verdictID int64, 
 		} else if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO provider_findings(verdict_id,task_id,provider,repo,head_sha,finding_key,pattern_seq,path,line,excerpt,severity,origin,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'open')`,
-			verdictID, verdict.TaskID, verdict.Provider, verdict.Repository, verdict.Head, providerFindingKey(finding), patternSeq, finding.Path, finding.Line, finding.Excerpt, finding.Severity, finding.Origin); err != nil {
+		result, err := tx.ExecContext(ctx, `INSERT INTO provider_findings(verdict_id,task_id,provider,repo,head_sha,finding_key,pattern_seq,path,line,excerpt,severity,origin,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'open')`,
+			verdictID, verdict.TaskID, verdict.Provider, verdict.Repository, verdict.Head, providerFindingKey(finding), patternSeq, finding.Path, finding.Line, finding.Excerpt, finding.Severity, finding.Origin)
+		if err != nil {
+			return err
+		}
+		findingID, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO provider_finding_events(finding_id,event,note,at) VALUES(?, 'guidance', ?, ?)`, findingID, finding.Guidance, time.Now().UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -84,10 +93,10 @@ func recordProviderFindingsTx(ctx context.Context, tx *sql.Tx, verdictID int64, 
 
 func (db *DB) ProviderFindingForTask(ctx context.Context, taskID int64, seq int) (ProviderFindingDetail, error) {
 	var finding ProviderFindingDetail
-	err := db.QueryRowContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,CASE WHEN EXISTS(SELECT 1 FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='withdrawn') THEN 'withdrawn' ELSE f.state END
+	err := db.QueryRowContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,COALESCE((SELECT e.note FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='guidance' ORDER BY e.id DESC LIMIT 1),p.fix_guidance,''),f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,CASE WHEN EXISTS(SELECT 1 FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='withdrawn') THEN 'withdrawn' ELSE f.state END
 FROM provider_findings f JOIN provider_finding_patterns p ON p.task_id=f.task_id AND p.seq=f.pattern_seq
 JOIN current_verdicts v ON v.id=f.verdict_id
-WHERE f.task_id=? AND f.id=? AND v.provider=f.provider AND v.id=(SELECT id FROM current_verdicts latest WHERE latest.task_id=f.task_id AND latest.repo=f.repo AND latest.provider=f.provider ORDER BY latest.recorded_at DESC,latest.id DESC LIMIT 1)`, taskID, seq).Scan(&finding.FindingSeq, &finding.PatternSeq, &finding.PatternKey, &finding.Title, &finding.Rule, &finding.FixGuidance,
+WHERE f.task_id=? AND f.id=? AND v.provider=f.provider AND v.id=(SELECT id FROM current_verdicts latest WHERE latest.task_id=f.task_id AND latest.repo=f.repo AND latest.provider=f.provider ORDER BY latest.recorded_at DESC,latest.id DESC LIMIT 1)`, taskID, seq).Scan(&finding.FindingSeq, &finding.PatternSeq, &finding.PatternKey, &finding.Title, &finding.Rule, &finding.FixGuidance, &finding.Guidance,
 		&finding.Repository, &finding.HeadSHA, &finding.Path, &finding.Line, &finding.Excerpt, &finding.Severity, &finding.Origin, &finding.State)
 	return finding, err
 }
@@ -119,7 +128,7 @@ func (db *DB) WithdrawProviderFinding(ctx context.Context, taskID, findingID, de
 }
 
 func (db *DB) ProviderFindingsForTask(ctx context.Context, taskID int64) ([]ProviderFindingDetail, error) {
-	rows, err := db.QueryContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,CASE WHEN EXISTS(SELECT 1 FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='withdrawn') THEN 'withdrawn' ELSE f.state END
+	rows, err := db.QueryContext(ctx, `SELECT f.id,f.pattern_seq,p.key,p.title,p.rule,p.fix_guidance,COALESCE((SELECT e.note FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='guidance' ORDER BY e.id DESC LIMIT 1),p.fix_guidance,''),f.repo,f.head_sha,f.path,f.line,f.excerpt,f.severity,f.origin,CASE WHEN EXISTS(SELECT 1 FROM provider_finding_events e WHERE e.finding_id=f.id AND e.event='withdrawn') THEN 'withdrawn' ELSE f.state END
 FROM provider_findings f JOIN provider_finding_patterns p ON p.task_id=f.task_id AND p.seq=f.pattern_seq
 JOIN current_verdicts v ON v.id=f.verdict_id
 WHERE f.task_id=? AND v.provider=f.provider AND v.id=(SELECT id FROM current_verdicts latest WHERE latest.task_id=f.task_id AND latest.repo=f.repo AND latest.provider=f.provider ORDER BY latest.recorded_at DESC,latest.id DESC LIMIT 1)
@@ -131,7 +140,7 @@ ORDER BY f.repo,f.pattern_seq,f.id`, taskID)
 	var findings []ProviderFindingDetail
 	for rows.Next() {
 		var finding ProviderFindingDetail
-		if err := rows.Scan(&finding.FindingSeq, &finding.PatternSeq, &finding.PatternKey, &finding.Title, &finding.Rule, &finding.FixGuidance,
+		if err := rows.Scan(&finding.FindingSeq, &finding.PatternSeq, &finding.PatternKey, &finding.Title, &finding.Rule, &finding.FixGuidance, &finding.Guidance,
 			&finding.Repository, &finding.HeadSHA, &finding.Path, &finding.Line, &finding.Excerpt, &finding.Severity, &finding.Origin, &finding.State); err != nil {
 			return nil, err
 		}
