@@ -78,15 +78,21 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 	if task.Type != "change" {
 		return axi.Failure("merge_refused", "only Change Tasks can be Merged", false)
 	}
-	if !project.IsWorkspace() && task.WorktreePath != "" && task.Branch != "" {
+	sandboxAvailable, err := taskSandboxAvailable(ctx.Context, db, task)
+	if err != nil {
+		return err
+	}
+	if sandboxAvailable && !project.IsWorkspace() && task.WorktreePath != "" && task.Branch != "" {
 		lock, lockErr := acquireTaskBranchAuthorLock(ctx.Context, task.WorktreePath, task.Branch)
 		if lockErr != nil {
 			return axi.Failure("merge_refused", "could not acquire the branch author operation lock", true, lockErr.Error())
 		}
 		defer lock.Close()
 	}
-	if err := requireCurrentTaskBranchAuthor(ctx.Context, db, task); err != nil {
-		return axi.Failure("merge_refused", "Task does not hold the current branch author claim", false, err.Error())
+	if sandboxAvailable {
+		if err := requireCurrentTaskBranchAuthor(ctx.Context, db, task); err != nil {
+			return axi.Failure("merge_refused", "Task does not hold the current branch author claim", false, err.Error())
+		}
 	}
 	if usesRemovedNoMistakes(task) {
 		return noMistakesRemoved(task)
@@ -99,12 +105,14 @@ func (s *Service) merge(ctx *axi.Context, args []string) (returnErr error) {
 		return ctx.Print(fields)
 	}
 	if task.State == store.StateDone && !project.IsWorkspace() {
-		work, err := s.unmergedWork(ctx.Context, db, project, task)
-		if err != nil {
-			return err
-		}
-		if work == "" {
-			return axi.Failure("merge_refused", "Task has no change to deliver", false, "Run `posse teardown "+taskIDString(task.Seq)+"` to finish it")
+		if sandboxAvailable || !deliveredByPullRequest(task.MergeMode) {
+			work, err := s.unmergedWork(ctx.Context, db, project, task)
+			if err != nil {
+				return err
+			}
+			if work == "" {
+				return axi.Failure("merge_refused", "Task has no change to deliver", false, "Run `posse teardown "+taskIDString(task.Seq)+"` to finish it")
+			}
 		}
 	}
 	if parsed.Bool("execute") {
@@ -1400,6 +1408,18 @@ func taskSandboxHeldBy(ctx context.Context, db *store.DB, task store.Task) (bool
 		return false, err
 	}
 	return sandbox.ID == task.SandboxID && sandbox.TaskID == task.ID && sandbox.State == "held", nil
+}
+
+func taskSandboxAvailable(ctx context.Context, db *store.DB, task store.Task) (bool, error) {
+	held, err := taskSandboxHeldBy(ctx, db, task)
+	if err != nil || held {
+		return held, err
+	}
+	released, err := taskExecutorReleased(ctx, db, task.ID)
+	if err != nil || released {
+		return false, err
+	}
+	return task.SandboxID == 0, nil
 }
 
 func isMissingGitRef(err error) bool {
