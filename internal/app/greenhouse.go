@@ -1396,7 +1396,7 @@ func greenhouseIntent(task store.Task, plan *taskplan.Plan) string {
 			if input.Role != "brief" {
 				continue
 			}
-			if brief, err := dispatch.ParseBriefText(string(input.Bytes)); err == nil {
+			if brief, err := dispatch.ParseHistoricalBriefText(string(input.Bytes)); err == nil {
 				if brief.Title != "" {
 					title = brief.Title
 				}
