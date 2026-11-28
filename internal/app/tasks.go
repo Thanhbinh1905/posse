@@ -399,6 +399,13 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if err != nil {
 		return err
 	}
+	for _, member := range members {
+		if defaultBranchUnborn(ctx.Context, member.repoTarget) {
+			if err := requireGitUnbornTaskSupport(ctx.Context); err != nil {
+				return err
+			}
+		}
+	}
 	issueTargets, err := projectTargets(ctx.Context, db, project)
 	if err != nil {
 		return err

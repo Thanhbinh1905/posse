@@ -50,6 +50,72 @@ func TestRelaunchPlanRevisionRequiresEffectiveChanges(t *testing.T) {
 	}
 }
 
+func TestStartRejectsUnbornWorkspaceMemberBeforeAdmissionOnOldGit(t *testing.T) {
+	fixture := newStartFixture(t)
+	root := t.TempDir()
+	workspace := filepath.Join(root, "stack")
+	member := filepath.Join(workspace, "worker")
+	if err := os.MkdirAll(member, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTest(t, member, "init", "-b", "main")
+	detected, err := detectProject(context.Background(), workspace)
+	if err != nil || detected.Kind != store.ProjectKindWorkspace {
+		t.Fatalf("detect Workspace = %#v, %v", detected, err)
+	}
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := registerDetected(context.Background(), db, detected)
+	if err == nil {
+		err = db.SetProjectLead(context.Background(), project.ID, "w1", "w1:p1", "posse:stack:lead")
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceBrief := "---\ntype: change\ntitle: Workspace Git check\ndone_when: the Worker acts\nrepos: [worker]\n---\nCreate a committed file.\n"
+	if err := os.WriteFile(fixture.brief, []byte(workspaceBrief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'git version 2.35.9\\n'; exit 0; fi\nexec %q \"$@\"\n", realGit)
+	if err := os.WriteFile(shim, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Chdir(workspace)
+	output := &bytes.Buffer{}
+	service := testService(fixture.home, fixture.fake)
+	cli := service.CLI()
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief, "--name", "workspace-git-check"}); code == 0 || !strings.Contains(output.String(), "git_version_unsupported") {
+		t.Fatalf("start with Git 2.35 and unborn Workspace member: %d\n%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if tasks, err := db.Tasks(context.Background(), project.ID, true); err != nil || len(tasks) != 0 {
+		t.Fatalf("unsupported Git created Tasks: %#v, %v", tasks, err)
+	}
+	if sandboxes, err := db.Sandboxes(context.Background(), project.ID); err != nil || len(sandboxes) != 0 {
+		t.Fatalf("unsupported Git acquired Sandboxes: %#v, %v", sandboxes, err)
+	}
+	if leases, err := db.ResourceLeases(context.Background(), project.ID); err != nil || len(leases) != 0 {
+		t.Fatalf("unsupported Git acquired resource leases: %#v, %v", leases, err)
+	}
+}
+
 func TestWorkspaceWorkerBriefQualifiesTicketWithMember(t *testing.T) {
 	brief, err := dispatch.ParseBriefText("---\ntype: change\ntitle: Fix checkout\ndone_when: checked\nrepos: [backend, worker]\nticket: worker#12\nrefs: [backend#12]\n---\n")
 	if err != nil {
