@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -444,6 +445,23 @@ func stopBackgroundWatch(t *testing.T, f *prLifecycleFixture) {
 	stopFixtureBackgroundWatch(t, f.root, f.env, f.db, f.project.ID)
 }
 
+func stopFixtureWatchPID(pid int, signal syscall.Signal, kill func(int, syscall.Signal) error) error {
+	err := kill(pid, signal)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}
+
+func TestStopFixtureWatchPIDAlreadyExited(t *testing.T) {
+	err := stopFixtureWatchPID(123, syscall.SIGTERM, func(int, syscall.Signal) error {
+		return syscall.ESRCH
+	})
+	if err != nil {
+		t.Fatalf("already-exited Watch should be treated as stopped: %v", err)
+	}
+}
+
 func stopFixtureBackgroundWatch(t *testing.T, root string, env []string, db *store.DB, projectID int64) {
 	t.Helper()
 	_ = herdr.NewWithEnv("herdr", env) // Keep the fixture's Herdr environment isolated.
@@ -452,7 +470,7 @@ func stopFixtureBackgroundWatch(t *testing.T, root string, env []string, db *sto
 	}
 	for _, pid := range watchPIDs(root) {
 		// SIGTERM lets active maintenance release its leases and SQLite writes.
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err := stopFixtureWatchPID(pid, syscall.SIGTERM, syscall.Kill); err != nil {
 			t.Fatalf("stop background Watch: %v", err)
 		}
 	}
