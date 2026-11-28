@@ -289,6 +289,28 @@ func TestOpenWorkerTabReusesTheTaskChildWorkspaceForRelaunch(t *testing.T) {
 	}
 }
 
+func TestOpenWorkerTabDoesNotReuseRecordedWorkspaceWhenItsPathDiffers(t *testing.T) {
+	project, task, adapter := workerTabSession(t)
+	task.HerdrWorkspaceID = "w2"
+	child := herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task), Root: t.TempDir()}
+	child.Worktree.CheckoutPath = child.Root
+	child.Worktree.IsLinkedWorktree = true
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, child)
+	for i := range adapter.snapshot.Panes {
+		adapter.snapshot.Panes[i].CWD = t.TempDir()
+	}
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", CWD: child.Root})
+	adapter.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w3"},"tab":{"tab_id":"w3:t1"},"root_pane":{"pane_id":"w3:p1","tab_id":"w3:t1"}}`)
+
+	opened, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), nil, t.TempDir(), project, task, task.WorktreePath, "claude")
+	if err != nil || opened.WorkspaceID != "w3" {
+		t.Fatalf("openWorkerTab reused a recorded workspace at another path: opened=%#v err=%v", opened, err)
+	}
+	if adapter.CallCount("workspace.create") != 1 || adapter.CallCount("tab.create") != 0 {
+		t.Fatalf("a recorded ID and label overrode the workspace path: %#v", adapter.Calls)
+	}
+}
+
 func TestOpenWorkerTabOpensWorkspaceProjectWorkerInSubworkspace(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
 	project.Kind = store.ProjectKindWorkspace

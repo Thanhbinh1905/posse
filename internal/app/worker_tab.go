@@ -56,6 +56,25 @@ func sandboxOccupied(holder string) error {
 	return axi.Failure("worker_workspace_occupied", "another Herdr workspace already holds this Sandbox: "+holder, false, "Inspect the Sandbox's open panes before retrying")
 }
 
+func workspaceMatchesTaskPath(snapshot herdr.Snapshot, workspace herdr.Workspace, task store.Task, path string) bool {
+	cleanPath := filepath.Clean(path)
+	if workspace.Root != "" && filepath.Clean(workspace.Root) == cleanPath {
+		return true
+	}
+	if workspace.Worktree.IsLinkedWorktree && filepath.Clean(workspace.Worktree.CheckoutPath) == cleanPath {
+		return true
+	}
+	for _, pane := range snapshot.Panes {
+		if pane.WorkspaceID != workspace.WorkspaceID || filepath.Clean(pane.CWD) != cleanPath {
+			continue
+		}
+		if _, owned := findTaskPane([]herdr.Pane{pane}, task); owned {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, path, displayAgent string) (openedTab, error) {
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
@@ -70,21 +89,7 @@ func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, 
 		if workspace.WorkspaceID == project.HerdrWorkspaceID {
 			continue
 		}
-		matchesPath := workspace.Root != "" && filepath.Clean(workspace.Root) == filepath.Clean(path)
-		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Label == workerWorkspaceLabel(task) {
-			matchesPath = true
-		}
-		if workspace.Worktree.IsLinkedWorktree && filepath.Clean(workspace.Worktree.CheckoutPath) == filepath.Clean(path) {
-			matchesPath = true
-		}
-		if !matchesPath {
-			for _, pane := range snapshot.Panes {
-				if pane.WorkspaceID == workspace.WorkspaceID && filepath.Clean(pane.CWD) == filepath.Clean(path) {
-					matchesPath = true
-					break
-				}
-			}
-		}
+		matchesPath := workspaceMatchesTaskPath(snapshot, workspace, task, path)
 		if !matchesPath {
 			continue
 		}
