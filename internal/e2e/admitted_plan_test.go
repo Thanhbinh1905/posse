@@ -87,6 +87,42 @@ func TestAdmittedPublishUsesSelectedBriefInsteadOfMutableCopy(t *testing.T) {
 	}
 }
 
+func TestFrozenPre1332BriefRemainsReadableByCLI(t *testing.T) {
+	fixture := newPRLifecycleFixture(t)
+	defer fixture.db.Close()
+	briefPath := filepath.Join(fixture.root, "change.md")
+	original := "---\ntype: change\ntitle: Historical issue reference\ndone_when: committed change exists\nticket: 12\n---\nCreate a committed change.\n"
+	if err := os.WriteFile(briefPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.runStartWithStoreBusyRetry(t, briefPath, "historical-brief")
+	task := fixture.mustTask(t, "t1")
+	plan, err := task.AdmittedPlan()
+	if err != nil || plan == nil {
+		t.Fatalf("load admitted plan: %v", err)
+	}
+	pre1332 := strings.Replace(original, "committed change exists", "Fix issue #1044", 1)
+	plan.Inputs[0] = taskplan.Select("brief", plan.Inputs[0].Source, []byte(pre1332))
+	plan.AdmittedSHA256 = ""
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, string(encoded), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(context.Background(), `UPDATE task_plan_revisions SET plan_json=? WHERE task_id=? AND revision=?`, string(encoded), task.ID, plan.Revision); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{}, {"list"}, {"show", "t1"}} {
+		command := exec.Command(fixture.binary, args...)
+		command.Dir, command.Env = fixture.repo, fixture.leadEnv
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("posse %s failed: %v\n%s", strings.Join(args, " "), err, output)
+		}
+	}
+}
+
 func TestWorkerAdmittedStatusDoesNotRecoverOrExposeSibling(t *testing.T) {
 	fixture := reviewIdentityFixture(t)
 	if code, output := startReviewIdentityTask(t, fixture, "Own candidate", "author", ""); code != 0 {
