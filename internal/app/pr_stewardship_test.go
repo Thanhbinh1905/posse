@@ -791,8 +791,8 @@ func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) 
 	if err != nil || task.State != store.StateMerging {
 		t.Fatalf("release changed Land state: %#v err=%v", task, err)
 	}
-	if policy, err := fixture.db.DeliveryExecutorPolicy(context.Background(), fixture.task.ID); err != nil || policy != "release" {
-		t.Fatalf("effective executor policy = %q err=%v", policy, err)
+	if policy, found, err := fixture.db.LatestAppliedTaskExecutorPolicy(context.Background(), fixture.task.ID); err != nil || !found || policy.Subject != "release" {
+		t.Fatalf("effective executor policy = %#v found=%v err=%v", policy, found, err)
 	}
 	if sandbox, err := fixture.db.SandboxByTask(context.Background(), fixture.task.ID); !store.IsNotFound(err) {
 		t.Fatalf("released Task still owns Sandbox %#v err=%v", sandbox, err)
