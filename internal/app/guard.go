@@ -2513,12 +2513,31 @@ func gitTopLevelDirectory(cwd string, e *shellEnv) (string, bool) {
 	return "", false
 }
 
+func gitEnvironmentBool(value string) (bool, bool) {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 func gitConfigWorktreesWithEnv(e *shellEnv, cwd string) ([]string, bool) {
 	paths := []string{}
 	if e.unknown["GIT_CONFIG_NOSYSTEM"] {
 		return nil, false
 	}
-	if !e.exported["GIT_CONFIG_NOSYSTEM"] || e.values["GIT_CONFIG_NOSYSTEM"] == "" {
+	noSystem := false
+	if e.exported["GIT_CONFIG_NOSYSTEM"] && e.values["GIT_CONFIG_NOSYSTEM"] != "" {
+		var valid bool
+		noSystem, valid = gitEnvironmentBool(e.values["GIT_CONFIG_NOSYSTEM"])
+		if !valid {
+			return nil, false
+		}
+	}
+	if !noSystem {
 		if e.unknown["GIT_CONFIG_SYSTEM"] {
 			return nil, false
 		}
