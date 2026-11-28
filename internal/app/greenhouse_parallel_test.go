@@ -398,7 +398,7 @@ func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T)
 	}
 }
 
-func TestGreenhouseTargetRefreshSkipsStaleObservationAfterTaskHeadContainsTarget(t *testing.T) {
+func TestGreenhouseCandidateRefreshUsesStaleCandidateAfterTaskHeadContainsTarget(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
 	plan, err := f.task.AdmittedPlan()
@@ -427,8 +427,8 @@ func TestGreenhouseTargetRefreshSkipsStaleObservationAfterTaskHeadContainsTarget
 		t.Fatal(err)
 	}
 	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
-	if err != nil || queued || len(instructions) != 0 {
-		t.Fatalf("stale Greenhouse observation queued=%t instructions=%+v err=%v; want no refresh after Task head contains target %s", queued, instructions, err, target)
+	if err != nil || !queued || len(instructions) != 1 || !strings.Contains(instructions[0].Body, staleHead) {
+		t.Fatalf("stale candidate refresh queued=%t instructions=%+v err=%v; want one refresh for candidate %s despite Task head containing target %s", queued, instructions, err, staleHead, target)
 	}
 }
 
