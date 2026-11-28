@@ -255,7 +255,8 @@ func (s *Service) promotePrivateCandidate(out *axi.Context, db *store.DB, home s
 	promotionTask := task
 	promotionTask.WorktreePath = candidate.WorktreePath
 	promotionTask.GatedSHA = candidate.CandidateSHA
-	prURL, _, err := s.findOrCreatePullRequest(ctx, db, project, promotionTask, intent, forge, repoName, candidate.Summary, candidate.Verification, candidate.Proof, candidate.Risk, candidate.Refresh, candidate.ExpectedRemoteSHA)
+	description := publishDescription{summary: candidate.Summary, verification: candidate.Verification, proof: candidate.Proof, risk: candidate.Risk, refreshLegacy: candidate.Refresh}
+	prURL, _, err := s.findOrCreatePullRequest(ctx, db, project, promotionTask, intent, forge, repoName, description, candidate.ExpectedRemoteSHA)
 	if err != nil {
 		return err
 	}
@@ -339,7 +340,8 @@ func (s *Service) refreshPromotedPullRequest(out *axi.Context, db *store.DB, lan
 	if risk == "" {
 		risk = candidate.Risk
 	}
-	if err := s.refreshExistingPullRequest(ctx, db, intent, project, promotedTask, forge, prURL, lane.repo, summary, verification, proof, risk, true); err != nil {
+	description := publishDescription{summary: summary, verification: verification, proof: proof, risk: risk, refreshLegacy: true}
+	if err := s.refreshExistingPullRequest(ctx, db, intent, project, promotedTask, forge, prURL, lane.repo, description); err != nil {
 		return err
 	}
 	result := axi.Object{{Key: "task", Value: taskIDString(task.Seq)}}

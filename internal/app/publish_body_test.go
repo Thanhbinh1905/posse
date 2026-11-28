@@ -129,7 +129,7 @@ func TestRefreshPublishBodyConflictsWithUnstructuredHumanDescription(t *testing.
 func TestPreserveOmittedPublishBodyFields(t *testing.T) {
 	existing := managedPublishBody("## Verification\n\n- [x] prior verification\n\n## Proof\n\nprior proof\n\n## Risk And Rollback\n\nRisk: low\nRollback: revert", testPublishToken)
 	next := "## Summary\n\nUpdated summary\n\n## Verification\n\n- [ ] Not run; reason: not supplied\n\n## Proof\n\n_No proof supplied._\n\n## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR"
-	got := preserveOmittedPublishBodyFields(existing, next, testPublishToken)
+	got := preserveOmittedPublishBodyFields(existing, next, testPublishToken, nil)
 	for _, value := range []string{"Updated summary", "prior verification", "prior proof", "Risk: low", "Rollback: revert"} {
 		if !strings.Contains(got, value) {
 			t.Errorf("refreshed body omitted %q: %s", value, got)
@@ -149,7 +149,7 @@ func TestPreserveOmittedPublishBodyFieldsKeepsNestedContent(t *testing.T) {
 			existing := managedPublishBody("## Verification\n\n[x] verified\n\n## Proof\n\n"+test.proof+"\n\n## Risk And Rollback\n\nRisk: low\nRollback: revert", testPublishToken)
 			next := "## Verification\n\n- [ ] Not run; reason: not supplied\n\n## Proof\n\n_No proof supplied._\n\n## Risk And Rollback\n\nRisk: not stated\nRollback: revert this PR"
 
-			got := preserveOmittedPublishBodyFields(existing, next, testPublishToken)
+			got := preserveOmittedPublishBodyFields(existing, next, testPublishToken, nil)
 			if !strings.Contains(got, test.proof) {
 				t.Fatalf("refresh truncated nested Proof content: got %q, want full content %q", got, test.proof)
 			}

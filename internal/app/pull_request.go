@@ -271,7 +271,7 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 				return axi.Failure("intent_active", "Task already has an unfinished command", true, err.Error())
 			}
 			openIntentActive = true
-			prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", "", "", "", "", false, "")
+			prURL, _, openErr := s.findOrCreatePullRequest(ctx, db, project, task, openIntent, forge, "", publishDescription{}, "")
 			if openErr != nil {
 				return openErr
 			}
@@ -317,14 +317,14 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 
 // findOrCreatePullRequest opens or reuses the Task's PR/MR and records it as
 // a delivery stewarded by the Lead.
-func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (string, bool, error) {
+func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member string, description publishDescription, previousRemoteHead string) (string, bool, error) {
 	var prURL string
 	var opened bool
 	var err error
 	if forge.Kind == "gitlab" {
-		prURL, opened, err = s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
+		prURL, opened, err = s.findOrCreateGitLabMR(ctx, db, project, task, intent, forge, member, description, previousRemoteHead)
 	} else {
-		prURL, opened, err = s.findOrCreateGitHubPullRequest(ctx, db, project, task, intent, forge, member, summary, verification, proof, risk, refreshLegacy, previousRemoteHead)
+		prURL, opened, err = s.findOrCreateGitHubPullRequest(ctx, db, project, task, intent, forge, member, description, previousRemoteHead)
 	}
 	if err != nil {
 		return prURL, opened, err
@@ -335,7 +335,7 @@ func (s *Service) findOrCreatePullRequest(ctx context.Context, db *store.DB, pro
 	return prURL, opened, nil
 }
 
-func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member, summary, verification, proof, risk string, refreshLegacy bool, previousRemoteHead string) (prURL string, opened bool, resultErr error) {
+func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.DB, project store.Project, task store.Task, intent store.Intent, forge repositoryForge, member string, description publishDescription, previousRemoteHead string) (prURL string, opened bool, resultErr error) {
 	args := []string{"pr", "list", "--state", "open", "--head", task.Branch, "--json", "url,headRefName,headRefOid,baseRefName,headRepository", "--limit", "100"}
 	pollCtx, cancel := context.WithTimeout(ctx, openPullRequestHeadTimeout)
 	defer cancel()
@@ -384,8 +384,8 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 					return "", false, err
 				}
 				// Merge may adopt an existing PR but has no new Worker metadata to publish.
-				if summary != "" {
-					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, urlValue, member, summary, verification, proof, risk, refreshLegacy); err != nil {
+				if description.summary != "" {
+					if err := s.refreshExistingPullRequest(ctx, db, intent, project, task, forge, urlValue, member, description); err != nil {
 						return "", false, err
 					}
 				}
@@ -440,7 +440,7 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 	if err != nil {
 		return "", false, err
 	}
-	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
+	title, body, err := prDetails(ctx, db, project, task, s.homePath, member, description.summary, description.verification, description.proof, description.risk)
 	if err != nil {
 		return "", false, err
 	}
@@ -461,8 +461,8 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 	return urlValue, true, nil
 }
 
-func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, intent store.Intent, project store.Project, task store.Task, forge repositoryForge, prURL, member, summary, verification, proof, risk string, refreshLegacy bool) error {
-	title, nextBody, err := prDetails(ctx, db, project, task, s.homePath, member, summary, verification, proof, risk)
+func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, intent store.Intent, project store.Project, task store.Task, forge repositoryForge, prURL, member string, description publishDescription) error {
+	title, nextBody, err := prDetails(ctx, db, project, task, s.homePath, member, description.summary, description.verification, description.proof, description.risk)
 	if err != nil {
 		return err
 	}
@@ -518,10 +518,10 @@ func (s *Service) refreshExistingPullRequest(ctx context.Context, db *store.DB, 
 		existingBody = strings.ReplaceAll(existingBody, publishBodyMarker("start", oldToken), publishBodyMarker("start", token))
 		existingBody = strings.ReplaceAll(existingBody, publishBodyMarker("end", oldToken), publishBodyMarker("end", token))
 	}
-	if refreshLegacy {
-		nextBody = preserveOmittedPublishBodyFields(existingBody, nextBody, token)
+	if description.retainEvidence != nil || description.refreshLegacy {
+		nextBody = preserveOmittedPublishBodyFields(existingBody, nextBody, token, description.retainEvidence)
 	}
-	nextBody, err = refreshPublishBody(existingBody, nextBody, token, refreshLegacy)
+	nextBody, err = refreshPublishBody(existingBody, nextBody, token, description.refreshLegacy)
 	if err != nil {
 		return err
 	}
