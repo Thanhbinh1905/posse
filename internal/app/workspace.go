@@ -104,8 +104,8 @@ func projectCapabilities(kind string) axi.Object {
 }
 
 func executionUnavailable(project store.Project) error {
-	return axi.Failure("execution_unavailable", "Project "+project.Name+" is a Directory Project without Git: its Lead can explore and plan, but Posse runs no Tasks or Git operations here", false,
-		"To run Tasks, initialize Git in "+project.Root+" or add repositories inside it, then run `posse project scan`")
+	return axi.Failure("execution_unavailable", "Project "+project.Name+" is a Directory Project without Git: its Lead can explore and plan, but Posse admits no Tasks here", false,
+		"After explicit User approval, run `posse project init --user-approved \"<User's words>\"` to enable Tasks, or add repositories inside it and run `posse project scan`")
 }
 
 // scanWorkspace lists the direct child folders of root that are the top level of

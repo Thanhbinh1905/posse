@@ -374,6 +374,83 @@ func TestDirectoryLeadRestartKeepsIdentityAndStatesCapabilities(t *testing.T) {
 	assertNoGit(t, dir)
 }
 
+func TestProjectInitResumesAfterGitInitBeforeConversion(t *testing.T) {
+	harness, dir := startDirectoryLead(t, nil)
+	gitTest(t, dir, "init", "-b", "main")
+	if code := harness.run("project", "init", "--user-approved", "resume Git conversion"); code != 0 || !strings.Contains(harness.out.String(), "converted: true") {
+		t.Fatalf("resume project init: %d\n%s", code, harness.out.String())
+	}
+	project, err := harness.db(t).ProjectByRoot(context.Background(), dir)
+	if err != nil || project.Kind != store.ProjectKindRepo {
+		t.Fatalf("resumed Project = %#v, %v", project, err)
+	}
+}
+
+func TestProjectInitRefusesUnsafeFolderShapes(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "repo")
+	initRepo(t, repo)
+	nested := filepath.Join(repo, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProjectInitRoot(context.Background(), nested); err == nil || !strings.Contains(err.Error(), "refused inside another repository") {
+		t.Fatalf("nested repository root check = %v", err)
+	}
+	workspaceParent := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(workspaceParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	initRepo(t, filepath.Join(workspaceParent, "member"))
+	target := filepath.Join(workspaceParent, "new-project")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProjectInitRoot(context.Background(), target); err == nil || !strings.Contains(err.Error(), "parent contains repositories") {
+		t.Fatalf("workspace parent check = %v", err)
+	}
+	if err := validateProjectInitRoot(context.Background(), string(filepath.Separator)); err == nil || !strings.Contains(err.Error(), "filesystem root") {
+		t.Fatalf("filesystem root check = %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(home); resolveErr == nil {
+		home = resolved
+	}
+	if err := validateProjectInitRoot(context.Background(), filepath.Clean(home)); err == nil || !strings.Contains(err.Error(), "User home directory") {
+		t.Fatalf("User home check = %v", err)
+	}
+}
+
+func TestProjectInitRequiresExplicitConsent(t *testing.T) {
+	harness, dir := startDirectoryLead(t, nil)
+	if code := harness.run("project", "init"); code == 0 || !strings.Contains(harness.out.String(), "user_only") {
+		t.Fatalf("project init without consent: %d\n%s", code, harness.out.String())
+	}
+	assertNoGit(t, dir)
+}
+
+func TestProjectInitConvertsDirectoryProjectWithoutStagingOrCommitting(t *testing.T) {
+	harness, dir := startDirectoryLead(t, map[string]string{"ideas.md": "plan\n"})
+	if code := harness.run("project", "init", "--user-approved", "initialize this Directory Project"); code != 0 || !strings.Contains(harness.out.String(), "converted: true") {
+		t.Fatalf("project init: %d\n%s", code, harness.out.String())
+	}
+	if got := strings.TrimSpace(gitTest(t, dir, "symbolic-ref", "--short", "HEAD")); got != "main" {
+		t.Fatalf("initial branch = %q, want main", got)
+	}
+	if _, err := gitOutput(context.Background(), dir, "rev-parse", "--verify", "HEAD"); err == nil {
+		t.Fatal("project init created a baseline commit")
+	}
+	if got := gitTest(t, dir, "status", "--porcelain"); !strings.Contains(got, "ideas.md") {
+		t.Fatalf("existing file was not left untracked: %q", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "ideas.md")); err != nil || string(got) != "plan\n" {
+		t.Fatalf("existing file changed: %q %v", got, err)
+	}
+}
+
 func TestProjectScanConvertsDirectoryProjectInPlace(t *testing.T) {
 	for _, shape := range []string{"repo", "workspace"} {
 		t.Run(shape, func(t *testing.T) {

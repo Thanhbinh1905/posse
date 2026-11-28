@@ -180,6 +180,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if project.IsDirectory() {
 		return executionUnavailable(project)
 	}
+	if !project.IsWorkspace() && defaultBranchUnborn(ctx.Context, projectRepoTarget(project)) {
+		if err := requireGitUnbornTaskSupport(ctx.Context); err != nil {
+			return err
+		}
+	}
 	var adoption *store.TaskAdoptionRequest
 	var adoptionSource *store.Task
 	if brief.Adopt != "" {
