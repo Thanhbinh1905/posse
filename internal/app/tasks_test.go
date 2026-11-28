@@ -474,7 +474,7 @@ func TestConcurrentQueuedLaunchAndListTolerateAgentRegistrationRace(t *testing.T
 				<-releasePrompt
 			})
 		}
-		if method == "worktree.open" {
+		if method == "workspace.create" {
 			select {
 			case tabCreated <- struct{}{}:
 			default:
@@ -531,7 +531,7 @@ func TestConcurrentQueuedLaunchAndListTolerateAgentRegistrationRace(t *testing.T
 		t.Fatalf("concurrent launch exit=%d launch.log=%q err=%v", launchExit, launchLog, err)
 	}
 	started, err := db.TaskByID(ctx, fixture.project.ID, queued.ID)
-	if err != nil || started.State != store.StateWorking || fixture.fake.CallCount("worktree.open") != 1 {
+	if err != nil || started.State != store.StateWorking || fixture.fake.CallCount("workspace.create") != 1 {
 		t.Fatalf("concurrent launches started task=%+v worktree.open=%d err=%v", started, fixture.fake.CallCount("worktree.open"), err)
 	}
 	var declines int
@@ -1445,7 +1445,7 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 	lead := herdr.Pane{PaneID: "w3:p1", WorkspaceID: "w3", TabID: "w3:t0", Label: "posse:shop:lead"}
 	fake := herdr.NewFake()
 	fake.SnapshotValue.Panes = []herdr.Pane{lead}
-	fake.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w4"},"tab":{"tab_id":"w4:t1"},"root_pane":{"pane_id":"w4:p2","tab_id":"w4:t1"}}`)
+	fake.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w4"},"tab":{"tab_id":"w4:t1"},"root_pane":{"pane_id":"w4:p2","tab_id":"w4:t1"}}`)
 	fake.Results["agent.get"] = json.RawMessage(`{"agent":{"agent_status":"idle","interactive_ready":true,"launch_pending":false}}`)
 	fake.BeforeCall = func(method string) {
 		if method == "agent.start" {
@@ -1499,8 +1499,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 		switch call.Method {
 		case "workspace.rename":
 			workspaceRenamed = true
-		case "worktree.open":
-			tabCreated = call.Params["label"] == "worker-tree-t1" && call.Params["path"] == sandbox && call.Params["workspace_id"] == "w3"
+		case "workspace.create":
+			tabCreated = call.Params["label"] == "└ worker-tree-t1" && call.Params["cwd"] == sandbox
 		case "agent.start":
 			startedIndex = index
 		case "pane.report_metadata":
@@ -1513,8 +1513,8 @@ func TestRelaunchResumesLegacySessionWithFullProfileArgumentsInSameSandbox(t *te
 			metadataAfterStart = metadataAfterStart || (metadataReported && startedIndex >= 0 && index > startedIndex)
 		}
 	}
-	if workspaceRenamed || !tabCreated || !metadataBeforeStart || !metadataAfterStart || startedIndex < 0 || firstMetadataIndex >= startedIndex || lastMetadataIndex <= startedIndex {
-		t.Fatalf("relaunch relabeled a workspace or missed early harness metadata: workspace renamed=%v tab_created=%v metadata_before=%v metadata_after=%v calls=%#v", workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart, fake.Calls)
+	if !workspaceRenamed || !tabCreated || !metadataBeforeStart || !metadataAfterStart || startedIndex < 0 || firstMetadataIndex >= startedIndex || lastMetadataIndex <= startedIndex {
+		t.Fatalf("relaunch did not create and label a Worker workspace or missed harness metadata: workspace renamed=%v workspace_created=%v metadata_before=%v metadata_after=%v calls=%#v", workspaceRenamed, tabCreated, metadataBeforeStart, metadataAfterStart, fake.Calls)
 	}
 	relaunchText, err := os.ReadFile(filepath.Join(home, "projects", "shop", "tasks", "t1", "relaunch.md"))
 	if err != nil || !strings.Contains(string(relaunchText), "Re-read `launch.md`") || !strings.Contains(string(relaunchText), "posse signal") || !strings.Contains(string(relaunchText), "first instruction") || !strings.Contains(string(relaunchText), "later instruction supersedes the first") || !strings.Contains(string(relaunchText), "author-handoff-launch-1.json") {
@@ -1769,6 +1769,61 @@ func newRelaunchFixture(t *testing.T, initial store.State) relaunchFixture {
 		t.Fatal(err)
 	}
 	return relaunchFixture{db: db, fake: fake, service: service, home: home, project: project, cfg: cfg, task: task}
+}
+
+func TestRelaunchMigratesLegacyWorktreeWorkspace(t *testing.T) {
+	fixture := newRelaunchFixture(t, store.StateLost)
+	ctx := context.Background()
+	if err := fixture.db.SetProjectLead(ctx, fixture.project.ID, "lead", "lead:p1", "posse:shop:lead"); err != nil {
+		t.Fatal(err)
+	}
+	fixture.project.HerdrWorkspaceID = "lead"
+	fixture.project.LeadPaneID = "lead:p1"
+	fixture.project.LeadLabel = "posse:shop:lead"
+	fixture.fake.SnapshotValue.Workspaces = []herdr.Workspace{{WorkspaceID: "lead", Label: "Lead:shop"}, {WorkspaceID: "w1", Label: "legacy"}}
+	fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "lead:p1", WorkspaceID: "lead", Label: "posse:shop:lead"})
+	fixture.fake.SnapshotValue.Workspaces[1].Worktree.CheckoutPath = fixture.task.WorktreePath
+	fixture.fake.SnapshotValue.Workspaces[1].Worktree.IsLinkedWorktree = true
+	fixture.fake.SnapshotValue.Panes[0].WorkspaceID = "w1"
+	fixture.fake.SnapshotValue.Panes[0].CWD = fixture.task.WorktreePath
+	if !isLegacyWorkerWorkspace(fixture.fake.SnapshotValue, fixture.project, fixture.task, fixture.fake.SnapshotValue.Panes[0]) {
+		t.Fatalf("fixture is not recognized as a legacy workspace: %#v", fixture.fake.SnapshotValue)
+	}
+	fixture.fake.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
+	fixture.fake.BeforeCall = func(method string) {
+		switch method {
+		case "workspace.close":
+			fixture.fake.SnapshotValue.Workspaces = []herdr.Workspace{{WorkspaceID: "lead", Label: "Lead:shop"}}
+			fixture.fake.SnapshotValue.Panes = []herdr.Pane{{PaneID: "lead:p1", WorkspaceID: "lead", Label: "posse:shop:lead"}}
+		case "agent.start":
+			fixture.fake.SnapshotValue.Workspaces = append(fixture.fake.SnapshotValue.Workspaces, herdr.Workspace{WorkspaceID: "w2", Root: fixture.task.WorktreePath, Label: workerWorkspaceLabel(fixture.task)})
+			fixture.fake.SnapshotValue.Panes = append(fixture.fake.SnapshotValue.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", Label: fixture.task.PaneLabel, CWD: fixture.task.WorktreePath, Agent: "claude", AgentStatus: "working"})
+		}
+	}
+	if _, err := fixture.service.relaunchTask(ctx, fixture.db, fixture.home, fixture.project, fixture.cfg, fixture.task, ""); err != nil {
+		t.Fatalf("relaunch legacy Worker: %v", err)
+	}
+	updated, err := fixture.db.TaskByID(ctx, fixture.project.ID, fixture.task.ID)
+	if err != nil || updated.HerdrWorkspaceID != "w2" || updated.WorktreePath != fixture.task.WorktreePath || updated.Branch != fixture.task.Branch {
+		t.Fatalf("legacy migration changed Task Sandbox or failed to record workspace: %#v, %v calls=%#v", updated, err, fixture.fake.Calls)
+	}
+	var closeIndex, openIndex, startIndex int
+	for index, call := range fixture.fake.Calls {
+		switch call.Method {
+		case "workspace.close":
+			closeIndex = index + 1
+		case "workspace.create":
+			if call.Params["label"] != workerWorkspaceLabel(fixture.task) || call.Params["cwd"] != fixture.task.WorktreePath {
+				t.Fatalf("new workspace params = %#v", call.Params)
+			}
+			openIndex = index + 1
+		case "agent.start":
+			startIndex = index + 1
+		}
+	}
+	if closeIndex == 0 || openIndex <= closeIndex || startIndex <= openIndex {
+		t.Fatalf("migration order close=%d open=%d start=%d calls=%#v", closeIndex, openIndex, startIndex, fixture.fake.Calls)
+	}
 }
 
 func TestRelaunchStopsDetachedCodexDaemonBeforeApprovedDiscard(t *testing.T) {

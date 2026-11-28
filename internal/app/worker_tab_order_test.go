@@ -93,7 +93,7 @@ func TestOpenWorkerTabContinuesWhenWorkspaceMoveFails(t *testing.T) {
 	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "other"}, herdr.Workspace{WorkspaceID: "new-child"})
 	adapter.snapshot.Panes[1].CWD = t.TempDir()
 	adapter.Fake.Errors["workspace.move"] = errors.New("unsupported method")
-	adapter.Fake.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"new-child"},"tab":{"tab_id":"new-child:t1"},"root_pane":{"pane_id":"new-child:p1","tab_id":"new-child:t1"}}`)
+	adapter.Fake.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"new-child"},"tab":{"tab_id":"new-child:t1"},"root_pane":{"pane_id":"new-child:p1","tab_id":"new-child:t1"}}`)
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), db, home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened.WorkspaceID != "new-child" {
 		t.Fatalf("Worker launch after ordering failure = %#v, %v", opened, err)

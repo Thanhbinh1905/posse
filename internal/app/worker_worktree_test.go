@@ -39,7 +39,7 @@ func TestTeardownVerifiesHerdrRemovedOnlyTheLinkedChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Closed) != 1 || result.Closed[0] != "w2:p1" || adapter.CallCount("workspace.close") != 0 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 || adapter.CallCount("pane.focus") != 0 {
+	if len(result.Closed) != 1 || result.Closed[0] != "w2:p1" || adapter.CallCount("workspace.close") != 1 || adapter.CallCount("tab.close") != 0 || adapter.CallCount("pane.close") != 0 || adapter.CallCount("pane.focus") != 0 {
 		t.Fatalf("child teardown: result=%+v calls=%+v", result, adapter.Calls)
 	}
 	// A stale recorded workspace id cannot claim a reused User workspace.

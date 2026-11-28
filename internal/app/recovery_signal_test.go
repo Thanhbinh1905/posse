@@ -115,11 +115,14 @@ func (a *failedSignalRecoveryAdapter) Snapshot(ctx context.Context) (herdr.Snaps
 func (a *failedSignalRecoveryAdapter) Call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	switch method {
 	case "workspace.create":
-		a.Results[method] = json.RawMessage(`{"workspace":{"workspace_id":"w3"},"root_pane":{"pane_id":"w3:p1","tab_id":"w3:t1"}}`)
-		a.snapshot.Workspaces = append(a.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "w3", Label: "Lead:shop"})
-	case "worktree.open":
-		a.Results[method] = json.RawMessage(`{"workspace":{"workspace_id":"w4"},"root_pane":{"pane_id":"w4:p1","tab_id":"w4:t1"}}`)
-		a.snapshot.Panes = append(a.snapshot.Panes, herdr.Pane{PaneID: "w4:p1", WorkspaceID: "w4", TabID: "w4:t1", Label: "posse:shop:t1"})
+		if params["label"] == "Lead:shop" {
+			a.Results[method] = json.RawMessage(`{"workspace":{"workspace_id":"w3"},"root_pane":{"pane_id":"w3:p1","tab_id":"w3:t1"}}`)
+			a.snapshot.Workspaces = append(a.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "w3", Label: "Lead:shop"})
+		} else {
+			a.Results[method] = json.RawMessage(`{"workspace":{"workspace_id":"w4"},"root_pane":{"pane_id":"w4:p1","tab_id":"w4:t1"}}`)
+			a.snapshot.Workspaces = append(a.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "w4", Root: params["cwd"].(string), Label: params["label"].(string)})
+			a.snapshot.Panes = append(a.snapshot.Panes, herdr.Pane{PaneID: "w4:p1", WorkspaceID: "w4", TabID: "w4:t1", Label: "posse:shop:t1", CWD: params["cwd"].(string)})
+		}
 	case "tab.create":
 		if params["label"] == "posse:shop:lead" {
 			a.Results[method] = json.RawMessage(`{"tab":{"tab_id":"w3:t1"},"root_pane":{"pane_id":"w3:p1","tab_id":"w3:t1"}}`)
