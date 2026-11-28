@@ -29,7 +29,7 @@ func workerWorkspaceLabelForE2E(task store.Task) string {
 	return "└ " + name + "-" + id
 }
 
-func TestRepositoryWorkersOpenAsLeadChildrenAndTeardownIsScoped(t *testing.T) {
+func TestRepositoryWorkersUseLabeledWorkspacesAndTeardownIsScoped(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	first := f.start(t, "t1", "Native first", "native-first")
 	second := f.start(t, "t2", "Native second", "native-second")
