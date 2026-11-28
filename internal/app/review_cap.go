@@ -196,6 +196,28 @@ func currentReviewCapHead(ctx context.Context, db *store.DB, project store.Proje
 	return reviewCapHead(ctx, db, project, task)
 }
 
+func requireReviewCapAnswerHead(ctx context.Context, db *store.DB, project store.Project, decision store.Decision, shownHead string) error {
+	taskRef, expected, valid := parseReviewCapOrigin(decision.Origin)
+	if !valid || shownHead != "" && shownHead != expected {
+		return axi.Failure("decision_refused", "The supplied head does not match this Review-cap Decision", false, "Run `posse decisions` and ask the User about the correct head")
+	}
+	task, err := db.TaskByID(ctx, project.ID, decision.TaskID)
+	if err != nil {
+		return err
+	}
+	if taskRef != taskIDString(task.Seq) || task.Type != "change" {
+		return axi.Failure("decision_refused", "Review cap Decision binding is invalid", false)
+	}
+	binding, err := currentReviewCapHead(ctx, db, project, task)
+	if err != nil {
+		return err
+	}
+	if binding.Head != expected {
+		return axi.Failure("decision_refused", "Review-cap head changed; refresh Decisions before selecting an outcome", false, "Ask for a new User answer about the current head; do not reuse the previous approval")
+	}
+	return nil
+}
+
 func requireReviewCapCandidateTargetsCurrent(ctx context.Context, db *store.DB, project store.Project, task store.Task, targets []store.ReviewTarget) error {
 	if task.State != store.StateDone {
 		return nil

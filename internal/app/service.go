@@ -168,7 +168,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "accept", Usage: "$ accept <task> [--user-approved <quote>]", Summary: "Record User acceptance of a publication-bound Research Report after independent review.", Handler: s.acceptReport},
 		{Name: "ask", Usage: "$ ask <task> <question> --option <choice> --option <choice>...", Summary: "Put a Worker's question to the User as a Decision.", Handler: s.ask},
 		{Name: "decisions", Usage: "$ decisions [--all]", Summary: "List pending Decisions, or include answered ones.", Handler: s.decisions},
-		{Name: "decide", Usage: "$ decide <decision> <option> [--to <task>] [--user-approved <quote> | --lead-reason <reason>] [--recover]", Summary: "Record a User answer or YOLO Lead Review-cap resolution.", Handler: s.decide},
+		{Name: "decide", Usage: "$ decide <decision> <option> [--head <sha>] [--to <task>] [--user-approved <quote> | --lead-reason <reason>] [--recover]", Summary: "Record a User answer or YOLO Lead Review-cap resolution.", Handler: s.decide},
 		{Name: "apply", Usage: "$ apply <decision>", Summary: "Carry out an answered Decision action.", Handler: s.applyDecision},
 		{Name: "dispatch", Usage: "$ dispatch --brief <file> [--name <short>] [--profile <name>]", Summary: "Preview Dispatch Rule, Profile and Task Name selection.", Handler: s.dispatch},
 		{Name: "stats", Usage: "$ stats [--days n]", Summary: "Show Task cost and token percentiles overall, by Task type and Profile, plus each Profile's landed rate and relaunches.", Handler: s.stats},

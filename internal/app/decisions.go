@@ -322,10 +322,28 @@ func (s *Service) decisions(ctx *axi.Context, args []string) error {
 		return err
 	}
 	rows := make([]any, 0, len(items))
+	pendingCap := false
 	for _, item := range items {
-		rows = append(rows, decisionOutput(ctx.Context, db, project.ID, item))
+		row := decisionOutput(ctx.Context, db, project.ID, item)
+		if item.Kind == "review_cap" && item.AnsweredAt == 0 && item.ObsoleteAt == 0 {
+			pendingCap = true
+			if project.IsWorkspace() {
+				task, err := db.TaskByID(ctx.Context, project.ID, item.TaskID)
+				if err != nil {
+					return err
+				}
+				if binding, err := currentReviewCapHead(ctx.Context, db, project, task); err == nil && binding.Head == row["head"] {
+					row["heads"] = binding.Targets
+				}
+			}
+		}
+		rows = append(rows, row)
 	}
-	return ctx.Print(axi.Object{{Key: "decisions", Value: rows}, {Key: "help", Value: []any{"Run `posse decide <decision> <option> --user-approved \"<User's words>\"` to answer a Decision"}}})
+	help := "Run `posse decide <decision> <option> --user-approved \"<User's words>\"` to answer a Decision"
+	if pendingCap {
+		help = "Reply in the Lead chat to answer a Review-cap Decision. Name the Task or Decision and say what should happen. No command is needed."
+	}
+	return ctx.Print(axi.Object{{Key: "decisions", Value: rows}, {Key: "help", Value: []any{help}}})
 }
 
 func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.Decision) map[string]any {
@@ -335,6 +353,11 @@ func decisionOutput(ctx context.Context, db *store.DB, projectID int64, d store.
 		"answer": d.Answer, "user_quote": d.UserQuote, "answer_actor": d.AnswerActor, "answer_reason": d.AnswerReason, "created_at": d.CreatedAt,
 		"answered_at": d.AnsweredAt, "kind": d.Kind, "task_launches": d.TaskLaunches,
 		"obsolete_at": d.ObsoleteAt, "obsolete_reason": d.ObsoleteReason,
+	}
+	if d.Kind == "review_cap" {
+		if _, head, ok := parseReviewCapOrigin(d.Origin); ok {
+			output["head"] = head
+		}
 	}
 	if d.Kind == "review_dispute" {
 		output["evidence"] = string(d.Evidence)
@@ -355,7 +378,7 @@ func (s *Service) requireLeadOrUser(ctx context.Context, db *store.DB, project s
 }
 
 func (s *Service) decide(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("decide", args, map[string]flagSpec{"user-approved": {}, "lead-reason": {}, "recover": {boolean: true}, "to": {}})
+	parsed, err := parseArgs("decide", args, map[string]flagSpec{"user-approved": {}, "lead-reason": {}, "head": {}, "recover": {boolean: true}, "to": {}})
 	if err != nil {
 		return err
 	}
@@ -390,6 +413,10 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	decisionBefore, err := db.Decision(ctx.Context, project.ID, id)
 	if err != nil {
 		return axi.Failure("decision_unknown", "Decision not found in this Project", false, "Run `posse decisions` to list pending Decisions")
+	}
+	shownHead, headSupplied := parsed.Flags["head"]
+	if headSupplied && (shownHead == "" || decisionBefore.Kind != "review_cap" || parsed.Bool("recover")) {
+		return axi.Usage("--head requires the full head from a Review-cap Decision and cannot be combined with --recover")
 	}
 	if parsed.Bool("recover") {
 		if decisionBefore.Kind != "review_cap" || decisionBefore.Answer != "final-fix" || parsed.Positionals[1] != "rethink" {
@@ -427,17 +454,11 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	}
 	if reason := strings.TrimSpace(parsed.Flags["lead-reason"]); reason != "" {
 		cfg, cfgErr := config.Load(home, project.Name)
-		task, taskErr := db.TaskByID(ctx.Context, project.ID, decisionBefore.TaskID)
-		if role != "lead" || decisionBefore.Kind != "review_cap" || cfgErr != nil || !cfg.Autonomy.Yolo || taskErr != nil {
+		if role != "lead" || decisionBefore.Kind != "review_cap" || cfgErr != nil || !cfg.Autonomy.Yolo {
 			return axi.Failure("decision_refused", "--lead-reason is only available to a Lead for a review_cap Decision under delegated review autonomy", false)
 		}
-		_, expected, valid := parseReviewCapOrigin(decisionBefore.Origin)
-		binding, err := currentReviewCapHead(ctx.Context, db, project, task)
-		if err != nil {
+		if err := requireReviewCapAnswerHead(ctx.Context, db, project, decisionBefore, shownHead); err != nil {
 			return err
-		}
-		if !valid || binding.Head != expected {
-			return axi.Failure("decision_refused", "Review-cap head changed; refresh Decisions before selecting an outcome", false)
 		}
 		decision, err := db.AnswerDecisionAs(ctx.Context, project.ID, id, parsed.Positionals[1], "lead", "", reason)
 		if err != nil {
@@ -466,6 +487,11 @@ func (s *Service) decide(ctx *axi.Context, args []string) error {
 	}
 	if role == "lead" && strings.TrimSpace(quote) == "" {
 		return axi.Failure("user_only", "only the User answers a Decision; the Lead must quote the User", false, "Pass `--user-approved \"<User's words>\"` after the User answers")
+	}
+	if headSupplied {
+		if err := requireReviewCapAnswerHead(ctx.Context, db, project, decisionBefore, shownHead); err != nil {
+			return err
+		}
 	}
 	if quote == "" {
 		quote = parsed.Positionals[1]

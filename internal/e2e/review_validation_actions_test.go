@@ -772,8 +772,9 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	if code, output := runReleaseCLI(t, f.binary, candidatePath, workerEnv, "signal", "done", "Candidate changed after the final Review", "--turn", turn); code != 0 {
 		t.Fatalf("record new private candidate head: %d %s", code, output)
 	}
-	if code, output := runReviewIdentityCLI(t, f, "decisions"); code != 0 || !strings.Contains(output, "review_cap") {
-		t.Fatalf("reconcile Review cap Decision: %d %s", code, output)
+	code, decisionsOutput := runReviewIdentityCLI(t, f, "decisions")
+	if code != 0 || !strings.Contains(decisionsOutput, "review_cap") {
+		t.Fatalf("reconcile Review cap Decision: %d %s", code, decisionsOutput)
 	}
 	if code, output := runReviewIdentityCLI(t, f, "review", changeSeq, "--full"); code != 0 || !strings.Contains(output, "review_rounds_used") || !strings.Contains(output, "P-1") {
 		t.Fatalf("inspect Finding Ledger and cap usage: %d %s", code, output)
@@ -793,9 +794,31 @@ func TestReviewCapAcceptHeadIsExactHeadEvidenceAndDoesNotSkipStages(t *testing.T
 	if code, out := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--lead-reason", "Not authorized without YOLO"); code == 0 {
 		t.Fatalf("non-YOLO delegated answer: %s", out)
 	}
-	const quote = "Accept this exact candidate head despite the blocking finding."
-	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--user-approved", quote); code != 0 {
-		t.Fatalf("record User's cap choice: %d %s", code, output)
+	if !strings.Contains(decisionsOutput, "head: "+candidate.CandidateSHA) || !strings.Contains(decisionsOutput, "Reply in the Lead chat") {
+		t.Fatalf("Decision listing does not identify the exact head and chat answer path: %s", decisionsOutput)
+	}
+	const quote = "Chấp nhận head này."
+	if code, output := runReleaseCLI(t, f.binary, change.WorktreePath, workerEnv, "decide", fmt.Sprint(decisionID), "accept-head", "--head", candidate.CandidateSHA, "--user-approved="+quote); code != 1 || !strings.Contains(output, "worker_forbidden") {
+		t.Fatalf("Worker could relay a User-only Decision: %d %s", code, output)
+	}
+	for _, attempt := range []struct{ head, quote, wantError string }{
+		{candidate.CandidateSHA, "", "user_only"},
+		{candidate.CandidateSHA, " <lời bạn> ", "user_approval_placeholder"},
+		{strings.Repeat("0", 40), quote, "The supplied head does not match this Review-cap Decision"},
+	} {
+		if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--head", attempt.head, "--user-approved="+attempt.quote); code != 1 || !strings.Contains(output, attempt.wantError) {
+			t.Fatalf("expected %s before recording an answer: %d %s", attempt.wantError, code, output)
+		}
+	}
+	if unanswered, err := f.db.Decision(context.Background(), f.project.ID, decisionID); err != nil || unanswered.AnsweredAt != 0 {
+		t.Fatalf("refused attempts must leave the Decision pending: %+v, %v", unanswered, err)
+	}
+	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "accept-head", "--head", candidate.CandidateSHA, "--user-approved="+quote); code != 0 {
+		t.Fatalf("record User's cap choice from chat: %d %s", code, output)
+	}
+	answer, err := f.db.Decision(context.Background(), f.project.ID, decisionID)
+	if err != nil || answer.AnswerActor != "user" || answer.UserQuote != quote || answer.Origin != origin {
+		t.Fatalf("User answer lost its exact text or head binding: %+v, %v", answer, err)
 	}
 	if err := f.db.Transition(context.Background(), change.ID, store.StateDone, store.StateWorking, "worker", "Resume after acceptance"); err != nil {
 		t.Fatal(err)
@@ -945,7 +968,10 @@ func TestReviewCapFinalFixRaisesANewDecisionForItsResultingHead(t *testing.T) {
 	if err := f.db.QueryRowContext(context.Background(), `SELECT id FROM decisions WHERE task_id=? AND kind='review_cap' AND answered_at=0`, change.ID).Scan(&decisionID); err != nil {
 		t.Fatal(err)
 	}
-	const quote = "Allow one final whole-pattern fix."
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE review_findings SET severity='P3' WHERE ship_task_id=?`, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	const quote = "Allow one final fix of the non-blocking findings."
 	if code, output := runReviewIdentityCLI(t, f, "decide", fmt.Sprint(decisionID), "final-fix", "--user-approved", quote); code != 0 {
 		t.Fatalf("answer final-fix: %d %s", code, output)
 	}
