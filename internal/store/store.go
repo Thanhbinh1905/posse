@@ -2240,6 +2240,31 @@ func (db *DB) recordWorkerSignal(ctx context.Context, task Task, verb, note stri
 			return "", err
 		}
 	}
+	if verb == "done" && taskType == "change" {
+		var signalData struct {
+			GreenhousePublishedHead string `json:"greenhouse_published_head"`
+			PRURL                   string `json:"pr_url"`
+		}
+		if err := json.Unmarshal(encoded, &signalData); err != nil {
+			return "", err
+		}
+		if signalData.GreenhousePublishedHead != "" {
+			if !validCommitSHA(signalData.GreenhousePublishedHead) || signalData.PRURL == "" {
+				return "", fmt.Errorf("invalid Greenhouse published head")
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE tasks SET gated_sha=?,pr_url=? WHERE id=? AND project_id=? AND type='change' AND landing_mode='pr' AND (pr_url='' OR pr_url=?) AND state='done' AND (gated_sha='' OR gated_sha=?) AND EXISTS (SELECT 1 FROM verified_pr_heads WHERE task_id=tasks.id AND pr_url=? AND head_sha=?)`, signalData.GreenhousePublishedHead, signalData.PRURL, task.ID, task.ProjectID, signalData.PRURL, signalData.GreenhousePublishedHead, signalData.PRURL, signalData.GreenhousePublishedHead)
+			if err != nil {
+				return "", err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return "", err
+			}
+			if changed != 1 {
+				return "", ErrStaleValidationHead
+			}
+		}
+	}
 	if verb == "done" && task.Type == "change" && !inPlace {
 		var taskType, paneID, server string
 		var transitionID int64
