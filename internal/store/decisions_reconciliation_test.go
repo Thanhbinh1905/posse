@@ -123,3 +123,41 @@ func TestTeardownDependantsDecisionObsoletedWhenNoneRemainQueued(t *testing.T) {
 		t.Fatalf("Decision not obsoleted: %#v %v", d, err)
 	}
 }
+
+func TestTeardownDependantsDecisionCannotBeAnsweredAfterDependantsLeaveQueued(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local", State: StateQueued})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependent, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "B", MergeMode: "local", State: StateQueued})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: parent, Origin: "teardown-dependants:t1:t2", Kind: "teardown_dependants", Question: "Re-point?", Options: []string{"re-point", "cascade"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, parent, StateQueued, StateTornDown, "cli", "released"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transition(ctx, dependent, StateQueued, StateTornDown, "cli", "released"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "cascade", "Discard the dependant"); err == nil {
+		t.Fatal("stale teardown_dependants Decision accepted")
+	}
+	decision, err = db.Decision(ctx, project.ID, decision.ID)
+	if err != nil || decision.ObsoleteAt == 0 || decision.Answer != "" {
+		t.Fatalf("stale Decision was not obsoleted: %#v %v", decision, err)
+	}
+}

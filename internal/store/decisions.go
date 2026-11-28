@@ -613,7 +613,7 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" {
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" && decision.Kind != "teardown_dependants" {
 		return "", nil
 	}
 	var state State
@@ -635,6 +635,19 @@ func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision)
 	}
 	if decision.Kind == "recovery" && (state != StateFailed && state != StateLost || launches != decision.TaskLaunches) {
 		return "Task no longer failed or lost", nil
+	}
+	if decision.Kind == "teardown_dependants" {
+		parts := strings.Split(decision.Origin, ":")
+		if len(parts) != 3 || parts[0] != "teardown-dependants" {
+			return "", nil
+		}
+		var queued bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks dependant WHERE dependant.project_id=? AND dependant.state='queued' AND INSTR(','||?||',', ',t'||dependant.seq||',')>0)`, decision.ProjectID, parts[2]).Scan(&queued); err != nil {
+			return "", err
+		}
+		if !queued {
+			return "No named dependants remain queued", nil
+		}
 	}
 	if decision.Kind == "dependency" {
 		parts := strings.Split(decision.Origin, ":")
