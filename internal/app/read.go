@@ -18,6 +18,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/atomicfile"
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
+	"github.com/thanhbinh1905/posse/internal/herdr"
 	"github.com/thanhbinh1905/posse/internal/runtime"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
@@ -68,43 +69,45 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 }
 
 type activeTaskSummary struct {
-	ID            string `json:"id"`
-	Greenhouse    string `json:"greenhouse,omitempty"`
-	Name          string `json:"name"`
-	State         string `json:"state"`
-	Agent         string `json:"agent,omitempty"`
-	AgentMismatch string `json:"agent_mismatch,omitempty"`
-	MergeQueue    string `json:"merge_queue,omitempty"`
+	ID                    string `json:"id"`
+	Greenhouse            string `json:"greenhouse,omitempty"`
+	Name                  string `json:"name"`
+	State                 string `json:"state"`
+	Agent                 string `json:"agent,omitempty"`
+	AgentMismatch         string `json:"agent_mismatch,omitempty"`
+	MergeQueue            string `json:"merge_queue,omitempty"`
+	WorkerWorkspaceLayout string `json:"worker_workspace_layout,omitempty"`
 }
 
 type taskSummary struct {
-	ID            string       `json:"id"`
-	Type          string       `json:"type"`
-	State         string       `json:"state"`
-	Agent         string       `json:"agent,omitempty"`
-	AgentMismatch string       `json:"agent_mismatch,omitempty"`
-	Title         string       `json:"title"`
-	Name          string       `json:"name"`
-	PRState       string       `json:"pr_state,omitempty"`
-	PRURL         string       `json:"pr_url,omitempty"`
-	Greenhouse    string       `json:"greenhouse,omitempty"`
-	Queue         string       `json:"merge_queue,omitempty"`
-	Profile       string       `json:"profile,omitempty"`
-	Branch        string       `json:"branch,omitempty"`
-	Reason        string       `json:"reason,omitempty"`
-	Decisions     []int64      `json:"decisions,omitempty"`
-	Issues        []string     `json:"issues,omitempty"`
-	Refs          []string     `json:"refs,omitempty"`
-	CreatedAt     string       `json:"created_at,omitempty"`
-	Age           string       `json:"age,omitempty"`
-	After         []string     `json:"after,omitempty"`
-	WaitReason    string       `json:"wait_reason,omitempty"`
-	Ticket        string       `json:"ticket,omitempty"`
-	CI            string       `json:"ci,omitempty"`
-	ReviewRound   int          `json:"review_round,omitempty"`
-	Intent        string       `json:"intent,omitempty"`
-	LastSignal    string       `json:"last_signal,omitempty"`
-	Usage         usage.Counts `json:"usage"`
+	ID                    string       `json:"id"`
+	Type                  string       `json:"type"`
+	State                 string       `json:"state"`
+	Agent                 string       `json:"agent,omitempty"`
+	AgentMismatch         string       `json:"agent_mismatch,omitempty"`
+	Title                 string       `json:"title"`
+	Name                  string       `json:"name"`
+	PRState               string       `json:"pr_state,omitempty"`
+	PRURL                 string       `json:"pr_url,omitempty"`
+	Greenhouse            string       `json:"greenhouse,omitempty"`
+	Queue                 string       `json:"merge_queue,omitempty"`
+	WorkerWorkspaceLayout string       `json:"worker_workspace_layout,omitempty"`
+	Profile               string       `json:"profile,omitempty"`
+	Branch                string       `json:"branch,omitempty"`
+	Reason                string       `json:"reason,omitempty"`
+	Decisions             []int64      `json:"decisions,omitempty"`
+	Issues                []string     `json:"issues,omitempty"`
+	Refs                  []string     `json:"refs,omitempty"`
+	CreatedAt             string       `json:"created_at,omitempty"`
+	Age                   string       `json:"age,omitempty"`
+	After                 []string     `json:"after,omitempty"`
+	WaitReason            string       `json:"wait_reason,omitempty"`
+	Ticket                string       `json:"ticket,omitempty"`
+	CI                    string       `json:"ci,omitempty"`
+	ReviewRound           int          `json:"review_round,omitempty"`
+	Intent                string       `json:"intent,omitempty"`
+	LastSignal            string       `json:"last_signal,omitempty"`
+	Usage                 usage.Counts `json:"usage"`
 }
 
 type noticeSummary struct {
@@ -220,6 +223,12 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 	}
 	taskRows := make([]taskSummary, 0, len(tasks))
 	needsYou := make([]taskSummary, 0)
+	var workerSnapshot *herdr.Snapshot
+	if s.Herdr != nil {
+		if snapshot, snapshotErr := s.snapshot(ctx.Context); snapshotErr == nil {
+			workerSnapshot = &snapshot
+		}
+	}
 	for _, task := range tasks {
 		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID])}
 		row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
@@ -227,6 +236,11 @@ func (s *Service) printProjectHome(ctx *axi.Context, db *store.DB, project store
 			return err
 		}
 		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
+		if workerSnapshot != nil && liveWorkerState(task.State) {
+			if pane, found := findTaskPane(workerSnapshot.Panes, task); found && isLegacyWorkerWorkspace(*workerSnapshot, project, task, pane) {
+				row.WorkerWorkspaceLayout = "legacy-worktree-open"
+			}
+		}
 		if task.PRURL != "" {
 			_, row.PRState, err = pullRequestDisplay(ctx.Context, db, task)
 			if err != nil {
@@ -516,6 +530,12 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 	}
 	now := time.Now()
 	rows := make([]taskSummary, 0, len(tasks))
+	var herdrSnapshot *herdr.Snapshot
+	if s.Herdr != nil {
+		if snapshot, snapshotErr := s.snapshot(ctx.Context); snapshotErr == nil {
+			herdrSnapshot = &snapshot
+		}
+	}
 	for _, task := range tasks {
 		row := taskSummary{ID: taskIDString(task.Seq), Type: task.Type, State: string(task.State), Title: task.Title, Name: taskDisplayName(task), Queue: mergeQueueLabel(queuePlaces[task.ID]), Profile: task.Profile, Usage: taskUsage(ctx.Context, db, task, cfg)}
 		row.Greenhouse, err = greenhouseTaskStatus(ctx.Context, db, task, now)
@@ -523,6 +543,11 @@ func (s *Service) ls(ctx *axi.Context, args []string) error {
 			return err
 		}
 		row.Agent, row.AgentMismatch = agentObservation(task, cfg, now)
+		if herdrSnapshot != nil && liveWorkerState(task.State) {
+			if pane, found := findTaskPane(herdrSnapshot.Panes, task); found && isLegacyWorkerWorkspace(*herdrSnapshot, project, task, pane) {
+				row.WorkerWorkspaceLayout = "legacy-worktree-open"
+			}
+		}
 		if taskNeedsUser(task) {
 			row.Reason, err = taskFailureReason(ctx.Context, db, task)
 			if err != nil {
@@ -1126,13 +1151,6 @@ func (s *Service) show(ctx *axi.Context, args []string) error {
 		}
 		view["worktree_path"] = task.WorktreePath
 		view["herdr_workspace_id"] = task.HerdrWorkspaceID
-		if s.Herdr != nil && task.State == store.StateWorking {
-			if snapshot, snapshotErr := s.snapshot(ctx.Context); snapshotErr == nil {
-				if pane, found := findTaskPane(snapshot.Panes, task); found && isLegacyWorkerWorkspace(snapshot, project, task, pane) {
-					view["worker_workspace_layout"] = "legacy-worktree-open"
-				}
-			}
-		}
 		view["pane_id"] = task.PaneID
 		view["pr_url"] = task.PRURL
 	}
@@ -1277,6 +1295,15 @@ func taskTransitionRows(task store.Task, transitions []store.TransitionRecord) [
 		rows = append(rows, map[string]any{"id": transition.ID, "task_id": taskIDString(task.Seq), "from": transition.From, "to": transition.To, "source": transition.Source, "note": transition.Note, "at": transition.At})
 	}
 	return rows
+}
+
+func liveWorkerState(state store.State) bool {
+	switch state {
+	case store.StateSpawning, store.StateWorking, store.StateNeedsDecision, store.StateBlocked, store.StateStalled, store.StateDone, store.StateMerging:
+		return true
+	default:
+		return false
+	}
 }
 
 func taskDisplayName(task store.Task) string {

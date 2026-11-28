@@ -67,7 +67,13 @@ func (s *Service) openWorkerTab(ctx context.Context, db *store.DB, home string, 
 	}
 	reuseWorkerWorkspace := false
 	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID == project.HerdrWorkspaceID {
+			continue
+		}
 		matchesPath := workspace.Root != "" && filepath.Clean(workspace.Root) == filepath.Clean(path)
+		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Label == workerWorkspaceLabel(task) {
+			matchesPath = true
+		}
 		if workspace.Worktree.IsLinkedWorktree && filepath.Clean(workspace.Worktree.CheckoutPath) == filepath.Clean(path) {
 			matchesPath = true
 		}
