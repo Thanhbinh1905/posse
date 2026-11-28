@@ -285,7 +285,7 @@ func (s *Service) openWorkspaceMerge(ctx context.Context, db *store.DB, project 
 				}); err != nil {
 					return axi.Failure("pr_push_failed", repo.Repo+": could not push the gated Task branch", true, err.Error())
 				}
-				prURL, opened, err := s.findOrCreatePullRequest(ctx, db, member.project, gated, intent, forge, member.target.Name, "", "", "", "", false, "")
+				prURL, opened, err := s.findOrCreatePullRequest(ctx, db, member.project, gated, intent, forge, member.target.Name, publishDescription{}, "")
 				if err != nil {
 					return prefixFailure(repo.Repo, err)
 				}

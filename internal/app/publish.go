@@ -327,10 +327,24 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	}
 	// findOrCreate uses the expected tip to reject an existing PR on a moved head.
 	task.GatedSHA = sha // ephemeral until the Lead records the merge head.
-	verification := strings.Join(parsed.Repeated["verify"], "\n")
-	proof := strings.Join(parsed.Repeated["proof"], "\n\n")
-	risk := strings.Join(parsed.Repeated["risk"], "\n\n")
-	prURL, _, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, parsed.Flags["repo"], parsed.Positionals[0], verification, proof, risk, parsed.Bool("refresh"), previousRemoteHead)
+	description := publishDescription{
+		summary:       parsed.Positionals[0],
+		verification:  strings.Join(parsed.Repeated["verify"], "\n"),
+		proof:         strings.Join(parsed.Repeated["proof"], "\n\n"),
+		risk:          strings.Join(parsed.Repeated["risk"], "\n\n"),
+		refreshLegacy: parsed.Bool("refresh"),
+	}
+	if greenhouseFullPipeline {
+		description.retainEvidence = []string{}
+		for _, field := range []struct{ flag, heading string }{
+			{"verify", "Verification"}, {"proof", "Proof"}, {"risk", "Risk And Rollback"},
+		} {
+			if len(parsed.Repeated[field.flag]) == 0 {
+				description.retainEvidence = append(description.retainEvidence, field.heading)
+			}
+		}
+	}
+	prURL, _, err := s.findOrCreatePullRequest(out.Context, db, project, task, intent, forge, repoFilter, description, previousRemoteHead)
 	if err != nil {
 		return err
 	}
