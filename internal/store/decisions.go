@@ -507,7 +507,7 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 }
 
 const resolvedDecisionPredicate = `
-		(d.kind<>'orphan' AND t.state='torn-down')
+		(d.kind NOT IN ('orphan','teardown_dependants') AND t.state='torn-down')
 		OR (d.kind='teardown_dependants' AND NOT EXISTS(
 			SELECT 1 FROM tasks dependant WHERE dependant.project_id=d.project_id AND dependant.state='queued'
 			AND INSTR(','||SUBSTR(d.origin, INSTR(d.origin, ':')+INSTR(SUBSTR(d.origin, INSTR(d.origin, ':')+1), ':')+1)||',', ',t'||dependant.seq||',')>0

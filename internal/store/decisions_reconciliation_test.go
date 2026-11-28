@@ -64,6 +64,13 @@ func TestTeardownDependantsDecisionObsoletedWhenNoneRemainQueued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Transition(ctx, parent, StateQueued, StateTornDown, "cli", "released"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.Decisions(ctx, project.ID, true)
+	if err != nil || len(pending) != 1 || pending[0].ID != d.ID {
+		t.Fatalf("Decision disappeared while a named dependant remained queued: %#v %v", pending, err)
+	}
 	if err := db.Transition(ctx, dependent, StateQueued, StateTornDown, "cli", "released"); err != nil {
 		t.Fatal(err)
 	}
