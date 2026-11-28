@@ -32,6 +32,7 @@ type Brief struct {
 	AutonomyMerge  string
 	// Repos names the workspace members the Task works on; empty for a repo Project.
 	Repos       []string
+	Inputs      []InputSelection
 	RootContext string
 	Ticket      *IssueRef
 	// Issues preserves the legacy `issues:` field, including historical multi-issue Briefs.
@@ -43,6 +44,11 @@ type Brief struct {
 }
 
 var taskIDPattern = regexp.MustCompile(`^t[1-9][0-9]*$`)
+
+type InputSelection struct {
+	Path string
+	Use  string
+}
 
 type IssueRef struct {
 	Repository string
@@ -185,7 +191,7 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, stored bool) (Br
 			}
 			continue
 		}
-		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "root_context", "ticket", "issues", "refs", "after", "followups") {
+		if !oneOf(key, "type", "title", "done_when", "merge_mode", "execution", "paths", "review", "review_rounds", "budget_tokens", "base", "target", "review_of", "supersedes", "adopt", "report_kind", "autonomy", "repos", "inputs", "root_context", "ticket", "issues", "refs", "after", "followups") {
 			return Brief{}, &BriefError{Field: key, Reason: "unknown Brief field"}
 		}
 		if _, exists := values[key]; exists {
@@ -206,6 +212,13 @@ func parseBriefText(contents string, allowHistoricalMultiIssue, stored bool) (Br
 		ReportKind:  unquote(values["report_kind"]),
 		RootContext: unquote(values["root_context"]),
 		Body:        strings.TrimSpace(strings.Join(lines[closing+1:], "\n")),
+	}
+	if raw, found := values["inputs"]; found {
+		inputs, err := parseInputs(raw)
+		if err != nil {
+			return Brief{}, err
+		}
+		brief.Inputs = inputs
 	}
 	if raw, found := values["after"]; found {
 		dependencies, err := parseDependencies(raw)
@@ -590,7 +603,36 @@ func parseBranchSelection(raw, field string) (string, map[string]string, error) 
 	return unquote(text), nil, nil
 }
 
-// parseRepos reads `repos: [a, b]` or `repos: a, b`.
+// parseInputs reads exact path=purpose entries from a Brief.
+func parseInputs(raw string) ([]InputSelection, error) {
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "[") {
+		if !strings.HasSuffix(text, "]") {
+			return nil, &BriefError{Field: "inputs", Reason: "must be a list of path=use entries such as [spec/API.md=API contract]"}
+		}
+		text = strings.TrimSuffix(strings.TrimPrefix(text, "["), "]")
+	}
+	inputs := []InputSelection{}
+	seen := map[string]bool{}
+	for _, item := range strings.Split(text, ",") {
+		path, use, found := strings.Cut(strings.TrimSpace(item), "=")
+		path, use = unquote(strings.TrimSpace(path)), unquote(strings.TrimSpace(use))
+		if !found || path == "" || use == "" || seen[path] {
+			return nil, &BriefError{Field: "inputs", Reason: "must list unique exact paths with an intended use, as path=use"}
+		}
+		seen[path] = true
+		inputs = append(inputs, InputSelection{Path: path, Use: use})
+		if len(inputs) > 64 {
+			return nil, &BriefError{Field: "inputs", Reason: "cannot select more than 64 files"}
+		}
+	}
+	if len(inputs) == 0 {
+		return nil, &BriefError{Field: "inputs", Reason: "must list at least one exact path"}
+	}
+	return inputs, nil
+}
+
+// parsePaths reads the legacy in-place execution path list.
 func parsePaths(raw string) ([]string, error) {
 	text := strings.TrimSpace(raw)
 	if strings.HasPrefix(text, "[") {

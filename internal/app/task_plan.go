@@ -81,6 +81,11 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 		return taskplan.Plan{}, err
 	}
 	inputs := []taskplan.Input{selectedLaunchSettings(launch)}
+	selectedInputs, err := freezeSelectedInputs(project, members, brief.Inputs)
+	if err != nil {
+		return taskplan.Plan{}, fmt.Errorf("selected Brief input: %w", err)
+	}
+	inputs = append(inputs, selectedInputs...)
 	for _, source := range preferences {
 		if !source.Exists {
 			continue
@@ -127,6 +132,9 @@ func resolveTaskPlan(ctx context.Context, home string, project store.Project, cf
 // Restore files absent after a crash from the admitted inputs, never from
 // mutable Brief, preferences or Profile sources. Existing launch text is kept.
 func restoreAdmittedLaunchFiles(home string, project store.Project, task store.Task, plan *taskplan.Plan) error {
+	if err := writeSelectedInputFiles(plan.Paths.Output, plan.Inputs); err != nil {
+		return err
+	}
 	roundFiles := make(map[string][]byte)
 	for _, input := range plan.Inputs {
 		if input.Role == "review-round-file" {
@@ -168,7 +176,7 @@ func restoreAdmittedLaunchFiles(home string, project store.Project, task store.T
 	for _, member := range plan.Execution.Members {
 		members = append(members, taskMember{repoTarget: repoTarget{Name: member.Name, DefaultBranch: member.Target}, Path: member.Path, BaseRef: member.Base, TargetBranch: member.Target, MergeMode: member.Delivery})
 	}
-	contents := workerProtocol(home, project, task, brief, briefPath, plan.Paths.Scratch, plan.Execution.RootContext) + roleSkillProtocol(plan, task) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
+	contents := workerProtocol(home, project, task, brief, briefPath, plan.Paths.Scratch, plan.Execution.RootContext) + selectedInputProtocol(plan.Paths.Output, plan.Inputs) + roleSkillProtocol(plan, task) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(plan.Launch.Kind) + "\n\n" + brief.Body + "\n"
 	contents = appendPreferenceInstructions(contents, "worker", planPreferences(plan))
 	contents = appendKnowledgeInstructions(contents, project, planKnowledge(plan))
 	return writeFile(launchPath, []byte(contents))
