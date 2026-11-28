@@ -69,14 +69,13 @@ func (s *Service) leadStatus(ctx context.Context, project store.Project) string 
 }
 
 type activeTaskSummary struct {
-	ID                    string `json:"id"`
-	Greenhouse            string `json:"greenhouse,omitempty"`
-	Name                  string `json:"name"`
-	State                 string `json:"state"`
-	Agent                 string `json:"agent,omitempty"`
-	AgentMismatch         string `json:"agent_mismatch,omitempty"`
-	MergeQueue            string `json:"merge_queue,omitempty"`
-	WorkerWorkspaceLayout string `json:"worker_workspace_layout,omitempty"`
+	ID            string `json:"id"`
+	Greenhouse    string `json:"greenhouse,omitempty"`
+	Name          string `json:"name"`
+	State         string `json:"state"`
+	Agent         string `json:"agent,omitempty"`
+	AgentMismatch string `json:"agent_mismatch,omitempty"`
+	MergeQueue    string `json:"merge_queue,omitempty"`
 }
 
 type taskSummary struct {
