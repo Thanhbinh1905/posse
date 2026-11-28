@@ -152,8 +152,25 @@ func selectedInputIgnored(root, relative string, memberInput, workspace bool) (b
 	if workspace && !memberInput {
 		return false, nil
 	}
+	probe := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel")
+	output, err := probe.CombinedOutput()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 128 {
+			if _, statErr := os.Lstat(filepath.Join(root, ".git")); os.IsNotExist(statErr) {
+				return false, nil
+			}
+		}
+		return false, err
+	}
+	projectRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	if filepath.Clean(strings.TrimSpace(string(output))) != filepath.Clean(projectRoot) {
+		return false, nil
+	}
 	command := exec.Command("git", "-C", root, "check-ignore", "--quiet", "--", relative)
-	err := command.Run()
+	err = command.Run()
 	if err == nil {
 		return true, nil
 	}
