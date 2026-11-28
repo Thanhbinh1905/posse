@@ -599,7 +599,8 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'dependency' THEN 'Queued Task or prerequisite state changed'
 		WHEN 'teardown_dependants' THEN 'No named dependants remain queued'
 		ELSE CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE id=d.task_id AND state='torn-down') THEN 'Task was torn down' ELSE 'Task no longer failed or lost' END END
-		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind<>'orphan'
+		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0
+		AND d.kind<>'workflow_stage' AND (d.kind<>'orphan' OR d.origin LIKE 'orphan:unrecoverable:%')
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=d.task_id AND (`+resolvedDecisionPredicate+`))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
 		return err
