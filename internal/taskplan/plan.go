@@ -199,6 +199,16 @@ type Plan struct {
 	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
 }
 
+func (p Plan) FrozenReviewProvider() string {
+	if p.ReviewProvider != "" {
+		return p.ReviewProvider
+	}
+	if p.ValidationLoops != nil {
+		return p.ValidationLoops.ReviewProvider
+	}
+	return ""
+}
+
 // DeletesBranchOnMerge reports the frozen delete_branch_on_merge of a workspace
 // Member, or of the Project when member is empty. Plans admitted before the
 // setting existed delete, as Posse did then.

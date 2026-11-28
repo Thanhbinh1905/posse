@@ -111,6 +111,57 @@ func TestReviewProvidersAreFrozenPerPlanMember(t *testing.T) {
 	}
 }
 
+func TestScopeAmendmentUsesFrozenReviewProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, legacyProvider string
+		wantAmendment                  bool
+	}{
+		{"explicit Greenhouse", "greenhouse", "", true},
+		{"legacy Greenhouse", "", "greenhouse", true},
+		{"explicit builtin overrides legacy Greenhouse", "builtin", "greenhouse", false},
+		{"legacy builtin", "", "builtin", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := request("change")
+			r.Review, r.Delivery, r.ReviewProvider = "full-pipeline", "pr", tc.provider
+			r.ValidationLoops = &taskplan.ValidationLoops{
+				Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1"}, ReviewProvider: tc.legacyProvider,
+			}
+			plan, err := taskplan.Resolve(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.provider == "" {
+				plan.Version, plan.ReviewProvider = 7, ""
+			}
+			if err := plan.Validate(); err != nil {
+				t.Fatalf("the original plan does not validate: %v", err)
+			}
+			amended, err := plan.AmendScope(taskplan.ScopeAmendment{
+				Repository: "shop", Scope: "Add a filter", Quote: "Include the filter in the same PR.", Actor: "lead", Source: taskplan.ScopeAmendmentSource,
+				PRURL: "https://github.com/acme/shop/pull/17", OldHead: strings.Repeat("a", 40), NewHead: strings.Repeat("b", 40),
+			})
+			if !tc.wantAmendment {
+				if err == nil {
+					t.Fatal("a builtin-review plan accepted a Greenhouse scope amendment")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("scope amendment refused for a valid frozen Greenhouse plan: %v", err)
+			}
+			encoded, err := amended.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored, err := taskplan.Decode(encoded)
+			if err != nil || restored.ScopeRevision() != 2 || restored.PreviousSHA256 != plan.SHA256() {
+				t.Fatalf("amendment did not round-trip: revision %d, err %v", restored.ScopeRevision(), err)
+			}
+		})
+	}
+}
+
 func TestReviewParallelIsFrozenWithValidationLoops(t *testing.T) {
 	r := request("change")
 	r.ValidationLoops = &taskplan.ValidationLoops{Review: config.ReviewLoop{Enabled: true, MaxRounds: 3, BlockAt: "P1", AutoStart: true}, ReviewProvider: "greenhouse", ReviewParallel: "greenhouse"}

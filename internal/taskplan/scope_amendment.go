@@ -62,7 +62,7 @@ func (p *Plan) ScopeReviewIntent() string {
 func (p Plan) validateScopeAmendments() error {
 	previous := 1
 	for _, amendment := range p.ScopeAmendments {
-		if p.Type != "change" || p.Execution.Scope != "repo" || p.Execution.Mode != "sandbox" || p.Delivery != "pr" || p.Review != "full-pipeline" || p.ReviewProvider != "greenhouse" ||
+		if p.Type != "change" || p.Execution.Scope != "repo" || p.Execution.Mode != "sandbox" || p.Delivery != "pr" || p.Review != "full-pipeline" || p.FrozenReviewProvider() != "greenhouse" ||
 			amendment.Revision <= previous || amendment.Revision > p.Revision || amendment.Repository == "" || amendment.PRURL == "" ||
 			amendment.Actor != "lead" || amendment.Source != ScopeAmendmentSource || !validScopeText(amendment.Scope) || !validScopeText(amendment.Quote) ||
 			!validScopeHead(amendment.OldHead) || !validScopeHead(amendment.NewHead) || amendment.OldHead == amendment.NewHead {

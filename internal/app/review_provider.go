@@ -21,10 +21,7 @@ func taskUsesGreenhouseReviewProvider(task store.Task, cfg config.Config, reposi
 		for _, member := range plan.Execution.Members {
 			provider := member.ReviewProvider
 			if provider == "" {
-				provider = plan.ReviewProvider
-			}
-			if provider == "" && plan.ValidationLoops != nil {
-				provider = plan.ValidationLoops.ReviewProvider
+				provider = plan.FrozenReviewProvider()
 			}
 			if provider == "" {
 				provider = cfg.EffectiveReviewProvider(member.Name)
@@ -42,11 +39,8 @@ func taskUsesGreenhouseReviewProvider(task store.Task, cfg config.Config, reposi
 			}
 		}
 	}
-	if plan.ReviewProvider != "" {
-		return plan.ReviewProvider == store.GreenhouseReviewProvider
-	}
-	if plan.ValidationLoops != nil && plan.ValidationLoops.ReviewProvider != "" {
-		return plan.ValidationLoops.ReviewProvider == store.GreenhouseReviewProvider
+	if provider := plan.FrozenReviewProvider(); provider != "" {
+		return provider == store.GreenhouseReviewProvider
 	}
 	return cfg.EffectiveReviewProvider(repository) == store.GreenhouseReviewProvider
 }
