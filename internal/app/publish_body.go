@@ -28,6 +28,7 @@ type publishDescription struct {
 	summary, verification, proof, risk string
 	refreshLegacy                      bool
 	retainEvidence                     []string
+	expectedURL                        string
 }
 
 func publishBodyMarker(edge, token string) string {

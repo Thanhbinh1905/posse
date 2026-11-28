@@ -85,7 +85,7 @@ func validationSummaryFor(ctx context.Context, db *store.DB, task store.Task, re
 			summary.Head = dispositionHead
 		}
 	}
-	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	verdicts, err := db.CurrentVerdictsFor(ctx, task.ID)
 	if err != nil {
 		return summary, err
 	}

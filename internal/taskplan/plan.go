@@ -185,6 +185,7 @@ type Plan struct {
 	Preferences      []Preference          `json:"preferences,omitempty"`
 	UserChoice       *UserChoice           `json:"user_choice,omitempty"`
 	MemberAdmissions []MemberAdmission     `json:"member_admissions,omitempty"`
+	ScopeAmendments  []ScopeAmendment      `json:"scope_amendments,omitempty"`
 	Inputs           []Input               `json:"inputs"`
 	Paths            Paths                 `json:"paths"`
 	Launch           Launch                `json:"launch"`
@@ -535,6 +536,9 @@ func (p Plan) Validate() error {
 			return invalid("invalid Member-admission approval")
 		}
 		seenAdmissions[admission.Repository] = true
+	}
+	if err := p.validateScopeAmendments(); err != nil {
+		return invalid(err.Error())
 	}
 	if p.Launch.ProfileName == "" || p.Launch.Profile.Kind == "" {
 		return invalid("missing launch Profile or kind")

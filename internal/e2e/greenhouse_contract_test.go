@@ -63,9 +63,17 @@ if mode == 'invalid-output':
 verdict = {'head': request['Head'], 'verdict': 'clean', 'coverage': request['Paths'], 'findings': []}
 if mode == 'inconclusive':
     verdict['verdict'] = 'inconclusive'
+finding = None
+if mode == 'scope':
+    with open(os.path.join(ctl, 'review-intent'), 'w') as log:
+        log.write(request['Intent'])
+    if 'mysql-filter.txt' in request['Paths'] and 'Add a MySQL filter to the guest image rotation' not in request['Intent']:
+        finding = ('mysql-filter.txt', 'The MySQL filter is outside the admitted scope')
 if mode == 'findings':
+    finding = (request['Paths'][0], 'The fixture flags this line')
+if finding:
     verdict['verdict'] = 'findings'
-    verdict['findings'] = [{'id': 'fixture-p1', 'priority': 'P1', 'origin': 'correctness', 'file': request['Paths'][0], 'start': 1, 'end': 1, 'explanation': 'The fixture flags this line', 'action': 'Change the line', 'rule': '', 'head': request['Head']}]
+    verdict['findings'] = [{'id': 'fixture-p1', 'priority': 'P1', 'origin': 'correctness', 'file': finding[0], 'start': 1, 'end': 1, 'explanation': finding[1], 'action': 'Change the line', 'rule': '', 'head': request['Head']}]
 emit({'role': 'assistant', 'provider': 'fixture', 'model': 'model', 'stopReason': 'stop', 'content': [{'type': 'text', 'text': json.dumps(verdict)}]})
 print(json.dumps({'type': 'agent_settled', 'aborted': False}))
 `

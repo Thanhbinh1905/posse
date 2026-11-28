@@ -275,6 +275,15 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 	if err != nil {
 		return axi.Failure("pr_remote_head_failed", "could not inspect the Task branch on origin before publishing", true, err.Error())
 	}
+	expectedURL := plan.ScopePRURL()
+	if expectedURL != "" {
+		if task.PRURL != expectedURL {
+			return axi.Failure("scope_pr_mismatch", "the amended Task must update its original PR or MR", false)
+		}
+		if err := validateWorkerPullRequestWithRemote(out.Context, project, task, forge, expectedURL, previousRemoteHead, false); err != nil {
+			return err
+		}
+	}
 	var pushOptions []string
 	if publishRewritesHistory(out.Context, task.WorktreePath, previousRemoteHead, sha) != rewrite {
 		if rewrite {
@@ -333,6 +342,7 @@ func (s *Service) publish(out *axi.Context, args []string) (returnErr error) {
 		proof:         strings.Join(parsed.Repeated["proof"], "\n\n"),
 		risk:          strings.Join(parsed.Repeated["risk"], "\n\n"),
 		refreshLegacy: parsed.Bool("refresh"),
+		expectedURL:   expectedURL,
 	}
 	if greenhouseFullPipeline {
 		description.retainEvidence = []string{}

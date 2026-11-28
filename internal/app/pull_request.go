@@ -368,6 +368,9 @@ func (s *Service) findOrCreateGitHubPullRequest(ctx context.Context, db *store.D
 		if mismatch != nil {
 			return "", false, pullRequestTargetMismatch(mismatch.URL, mismatch.BaseRefName, taskTargetBranch(project, task))
 		}
+		if description.expectedURL != "" && (!found || candidateURL != description.expectedURL) {
+			return "", false, axi.Failure("scope_pr_mismatch", "the amended Task must update its original open PR", false)
+		}
 		if !found {
 			if !foundOpenPR {
 				break

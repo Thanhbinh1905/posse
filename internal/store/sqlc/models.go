@@ -92,6 +92,30 @@ type ConfigApproval struct {
 	At        int64
 }
 
+type CurrentVerdict struct {
+	ID             int64
+	TaskID         int64
+	Repo           string
+	Provider       string
+	Protocol       string
+	GrantID        sql.NullString
+	HeadSha        string
+	TargetSha      string
+	ReviewBaseSha  string
+	Verdict        string
+	Blocking       int64
+	RulesDigest    string
+	ConfigDigest   string
+	InputDigest    string
+	Backend        string
+	Model          string
+	FindingsDigest string
+	FindingsPath   string
+	Mode           string
+	RecordedAt     int64
+	ScopeRevision  int64
+}
+
 type Decision struct {
 	ID             int64
 	ProjectID      int64
@@ -1005,6 +1029,7 @@ type Verdict struct {
 	FindingsPath   string
 	Mode           string
 	RecordedAt     int64
+	ScopeRevision  int64
 }
 
 type VerifiedPrHead struct {

@@ -81,6 +81,14 @@ func (db *DB) RecordGreenhouseReviewRequest(ctx context.Context, request Greenho
 	return db.PersistTask(ctx, request.TaskID)
 }
 
+func (db *DB) HasCurrentGreenhouseReviewRequest(ctx context.Context, taskID int64, repository, head string) (bool, error) {
+	var exists bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM greenhouse_review_requests r JOIN current_verdicts v ON v.id=r.verdict_id
+		WHERE r.task_id=? AND r.repo=? AND r.requested_head=? AND r.outcome='verdict')`, taskID, repository, head).Scan(&exists)
+	return exists, err
+}
+
 func (db *DB) GreenhouseReviewRequests(ctx context.Context, projectID int64) ([]GreenhouseReviewRequest, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id,project_id,task_id,repo,requested_head,provider,requested_at,settled_at,outcome,verdict_id,COALESCE(grant_id,''),failure_count FROM greenhouse_review_requests WHERE project_id=? ORDER BY requested_at,id`, projectID)
 	if err != nil {
