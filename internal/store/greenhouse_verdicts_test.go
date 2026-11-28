@@ -190,8 +190,15 @@ func TestGreenhouseVerdictPersistsFindingsByTaskRepositoryAndHead(t *testing.T) 
 		t.Fatalf("record Verdict with findings = %v, %v", recorded, err)
 	}
 	findings, err := f.db.ProviderFindingsForTask(f.ctx, f.change)
-	if err != nil || len(findings) != 1 || findings[0].Repository != "shop" || findings[0].HeadSHA != reviewShaA || findings[0].State != "open" || findings[0].Rule != "review-gate" {
+	if err != nil || len(findings) != 1 || findings[0].Repository != "shop" || findings[0].HeadSHA != reviewShaA || findings[0].State != "open" || findings[0].Rule != "review-gate" || findings[0].Guidance != "Require the Verdict" {
 		t.Fatalf("Greenhouse findings = %+v, %v", findings, err)
+	}
+	if _, err := f.db.ExecContext(f.ctx, `DELETE FROM provider_finding_events WHERE finding_id=? AND event='guidance'`, findings[0].FindingSeq); err != nil {
+		t.Fatal(err)
+	}
+	findings, err = f.db.ProviderFindingsForTask(f.ctx, f.change)
+	if err != nil || len(findings) != 1 || findings[0].Guidance != "Require the Verdict" {
+		t.Fatalf("legacy Greenhouse findings = %+v, %v; want pattern guidance when no per-finding guidance event exists", findings, err)
 	}
 }
 
