@@ -143,7 +143,7 @@ func (s *Service) scanDirectoryProject(ctx *axi.Context, db *store.DB, home stri
 		return ctx.Print(axi.Object{
 			{Key: "project", Value: project.Name}, {Key: "kind", Value: project.Kind}, {Key: "converted", Value: false},
 			{Key: "capabilities", Value: projectCapabilities(project.Kind)},
-			{Key: "help", Value: []any{"Initialize Git in " + project.Root + " or add repositories inside it, then run `posse project scan` again to enable Tasks"}},
+			{Key: "help", Value: []any{"After explicit User approval, run `posse project init --user-approved \"<User's words>\"` to enable Tasks, or add repositories inside it and run `posse project scan`"}},
 		})
 	}
 	if detected.Root != project.Root {

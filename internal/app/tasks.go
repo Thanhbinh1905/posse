@@ -180,6 +180,11 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	if project.IsDirectory() {
 		return executionUnavailable(project)
 	}
+	if !project.IsWorkspace() && defaultBranchUnborn(ctx.Context, projectRepoTarget(project)) {
+		if err := requireGitUnbornTaskSupport(ctx.Context); err != nil {
+			return err
+		}
+	}
 	var adoption *store.TaskAdoptionRequest
 	var adoptionSource *store.Task
 	if brief.Adopt != "" {
@@ -393,6 +398,13 @@ func (s *Service) spawnTask(ctx *axi.Context, args []string, generated *generate
 	members, workspaceMode, err := s.planTaskMembersWithChoice(ctx.Context, db, project, cfg, brief, reviewedTask, choice != nil)
 	if err != nil {
 		return err
+	}
+	for _, member := range members {
+		if defaultBranchUnborn(ctx.Context, member.repoTarget) {
+			if err := requireGitUnbornTaskSupport(ctx.Context); err != nil {
+				return err
+			}
+		}
 	}
 	issueTargets, err := projectTargets(ctx.Context, db, project)
 	if err != nil {

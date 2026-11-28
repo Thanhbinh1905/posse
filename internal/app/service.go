@@ -230,6 +230,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "ack", Usage: "$ ack <id...|all>", Summary: "Acknowledge open Notices.", Handler: s.ack},
 		{Name: "project", Summary: "Inspect or change a Project's settings.", Subcommands: []*axi.Command{
 			{Name: "add", Usage: "$ project add [--name <n>]", Summary: "Register a Git repository, workspace or Directory Project without starting its Lead.", Handler: s.projectAdd},
+			{Name: "init", Usage: "$ project init [--user-approved <quote>]", Summary: "Initialize Git in a Directory Project after explicit consent, without staging or committing files.", Handler: s.projectInit},
 			{Name: "scan", Usage: "$ project scan [<name>]", Summary: "Re-detect a workspace Project's member repositories, or convert a Directory Project whose folder gained Git.", Handler: s.projectScan},
 			{Name: "show", Summary: "Show a Project's effective config.", Handler: s.projectShow},
 			{Name: "move", Summary: "Update a moved Project's root path.", Handler: s.projectMove},

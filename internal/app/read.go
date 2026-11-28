@@ -406,7 +406,7 @@ func homeHelp(project store.Project, tasks []store.Task, notices []store.Notice)
 			help = append(help, "Run `posse show "+show+"` to inspect this Task")
 		}
 	} else if project.IsDirectory() {
-		help = append(help, "This Directory Project admits no Tasks; initialize Git or add repositories, then run `posse project scan`")
+		help = append(help, "This Directory Project admits no Tasks; after explicit User approval, run `posse project init --user-approved \"<User's words>\"`, or add repositories and run `posse project scan`")
 	} else {
 		help = append(help, "Run `posse start --brief <file> [--name <short>]` to delegate a Task")
 	}

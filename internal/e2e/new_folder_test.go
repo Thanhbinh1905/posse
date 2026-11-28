@@ -132,9 +132,22 @@ func TestNewFolderLandsFirstCommitWithoutGitSetup(t *testing.T) {
 	if show := runPosse(t, f.binary, f.repo, f.leadEnv, "project", "show"); !strings.Contains(show, "kind: directory") || !strings.Contains(show, "execution: none") {
 		t.Fatalf("not an exploration-only Project: %s", show)
 	}
-	gitTest(t, f.env, f.repo, "init", "-b", "main")
-	if scan := runPosse(t, f.binary, f.repo, f.leadEnv, "project", "scan"); !strings.Contains(scan, "converted: true") {
-		t.Fatalf("conversion failed: %s", scan)
+	unnamed := filepath.Join(f.repo, "notes.md")
+	if err := os.WriteFile(unnamed, []byte("User notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if init := runPosse(t, f.binary, f.repo, f.leadEnv, "project", "init", "--user-approved", "Initialize this Directory Project as Git"); !strings.Contains(init, "converted: true") {
+		t.Fatalf("consented Git init failed: %s", init)
+	}
+	exclude := filepath.Join(f.repo, ".git", "info", "exclude")
+	if err := os.WriteFile(exclude, []byte("notes.md\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if contents, err := os.ReadFile(unnamed); err != nil || string(contents) != "User notes\n" {
+		t.Fatalf("Git init changed the unnamed User file: %q %v", contents, err)
+	}
+	if status := gitTest(t, f.env, f.repo, "status", "--ignored", "--porcelain"); !strings.Contains(status, "!! notes.md") || strings.Contains(status, "A  notes.md") {
+		t.Fatalf("Git init did not leave the unnamed User file ignored and unstaged: %q", status)
 	}
 	if out, err := gitCommand(f.env, f.repo, "rev-parse", "--verify", "--quiet", "HEAD"); err == nil {
 		t.Fatalf("posse up created a commit: %s", out)
