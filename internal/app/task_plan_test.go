@@ -231,6 +231,117 @@ func TestAdmittedBriefAndPreferencesDoNotFollowMutableCopies(t *testing.T) {
 	}
 }
 
+func TestStartFreezesAndDeliversSelectedInputWithoutDirtyingWorktree(t *testing.T) {
+	f := newStartFixture(t)
+	original := []byte("contract bytes\r\n")
+	if err := os.WriteFile(filepath.Join(f.repo, "contract.md"), original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brief := "---\ntype: change\ntitle: Selected input\ndone_when: consume contract\ninputs: [contract.md=Use as the API contract]\n---\nImplement the requested contract.\n"
+	if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, output := f.start(t); code != 0 {
+		t.Fatalf("start code=%d %s", code, output)
+	}
+	task, _ := f.onlyTask(t)
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected *taskplan.Input
+	for i := range plan.Inputs {
+		if plan.Inputs[i].Role == "selected-input" {
+			selected = &plan.Inputs[i]
+		}
+	}
+	if selected == nil || !bytes.Equal(selected.Bytes, original) || selected.Use != "Use as the API contract" {
+		t.Fatalf("selected input was not frozen with its purpose: %#v", selected)
+	}
+	managed := filepath.Join(plan.Paths.Output, "inputs", selected.SHA256+".data")
+	contents, err := os.ReadFile(managed)
+	if err != nil || !bytes.Equal(contents, original) {
+		t.Fatalf("managed input = %q, %v", contents, err)
+	}
+	info, err := os.Stat(managed)
+	if err != nil || info.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("managed input is not read-only: %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(task.WorktreePath, "contract.md")); !os.IsNotExist(err) {
+		t.Fatalf("unused input was copied into the Task worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.repo, "contract.md"), []byte("later root edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreAdmittedLaunchFiles(f.home, f.project, task, plan); err != nil {
+		t.Fatal(err)
+	}
+	contents, err = os.ReadFile(managed)
+	if err != nil || !bytes.Equal(contents, original) {
+		t.Fatalf("root edit changed frozen managed input: %q, %v", contents, err)
+	}
+}
+
+func TestStartRejectsUnsafeSelectedInputsBeforeResourceAllocation(t *testing.T) {
+	for _, testCase := range []struct {
+		name, path, setup, refusal string
+	}{
+		{name: "symlink", path: "link.md", setup: "symlink", refusal: "symlink"},
+		{name: "ancestor-symlink", path: "linked/contract.md", setup: "ancestor-symlink", refusal: "symlink"},
+		{name: "traversal", path: "../outside.md", refusal: "relative exact file path"},
+		{name: "ignored", path: "ignored.md", setup: "ignored", refusal: "ignored by Git"},
+		{name: "directory", path: "docs", setup: "directory", refusal: "not a regular file"},
+		{name: "oversized", path: "large.md", setup: "oversized", refusal: "1 MiB per-file limit"},
+		{name: "reserved", path: ".git/config", refusal: "reserved metadata"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			f := newStartFixture(t)
+			switch testCase.setup {
+			case "symlink":
+				if err := os.Symlink("missing.md", filepath.Join(f.repo, testCase.path)); err != nil {
+					t.Fatal(err)
+				}
+			case "ancestor-symlink":
+				outside := filepath.Join(f.home, "outside")
+				if err := os.Mkdir(outside, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outside, "contract.md"), []byte("external"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(f.repo, "linked")); err != nil {
+					t.Fatal(err)
+				}
+			case "ignored":
+				if err := os.WriteFile(filepath.Join(f.repo, ".gitignore"), []byte("ignored.md\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(f.repo, testCase.path), []byte("private"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(filepath.Join(f.repo, testCase.path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "oversized":
+				if err := os.WriteFile(filepath.Join(f.repo, testCase.path), bytes.Repeat([]byte{'x'}, maxSelectedInputSize+1), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			brief := "---\ntype: change\ntitle: Unsafe input\ndone_when: refuse unsafe input\ninputs: [" + testCase.path + "=Read it]\n---\n"
+			if err := os.WriteFile(f.brief, []byte(brief), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if code, output := f.start(t); code != 1 || !strings.Contains(output, testCase.refusal) {
+				t.Fatalf("unsafe input was not refused: code=%d %s", code, output)
+			}
+			if f.fake.CallCount("tab.create") != 0 || f.fake.CallCount("agent.start") != 0 {
+				t.Fatalf("unsafe input allocated Worker resources: %#v", f.fake.Calls)
+			}
+		})
+	}
+}
+
 func TestStartFreezesValidationLoopSettingsAndBriefTightening(t *testing.T) {
 	f := newStartFixture(t)
 	global := `[defaults]

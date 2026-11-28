@@ -8,6 +8,16 @@ import (
 	"github.com/thanhbinh1905/posse/internal/config"
 )
 
+func TestParseBriefTextAcceptsSelectedInputs(t *testing.T) {
+	brief, err := ParseBriefText("---\ntype: change\ntitle: Selected inputs\ndone_when: use frozen contract\ninputs: [spec/API.md=API contract, api:docs/contract.md=Member contract]\n---\nUse these files.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(brief.Inputs) != 2 || brief.Inputs[0] != (InputSelection{Path: "spec/API.md", Use: "API contract"}) || brief.Inputs[1] != (InputSelection{Path: "api:docs/contract.md", Use: "Member contract"}) {
+		t.Fatalf("selected inputs = %#v", brief.Inputs)
+	}
+}
+
 func TestMaintenanceAdoptionBriefField(t *testing.T) {
 	brief, err := ParseBriefText("---\ntype: change\ntitle: Continue branch\ndone_when: changes are complete\nadopt: t12\n---\n")
 	if err != nil || brief.Adopt != "t12" {

@@ -15,9 +15,10 @@ import (
 	"github.com/thanhbinh1905/posse/internal/dispatch"
 )
 
-const Version = 10
+const Version = 11
 
 const planVersionWithoutStagedWorkflows = 10
+const planVersionSelectedInputs = 11
 
 const planVersionGreenhouseDelivery = 9
 
@@ -47,6 +48,7 @@ type Input struct {
 	SHA256 string `json:"sha256"`
 	Path   string `json:"path,omitempty"`
 	Layer  string `json:"layer,omitempty"`
+	Use    string `json:"use,omitempty"`
 	Legacy bool   `json:"legacy,omitempty"`
 }
 
@@ -672,7 +674,11 @@ func (p Plan) Validate() error {
 	if len(grants) != 2 || grants["autonomy.review"] != "ask" && grants["autonomy.review"] != "lead" || grants["autonomy.merge"] != "ask" && grants["autonomy.merge"] != "auto" {
 		return invalid("unsupported autonomy grant")
 	}
+	selectedInputs := make([]Input, 0)
 	for _, input := range p.Inputs {
+		if input.Role == "selected-input" {
+			selectedInputs = append(selectedInputs, input)
+		}
 		if input.Path != "" {
 			if input.Role == "brief" || len(input.Bytes) != 0 || len(input.SHA256) != sha256.Size*2 {
 				return invalid("invalid selected input path: " + input.Source)
@@ -695,6 +701,22 @@ func (p Plan) Validate() error {
 		selected := Select(input.Role, input.Source, input.Bytes)
 		if input.SHA256 != selected.SHA256 {
 			return invalid("selected input digest mismatch: " + input.Source)
+		}
+		if input.Role == "selected-input" && (strings.TrimSpace(input.Use) == "" || input.Source == "") {
+			return invalid("selected input is missing its intended use or path")
+		}
+		if input.Role != "selected-input" && input.Use != "" {
+			return invalid("intended use is valid only for selected inputs")
+		}
+	}
+	if p.Version >= planVersionSelectedInputs {
+		if len(selectedInputs) != len(brief.Inputs) {
+			return invalid("selected inputs do not match the Brief")
+		}
+		for i, selection := range brief.Inputs {
+			if selectedInputs[i].Source != selection.Path || selectedInputs[i].Use != selection.Use {
+				return invalid("selected input provenance does not match the Brief")
+			}
 		}
 	}
 	return nil

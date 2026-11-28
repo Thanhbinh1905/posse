@@ -834,13 +834,17 @@ func (s *Service) launchAdmittedTask(ctx *axi.Context, db *store.DB, home string
 		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 		return err
 	}
+	if err := s.runIntentStep(ctx.Context, db, intent, "selected.inputs", func() error { return writeSelectedInputFiles(taskHome, plan.Inputs) }); err != nil {
+		_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
+		return err
+	}
 	if len(reviewFiles) > 0 {
 		if err := s.runIntentStep(ctx.Context, db, intent, "review.files", func() error { return writeReviewRoundFiles(taskHome, reviewFiles) }); err != nil {
 			_ = s.failSpawn(ctx.Context, db, project, taskID, task.Title, err.Error())
 			return err
 		}
 	}
-	launchContents := workerProtocol(home, project, task, brief, briefPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + roleSkillProtocol(&plan, task) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
+	launchContents := workerProtocol(home, project, task, brief, briefPath, scratchPath, plan.Execution.RootContext, fmt.Sprintf("launch:%d", launch)) + selectedInputProtocol(taskHome, plan.Inputs) + roleSkillProtocol(&plan, task) + workspaceProtocol(project, members, plan.Execution.RootContext) + workerWaitRules(kindConfig) + "\n\n" + brief.Body + "\n"
 	launchContents = appendPreferenceInstructions(launchContents, "worker", planPreferences(&plan))
 	launchContents = appendKnowledgeInstructions(launchContents, project, planKnowledge(&plan))
 	if err := s.runIntentStep(ctx.Context, db, intent, "launch.write", func() error { return writeFile(launchPath, []byte(launchContents)) }); err != nil {
