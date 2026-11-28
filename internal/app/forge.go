@@ -40,49 +40,77 @@ func resolveForgeForRepositoryWithCache(ctx context.Context, root string, cfg co
 	if err != nil {
 		return repositoryForge{}, nil, axi.Failure("pr_origin_invalid", err.Error(), false)
 	}
-	kind := cfg.Defaults.Forge
+	forge := repositoryForge{Host: host, Path: path, Root: root}
+	mode := repositoryForgeMode(cfg, member, host)
+	if mode != "auto" {
+		forge.Kind = mode
+		return forge, nil, nil
+	}
+	var probe forgeProbeOutcome
+	if useCache {
+		probe, err = cachedForgeProbe(ctx, root, host, cfg, mode)
+	} else {
+		probe, err = runForgeProbe(ctx, root, host, mode)
+	}
+	if err != nil {
+		return forge, &probe, err
+	}
+	forge.Kind, err = detectRepositoryForge(probe, cfg, member, host)
+	return forge, &probe, err
+}
+
+func repositoryForgeName(cfg config.Config, member string) string {
 	if member != "" {
-		if override, ok := cfg.Repositories[member]; ok && override.Forge != "" {
-			kind = override.Forge
-		}
+		return member
 	}
-	var probe *forgeProbeOutcome
-	if kind == "" || kind == "auto" {
-		switch host {
-		case "github.com":
-			kind = "github"
-		case "gitlab.com":
-			kind = "gitlab"
-		default:
-			// Enterprise auto-detection is a bounded, shared probe. Explicit
-			// forge configuration never reaches this branch.
-			var result forgeProbeOutcome
-			var probeErr error
-			if useCache {
-				result, probeErr = cachedForgeProbe(ctx, root, host, cfg, "auto")
-			} else {
-				result, probeErr = runForgeProbe(ctx, root, host, "auto")
-			}
-			probe = &result
-			if probeErr != nil {
-				return repositoryForge{Host: host, Path: path, Root: root}, probe, probeErr
-			}
-			switch {
-			case result.GitLabAuthenticated && result.GitHubAuthenticated:
-				return repositoryForge{Host: host, Path: path, Root: root}, probe, axi.Failure("pr_forge_ambiguous", "origin host is authenticated with both gh and glab: "+host, false, "Set defaults.forge or repositories.<repository>.forge")
-			case result.GitLabAuthenticated:
-				kind = "gitlab"
-			case result.GitHubAuthenticated:
-				kind = "github"
-			case result.anyTimedOut():
-				return repositoryForge{Host: host, Path: path, Root: root}, probe, forgeProbeTimeoutError(host)
-			}
-		}
+	return cfg.ProjectName
+}
+
+func repositoryForgeKey(cfg config.Config, member string) string {
+	name := repositoryForgeName(cfg, member)
+	if name == "" {
+		name = "<repository>"
 	}
-	if kind != "github" && kind != "gitlab" {
-		return repositoryForge{Host: host, Path: path, Root: root}, probe, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
+	return "repositories." + name + ".forge"
+}
+
+func repositoryForgeMode(cfg config.Config, member, host string) string {
+	kind := cfg.Defaults.LegacyForge
+	if override := cfg.Repositories[repositoryForgeName(cfg, member)].Forge; override != "" {
+		kind = override
 	}
-	return repositoryForge{Kind: kind, Host: host, Path: path, Root: root}, probe, nil
+	if kind == "github" || kind == "gitlab" {
+		return kind
+	}
+	switch host {
+	case "github.com":
+		return "github"
+	case "gitlab.com":
+		return "gitlab"
+	default:
+		return "auto"
+	}
+}
+
+func detectRepositoryForge(probe forgeProbeOutcome, cfg config.Config, member, host string) (string, error) {
+	key := repositoryForgeKey(cfg, member)
+	scope := "the Project config"
+	if cfg.ProjectName != "" {
+		scope = "the " + cfg.ProjectName + " Project config"
+	}
+	override := "Set `" + key + "` to github or gitlab in " + scope + "."
+	switch {
+	case probe.GitLabAuthenticated && probe.GitHubAuthenticated:
+		return "", axi.Failure("pr_forge_ambiguous", "origin host is authenticated with both gh and glab: "+host+"; choose a forge with "+key, false, override)
+	case probe.GitLabAuthenticated:
+		return "gitlab", nil
+	case probe.GitHubAuthenticated:
+		return "github", nil
+	case probe.anyTimedOut():
+		return "", axi.Failure("pr_forge_probe_timeout", "forge CLI timed out for host "+host+"; override detection with "+key, true, "Check forge CLI connectivity and authentication for this host.", override)
+	default:
+		return "", axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host+"; set "+key+" or authenticate gh or glab for this host", false, "Authenticate gh or glab for "+host+", or select the forge explicitly.", override)
+	}
 }
 
 func forgeProbeTimeoutError(host string) error {

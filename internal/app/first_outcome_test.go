@@ -777,7 +777,7 @@ func TestFirstOutcomeReadinessRecomputed(t *testing.T) {
 		t.Fatal(err)
 	}
 	check([]string{"machine_setup"}, []string{"forge_auth", "autonomy_ask"})
-	outcomeCLI(t, f.service, 0, "config", "set", "defaults.forge", "gitlab", "--project", "shop")
+	outcomeCLI(t, f.service, 0, "config", "set", "repositories.shop.forge", "gitlab", "--project", "shop")
 	gitTest(t, f.repo, "remote", "set-url", "origin", "https://gitlab.example.com/group/project.git")
 	output := outcomeCLI(t, f.service, 0, "--json")
 	if !strings.Contains(output, "gitlab.example.com") || !strings.Contains(output, "unknown") {

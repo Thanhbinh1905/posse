@@ -191,11 +191,21 @@ func (s *Service) collectDoctorChecks(ctx *axi.Context) (doctorResult, error) {
 				}
 				status, detail, action := s.reviewDispatchCheck(ctx.Context, project, projectCfg)
 				addCheck("review dispatch "+project.Name, status, detail, action)
+				if project.IsWorkspace() {
+					targets, err := projectTargets(ctx.Context, db, project)
+					if err != nil {
+						addCheck("forge "+project.Name, "warn", err.Error(), "Inspect the Project repositories and retry `posse doctor`")
+					} else {
+						checks = append(checks, repositoryDoctorChecks(ctx.Context, projectCfg, targets)...)
+					}
+					continue
+				}
 				forge, _, err := resolveForgeForRepositoryFresh(ctx.Context, project.Root, projectCfg, "")
 				if err != nil {
-					action := "Set defaults.forge for this Project"
-					if strings.Contains(err.Error(), "forge CLI timed out") {
-						action = "Check forge CLI connectivity and authentication for this host"
+					action := "Check the repository's origin remote"
+					var forgeErr *axi.Error
+					if errors.As(err, &forgeErr) && len(forgeErr.Help) > 0 {
+						action = strings.Join(forgeErr.Help, " ")
 					}
 					addCheck("forge "+project.Name, "warn", err.Error(), action)
 					continue
