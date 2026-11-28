@@ -178,19 +178,28 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 				}
 			}
 		}
-		if task.WorktreePath == "" || task.Branch == "" {
+		sandboxAvailable, err := taskSandboxAvailable(ctx, db, task)
+		if err != nil {
+			return err
+		}
+		if task.Branch == "" || sandboxAvailable && task.WorktreePath == "" {
 			return axi.Failure("merge_refused", "Task has no branch or Sandbox", false)
 		}
-		status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
-		if err != nil {
-			return err
-		}
-		if status != "" {
-			return axi.Failure("merge_refused", "Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")
-		}
-		gatedSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
-		if err != nil {
-			return err
+		gatedSHA := task.GatedSHA
+		if sandboxAvailable {
+			status, err := gitStatusOutput(ctx, task.WorktreePath, "--porcelain")
+			if err != nil {
+				return err
+			}
+			if status != "" {
+				return axi.Failure("merge_refused", "Task worktree is not clean", false, "Commit or discard the remaining changes, then signal done again")
+			}
+			gatedSHA, err = gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+			if err != nil {
+				return err
+			}
+		} else if gatedSHA == "" {
+			return axi.Failure("merge_refused", "released Task has no recorded gated commit", false)
 		}
 		workerPR := task.PRURL != ""
 		if fullPipelineSelected(task, "") && !workerPR {
@@ -215,15 +224,17 @@ func (s *Service) preparePullRequestMerge(out *axi.Context, db *store.DB, projec
 			return err
 		}
 		task.GatedSHA = gatedSHA
-		currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
-		if err != nil {
-			return err
-		}
-		if currentSHA != gatedSHA {
-			if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
+		if sandboxAvailable {
+			currentSHA, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+			if err != nil {
 				return err
 			}
-			return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
+			if currentSHA != gatedSHA {
+				if err := db.ClearTaskGatedSHA(ctx, task.ID); err != nil {
+					return err
+				}
+				return axi.Failure("branch_moved", "Task branch moved after its merge head was recorded", false, "Run `posse merge "+taskIDString(task.Seq)+"` again")
+			}
 		}
 		if err := s.requirePRTargetFresh(ctx, db, project, cfg, task, "", task.MergeMode, gatedSHA); err != nil {
 			if clearErr := db.ClearTaskGatedSHA(ctx, task.ID); clearErr != nil {
@@ -1394,7 +1405,13 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 		}
 		headSHA := task.GatedSHA
 		if headSHA == "" && task.WorktreePath != "" && task.Branch != "" {
-			headSHA, _ = gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+			sandboxAvailable, err := taskSandboxAvailable(ctx, db, task)
+			if err != nil {
+				return err
+			}
+			if sandboxAvailable {
+				headSHA, _ = gitOutput(ctx, task.WorktreePath, "rev-parse", "refs/heads/"+task.Branch)
+			}
 		}
 		if headSHA == "" {
 			previous, previousErr := db.LatestPRObservation(ctx, task.ID)
@@ -1647,12 +1664,25 @@ func (s *Service) pollProjectPullRequestsPass(ctx context.Context, db *store.DB,
 			if verifyErr != nil {
 				return verifyErr
 			}
-			// A head still on the Sandbox's Task branch is also the Worker's own.
 			if !verified && task.WorktreePath != "" && task.Branch != "" {
-				verified = headOnTaskBranch(ctx, task.WorktreePath, task.Branch, observation.HeadSHA)
+				sandboxAvailable, err := taskSandboxAvailable(ctx, db, task)
+				if err != nil {
+					return err
+				}
+				if sandboxAvailable {
+					verified = headOnTaskBranch(ctx, task.WorktreePath, task.Branch, observation.HeadSHA)
+				}
 			}
 			if !verified {
-				if err := raiseUngatedMergedHeadNotice(ctx, db, project, task, task.WorktreePath, "", task.PRURL, task.GatedSHA, observation.HeadSHA); err != nil {
+				worktree := ""
+				sandboxAvailable, err := taskSandboxAvailable(ctx, db, task)
+				if err != nil {
+					return err
+				}
+				if sandboxAvailable {
+					worktree = task.WorktreePath
+				}
+				if err := raiseUngatedMergedHeadNotice(ctx, db, project, task, worktree, "", task.PRURL, task.GatedSHA, observation.HeadSHA); err != nil {
 					return err
 				}
 				continue
