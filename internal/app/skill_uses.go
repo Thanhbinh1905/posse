@@ -20,16 +20,17 @@ import (
 // roleSkillStep says when a Worker must invoke a bundled workflow skill and
 // which of `publish` and `done` it applies to.
 type roleSkillStep struct {
-	when  string
-	steps []string
+	when          string
+	steps         []string
+	diffTriggered bool
 }
 
 var proseSkillStep = roleSkillStep{when: "on PR text, commit messages and Reports, before `posse publish` and the `done` Signal", steps: []string{"publish", "done"}}
 
 var roleSkillSteps = map[string]roleSkillStep{
-	"posse-tdd":               {when: "before changing code; write the failing test first"},
-	"posse-deslop":            {when: "when this Task changes code, before the `done` Signal", steps: []string{"done"}},
-	"posse-no-comments":       {when: "when this Task changes code, before the `done` Signal and after `posse-deslop`", steps: []string{"done"}},
+	"posse-tdd":               {when: "before changing code; write the failing test first", diffTriggered: true},
+	"posse-deslop":            {when: "when this Task changes code, before the `done` Signal", steps: []string{"done"}, diffTriggered: true},
+	"posse-no-comments":       {when: "when this Task changes code, before the `done` Signal and after `posse-deslop`", steps: []string{"done"}, diffTriggered: true},
 	"posse-technical-writing": proseSkillStep,
 	"posse-unslop":            proseSkillStep,
 	"posse-review":            {when: "for the whole review, before the `done` Signal", steps: []string{"done"}},
@@ -235,10 +236,13 @@ func roleSkillsUnusedFailure(skills []string) *axi.Error {
 }
 
 // requireRoleSkillsUsed refuses while a configured role skill has 0 uses.
-func requireRoleSkillsUsed(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task) error {
+func requireRoleSkillsUsed(ctx context.Context, db *store.DB, home string, project store.Project, task store.Task, noChange bool) error {
 	unused, err := unusedRoleSkills(ctx, db, home, project, task)
 	if err != nil {
 		return err
+	}
+	if noChange {
+		unused = slices.DeleteFunc(unused, func(name string) bool { return roleSkillSteps[name].diffTriggered })
 	}
 	if len(unused) > 0 {
 		return roleSkillsUnusedFailure(unused)

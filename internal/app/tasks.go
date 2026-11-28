@@ -2102,7 +2102,7 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 		if pending {
 			return queuedInstructionsPendingFailure(ctx.Context, db, task, time.Now())
 		}
-		if err := requireRoleSkillsUsed(ctx.Context, db, home, project, task); err != nil {
+		if err := requireRoleSkillsUsed(ctx.Context, db, home, project, task, noChange); err != nil {
 			return err
 		}
 	}

@@ -562,7 +562,7 @@ func (p Plan) Validate() error {
 	if len(p.Inputs) == 0 || p.Inputs[0].Role != "brief" {
 		return invalid("missing selected Brief")
 	}
-	parseBrief := dispatch.ParseBriefText
+	parseBrief := dispatch.ParseStoredBriefText
 	if p.Version < planVersionWithoutStagedWorkflows {
 		parseBrief = dispatch.ParseHistoricalBriefText
 	}
