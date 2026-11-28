@@ -507,7 +507,12 @@ func (db *DB) AdvanceDecisionNoticeCursor(ctx context.Context, projectID, id int
 }
 
 const resolvedDecisionPredicate = `
-		(d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode IN ('pr','greenhouse') AND NOT EXISTS(
+		(d.kind<>'orphan' AND t.state='torn-down')
+		OR (d.kind='teardown_dependants' AND NOT EXISTS(
+			SELECT 1 FROM tasks dependant WHERE dependant.project_id=d.project_id AND dependant.state='queued'
+			AND INSTR(','||SUBSTR(d.origin, INSTR(d.origin, ':')+INSTR(SUBSTR(d.origin, INSTR(d.origin, ':')+1), ':')+1)||',', ',t'||dependant.seq||',')>0
+		))
+		OR (d.kind='merge_ready' AND (t.state NOT IN ('done','merging') OR (t.landing_mode IN ('pr','greenhouse') AND NOT EXISTS(
 			SELECT 1 FROM pr_observations p WHERE p.task_id=t.id AND p.pr_url=t.pr_url
 			AND p.id=(SELECT MAX(id) FROM pr_observations WHERE task_id=t.id AND pr_url=t.pr_url)
 			AND p.state='OPEN' AND p.head_sha=t.gated_sha AND json_extract(p.checks,'$.state')='SUCCESS'
@@ -592,8 +597,9 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 		WHEN 'quota' THEN 'Worker relaunched or Task left its working states'
 		WHEN 'budget' THEN 'Budget Decision no longer applies to this Worker launch, Task state or Project day'
 		WHEN 'dependency' THEN 'Queued Task or prerequisite state changed'
-		ELSE 'Task no longer failed or lost' END
-		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind IN ('merge_ready','recovery','worker_exited','pr_closed','orphan','quota','budget','dependency')
+		WHEN 'teardown_dependants' THEN 'No named dependants remain queued'
+		ELSE CASE WHEN EXISTS(SELECT 1 FROM tasks WHERE id=d.task_id AND state='torn-down') THEN 'Task was torn down' ELSE 'Task no longer failed or lost' END END
+		WHERE d.project_id=? AND d.answered_at=0 AND d.obsolete_at=0 AND d.kind<>'orphan'
 		AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=d.task_id AND (`+resolvedDecisionPredicate+`))`, time.Now().UnixMilli(), projectID)
 	if err != nil {
 		return err
