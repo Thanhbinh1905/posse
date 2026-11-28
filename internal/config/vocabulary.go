@@ -16,6 +16,7 @@ const (
 	vocabularyMarkerV1               = "# posse vocabulary: 1\n"
 	vocabularyMarker                 = "# posse vocabulary: 2\n"
 	deprecatedWorkerDisplayPrefixKey = "identity.worker.display_prefix"
+	legacyForgeKey                   = "defaults.forge"
 )
 
 func vocabularyMarkerVersion(data []byte) int {
@@ -43,9 +44,9 @@ func vocabularyVersion(data []byte, path string) (int, error) {
 	return vocabularyMarkerVersion(marker), nil
 }
 
-// IsDeprecatedKey reports whether an old schema accepted a key that no longer has an effect.
+// IsDeprecatedKey identifies retired keys that can still be unset.
 func IsDeprecatedKey(key string) bool {
-	return key == deprecatedWorkerDisplayPrefixKey
+	return key == deprecatedWorkerDisplayPrefixKey || key == legacyForgeKey
 }
 
 // ReplacementKey is shared by validation and the one-time stored-config upgrade.
@@ -76,6 +77,9 @@ func ReplacementKey(key string) string {
 func unknownKeyReason(key string) string {
 	if key == deprecatedWorkerDisplayPrefixKey {
 		return "deprecated and has no effect; remove it from the config file"
+	}
+	if canonicalSchemaKey(key) == legacyForgeKey {
+		return "is no longer settable; Posse detects the forge automatically. For an override, set " + repositoryForgeKey
 	}
 	if key == "defaults.auto_recover" {
 		return autoRecoverRemoved

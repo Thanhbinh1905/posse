@@ -324,13 +324,14 @@ func forgeProbeCacheKey(host string, cfg config.Config) (string, string, error) 
 	identity, err := json.Marshal(struct {
 		Host          string            `json:"host"`
 		Configuration json.RawMessage   `json:"configuration"`
+		LegacyForge   string            `json:"legacy_forge,omitempty"`
 		Executables   map[string]string `json:"executables"`
 		Home          string            `json:"home"`
 		UserHome      string            `json:"user_home"`
 		XDGConfigHome string            `json:"xdg_config_home"`
 		GHConfigDir   string            `json:"gh_config_dir"`
 		GLABConfigDir string            `json:"glab_config_dir"`
-	}{host, configuration, cliPaths, home, os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("GH_CONFIG_DIR"), os.Getenv("GLAB_CONFIG_DIR")})
+	}{host, configuration, cfg.Defaults.LegacyForge, cliPaths, home, os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("GH_CONFIG_DIR"), os.Getenv("GLAB_CONFIG_DIR")})
 	if err != nil {
 		return "", "", err
 	}

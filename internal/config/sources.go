@@ -22,6 +22,9 @@ func (c Config) EffectiveSources() (map[string][]string, error) {
 			return
 		}
 		prefix = canonicalSchemaKey(prefix)
+		if prefix == legacyForgeKey {
+			return
+		}
 		prefix = strings.Replace(prefix, "dispatch_default.", "dispatch.default.", 1)
 		if prefix == "dispatch" && source != "built-in default" {
 			previous := sources[prefix]

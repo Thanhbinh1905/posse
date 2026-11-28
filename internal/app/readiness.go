@@ -141,46 +141,19 @@ func cachedRepositoryForgeReadiness(ctx context.Context, target repoTarget, cfg 
 	if host == "" || host == noOriginHost {
 		return repositoryForge{Root: target.Root}, &forgeAuthenticationUnknownError{}
 	}
-	kind := cfg.Defaults.Forge
-	if target.Name != "" {
-		if override, ok := cfg.Repositories[target.Name]; ok && override.Forge != "" {
-			kind = override.Forge
-		}
-	}
-	probeMode := kind
-	if kind == "" || kind == "auto" {
-		switch host {
-		case "github.com":
-			kind, probeMode = "github", "github"
-		case "gitlab.com":
-			kind, probeMode = "gitlab", "gitlab"
-		default:
-			probeMode = "auto"
-		}
-	}
-	if probeMode != "github" && probeMode != "gitlab" && probeMode != "auto" {
-		return repositoryForge{Host: host, Root: target.Root}, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
-	}
-	outcome, found, err := cachedForgeProbeOnly(host, cfg, probeMode)
-	forge := repositoryForge{Kind: kind, Host: host, Root: target.Root}
+	mode := repositoryForgeMode(cfg, target.Name, host)
+	outcome, found, err := cachedForgeProbeOnly(host, cfg, mode)
+	forge := repositoryForge{Kind: mode, Host: host, Root: target.Root}
 	if err != nil {
 		return forge, err
 	}
 	if !found {
 		return forge, &forgeAuthenticationUnknownError{Host: host}
 	}
-	if probeMode == "auto" {
-		switch {
-		case outcome.GitLabAuthenticated && outcome.GitHubAuthenticated:
-			return forge, axi.Failure("pr_forge_ambiguous", "origin host is authenticated with both gh and glab: "+host, false, "Set defaults.forge or repositories.<repository>.forge")
-		case outcome.GitLabAuthenticated:
-			forge.Kind = "gitlab"
-		case outcome.GitHubAuthenticated:
-			forge.Kind = "github"
-		case outcome.anyTimedOut():
-			return forge, forgeProbeTimeoutError(host)
-		default:
-			return forge, axi.Failure("pr_forge_unknown", "origin host has no configured forge: "+host, false, "Set defaults.forge to github or gitlab for this Project")
+	if mode == "auto" {
+		forge.Kind, err = detectRepositoryForge(outcome, cfg, target.Name, host)
+		if err != nil {
+			return forge, err
 		}
 	}
 	if outcome.timedOut(forge.Kind) {
@@ -242,10 +215,7 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 		}
 		if mode == "pr" || mode == "greenhouse" {
 			forgeCheck := forgeChecks[index]
-			auth := doctorCheck{Name: "forge auth" + suffix, Status: "ok", Detail: "authenticated", GapCode: "forge_auth", Key: "defaults.forge", Member: target.Name}
-			if target.Name != "" {
-				auth.Key = "repositories." + target.Name + ".forge"
-			}
+			auth := doctorCheck{Name: "forge auth" + suffix, Status: "ok", Detail: "authenticated", GapCode: "forge_auth", Key: repositoryForgeKey(cfg, target.Name), Member: target.Name}
 			if forgeCheck.Forge.Host != "" {
 				auth.Name += " " + forgeCheck.Forge.Host
 			}
@@ -265,8 +235,8 @@ func repositoryChecks(ctx context.Context, cfg config.Config, targets []repoTarg
 					auth.Action = "Run `" + authErr.CLI + " auth login --hostname " + authErr.Host + "`."
 				}
 				var probeErr *axi.Error
-				if errors.As(forgeCheck.Err, &probeErr) && probeErr.Code == "pr_forge_probe_timeout" {
-					auth.Action = "Check forge CLI connectivity and authentication for this host."
+				if errors.As(forgeCheck.Err, &probeErr) && len(probeErr.Help) > 0 {
+					auth.Action = strings.Join(probeErr.Help, " ")
 				}
 			}
 			checks = append(checks, auth)
