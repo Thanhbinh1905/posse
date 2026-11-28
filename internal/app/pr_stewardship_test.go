@@ -684,6 +684,73 @@ func mustGitCommonDir(t *testing.T, path string) string {
 	return repository
 }
 
+func TestReleasedPRMergeDoesNotTouchReusedSandbox(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	defer fixture.db.Close()
+	ctx := context.Background()
+	attachPRFixtureSandbox(t, fixture)
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	if code, output, stderr := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR: %d %s %s", code, output, stderr)
+	}
+	task, err := fixture.db.Task(ctx, fixture.project.ID, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.task = task
+	if _, err := fixture.db.ClaimBranchAuthor(ctx, mustGitCommonDir(t, fixture.worktree), fixture.task.Branch, fixture.task.ID, 1, fixture.headSHA, fixture.headSHA, false); err != nil {
+		t.Fatal(err)
+	}
+	removeFixtureTaskPane(fixture)
+	if code, output, stderr := fixture.run("pr", "release", "t1", "--policy", "release"); code != 0 {
+		t.Fatalf("release executor: %d %s %s", code, output, stderr)
+	}
+	otherID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "reuse released Sandbox", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := store.Task{ID: otherID, ProjectID: fixture.project.ID, Seq: 2, Type: "change", Branch: "posse/t2", BaseRef: "main"}
+	reused, err := acquireSandbox(ctx, fixture.db, fixture.project, other, fixture.home, "warm", nil)
+	if err != nil || reused.Path != fixture.worktree {
+		t.Fatalf("reuse released Sandbox: %#v err=%v", reused, err)
+	}
+	otherFile := filepath.Join(reused.Path, "other-task.txt")
+	if err := os.WriteFile(otherFile, []byte("uncommitted other Task work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Transition(ctx, fixture.task.ID, store.StateMerging, store.StateDone, "cli", "reproduce released Task awaiting merge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetTaskGatedSHA(ctx, fixture.task.ID, fixture.headSHA); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "SUCCESS", "APPROVED", "MERGEABLE", "", fixture.headSHA)
+	fixture.setGHHead(t, fixture.headSHA)
+	if _, err := fixture.db.RecordPRObservation(ctx, store.PRObservation{
+		ProjectID: fixture.project.ID, TaskID: fixture.task.ID, PRURL: fixture.task.PRURL,
+		HeadSHA: fixture.headSHA, State: "OPEN", Checks: marshalJSON(checkSnapshot{State: "SUCCESS"}),
+		Review: "APPROVED", Mergeable: "MERGEABLE",
+	}, store.PRObservationEffect{}, fixture.task); err != nil {
+		t.Fatal(err)
+	}
+
+	code, output, stderr := fixture.run("merge", "t1", "--execute", "--user-approved", "User approved the PR")
+	if code != 0 {
+		t.Fatalf("merge released PR: %d %s %s", code, output, stderr)
+	}
+	mergeLog, err := os.ReadFile(fixture.ghLog)
+	if err != nil || !strings.Contains(string(mergeLog), "pr merge") || !strings.Contains(string(mergeLog), "--match-head-commit "+fixture.headSHA) {
+		t.Fatalf("released PR was not merged at its gated head: log=%q err=%v", mergeLog, err)
+	}
+	if contents, err := os.ReadFile(otherFile); err != nil || string(contents) != "uncommitted other Task work\n" {
+		t.Fatalf("merge changed the reused Sandbox file: %q err=%v", contents, err)
+	}
+	status, err := gitOutput(ctx, reused.Path, "status", "--porcelain")
+	if err != nil || status != "?? other-task.txt" {
+		t.Fatalf("merge changed the reused Sandbox worktree: status=%q err=%v", status, err)
+	}
+}
+
 func TestPRReleaseKeepsDeliveryAndWatchStateAfterExecutorIsAbsent(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	defer fixture.db.Close()
