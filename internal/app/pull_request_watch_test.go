@@ -930,6 +930,60 @@ func TestPRWatchDeliversCIFixWithinTheFailurePoll(t *testing.T) {
 	}
 }
 
+func TestPRWatchRepairsMissingCIFixNoticeAfterQueueing(t *testing.T) {
+	fixture := newPRMergeFixture(t, "pr", store.StateDone)
+	ctx := context.Background()
+	if code, output, errOutput := fixture.run("merge", "t1"); code != 0 {
+		t.Fatalf("open PR exit=%d output=%s error=%s", code, output, errOutput)
+	}
+	freezeCILoopWithReview(t, fixture, 2, 0, "full-pipeline")
+	plan, err := fixture.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, fixture.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.setGraphQLState(t, "OPEN", "FAILURE", "REVIEW_REQUIRED", "MERGEABLE", "", fixture.headSHA)
+	t.Setenv("POSSE_TEST_GH_FAILURE_NAME", "integration")
+	t.Setenv("POSSE_TEST_GH_FAILURE_URL", "https://checks.example/integration")
+	cfg, err := config.Load(fixture.home, fixture.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `CREATE TRIGGER fail_ci_queued_notice BEFORE INSERT ON notices WHEN NEW.kind='ci_fix_queued' BEGIN SELECT RAISE(ABORT, 'CI Notice persistence failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err == nil || !strings.Contains(err.Error(), "CI Notice persistence failed") {
+		t.Fatalf("first CI poll error=%v, want the Notice persistence failure", err)
+	}
+	if _, err := fixture.db.ExecContext(ctx, `DROP TRIGGER fail_ci_queued_notice`); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.pollProjectPullRequests(ctx, fixture.db, fixture.project, cfg, true); err != nil {
+		t.Fatalf("retry CI poll: %v", err)
+	}
+
+	var messages, rounds, notices int
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE task_id=? AND body LIKE '%Required CI checks failed%'`, fixture.task.ID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, fixture.task.ID).Scan(&rounds); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, fixture.task.ID).Scan(&notices); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 1 || rounds != 1 || notices != 1 {
+		t.Fatalf("recovered CI fix: messages=%d rounds=%d ci_fix_queued=%d, want 1/1/1", messages, rounds, notices)
+	}
+}
+
 func TestPRWatchDeliversCIFixWhenPollReturnsErrorAfterQueueing(t *testing.T) {
 	fixture := newPRMergeFixture(t, "pr", store.StateDone)
 	ctx := context.Background()

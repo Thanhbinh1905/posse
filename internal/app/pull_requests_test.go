@@ -914,7 +914,7 @@ func TestGreenhouseFullPipelineAcceptHeadPublishesAndMergesExactHead(t *testing.
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[defaults]\nmerge_mode = \"pr\"\nmerge_method = \"squash\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	freezeCILoopWithReview(t, f, 2, 0, "full-pipeline")
 	plan, err := f.task.AdmittedPlan()
 	if err != nil {
 		t.Fatal(err)
@@ -1003,6 +1003,37 @@ func TestGreenhouseFullPipelineAcceptHeadPublishesAndMergesExactHead(t *testing.
 	}
 	if code, output, stderr := f.run("signal", "done", "Published exact Greenhouse head", "--head", head, "--pr", "https://github.com/acme/shop/pull/17", "--turn", turn); code != 0 {
 		t.Fatalf("done after publication: %d %s %s", code, output, stderr)
+	}
+	publishedTask, err := f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil || publishedTask.State != store.StateDone || publishedTask.GatedSHA != head {
+		t.Fatalf("published Greenhouse head was not gated on done: task=%+v err=%v", publishedTask, err)
+	}
+	cfgForCI, err := config.Load(f.home, f.project.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forge, err := forgeForRepository(context.Background(), f.project.Root, cfgForCI, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.service.processCIObservation(context.Background(), f.db, f.project, publishedTask, store.PRObservation{PRURL: publishedTask.PRURL, State: "OPEN", HeadSHA: head}, []failedCheck{{Name: "integration", URL: "https://checks.example/integration", RunID: "123", JobID: "456"}}, forge, ""); err != nil {
+		t.Fatalf("queue failed check on published Greenhouse head: %v", err)
+	}
+	var ciMessages, ciRounds, ciNotices int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE task_id=? AND body LIKE '%Required CI checks failed%'`, task.ID).Scan(&ciMessages); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM validation_fix_rounds WHERE ship_task_id=? AND kind='ci'`, task.ID).Scan(&ciRounds); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notices WHERE task_id=? AND kind='ci_fix_queued'`, task.ID).Scan(&ciNotices); err != nil {
+		t.Fatal(err)
+	}
+	if ciMessages != 1 || ciRounds != 1 || ciNotices != 1 {
+		t.Fatalf("published Greenhouse CI repair: messages=%d rounds=%d ci_fix_queued=%d, want 1/1/1", ciMessages, ciRounds, ciNotices)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE messages SET status='delivered',delivered_at=? WHERE task_id=? AND body LIKE '%Required CI checks failed%'`, time.Now().UnixMilli(), task.ID); err != nil {
+		t.Fatal(err)
 	}
 	cfgForReconcile, err := config.Load(f.home, f.project.Name)
 	if err != nil {

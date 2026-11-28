@@ -313,7 +313,7 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	checkSetKey := hex.EncodeToString(digest[:])
 	dedupeKey := "ci:" + observation.HeadSHA + ":" + checkSetKey
 	instruction := renderCIFixInstruction(task, plan, observation, forge, prURL, member, checks, tails)
-	result, err := db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
+	_, err := db.QueueCIFixInstruction(ctx, task.ID, observation.HeadSHA, prURL, dedupeKey, instruction, member, plan.ValidationLoops.CI.MaxFixRounds)
 	if errors.Is(err, store.ErrStaleValidationHead) || errors.Is(err, store.ErrStateRace) {
 		return nil
 	}
@@ -336,14 +336,12 @@ func (s *Service) queueCIFixRound(ctx context.Context, db *store.DB, project sto
 	if err != nil {
 		return err
 	}
-	if result.Queued {
-		data := marshalJSON(map[string]any{"url": prURL, "head_sha": observation.HeadSHA, "check_set": checkSetKey, "checks": names, "repository": member})
-		_, err = db.CreateValidationNoticeOnce(ctx, store.Notice{
-			ProjectID: project.ID, TaskID: task.ID, Kind: "ci_fix_queued",
-			Summary:  task.Title + ": " + memberLabel + "queued a CI fix round for gated head " + observation.HeadSHA + ": " + strings.Join(names, ", "),
-			DataJSON: data,
-		}, prURL, observation.HeadSHA, checkSetKey, member)
-	}
+	data := marshalJSON(map[string]any{"url": prURL, "head_sha": observation.HeadSHA, "check_set": checkSetKey, "checks": names, "repository": member})
+	_, err = db.CreateValidationNoticeOnce(ctx, store.Notice{
+		ProjectID: project.ID, TaskID: task.ID, Kind: "ci_fix_queued",
+		Summary:  task.Title + ": " + memberLabel + "queued a CI fix round for gated head " + observation.HeadSHA + ": " + strings.Join(names, ", "),
+		DataJSON: data,
+	}, prURL, observation.HeadSHA, checkSetKey, member)
 	return err
 }
 
