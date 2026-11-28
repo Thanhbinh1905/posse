@@ -90,6 +90,23 @@ merge_mode = "pr"
 
 	c.setMode(t, "clean")
 	c.requireRecordedGate(t, c.review(t), newHead, "clean")
+	priorVerdicts := c.verdicts(t)
+	prior := priorVerdicts[len(priorVerdicts)-1]
+	if prior.Grant != "shop/t1/shop/r3" {
+		t.Fatalf("expected r3 before simulating a Verdict without its request receipt, got %s", prior.Grant)
+	}
+	prior.Grant = "shop/t1/shop/r4"
+	prior.RecordedAt = 0
+	ctx := context.Background()
+	seed, err := store.Open(f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := seed.RecordGreenhouseVerdict(ctx, prior, func(context.Context) (string, error) { return newHead, nil })
+	seed.Close()
+	if err != nil || !recorded {
+		t.Fatalf("seed prior-scope Verdict without its request receipt: %v, %v", recorded, err)
+	}
 	c.setMode(t, "scope")
 	amend := []string{"task", "amend", "t1", "shop", "--head", newHead, "--scope", scope}
 	runPosseExpectingFailure(t, f, f.repo, c.env, "user_approval_required", amend...)
@@ -118,7 +135,6 @@ merge_mode = "pr"
 	if got := remoteHead(); got != oldHead {
 		t.Fatalf("unreviewed head reached the forge: %s", got)
 	}
-	ctx := context.Background()
 	db, err := store.OpenReadOnly(f.home)
 	if err != nil {
 		t.Fatal(err)
@@ -145,9 +161,18 @@ merge_mode = "pr"
 	if !waitForCondition(20*time.Second, func() bool {
 		verdicts := c.verdicts(t)
 		last := verdicts[len(verdicts)-1]
-		return last.ScopeRevision == approval.Revision && last.Qualifies(newHead)
+		return last.Grant != prior.Grant && last.ScopeRevision == approval.Revision && last.Qualifies(newHead)
 	}) {
-		t.Fatalf("Watch did not record a passing Verdict for the amended head: %+v", c.verdicts(t))
+		t.Fatalf("Watch did not record a passing Verdict for the amended head after grant %s: %+v", prior.Grant, c.verdicts(t))
+	}
+	requests, err := db.GreenhouseReviewRequests(ctx, task.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range requests {
+		if request.Grant == prior.Grant {
+			t.Fatalf("amended review reused prior-scope grant %s with outcome %s", request.Grant, request.Outcome)
+		}
 	}
 	if got := readTestFile(t, intentPath); !strings.Contains(got, title) || !strings.Contains(got, scope) || !strings.Contains(got, quote) {
 		t.Fatalf("amended reviewer intent lost Brief or approval: %q", got)

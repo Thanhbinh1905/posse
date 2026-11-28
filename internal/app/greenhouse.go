@@ -241,6 +241,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	}
 	round.Host = greenhouseReviewHost(project, task, member)
 	round.GrantPrefix = daemon.GrantPrefix(round.Host)
+	if revision := plan.ScopeRevision(); revision > 0 {
+		round.GrantPrefix += "/scope-" + strconv.Itoa(revision)
+	}
 	if followGrant != "" {
 		pendingGrant, err := parallelPendingGrant(pendingPath)
 		if err != nil {
@@ -1196,7 +1199,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	if err != nil || recorded {
 		return recorded, verdict, err
 	}
-	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	verdicts, err := db.CurrentVerdictsFor(ctx, task.ID)
 	if err != nil {
 		return false, store.Verdict{}, err
 	}
@@ -1205,7 +1208,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 			return false, persisted, nil
 		}
 	}
-	return false, store.Verdict{}, fmt.Errorf("greenhouse verdict for already-recorded grant %s was not found", result.Grant)
+	return false, store.Verdict{}, fmt.Errorf("no current Greenhouse Verdict for already-recorded grant %s", result.Grant)
 }
 
 func acceptedGreenhouseHead(ctx context.Context, db *store.DB, taskID int64, repository, current string) (string, error) {
