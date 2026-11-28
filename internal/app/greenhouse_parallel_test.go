@@ -398,6 +398,40 @@ func TestGreenhouseTargetMergeAfterAcceptHeadDoesNotRaiseReviewCap(t *testing.T)
 	}
 }
 
+func TestGreenhouseTargetRefreshSkipsStaleObservationAfterTaskHeadContainsTarget(t *testing.T) {
+	f := newPRMergeFixture(t, "pr", store.StateDone)
+	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")
+	plan, err := f.task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ReviewProvider = store.GreenhouseReviewProvider
+	encoded, err := plan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.ExecContext(context.Background(), `UPDATE tasks SET plan_json=? WHERE id=?`, encoded, f.task.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.task, err = f.db.TaskByID(context.Background(), f.project.ID, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleHead := f.headSHA
+	target := f.advanceTarget(t, false, true)
+	gitTest(t, f.task.WorktreePath, "fetch", "origin", "main")
+	gitTest(t, f.task.WorktreePath, "merge", "--no-edit", "origin/main")
+
+	queued, err := queueTargetMergeInstruction(context.Background(), f.db, f.task, "", prTargetFreshness{Branch: "main", Tip: target, Root: f.task.WorktreePath}, staleHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions, err := f.db.PendingTaskInstructions(context.Background(), f.task.ID)
+	if err != nil || queued || len(instructions) != 0 {
+		t.Fatalf("stale Greenhouse observation queued=%t instructions=%+v err=%v; want no refresh after Task head contains target %s", queued, instructions, err, target)
+	}
+}
+
 func TestGreenhouseStaleHeadInstructionRequestsReviewWithoutPR(t *testing.T) {
 	f := newPRMergeFixture(t, "pr", store.StateDone)
 	freezeCILoopWithReview(t, f, 0, 0, "full-pipeline")

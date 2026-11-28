@@ -301,6 +301,24 @@ func hasCurrentTargetWork(ctx context.Context, db *store.DB, task store.Task, me
 }
 
 func queueTargetMergeInstruction(ctx context.Context, db *store.DB, task store.Task, member string, freshness prTargetFreshness, headSHA string) (bool, error) {
+	if greenhouseFullPipelineTaskWithConfig(task, config.Config{}, member) && member == "" && task.WorktreePath != "" && (task.State == store.StateDone || task.State == store.StateMerging) {
+		currentHead, err := gitOutput(ctx, task.WorktreePath, "rev-parse", "HEAD")
+		if err != nil {
+			return false, err
+		}
+		checked, err := freshness.of(ctx, task.WorktreePath, currentHead)
+		if err != nil {
+			return false, err
+		}
+		if checked.Fresh {
+			for _, head := range []string{currentHead, headSHA} {
+				if _, err := db.WithdrawQueuedFreshnessInstructionsForHead(ctx, task.ID, head); err != nil {
+					return false, err
+				}
+			}
+			return false, nil
+		}
+	}
 	if freshness.Root != "" {
 		checked, err := freshness.of(ctx, freshness.Root, headSHA)
 		if err != nil {
