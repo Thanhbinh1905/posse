@@ -613,13 +613,16 @@ func (db *DB) ObsoleteResolvedDecisions(ctx context.Context, projectID int64) er
 }
 
 func decisionObsoleteReason(ctx context.Context, tx *writeTx, decision Decision) (string, error) {
-	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" && decision.Kind != "teardown_dependants" {
-		return "", nil
-	}
 	var state State
 	var launches int
 	if err := tx.QueryRowContext(ctx, `SELECT state,launches FROM tasks WHERE id=? AND project_id=?`, decision.TaskID, decision.ProjectID).Scan(&state, &launches); err != nil {
 		return "", err
+	}
+	if decision.Kind != "orphan" && decision.Kind != "teardown_dependants" && state == StateTornDown {
+		return "Task was torn down", nil
+	}
+	if decision.Kind != "merge_ready" && decision.Kind != "recovery" && decision.Kind != "worker_exited" && decision.Kind != "pr_closed" && decision.Kind != "orphan" && decision.Kind != "review_cap" && decision.Kind != "quota" && decision.Kind != "budget" && decision.Kind != "dependency" && decision.Kind != "teardown_dependants" {
+		return "", nil
 	}
 	if decision.Kind == "merge_ready" {
 		var ready bool

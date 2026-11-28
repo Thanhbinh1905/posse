@@ -47,6 +47,41 @@ func TestDecisionsReconcileAfterTaskTeardown(t *testing.T) {
 	}
 }
 
+func TestTornDownTaskDecisionsCannotBeAnsweredDirectly(t *testing.T) {
+	for _, kind := range []string{"review", "worker_question"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			project, err := db.CreateProject(ctx, "shop", t.TempDir(), "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			taskID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "A", MergeMode: "local", State: StateQueued})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "direct-answer", Kind: kind, Question: "Continue?", Options: []string{"yes", "no"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, taskID, StateQueued, StateTornDown, "cli", "released"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.AnswerDecision(ctx, project.ID, decision.ID, "yes", "Continue"); err == nil {
+				t.Fatal("torn-down Task Decision accepted direct answer")
+			}
+			decision, err = db.Decision(ctx, project.ID, decision.ID)
+			if err != nil || decision.ObsoleteAt == 0 || decision.Answer != "" {
+				t.Fatalf("Decision was not obsoleted: %#v %v", decision, err)
+			}
+		})
+	}
+}
+
 func TestUnrecoverableOrphanDecisionIsObsoletedAfterTeardown(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
