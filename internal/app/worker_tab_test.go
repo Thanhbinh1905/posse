@@ -228,10 +228,10 @@ func TestLeadWorkspaceRequiresTheExactRecordedWorkspaceID(t *testing.T) {
 	}
 }
 
-func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
+func TestOpenWorkerTabOpensRepositoryWorkerWithWorkspaceCreate(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
 	adapter.snapshot.Panes[1].CWD = t.TempDir()
-	adapter.Results["worktree.open"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
+	adapter.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
 	task.ShortName = "first-worker"
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
@@ -241,9 +241,9 @@ func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 	var methods []string
 	for _, call := range adapter.Calls {
 		methods = append(methods, call.Method)
-		if call.Method == "worktree.open" {
-			if call.Params["workspace_id"] != "w1" || call.Params["path"] != task.WorktreePath || call.Params["label"] != "first-worker-t1" || call.Params["focus"] != false {
-				t.Fatalf("worktree.open params = %#v", call.Params)
+		if call.Method == "workspace.create" {
+			if call.Params["cwd"] != task.WorktreePath || call.Params["label"] != "└ first-worker-t1" || call.Params["focus"] != false || call.Params["no_focus"] != true {
+				t.Fatalf("workspace.create params = %#v", call.Params)
 			}
 		}
 		if call.Method == "pane.rename" && (call.Params["pane_id"] != "w2:p1" || call.Params["label"] != task.PaneLabel) {
@@ -253,7 +253,7 @@ func TestOpenWorkerTabOpensRepositoryWorkerAsLinkedChild(t *testing.T) {
 			t.Fatalf("initial Worker metadata = %#v", call.Params)
 		}
 	}
-	if strings.Join(methods, ",") != "worktree.open,pane.report_metadata,pane.rename" {
+	if strings.Join(methods, ",") != "workspace.create,workspace.rename,pane.report_metadata,pane.rename" {
 		t.Fatalf("openWorkerTab calls = %v", methods)
 	}
 
@@ -271,7 +271,7 @@ func TestOpenWorkerTabReusesTheTaskChildWorkspaceForRelaunch(t *testing.T) {
 	task.HerdrWorkspaceID = "w2"
 	task.PaneID = "w2:p1"
 	task.PaneLabel = "posse:shop:t1"
-	child := herdr.Workspace{WorkspaceID: "w2", Label: "first-worker-t1"}
+	child := herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task), Root: task.WorktreePath}
 	child.Worktree.CheckoutPath = task.WorktreePath
 	child.Worktree.IsLinkedWorktree = true
 	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, child)
@@ -286,6 +286,28 @@ func TestOpenWorkerTabReusesTheTaskChildWorkspaceForRelaunch(t *testing.T) {
 	}
 	if adapter.CallCount("tab.create") != 1 || adapter.CallCount("worktree.open") != 0 {
 		t.Fatalf("relaunch did not reuse the Task child workspace: %#v", adapter.Calls)
+	}
+}
+
+func TestOpenWorkerTabDoesNotReuseRecordedWorkspaceWhenItsPathDiffers(t *testing.T) {
+	project, task, adapter := workerTabSession(t)
+	task.HerdrWorkspaceID = "w2"
+	child := herdr.Workspace{WorkspaceID: "w2", Label: workerWorkspaceLabel(task), Root: t.TempDir()}
+	child.Worktree.CheckoutPath = child.Root
+	child.Worktree.IsLinkedWorktree = true
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, child)
+	for i := range adapter.snapshot.Panes {
+		adapter.snapshot.Panes[i].CWD = t.TempDir()
+	}
+	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", CWD: child.Root})
+	adapter.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w3"},"tab":{"tab_id":"w3:t1"},"root_pane":{"pane_id":"w3:p1","tab_id":"w3:t1"}}`)
+
+	opened, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), nil, t.TempDir(), project, task, task.WorktreePath, "claude")
+	if err != nil || opened.WorkspaceID != "w3" {
+		t.Fatalf("openWorkerTab reused a recorded workspace at another path: opened=%#v err=%v", opened, err)
+	}
+	if adapter.CallCount("workspace.create") != 1 || adapter.CallCount("tab.create") != 0 {
+		t.Fatalf("a recorded ID and label overrode the workspace path: %#v", adapter.Calls)
 	}
 }
 
@@ -317,11 +339,11 @@ func TestOpenWorkerTabReusesWorkspaceProjectSubworkspaceForRelaunch(t *testing.T
 	task.HerdrWorkspaceID = "w2"
 	task.PaneID = "w2:p1"
 	task.PaneLabel = "posse:shop:t1"
-	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "w2", Root: task.WorktreePath})
+	adapter.snapshot.Workspaces = append(adapter.snapshot.Workspaces, herdr.Workspace{WorkspaceID: "w2", Root: task.WorktreePath, Label: workerWorkspaceLabel(task)})
 	adapter.snapshot.Panes[1].CWD = t.TempDir()
 	adapter.snapshot.Panes[2].CWD = t.TempDir()
 	adapter.snapshot.Panes = append(adapter.snapshot.Panes, herdr.Pane{PaneID: "w2:p1", WorkspaceID: "w2", TabID: "w2:t1", CWD: task.WorktreePath})
-	adapter.Results["tab.create"] = json.RawMessage(`{"tab":{"tab_id":"w2:t2"},"root_pane":{"pane_id":"w2:p2","tab_id":"w2:t2"}}`)
+	adapter.Results["tab.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t2"},"root_pane":{"pane_id":"w2:p2","tab_id":"w2:t2"}}`)
 	home := t.TempDir()
 	opened, err := testService(home, adapter).openWorkerTab(context.Background(), nil, home, project, task, task.WorktreePath, "claude")
 	if err != nil || opened != (openedTab{WorkspaceID: "w2", TabID: "w2:t2", PaneID: "w2:p2"}) {
@@ -361,6 +383,7 @@ func TestOpenWorkerTabRejectsAnOccupiedSandboxWorkspace(t *testing.T) {
 func TestOpenWorkerTabDoesNotCloseAnUnlabeledPaneAfterMetadataFailure(t *testing.T) {
 	project, task, adapter := workerTabSession(t)
 	adapter.snapshot.Panes[1].CWD = t.TempDir()
+	adapter.Results["workspace.create"] = json.RawMessage(`{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1","tab_id":"w2:t1"}}`)
 	adapter.Errors["pane.report_metadata"] = errors.New("metadata write failed")
 	_, err := testService(t.TempDir(), adapter).openWorkerTab(context.Background(), nil, t.TempDir(), project, task, task.WorktreePath, "claude")
 	if err == nil {

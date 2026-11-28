@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,7 +17,19 @@ import (
 	"github.com/thanhbinh1905/posse/internal/store"
 )
 
-func TestRepositoryWorkersOpenAsLeadChildrenAndTeardownIsScoped(t *testing.T) {
+func workerWorkspaceLabelForE2E(task store.Task) string {
+	name := task.ShortName
+	id := "t" + strconv.Itoa(task.Seq)
+	if name == "" {
+		name = task.Title
+	}
+	if name == id || strings.HasSuffix(name, "-"+id) {
+		return "└ " + name
+	}
+	return "└ " + name + "-" + id
+}
+
+func TestRepositoryWorkersUseLabeledWorkspacesAndTeardownIsScoped(t *testing.T) {
 	f := newWorkerTabsFixture(t)
 	first := f.start(t, "t1", "Native first", "native-first")
 	second := f.start(t, "t2", "Native second", "native-second")
@@ -40,8 +53,8 @@ func TestRepositoryWorkersOpenAsLeadChildrenAndTeardownIsScoped(t *testing.T) {
 				child = workspace
 			}
 		}
-		if child == nil || !child.Worktree.IsLinkedWorktree || child.Worktree.CheckoutPath != task.WorktreePath {
-			t.Fatalf("Worker %d is not a linked child for its Sandbox: task=%#v workspaces=%#v", task.Seq, task, snapshot.Workspaces)
+		if child == nil || child.Label != workerWorkspaceLabelForE2E(task) || child.Worktree.IsLinkedWorktree {
+			t.Fatalf("Worker %d is not a plain labeled workspace for its Sandbox: task=%#v workspaces=%#v", task.Seq, task, snapshot.Workspaces)
 		}
 		f.assertWorkerTab(t, snapshot, task)
 	}
@@ -64,6 +77,21 @@ func TestRepositoryWorkersOpenAsLeadChildrenAndTeardownIsScoped(t *testing.T) {
 	if _, found := findLeadInSnapshot(snapshot); !found {
 		t.Fatal("Teardown closed the Lead")
 	}
+	f.fail(t, "t2")
+	f.exitWorker(t, "t2")
+	runPosse(t, f.binary, f.repo, f.leadEnv, "relaunch", "t2")
+	f.waitState(t, "t2", store.StateWorking)
+	relaunched := f.task(t, "t2")
+	relaunchSnapshot := f.snapshot(t)
+	var relaunchedWorkspace *herdr.Workspace
+	for i := range relaunchSnapshot.Workspaces {
+		if relaunchSnapshot.Workspaces[i].WorkspaceID == relaunched.HerdrWorkspaceID {
+			relaunchedWorkspace = &relaunchSnapshot.Workspaces[i]
+		}
+	}
+	if relaunchedWorkspace == nil || relaunchedWorkspace.Label != workerWorkspaceLabelForE2E(relaunched) || relaunchedWorkspace.Worktree.IsLinkedWorktree {
+		t.Fatalf("relaunch did not move the Worker to a plain workspace: task=%#v workspace=%#v", relaunched, relaunchedWorkspace)
+	}
 	f.waitSessionPersisted(t)
 	beforeRestart := f.task(t, "t2")
 	killServer(t, f.server)
@@ -82,8 +110,8 @@ func TestRepositoryWorkersOpenAsLeadChildrenAndTeardownIsScoped(t *testing.T) {
 			restoredChild = workspace
 		}
 	}
-	if restoredChild == nil || !restoredChild.Worktree.IsLinkedWorktree || restoredChild.Worktree.CheckoutPath != restored.WorktreePath {
-		t.Fatalf("restart did not restore the Worker as a linked child: task=%#v child=%#v", restored, restoredChild)
+	if restoredChild == nil || restoredChild.Label != workerWorkspaceLabelForE2E(restored) || restoredChild.Worktree.IsLinkedWorktree {
+		t.Fatalf("restart did not restore the Worker as a plain labeled workspace: task=%#v child=%#v", restored, restoredChild)
 	}
 }
 
@@ -143,12 +171,10 @@ func TestLegacyLinkedWorkerChildTearsDownWithoutClosingLeadOrSibling(t *testing.
 	}
 }
 
-// A real attached Herdr 0.9.0 client must render the grouped names without
-// any Posse-specific sidebar configuration.
-func assertNativeWorktreeSidebar(t *testing.T, f *workerTabsFixture, names ...string) []byte {
+func assertNativeWorkerWorkspaceSidebar(t *testing.T, f *workerTabsFixture, names ...string) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("script"); err != nil {
-		t.Log("script unavailable; snapshot still verifies grouping")
+		t.Log("script unavailable; snapshot still verifies the workspace layout")
 		return nil
 	}
 	var output []byte
