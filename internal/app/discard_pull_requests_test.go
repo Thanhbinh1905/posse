@@ -79,7 +79,7 @@ esac
 	t.Setenv("POSSE_TEST_GH_LOG", log)
 	t.Setenv("POSSE_TEST_CLOSED_DIR", closedDir)
 	cfg := f.config()
-	cfg.Defaults.Forge = "github"
+	cfg.Defaults.LegacyForge = "github"
 	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ esac
 	t.Setenv("POSSE_TEST_GLAB_CLOSED", closed)
 	t.Setenv("POSSE_TEST_GLAB_HEAD", repo.GatedSHA)
 	cfg := f.config()
-	cfg.Defaults.Forge = "gitlab"
+	cfg.Defaults.LegacyForge = "gitlab"
 	task, err := f.db.TaskByID(ctx, f.project.ID, f.task.ID)
 	if err != nil {
 		t.Fatal(err)

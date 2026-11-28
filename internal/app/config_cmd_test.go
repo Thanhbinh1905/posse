@@ -841,6 +841,41 @@ func TestConfigDeprecatedWorkerPrefixIsRejectedAndLegacyConfigWarns(t *testing.T
 	}
 }
 
+func TestConfigLegacyForgeMigration(t *testing.T) {
+	f := newStartFixture(t)
+	userPath := config.ConfigPath(f.home, "")
+	projectPath := config.ConfigPath(f.home, f.project.Name)
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, text := range map[string]string{userPath: "[defaults]\nforge = 'github'\n", projectPath: "forge = 'gitlab'\n"} {
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, output := runCLI(t, f.service, "config", "show", "--effective", "--all", "--project", f.project.Name, "--json")
+	if code != 0 || !strings.Contains(output, userPath+": defaults.forge") || !strings.Contains(output, projectPath+": forge") || !strings.Contains(output, "repositories.<repository>.forge") || strings.Contains(output, `"forge":`) {
+		t.Fatalf("config show legacy forge: code=%d output=%s", code, output)
+	}
+	code, output = runCLI(t, f.service, "config", "set", "defaults.forge", "auto", "--project", f.project.Name)
+	if code != 1 || !strings.Contains(output, "repositories.<repository>.forge") {
+		t.Fatalf("config set legacy forge: code=%d output=%s", code, output)
+	}
+	for _, project := range []string{f.project.Name, ""} {
+		args := []string{"config", "unset", "defaults.forge"}
+		if project != "" {
+			args = append(args, "--project", project)
+		}
+		if code, output := runCLI(t, f.service, args...); code != 0 {
+			t.Fatalf("config unset legacy forge (%q): code=%d output=%s", project, code, output)
+		}
+	}
+	cfg, err := config.LoadReadOnly(f.home, f.project.Name)
+	if err != nil || cfg.Defaults.LegacyForge != "" || len(cfg.Warnings) != 0 {
+		t.Fatalf("legacy forge after unset = %q, warnings = %v, err = %v", cfg.Defaults.LegacyForge, cfg.Warnings, err)
+	}
+}
+
 func TestConfigShowHidesHarnessInternalsUnlessAll(t *testing.T) {
 	f := newStartFixture(t)
 	if err := os.WriteFile(filepath.Join(f.home, "config.toml"), []byte("[kinds.claude]\ninterrupt_keys = [\"ctrl+c\"]\n"), 0o600); err != nil {

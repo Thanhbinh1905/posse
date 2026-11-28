@@ -31,6 +31,8 @@ type KeySpec struct {
 	UserOnly bool
 }
 
+const repositoryForgeKey = "repositories.<repository>.forge"
+
 var keySpecs = []KeySpec{
 	{Key: "review_parallel", Type: TypeString, Allowed: []string{"greenhouse"}, Meaning: "Record Greenhouse Verdicts in parallel with the built-in review loop; unset disables parallel requests.", UserOnly: true},
 	{Key: "budget.daily_tokens", Type: TypeInteger, Default: int64(0), Meaning: "Per-Project token limit for the host-local calendar day; 0 disables it."},
@@ -58,8 +60,7 @@ var keySpecs = []KeySpec{
 	{Key: "defaults.recovery_backoff", Type: TypeDuration, Default: "5s", Meaning: "Initial delay between failed Worker relaunches during a restore; doubles up to one minute."},
 	{Key: "defaults.merge_mode", Type: TypeString, Allowed: []string{"greenhouse", "pr", "local"}, Default: "greenhouse", Meaning: "How Change Task changes are Delivered."},
 	{Key: "defaults.target_branch", Type: TypeString, Default: "", Meaning: "Default PR/MR target branch for Change Tasks; empty uses each repository's default branch."},
-	{Key: "defaults.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Forge for this Project; auto detects from each repository remote."},
-	{Key: "repositories.<repository>.forge", Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override the forge for a member repository."},
+	{Key: repositoryForgeKey, Type: TypeString, Allowed: []string{"auto", "github", "gitlab"}, Default: "auto", Meaning: "Override forge detection for a workspace Member or a single-repository Project (use its Project name)."},
 	{Key: "defaults.merge_method", Type: TypeString, Allowed: []string{"squash", "merge", "rebase"}, Default: "squash", Meaning: "Merge method used for pull requests."},
 	{Key: "defaults.require_current_target", Type: TypeBoolean, Default: false, Meaning: "Require a PR/MR head to contain the current target tip before final CI evidence and Merge, asking behind Workers to merge the target through a per-target merge queue (ADR 0019, ADR 0031); when false, a green, mergeable PR merges while behind and only conflicts ask the Worker to merge the target.", UserOnly: true},
 	{Key: "defaults.pr_poll", Type: TypeDuration, Default: "2m", Meaning: "Minimum interval between pull request and Project checkout polls."},
@@ -154,13 +155,17 @@ func SchemaAll() []KeySpec {
 func schema(all bool) []KeySpec {
 	result := make([]KeySpec, 0, len(keySpecs))
 	for _, spec := range keySpecs {
-		if !all && strings.HasPrefix(spec.Key, "kinds.") {
+		if !all && IsHiddenKey(spec.Key) {
 			continue
 		}
 		spec.Allowed = append([]string(nil), spec.Allowed...)
 		result = append(result, spec)
 	}
 	return result
+}
+
+func IsHiddenKey(key string) bool {
+	return strings.HasPrefix(key, "kinds.") || key == repositoryForgeKey || schemaKeyMatches(repositoryForgeKey, key)
 }
 
 func Lookup(key string) (KeySpec, bool) {
@@ -349,6 +354,12 @@ func SchemaValidationErrors(file string, values map[string]any, projectFile bool
 	walk = func(prefix string, value any) {
 		if replacement := ReplacementKey(prefix); replacement != "" {
 			issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "was removed; use " + replacement})
+			return
+		}
+		if canonicalSchemaKey(prefix) == legacyForgeKey {
+			if text, ok := value.(string); !ok || !oneOf(text, "auto", "github", "gitlab") {
+				issues = append(issues, &InvalidError{File: file, Key: prefix, Reason: "must be auto, github or gitlab"})
+			}
 			return
 		}
 		switch current := value.(type) {

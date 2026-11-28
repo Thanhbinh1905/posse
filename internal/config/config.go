@@ -43,7 +43,7 @@ type Defaults struct {
 	// RequireCurrentTarget enables ADR 0019's current-target rule and the
 	// ADR 0031 merge queue; off by default.
 	RequireCurrentTarget bool   `toml:"require_current_target" json:"require_current_target"`
-	Forge                string `toml:"forge" json:"forge"`
+	LegacyForge          string `toml:"forge" json:"-"`
 	PRPoll               string `toml:"pr_poll" json:"pr_poll"`
 	Review               string `toml:"review" json:"review"`
 	DeleteBranchOnMerge  bool   `toml:"delete_branch_on_merge" json:"delete_branch_on_merge"`
@@ -202,7 +202,7 @@ type Repository struct {
 	ReviewProvider string   `toml:"review_provider" json:"review_provider"`
 	MergeMode      string   `toml:"merge_mode" json:"merge_mode"`
 	TargetBranch   string   `toml:"target_branch" json:"target_branch"`
-	Forge          string   `toml:"forge" json:"forge"`
+	Forge          string   `toml:"forge" json:"forge,omitempty"`
 	// DeleteBranchOnMerge is nil when the Member inherits the Project value.
 	DeleteBranchOnMerge *bool `toml:"delete_branch_on_merge" json:"delete_branch_on_merge,omitempty"`
 }
@@ -263,6 +263,7 @@ type Config struct {
 	Dispatch            []Rule                `toml:"dispatch_rules" json:"dispatch"`
 	DispatchDefault     DispatchDefault       `toml:"dispatch_default" json:"dispatch_default"`
 	Autonomy            Autonomy              `toml:"autonomy" json:"autonomy"`
+	ProjectName         string                `toml:"-" json:"-"`
 	Files               []string              `toml:"-" json:"-"`
 	LeadLanguageDefault bool                  `toml:"-" json:"-"`
 	Warnings            []string              `toml:"-" json:"-"`
@@ -426,6 +427,7 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 	}
 	warnings := removeLegacyGateSettings(globalPath, global)
 	warnings = append(warnings, removeDeprecatedSettings(globalPath, global)...)
+	warnings = append(warnings, legacyForgeWarnings(globalPath, "", global)...)
 	if _, found := global["autonomy"]; found {
 		return Config{}, &InvalidError{File: globalPath, Key: "autonomy", Reason: "autonomy is valid only in a Project config"}
 	}
@@ -442,6 +444,7 @@ func loadConfig(home, projectName string, migrate bool) (Config, error) {
 		}
 		warnings = append(warnings, removeLegacyGateSettings(projectPath, project)...)
 		warnings = append(warnings, removeDeprecatedSettings(projectPath, project)...)
+		warnings = append(warnings, legacyForgeWarnings(projectPath, projectName, project)...)
 		for _, table := range userConfigOnlyTables {
 			if _, found := project[table]; found {
 				return Config{}, &InvalidError{File: projectPath, Key: table, Reason: userConfigOnlyReason(table)}
@@ -514,6 +517,26 @@ func removeDeprecatedSettings(path string, values map[string]any) []string {
 	return []string{fmt.Sprintf("%s: identity.worker.display_prefix was removed and is ignored as deprecated", path)}
 }
 
+func legacyForgeWarnings(path, projectName string, values map[string]any) []string {
+	var warnings []string
+	warn := func(key string, value any) {
+		guidance := "To use auto-detection, remove this entry. To keep an explicit forge, first set " + repositoryForgeKey + " for each affected repository."
+		if value == "auto" {
+			guidance = "Remove this entry once any inherited explicit defaults.forge has been migrated."
+		}
+		warnings = append(warnings, fmt.Sprintf("%s: %s was removed from the public schema but is still honored for compatibility. %s", path, key, guidance))
+	}
+	if defaults, ok := values["defaults"].(map[string]any); ok {
+		if value, found := defaults["forge"]; found {
+			warn(legacyForgeKey, value)
+		}
+	}
+	if value, found := values["forge"]; projectName != "" && found {
+		warn("forge", value)
+	}
+	return warnings
+}
+
 func configFromMaps(globalPath string, global map[string]any, projectPath string, project map[string]any, projectName string) (Config, error) {
 	globalRules, globalDefault := extractDispatch(global)
 	merged := mergeMaps(defaultMap(), global)
@@ -559,6 +582,7 @@ func configFromMaps(globalPath string, global map[string]any, projectPath string
 	if cfg.DispatchDefault.Use != "" {
 		cfg.DispatchDefault.Source = defaultSource
 	}
+	cfg.ProjectName = projectName
 	cfg.LeadLanguageDefault = !hasLeadLanguage(global) && !hasLeadLanguage(project)
 	cfg.Files = []string{globalPath}
 	if projectPath != "" {
@@ -724,7 +748,7 @@ func defaultMap() map[string]any {
 		"review_provider": "builtin",
 		"defaults": map[string]any{
 			"max_workers": 4, "dispatch_inheritance": "kind", "stall_after": "20m", "idle_after": "3m", "auto_teardown": "finished", "recovery_attempts": 3, "recovery_backoff": "5s", "merge_mode": "greenhouse",
-			"merge_method": "squash", "require_current_target": false, "forge": "auto", "pr_poll": "2m", "review": "none",
+			"merge_method": "squash", "require_current_target": false, "pr_poll": "2m", "review": "none",
 			"delete_branch_on_merge": true,
 		},
 		"kinds": map[string]any{
@@ -862,9 +886,6 @@ func (c Config) ValidationIssues(projectFile bool) []error {
 	}
 	if !oneOf(c.ReviewProvider, "builtin", "greenhouse") {
 		add("review_provider", "must be builtin or greenhouse")
-	}
-	if !oneOf(c.Defaults.Forge, "", "auto", "github", "gitlab") {
-		add("defaults.forge", "must be auto, github or gitlab")
 	}
 	for _, name := range sortedMapKeys(c.Repositories) {
 		repo := c.Repositories[name]

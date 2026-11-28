@@ -36,7 +36,7 @@ func (s *Service) configSchema(ctx *axi.Context, args []string) error {
 	}
 	help := []any{"Run `posse config show --effective` to inspect effective values", "Run `posse config set <key> <value>` to update a key"}
 	if !parsed.Bool("all") {
-		help = append(help, "Run `posse config schema --all` to inspect harness-internal keys")
+		help = append(help, "Run `posse config schema --all` to include advanced settings")
 	}
 	return ctx.Print(axi.Object{{Key: "keys", Value: rows}, {Key: "help", Value: help}})
 }
@@ -83,10 +83,10 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 			if err := json.Unmarshal(encoded, &values); err != nil {
 				return err
 			}
-			delete(values, "kinds")
+			hideAdvancedConfig(values)
 			effective = values
 			for key := range sources {
-				if strings.HasPrefix(key, "kinds.") {
+				if config.IsHiddenKey(key) {
 					delete(sources, key)
 				}
 			}
@@ -97,7 +97,7 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 		}
 		help := []any{"Run `posse config schema` to inspect User-facing keys"}
 		if !parsed.Bool("all") {
-			help = append(help, "Run `posse config show --effective --all` to include harness-internal settings")
+			help = append(help, "Run `posse config show --effective --all` to include advanced settings")
 		}
 		return ctx.Print(append(result, axi.Field{Key: "help", Value: help}))
 	}
@@ -114,14 +114,27 @@ func (s *Service) configShow(ctx *axi.Context, args []string) error {
 			}
 		}
 	}
+	delete(values, "forge")
+	if defaults, ok := values["defaults"].(map[string]any); ok {
+		delete(defaults, "forge")
+	}
 	if !parsed.Bool("all") {
-		delete(values, "kinds")
+		hideAdvancedConfig(values)
 	}
 	result := axi.Object{{Key: "scope", Value: configScope(projectName)}, {Key: "file", Value: path}, {Key: "values", Value: values}}
 	if len(cfg.Warnings) > 0 {
 		result = append(result, axi.Field{Key: "warnings", Value: stringsToAny(cfg.Warnings)})
 	}
-	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to include defaults and Project overrides", "Pass `--all` to include harness-internal settings"}}))
+	return ctx.Print(append(result, axi.Field{Key: "help", Value: []any{"Run `posse config show --effective` to include defaults and Project overrides", "Pass `--all` to include advanced settings"}}))
+}
+
+func hideAdvancedConfig(values map[string]any) {
+	delete(values, "kinds")
+	repositories, _ := values["repositories"].(map[string]any)
+	for _, value := range repositories {
+		repo, _ := value.(map[string]any)
+		delete(repo, "forge")
+	}
 }
 
 func (s *Service) configSet(ctx *axi.Context, args []string) error {

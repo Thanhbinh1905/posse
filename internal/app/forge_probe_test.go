@@ -111,7 +111,7 @@ func TestExplicitForgeConfigSkipsAutoDetectionAndDeduplicatesReadiness(t *testin
 		gitTest(t, repo, "remote", "add", "origin", "https://git.example/acme/"+member+".git")
 		targets = append(targets, repoTarget{Name: member, Root: repo, DefaultBranch: "main"})
 	}
-	cfg := config.Config{Defaults: config.Defaults{MergeMode: "pr", Forge: "gitlab"}}
+	cfg := config.Config{Defaults: config.Defaults{MergeMode: "pr", LegacyForge: "gitlab"}}
 	checks := repositoryDoctorChecks(context.Background(), cfg, targets)
 	for _, check := range checks {
 		if check.GapCode == "forge_auth" && check.Status != "ok" {
