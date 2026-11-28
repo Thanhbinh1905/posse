@@ -101,6 +101,22 @@ func TestValidationIgnoresRoleSkillsWhenUsesAreNotRecorded(t *testing.T) {
 	}
 }
 
+func TestNoChangeDoneDoesNotRequireDiffTriggeredRoleSkills(t *testing.T) {
+	fixture := newPRMergeFixture(t, "local", store.StateWorking)
+	installFullPipelinePlan(t, fixture)
+	installRoleSkills(t, fixture, "posse-deslop", "posse-no-comments", "posse-technical-writing")
+	if err := os.MkdirAll(filepath.Dir(skillHookMarkerPath(fixture)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillHookMarkerPath(fixture), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := requireRoleSkillsUsed(context.Background(), fixture.db, fixture.home, fixture.project, fixture.task, true)
+	if err == nil || !strings.Contains(err.Error(), "posse-technical-writing") || strings.Contains(err.Error(), "posse-deslop") {
+		t.Fatalf("no-change done skill gate error = %v, want only the always-enforced skill", err)
+	}
+}
+
 func TestRoleSkillsUnusedFailureNamesEverySkill(t *testing.T) {
 	failure := roleSkillsUnusedFailure([]string{"posse-tdd", "go-style"})
 	if failure.Code != "role_skills_unused" || !strings.Contains(failure.Message, "`posse-tdd`") || !strings.Contains(failure.Message, "`go-style`") {

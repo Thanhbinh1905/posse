@@ -121,7 +121,7 @@ func (s *Service) validateCandidate(out *axi.Context, args []string) error {
 		return admittedPlanFailure(fmt.Errorf("full-pipeline Task has no valid admitted plan"))
 	}
 	if stage == "docs" || stage == "lint" {
-		if err := requireRoleSkillsUsed(out.Context, db, home, project, task); err != nil {
+		if err := requireRoleSkillsUsed(out.Context, db, home, project, task, false); err != nil {
 			return err
 		}
 	}
