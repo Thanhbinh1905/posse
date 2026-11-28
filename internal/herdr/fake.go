@@ -76,6 +76,9 @@ func (f *Fake) Call(_ context.Context, method string, params map[string]any) (js
 	if method == "tab.create" {
 		return json.RawMessage(`{"tab":{"tab_id":"fake:watch"},"root_pane":{"pane_id":"fake:watch-pane","tab_id":"fake:watch"}}`), nil
 	}
+	if method == "workspace.create" {
+		return json.RawMessage(`{"workspace":{"workspace_id":"fake:child"},"tab":{"tab_id":"fake:child:t1"},"root_pane":{"pane_id":"fake:child:p1","tab_id":"fake:child:t1"}}`), nil
+	}
 	if method == "worktree.open" {
 		return json.RawMessage(`{"workspace":{"workspace_id":"fake:child"},"tab":{"tab_id":"fake:child:t1"},"root_pane":{"pane_id":"fake:child:p1","tab_id":"fake:child:t1"}}`), nil
 	}

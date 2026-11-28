@@ -576,8 +576,19 @@ func TestRealCLIIntentCrashMatrix(t *testing.T) {
 				}
 			}
 			harness.session.mu.Unlock()
-			if created != 0 {
-				t.Fatalf("%s created %d top-level Herdr workspaces", item.command, created)
+			wantWorkspaceCreates := 0
+			switch item.command {
+			case "start":
+				if item.step != "task.create" && item.step != "scratch.create" && item.step != "sandbox.acquire" && (item.step != "pane.open" || item.phase == "after") {
+					wantWorkspaceCreates = 1
+				}
+			case "relaunch":
+				if item.step == "pane.open" {
+					wantWorkspaceCreates = 1
+				}
+			}
+			if created != wantWorkspaceCreates {
+				t.Fatalf("%s created %d Herdr workspaces, want %d", item.command, created, wantWorkspaceCreates)
 			}
 			if item.command == "start" {
 				if err := fixture.openDB(t, func(db *store.DB) error {

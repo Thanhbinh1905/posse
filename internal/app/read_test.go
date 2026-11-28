@@ -38,7 +38,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	if err := db.SetProjectLead(ctx, project.ID, "w1", "w1:p1", "posse:shop:lead"); err != nil {
 		t.Fatal(err)
 	}
-	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 5, Type: "change", Title: "Ready to merge", ShortName: "ready-to-merge", MergeMode: "local", Branch: "posse/t5", AgentName: "posse-shop-t5-1", PaneID: "w2:p1", PaneLabel: "posse:shop:t5"})
+	taskID, err := db.CreateTask(ctx, project.ID, store.Task{Seq: 5, Type: "change", Title: "Ready to merge", ShortName: "ready-to-merge", MergeMode: "local", Branch: "posse/t5", WorktreePath: repo, HerdrWorkspaceID: "w2", AgentName: "posse-shop-t5-1", PaneID: "w2:p1", PaneLabel: "posse:shop:t5"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +55,15 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := herdr.NewFake()
-	fake.SnapshotValue = herdr.Snapshot{Panes: []herdr.Pane{
-		{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "working"},
-		{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t5", Agent: "claude", AgentStatus: "idle"},
-	}}
+	fake.SnapshotValue = herdr.Snapshot{
+		Workspaces: []herdr.Workspace{{WorkspaceID: "w1", Label: "Lead:shop"}, {WorkspaceID: "w2", Label: "ready-to-merge-t5"}},
+		Panes: []herdr.Pane{
+			{PaneID: "w1:p1", WorkspaceID: "w1", Label: "posse:shop:lead", Agent: "claude", AgentStatus: "working"},
+			{PaneID: "w2:p1", WorkspaceID: "w2", Label: "posse:shop:t5", Agent: "claude", AgentStatus: "idle"},
+		},
+	}
+	fake.SnapshotValue.Workspaces[1].Worktree.CheckoutPath = repo
+	fake.SnapshotValue.Workspaces[1].Worktree.IsLinkedWorktree = true
 	var output bytes.Buffer
 	cli := testService(home, fake).CLI()
 	cli.Out = &output
@@ -81,7 +86,7 @@ func TestProjectHomeUsesCompactRowAndStateDerivedHelp(t *testing.T) {
 	var list struct {
 		Tasks []map[string]any `json:"tasks"`
 	}
-	if err := json.Unmarshal(output.Bytes(), &list); err != nil || len(list.Tasks) != 1 || list.Tasks[0]["id"] != "t5" || list.Tasks[0]["name"] != "ready-to-merge" {
+	if err := json.Unmarshal(output.Bytes(), &list); err != nil || len(list.Tasks) != 1 || list.Tasks[0]["id"] != "t5" || list.Tasks[0]["name"] != "ready-to-merge" || list.Tasks[0]["worker_workspace_layout"] != "legacy-worktree-open" {
 		t.Fatalf("list omitted the Task name: err=%v output=%s rows=%#v", err, output.String(), list.Tasks)
 	}
 	output.Reset()
