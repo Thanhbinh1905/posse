@@ -141,6 +141,22 @@ func TestLowkeyToggleAndWatchWakeWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestReviewCapWakeDirectsLeadToAskInChat(t *testing.T) {
+	notices := []store.Notice{
+		{Kind: "task_done", Summary: strings.Repeat("a", 150)},
+		{Kind: "task_done", Summary: strings.Repeat("a", 150)},
+		{Kind: "task_done", Summary: strings.Repeat("a", 150)},
+		{Kind: "task_done", Summary: strings.Repeat("a", 150)},
+		{Kind: "review_cap_reached", Summary: "Review cap reached"},
+	}
+	for _, lowkey := range []bool{false, true} {
+		wake := noticeWakeMessage(context.Background(), nil, notices, lowkey)
+		if !strings.Contains(wake, "ask for a plain-language reply here") || !strings.Contains(wake, "posse decisions") {
+			t.Errorf("lowkey=%t: capped Decision wake lacks chat instructions: %s", lowkey, wake)
+		}
+	}
+}
+
 func TestLowkeyWakeIsBoundedAndSanitized(t *testing.T) {
 	notices := []store.Notice{{Kind: "task_done", Summary: strings.Repeat("ab\n", 300)}}
 	wake := noticeWakeMessage(context.Background(), nil, notices, true)

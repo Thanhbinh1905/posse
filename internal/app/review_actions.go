@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,8 +142,19 @@ func (s *Service) queueReviewFix(ctx context.Context, db *store.DB, project stor
 	if len(selectedPatterns) == 0 {
 		return reviewFixQueued{}, axi.Failure("review_fix_empty", "no open blocking Finding Patterns are available to fix", false)
 	}
-	if !capAuthorized && !greenhouse && taskUsesSharedReviewRepairCap(change) && !selectedReviewPatternsBlock(findings, selectedPatterns, plan) {
-		return reviewFixQueued{}, axi.Failure("review_fix_non_blocking", "a full-pipeline Review fix must include at least one blocking finding", false)
+	if !capAuthorized && taskUsesSharedReviewRepairCap(change) {
+		var blocks bool
+		if greenhouse {
+			blockAt := greenhouseBlockAt(change)
+			blocks = slices.ContainsFunc(findings, func(finding store.ReviewFindingDetail) bool {
+				return selectedPatterns[finding.PatternSeq] && reviewFindingActionable(finding) && greenhouseFindingBlocks(finding.Severity, blockAt)
+			})
+		} else {
+			blocks = selectedReviewPatternsBlock(findings, selectedPatterns, plan)
+		}
+		if !blocks {
+			return reviewFixQueued{}, axi.Failure("review_fix_non_blocking", "a full-pipeline Review fix must include at least one blocking finding", false)
+		}
 	}
 	selected := make([]int, 0, len(selectedPatterns))
 	for seq := range selectedPatterns {

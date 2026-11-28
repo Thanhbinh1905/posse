@@ -19,7 +19,9 @@ func noticeWakeMessage(ctx context.Context, db *store.DB, notices []store.Notice
 	ids := make([]string, 0, len(notices))
 	budget := 500
 	messageBudget := 4000
+	capReached := false
 	for _, notice := range notices {
+		capReached = capReached || notice.Kind == "review_cap_reached"
 		if notice.Kind == leadMessageNoticeKind {
 			entry := fmt.Sprintf("Notice %d: %s", notice.ID, strconv.Quote(notice.Summary))
 			if len(entry)+2 > messageBudget {
@@ -62,10 +64,14 @@ func noticeWakeMessage(ctx context.Context, db *store.DB, notices []store.Notice
 	if len(parts) < len(notices) {
 		extra = fmt.Sprintf("; +%d more (run `posse --full`)", len(notices)-len(parts))
 	}
-	if !lowkey {
-		return noticeEnvelope(notices, nil, strings.Join(parts, "; ")+extra+". Notice ids: "+strings.Join(ids, ",")+". Lowkey mode off: report every Notice and ack it.")
+	body := strings.Join(parts, "; ") + extra + ". Notice ids: " + strings.Join(ids, ",") + "."
+	if capReached {
+		body += " Check `posse decisions` for pending Review-cap Decisions. When a User choice is required, present the exact head and available options and ask for a plain-language reply here. Do not give the User a command to run."
 	}
-	return noticeEnvelope(notices, nil, strings.Join(parts, "; ")+extra+". Notice ids: "+strings.Join(ids, ",")+". Lowkey mode on. "+lowkeyReportingRule)
+	if !lowkey {
+		return noticeEnvelope(notices, nil, body+" Lowkey mode off: report every Notice and ack it.")
+	}
+	return noticeEnvelope(notices, nil, body+" "+lowkeyReportingRule)
 }
 
 func clipRunes(value string, limit int) string {

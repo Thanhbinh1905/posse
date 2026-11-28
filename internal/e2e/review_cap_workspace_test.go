@@ -220,13 +220,24 @@ func TestWorkspaceReviewCapRaisesDecisionBoundToEveryMemberCandidate(t *testing.
 			t.Fatalf("cap refusal does not name %s candidate %s: %s", member, candidates[member].CandidateSHA, output)
 		}
 	}
-	decisionID, _ := h.openCapDecision(t)
+	decisionID, origin := h.openCapDecision(t)
+	head := strings.TrimPrefix(origin, "review_cap:t1:")
 	code, output = h.lead(t, "decisions")
-	if code != 0 || !strings.Contains(output, "accept-head") || !strings.Contains(output, "final-fix") || !strings.Contains(output, "rethink") || !strings.Contains(output, "discard") || !strings.Contains(output, "api@"+candidates["api"].CandidateSHA[:7]) {
-		t.Fatalf("workspace cap Decision options or binding: code=%d %s", code, output)
+	if code != 0 || !strings.Contains(output, "accept-head") || !strings.Contains(output, "final-fix") || !strings.Contains(output, "rethink") || !strings.Contains(output, "discard") {
+		t.Fatalf("workspace cap Decision options: code=%d %s", code, output)
+	}
+	for _, value := range []string{"head: " + head, "heads[2]", candidates["api"].CandidateSHA, candidates["web"].CandidateSHA, "Reply in the Lead chat"} {
+		if !strings.Contains(output, value) {
+			t.Fatalf("workspace cap Decision missing %q: %s", value, output)
+		}
 	}
 	const quote = "Accept both Member candidates at the cap."
-	h.answer(t, decisionID, "accept-head", quote, "accepted-head")
+	if code, output := h.lead(t, "decide", fmt.Sprint(decisionID), "accept-head", "--head", head, "--user-approved="+quote); code != 0 {
+		t.Fatalf("record the User's chat answer: %d %s", code, output)
+	}
+	if code, output := h.lead(t, "apply", fmt.Sprint(decisionID)); code != 0 || !strings.Contains(output, "accepted-head") {
+		t.Fatalf("apply the answer to the exact workspace heads: %d %s", code, output)
+	}
 	rows, err := h.f.db.QueryContext(context.Background(), `SELECT head_sha FROM review_dispositions WHERE ship_task_id=? AND user_quote=?`, h.change.ID, quote)
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +305,8 @@ func TestWorkspaceReviewCapDecisionRefreshesWhenOneMemberSubmitsANewerCandidate(
 	if current["api"].CandidateSHA == before["api"].CandidateSHA || current["web"].CandidateSHA != before["web"].CandidateSHA {
 		t.Fatal("publish must change only the API candidate")
 	}
-	if code, output := h.lead(t, "decide", fmt.Sprint(oldID), "accept-head", "--user-approved", "Accept the previous workspace candidate heads."); code != 1 || !strings.Contains(output, "Review candidate head changed") {
+	oldHead := strings.TrimPrefix(oldOrigin, "review_cap:t1:")
+	if code, output := h.lead(t, "decide", fmt.Sprint(oldID), "accept-head", "--head", oldHead, "--user-approved", "Accept the previous workspace candidate heads."); code != 1 || !strings.Contains(output, "Review-cap head changed") {
 		t.Fatalf("publish must retire the stale Decision before it can be answered: %d %s", code, output)
 	}
 	newID, newOrigin := h.openCapDecision(t)
