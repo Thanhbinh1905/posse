@@ -186,7 +186,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	round := greenhouse.Round{
-		Worktree: member.worktree, MinimumGrantNumber: 1,
+		Worktree: member.worktree, MinimumGrantNumber: 1, ScopeRevision: plan.ScopeRevision(),
 		Intent:   greenhouseIntent(task, plan),
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
@@ -222,6 +222,13 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	defer releaseParallelReviewLock(parallelLock)
+	latestTask, err := db.TaskByID(ctx.Context, project.ID, task.ID)
+	if err != nil {
+		return err
+	}
+	if task.PlanRevision != latestTask.PlanRevision {
+		return axi.Failure("task_changed", "the admitted Task plan changed before Greenhouse started", true)
+	}
 	if err := checkPendingGreenhouseRuntime(pendingPath, override); err != nil {
 		return err
 	}
@@ -233,7 +240,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	round.Host = greenhouseReviewHost(project, task, member)
-	round.GrantPrefix = daemon.GrantPrefix(round.Host)
 	if followGrant != "" {
 		pendingGrant, err := parallelPendingGrant(pendingPath)
 		if err != nil {
@@ -262,7 +268,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, round.GrantPrefix)
+		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, daemon.GrantPrefix(round))
 		ownerHead, ownerStarted := parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
 		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: ownerHead, RequestedAt: ownerStarted}); err != nil {
 			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
@@ -795,7 +801,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 			} else if waived {
 				continue
 			}
-			verdicts, err := db.VerdictsFor(ctx, task.ID)
+			verdicts, err := db.CurrentVerdictsFor(ctx, task.ID)
 			if err != nil {
 				return err
 			}
@@ -887,7 +893,7 @@ func (s *Service) reconcileGreenhouseRepositoryPrepublication(ctx context.Contex
 		if err := s.startParallelGreenhouseReviews(ctx, db, home, project, task, []store.ReviewTarget{{Repository: project.Name, Commit: head}}); err != nil {
 			return err
 		}
-		verdicts, err := db.VerdictsFor(ctx, task.ID)
+		verdicts, err := db.CurrentVerdictsFor(ctx, task.ID)
 		if err != nil {
 			return err
 		}
@@ -1132,11 +1138,16 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 		return false, store.Verdict{}, err
 	}
 	digest := sha256.Sum256(findings)
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		return false, store.Verdict{}, err
+	}
 	verdict := store.Verdict{
 		TaskID: task.ID, Repository: member.name, Provider: store.GreenhouseReviewProvider, Protocol: strconv.Itoa(greenhouse.Protocol),
 		Grant: result.Grant, Head: hr.Head, Target: hr.Target, ReviewBase: reviewBase, Outcome: hr.Verdict,
 		RulesDigest: hr.RulesDigest, ConfigDigest: hr.ConfigDigest, InputDigest: hr.InputDigest, Backend: hr.Backend, Model: hr.Model,
 		FindingsHash: hex.EncodeToString(digest[:]), FindingsPath: path, Mode: greenhouseVerdictMode(task, cfg, member.name),
+		ScopeRevision: plan.ScopeRevision(),
 	}
 	for _, finding := range hr.Findings {
 		verdict.Findings = append(verdict.Findings, store.ProviderFinding{
@@ -1184,7 +1195,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 	if err != nil || recorded {
 		return recorded, verdict, err
 	}
-	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	verdicts, err := db.CurrentVerdictsFor(ctx, task.ID)
 	if err != nil {
 		return false, store.Verdict{}, err
 	}
@@ -1193,7 +1204,7 @@ func recordGreenhouseVerdict(ctx context.Context, db *store.DB, task store.Task,
 			return false, persisted, nil
 		}
 	}
-	return false, store.Verdict{}, fmt.Errorf("greenhouse verdict for already-recorded grant %s was not found", result.Grant)
+	return false, store.Verdict{}, fmt.Errorf("no current Greenhouse Verdict for already-recorded grant %s", result.Grant)
 }
 
 func acceptedGreenhouseHead(ctx context.Context, db *store.DB, taskID int64, repository, current string) (string, error) {
@@ -1408,7 +1419,8 @@ func greenhouseIntent(task store.Task, plan *taskplan.Plan) string {
 	if strings.TrimSpace(intent) == "" {
 		intent = "Greenhouse review"
 	}
-	const maxBytes = 8192
+	amendments := plan.ScopeReviewIntent()
+	maxBytes := 8192 - len(amendments)
 	const marker = "[truncated]"
 	if len(intent) > maxBytes {
 		end := maxBytes - len(marker)
@@ -1417,7 +1429,7 @@ func greenhouseIntent(task store.Task, plan *taskplan.Plan) string {
 		}
 		intent = intent[:end] + marker
 	}
-	return intent
+	return intent + amendments
 }
 
 func greenhouseTaskMember(ctx context.Context, db *store.DB, project store.Project, task store.Task, repo string) (greenhouseMember, error) {

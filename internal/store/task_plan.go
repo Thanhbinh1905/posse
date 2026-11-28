@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -109,6 +110,16 @@ func (db *DB) ReviseTaskPlans(ctx context.Context, revisions []TaskPlanRevision)
 			return fmt.Errorf("execution plan revision does not extend the admitted plan")
 		}
 		plan := revision.Plan
+		count := len(previous.ScopeAmendments)
+		if len(plan.ScopeAmendments) < count || !slices.Equal(plan.ScopeAmendments[:count], previous.ScopeAmendments) {
+			return fmt.Errorf("execution plan revision cannot alter the approved scope history")
+		}
+		if len(plan.ScopeAmendments) > count {
+			amendment := plan.ScopeAmendments[count]
+			if len(plan.ScopeAmendments) != count+1 || amendment.Revision != plan.Revision || revision.Task.State != StateWorking || amendment.PRURL != revision.Task.PRURL || revision.Repo != nil || !slices.Equal(plan.ChangedFields(*previous), []string{"scope_amendments"}) {
+				return fmt.Errorf("scope amendment must extend only the working Task's approved scope")
+			}
+		}
 		plan.AdmittedSHA256 = ""
 		data, err := plan.Encode()
 		if err != nil {
@@ -127,8 +138,13 @@ func (db *DB) ReviseTaskPlans(ctx context.Context, revisions []TaskPlanRevision)
 	defer tx.Rollback()
 	for _, revision := range prepared {
 		task, plan, data := revision.Task, revision.Plan, revision.Data
-		result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, workflow_run_id=?, plan_revision=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=?`,
-			data, plan.Launch.ProfileName, plan.Launch.DispatchRule, storedWorkflowRunID(data), storedPlanRevision(data), time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State)
+		amendedRepository := ""
+		if len(plan.ScopeAmendments) > len(revision.Previous.ScopeAmendments) {
+			amendedRepository = plan.ScopeAmendments[len(plan.ScopeAmendments)-1].Repository
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET plan_json=?, profile=?, dispatch_rule=?, workflow_run_id=?, plan_revision=?, gated_sha=CASE WHEN state='merging' THEN gated_sha ELSE '' END, updated_at=? WHERE id=? AND plan_json=? AND launches=? AND state=? AND (?='' OR (pr_url=? AND EXISTS(SELECT 1 FROM projects WHERE id=tasks.project_id AND name=?)))`,
+			data, plan.Launch.ProfileName, plan.Launch.DispatchRule, storedWorkflowRunID(data), storedPlanRevision(data), time.Now().UnixMilli(), task.ID, task.PlanJSON, task.Launches, task.State,
+			amendedRepository, task.PRURL, amendedRepository)
 		if err != nil {
 			return err
 		}
@@ -153,7 +169,7 @@ func (db *DB) ReviseTaskPlans(ctx context.Context, revisions []TaskPlanRevision)
 		reviewRelevant := false
 		for _, field := range changedFields {
 			switch field {
-			case "review", "validation_loops", "inputs", "execution", "preferences", "grants", "user_choice", "member_admissions":
+			case "review", "validation_loops", "inputs", "execution", "preferences", "grants", "user_choice", "member_admissions", "scope_amendments":
 				reviewRelevant = true
 			}
 		}

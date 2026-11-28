@@ -111,7 +111,7 @@ func taskUsesGreenhouseGate(task store.Task) bool {
 	if err != nil || plan == nil {
 		return false
 	}
-	return plan.ReviewProvider == store.GreenhouseReviewProvider || plan.ValidationLoops != nil && plan.ValidationLoops.ReviewProvider == store.GreenhouseReviewProvider
+	return plan.FrozenReviewProvider() == store.GreenhouseReviewProvider
 }
 
 func greenhouseFullPipelineTask(task store.Task) bool {

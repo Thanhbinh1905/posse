@@ -32,10 +32,10 @@ AND NOT (
   AND (
     tasks.landing_mode='pr'
     OR EXISTS (
-      SELECT 1 FROM verdicts v WHERE v.task_id=tasks.id AND v.repo=(SELECT name FROM projects WHERE id=tasks.project_id)
+      SELECT 1 FROM current_verdicts v WHERE v.task_id=tasks.id AND v.repo=(SELECT name FROM projects WHERE id=tasks.project_id)
       AND v.provider='greenhouse' AND v.mode='gate' AND v.head_sha=tasks.gated_sha
       AND (v.verdict='clean' OR v.verdict='findings' AND v.blocking=0)
-      AND v.id=(SELECT id FROM verdicts WHERE task_id=tasks.id AND repo=v.repo AND provider='greenhouse' AND mode='gate' ORDER BY recorded_at DESC,id DESC LIMIT 1)
+      AND v.id=(SELECT id FROM current_verdicts WHERE task_id=tasks.id AND repo=v.repo AND provider='greenhouse' AND mode='gate' ORDER BY recorded_at DESC,id DESC LIMIT 1)
     )
   )
 )

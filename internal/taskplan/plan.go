@@ -185,6 +185,7 @@ type Plan struct {
 	Preferences      []Preference          `json:"preferences,omitempty"`
 	UserChoice       *UserChoice           `json:"user_choice,omitempty"`
 	MemberAdmissions []MemberAdmission     `json:"member_admissions,omitempty"`
+	ScopeAmendments  []ScopeAmendment      `json:"scope_amendments,omitempty"`
 	Inputs           []Input               `json:"inputs"`
 	Paths            Paths                 `json:"paths"`
 	Launch           Launch                `json:"launch"`
@@ -196,6 +197,16 @@ type Plan struct {
 	Pool             config.Pool           `json:"pool"`
 	// DeleteBranchOnMerge is nil in plans admitted before the setting existed.
 	DeleteBranchOnMerge *bool `json:"delete_branch_on_merge,omitempty"`
+}
+
+func (p Plan) FrozenReviewProvider() string {
+	if p.ReviewProvider != "" {
+		return p.ReviewProvider
+	}
+	if p.ValidationLoops != nil {
+		return p.ValidationLoops.ReviewProvider
+	}
+	return ""
 }
 
 // DeletesBranchOnMerge reports the frozen delete_branch_on_merge of a workspace
@@ -535,6 +546,9 @@ func (p Plan) Validate() error {
 			return invalid("invalid Member-admission approval")
 		}
 		seenAdmissions[admission.Repository] = true
+	}
+	if err := p.validateScopeAmendments(); err != nil {
+		return invalid(err.Error())
 	}
 	if p.Launch.ProfileName == "" || p.Launch.Profile.Kind == "" {
 		return invalid("missing launch Profile or kind")

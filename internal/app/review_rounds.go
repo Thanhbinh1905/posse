@@ -1145,10 +1145,18 @@ func recordEmptyGreenhouseVerdict(ctx context.Context, db *store.DB, project sto
 		}
 		return false, fmt.Errorf("check Greenhouse review diff %s..%s: %w", reviewBase, target.Commit, err)
 	}
+	plan, err := change.AdmittedPlan()
+	if err != nil {
+		return false, err
+	}
+	grant := fmt.Sprintf("empty-diff/%d/%s/%s", change.ID, target.Repository, target.Commit)
+	if revision := plan.ScopeRevision(); revision > 0 {
+		grant += fmt.Sprintf("/scope-%d", revision)
+	}
 	verdict := store.Verdict{
 		TaskID: change.ID, Repository: target.Repository, Provider: store.GreenhouseReviewProvider,
-		Protocol: "2", Grant: fmt.Sprintf("empty-diff/%d/%s/%s", change.ID, target.Repository, target.Commit),
-		Head: target.Commit, Target: providerTarget, ReviewBase: reviewBase, Outcome: "clean", Mode: "gate",
+		Protocol: "2", Grant: grant,
+		Head: target.Commit, Target: providerTarget, ReviewBase: reviewBase, Outcome: "clean", Mode: "gate", ScopeRevision: plan.ScopeRevision(),
 	}
 	_, err = db.RecordGreenhouseVerdict(ctx, verdict, func(ctx context.Context) (string, error) {
 		return taskBranchAuthorHead(ctx, member.root, change.Branch)
@@ -1251,12 +1259,10 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 			_ = releaseParallelReviewLock(lock)
 			continue
 		}
-		exists := false
-		for _, request := range requests {
-			if request.TaskID == change.ID && request.Repository == target.Repository && request.RequestedHead == target.Commit && request.Outcome == "verdict" {
-				exists = true
-				break
-			}
+		exists, err := db.HasCurrentGreenhouseReviewRequest(ctx, change.ID, target.Repository, target.Commit)
+		if err != nil {
+			_ = releaseParallelReviewLock(lock)
+			return err
 		}
 		hasPending, err := parallelReviewPending(pendingPath)
 		if err != nil {

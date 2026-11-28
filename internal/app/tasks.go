@@ -1788,6 +1788,9 @@ func (s *Service) signal(ctx *axi.Context, args []string) error {
 			return err
 		}
 		if parsed.Flags["pr"] != "" {
+			if expectedURL := admittedPlan.ScopePRURL(); expectedURL != "" && parsed.Flags["pr"] != expectedURL {
+				return axi.Failure("scope_pr_mismatch", "the amended Task must report its original PR or MR", false)
+			}
 			if parsed.Flags["head"] != "" && parsed.Flags["head"] != head {
 				return axi.Failure("signal_invalid", "--head must match the current Task branch head", false, head)
 			}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/thanhbinh1905/posse/internal/store"
+	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
 
 const (
@@ -63,9 +64,17 @@ if mode == 'invalid-output':
 verdict = {'head': request['Head'], 'verdict': 'clean', 'coverage': request['Paths'], 'findings': []}
 if mode == 'inconclusive':
     verdict['verdict'] = 'inconclusive'
+finding = None
+if mode == 'scope':
+    with open(os.path.join(ctl, 'review-intent'), 'w') as log:
+        log.write(request['Intent'])
+    if 'mysql-filter.txt' in request['Paths'] and 'Add a MySQL filter to the guest image rotation' not in request['Intent']:
+        finding = ('mysql-filter.txt', 'The MySQL filter is outside the admitted scope')
 if mode == 'findings':
+    finding = (request['Paths'][0], 'The fixture flags this line')
+if finding:
     verdict['verdict'] = 'findings'
-    verdict['findings'] = [{'id': 'fixture-p1', 'priority': 'P1', 'origin': 'correctness', 'file': request['Paths'][0], 'start': 1, 'end': 1, 'explanation': 'The fixture flags this line', 'action': 'Change the line', 'rule': '', 'head': request['Head']}]
+    verdict['findings'] = [{'id': 'fixture-p1', 'priority': 'P1', 'origin': 'correctness', 'file': finding[0], 'start': 1, 'end': 1, 'explanation': finding[1], 'action': 'Change the line', 'rule': '', 'head': request['Head']}]
 emit({'role': 'assistant', 'provider': 'fixture', 'model': 'model', 'stopReason': 'stop', 'content': [{'type': 'text', 'text': json.dumps(verdict)}]})
 print(json.dumps({'type': 'agent_settled', 'aborted': False}))
 `
@@ -883,21 +892,30 @@ func TestGreenhouseAdapterContract(t *testing.T) {
 }
 
 func TestGreenhouseRecoverInterruptedReview(t *testing.T) {
-	testGreenhouseRecoverInterruptedReview(t, false)
+	testGreenhouseRecoverInterruptedReview(t, false, false)
 }
 
 func TestGreenhouseRecoverInterruptedIsolatedReview(t *testing.T) {
-	testGreenhouseRecoverInterruptedReview(t, true)
+	testGreenhouseRecoverInterruptedReview(t, true, false)
 }
 
-func testGreenhouseRecoverInterruptedReview(t *testing.T, isolated bool) {
+func TestGreenhouseRecoverInterruptedAmendedReview(t *testing.T) {
+	t.Run("shared", func(t *testing.T) { testGreenhouseRecoverInterruptedReview(t, false, true) })
+	t.Run("isolated", func(t *testing.T) { testGreenhouseRecoverInterruptedReview(t, true, true) })
+}
+
+func testGreenhouseRecoverInterruptedReview(t *testing.T, isolated, amended bool) {
 	t.Helper()
 	f := newWorkerTabsFixture(t)
 	c := newGreenhouseContract(t, f)
 	if isolated {
 		c, _ = newIsolatedGreenhouseContract(t, c)
 	}
-	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte("review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\n"), 0o600); err != nil {
+	config := "review_provider = \"greenhouse\"\n[defaults]\nreview = \"full-pipeline\"\n"
+	if amended {
+		config += "merge_mode = \"pr\"\n"
+	}
+	if err := os.WriteFile(filepath.Join(f.home, "projects", "shop", "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(c.ctl, "prefix-input"), nil, 0o600); err != nil {
@@ -906,6 +924,12 @@ func testGreenhouseRecoverInterruptedReview(t *testing.T, isolated bool) {
 	c.change = f.start(t, "t1", "Recover an interrupted review", "greenhouse-recover")
 	f.start(t, "t2", "Bystander Task", "recovery-bystander")
 	head := c.authorCommit(t)
+	scopeRevision := 0
+	if amended {
+		oldHead := head
+		head = c.authorCommit(t)
+		scopeRevision = c.seedScopeAmendment(t, oldHead, head)
+	}
 	c.hold(t)
 	shortReview := c.reviewArgs()
 	shortReview[slices.Index(shortReview, "--timeout")+1] = "50"
@@ -1024,7 +1048,7 @@ func testGreenhouseRecoverInterruptedReview(t *testing.T, isolated bool) {
 	}) {
 		t.Fatal("restarted review did not record a Verdict")
 	}
-	if len(verdicts) != 1 || verdicts[0].Grant != parked["grant"] || verdicts[0].Head != head || verdicts[0].Mode != "gate" || verdicts[0].Outcome != "clean" || c.invocations(t) != 2 || len(c.hostGrants(t)) != 1 {
+	if len(verdicts) != 1 || verdicts[0].Grant != parked["grant"] || verdicts[0].Head != head || verdicts[0].ScopeRevision != scopeRevision || verdicts[0].Mode != "gate" || verdicts[0].Outcome != "clean" || c.invocations(t) != 2 || len(c.hostGrants(t)) != 1 {
 		t.Fatalf("want one fresh reviewer execution and gate Verdict under the original grant; got %+v, invocations %d", verdicts, c.invocations(t))
 	}
 	inspection := c.greenhouse(t, map[string]any{"version": 2, "op": "inspect"})
@@ -1038,6 +1062,39 @@ func testGreenhouseRecoverInterruptedReview(t *testing.T, isolated bool) {
 		t.Fatalf("recorded recovery = %v; want %s with outcome %v", record, recovery, result["detail"])
 	}
 	t.Logf("review recover restarted %v; a fresh review then recorded the Verdict at %s", result["grant"], head)
+}
+
+func (c *greenhouseContract) seedScopeAmendment(t *testing.T, oldHead, newHead string) int {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(c.f.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	const pr = "https://github.com/acme/shop/pull/17"
+	if _, err := db.ExecContext(ctx, `UPDATE tasks SET pr_url=? WHERE id=?`, pr, c.change.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.TaskByID(ctx, c.change.ProjectID, c.change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := task.AdmittedPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	amended, err := plan.AmendScope(taskplan.ScopeAmendment{
+		Repository: "shop", Scope: "Add a filter", Quote: "Include the filter in the same PR.",
+		Source: taskplan.ScopeAmendmentSource, Actor: "lead", PRURL: pr, OldHead: oldHead, NewHead: newHead,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlan(ctx, task, amended); err != nil {
+		t.Fatal(err)
+	}
+	return amended.ScopeRevision()
 }
 
 func newGreenhouseContract(t *testing.T, f *workerTabsFixture) *greenhouseContract {

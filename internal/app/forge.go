@@ -248,6 +248,9 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 			if mr.TargetBranch != taskTargetBranch(project, task) {
 				return "", false, pullRequestTargetMismatch(mr.WebURL, mr.TargetBranch, taskTargetBranch(project, task))
 			}
+			if description.expectedURL != "" && mr.WebURL != description.expectedURL {
+				continue
+			}
 			matched = true
 			foundOpenMR = true
 			lastHead = mr.SHA
@@ -289,6 +292,9 @@ func (s *Service) findOrCreateGitLabMR(ctx context.Context, db *store.DB, projec
 			break
 		}
 		if !matched {
+			if description.expectedURL != "" {
+				return "", false, axi.Failure("scope_pr_mismatch", "the amended Task must update its original open MR", false)
+			}
 			if !foundOpenMR {
 				break
 			}

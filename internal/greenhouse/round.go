@@ -25,10 +25,9 @@ type Settings struct {
 
 // Round asks Greenhouse for one exact-head review of a Task Member.
 type Round struct {
-	Worktree string
-	Host     Host
-	// Round n uses GrantPrefix/r<n>.
-	GrantPrefix        string
+	Worktree           string
+	Host               Host
+	ScopeRevision      int
 	MinimumGrantNumber int
 	Intent             string
 	Target             string
@@ -98,11 +97,15 @@ func PendingRuntime(path string) (ReviewRuntime, bool, error) {
 	return runtime, true, nil
 }
 
-func (d *Daemon) GrantPrefix(host Host) string {
-	if !d.Isolated {
-		return host.ID
+func (d *Daemon) GrantPrefix(round Round) string {
+	prefix := round.Host.ID
+	if d.Isolated {
+		prefix += fmt.Sprintf("/isolated-%x", sha256.Sum256([]byte(d.Home)))
 	}
-	return fmt.Sprintf("%s/isolated-%x", host.ID, sha256.Sum256([]byte(d.Home)))
+	if round.ScopeRevision > 0 {
+		prefix += "/scope-" + strconv.Itoa(round.ScopeRevision)
+	}
+	return prefix
 }
 
 // Review continues the Member's round in flight, or starts the next one.
@@ -195,7 +198,7 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 	if round.MinimumGrantNumber > nextGrant {
 		nextGrant = round.MinimumGrantNumber
 	}
-	grant := fmt.Sprintf("%s/r%d", round.GrantPrefix, nextGrant)
+	grant := fmt.Sprintf("%s/r%d", d.GrantPrefix(round), nextGrant)
 	head, err := worktreeHead(ctx, round.Worktree)
 	if err != nil {
 		return RoundResult{}, err

@@ -35,7 +35,7 @@ func greenhousePartialReviewApplies(ctx context.Context, db *store.DB, task stor
 	if !noticeExists {
 		return false, nil
 	}
-	verdicts, err := db.VerdictsFor(ctx, task.ID)
+	verdicts, err := db.CurrentVerdictsFor(ctx, task.ID)
 	if err != nil {
 		return false, err
 	}

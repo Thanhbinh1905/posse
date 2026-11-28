@@ -14,6 +14,7 @@ func prepareSupportedHomeAtVersion(t *testing.T, db *DB, version int64) {
 	t.Helper()
 	ctx := context.Background()
 	for _, statement := range []string{
+		`DROP VIEW IF EXISTS current_verdicts`,
 		`DROP TRIGGER IF EXISTS clear_task_dependency_wait`,
 		`DROP TABLE IF EXISTS task_dependency_waits`,
 		`DROP TABLE IF EXISTS greenhouse_task_watches`,
@@ -34,6 +35,15 @@ func prepareSupportedHomeAtVersion(t *testing.T, db *DB, version int64) {
 		`INSERT INTO posse_migration_checksums(version,sha256) VALUES(95,'` + supportedLegacyMigrationChecksums[95] + `')`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var hasScopeRevision bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('verdicts') WHERE name='scope_revision')`).Scan(&hasScopeRevision); err != nil {
+		t.Fatal(err)
+	}
+	if hasScopeRevision {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE verdicts DROP COLUMN scope_revision`); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -84,8 +94,8 @@ func TestOpenAppliesBaselineAsOneMigration(t *testing.T) {
 	}
 	defer db.Close()
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 7 {
-		t.Fatalf("applied migration count = %d, %v; want the baseline and six subsequent migrations", applied, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM goose_db_version WHERE is_applied=1 AND version_id>0`).Scan(&applied); err != nil || applied != 8 {
+		t.Fatalf("applied migration count = %d, %v; want the baseline and seven subsequent migrations", applied, err)
 	}
 	var version int64
 	if err := db.QueryRow(`SELECT version_id FROM goose_db_version WHERE is_applied=1 AND version_id=?`, baselineMigrationVersion).Scan(&version); err != nil || version != baselineMigrationVersion {
