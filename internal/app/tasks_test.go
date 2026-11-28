@@ -942,6 +942,63 @@ Wait for both prerequisites.
 	}
 }
 
+func TestQueuePrerequisitesRevisesOnlyQueuedTask(t *testing.T) {
+	fixture := newStartFixture(t)
+	ctx := context.Background()
+	db, err := store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for sequence, title := range []string{"First predecessor", "Replacement predecessor"} {
+		if _, err := db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: sequence + 1, Type: "change", Title: title, MergeMode: "local"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	brief := `---
+type: change
+title: Dependent change
+done_when: queued prerequisites can be revised
+after: t1:landed
+---
+Wait for the selected prerequisite.
+`
+	if err := os.WriteFile(fixture.brief, []byte(brief), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cli := fixture.service.CLI()
+	output := &bytes.Buffer{}
+	cli.Out, cli.ErrOut = output, output
+	if code := cli.Run([]string{"start", "--brief", fixture.brief}); code != 0 {
+		t.Fatalf("start queued dependant: code=%d output=%s", code, output.String())
+	}
+	output.Reset()
+	if code := cli.Run([]string{"queue", "prerequisites", "t3", "--after", "t2:landed"}); code != 0 {
+		t.Fatalf("revise queued prerequisites: code=%d output=%s", code, output.String())
+	}
+	db, err = store.Open(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := db.Task(ctx, fixture.project.ID, "t3")
+	plan, planErr := queued.AdmittedPlan()
+	if err != nil || planErr != nil || queued.State != store.StateQueued || queued.PlanRevision != 2 || len(plan.Dependencies) != 1 || plan.Dependencies[0].TaskID != "t2" {
+		t.Fatalf("revised queued Task=%+v plan=%#v errors=%v/%v output=%s", queued, plan, err, planErr, output.String())
+	}
+	if err := db.Transition(ctx, queued.ID, store.StateQueued, store.StateSpawning, "cli", "fixture claim"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := cli.Run([]string{"queue", "prerequisites", "t3", "--clear"}); code == 0 || !strings.Contains(output.String(), "not queued") {
+		t.Fatalf("claimed Task accepted prerequisite revision: code=%d output=%s", code, output.String())
+	}
+}
+
 func TestFailedPrerequisiteDecisionCanDropEdgeAndRunQueuedTask(t *testing.T) {
 	fixture := newStartFixture(t)
 	ctx := context.Background()
