@@ -1834,7 +1834,7 @@ func assertWorkerSidebarPresentation(t *testing.T, client *herdr.Client, task st
 			tab = candidate
 		}
 	}
-	if workspaceLabel != "" && workspace.Label != workspaceLabel || workspace.WorkspaceID != task.HerdrWorkspaceID || !workspace.Worktree.IsLinkedWorktree || workspace.Worktree.CheckoutPath != task.WorktreePath ||
+	if workspaceLabel != "" && tab.Label != workspaceLabel || workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.Label != workerWorkspaceLabelForE2E(task) || workspace.Worktree.IsLinkedWorktree ||
 		pane.Label != task.PaneLabel || pane.CWD != task.WorktreePath || pane.Agent != "claude" || pane.DisplayAgent != pane.Agent ||
 		!strings.HasPrefix(pane.Title, task.Title+" · "+task.ShortName) ||
 		pane.Tokens["posse_title"] != task.Title || pane.Tokens["posse_name"] != task.ShortName || pane.Tokens["posse_sandbox"] != filepath.Base(task.WorktreePath) || pane.Tokens["posse_branch"] != task.Branch ||
@@ -1861,11 +1861,11 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 	}
 	lead, found := findLeadInSnapshot(snapshot)
 	workerTabID := tabOf(t, snapshot, task.PaneID)
-	workerChild := false
+	workerWorkspace := false
 	workerTab := false
 	for _, workspace := range snapshot.Workspaces {
-		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == task.WorktreePath {
-			workerChild = true
+		if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Label == workerWorkspaceLabelForE2E(task) && !workspace.Worktree.IsLinkedWorktree {
+			workerWorkspace = true
 		}
 	}
 	for _, candidate := range snapshot.Tabs {
@@ -1873,8 +1873,8 @@ func assertWorkerIsolation(t *testing.T, client *herdr.Client, posseBinary, home
 			workerTab = true
 		}
 	}
-	if !found || task.HerdrWorkspaceID == lead.WorkspaceID || !workerChild || !workerTab {
-		t.Fatalf("Worker is not a tab in its linked child workspace: task=%#v lead=%#v workspaces=%#v tabs=%#v", task, lead, snapshot.Workspaces, snapshot.Tabs)
+	if !found || task.HerdrWorkspaceID == lead.WorkspaceID || !workerWorkspace || !workerTab {
+		t.Fatalf("Worker is not a tab in its labeled workspace: task=%#v lead=%#v workspaces=%#v tabs=%#v", task, lead, snapshot.Workspaces, snapshot.Tabs)
 	}
 	if runtime.GOOS == "linux" {
 		raw, err := client.Call(context.Background(), "pane.process_info", map[string]any{"pane_id": task.PaneID})

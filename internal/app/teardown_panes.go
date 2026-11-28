@@ -1050,26 +1050,29 @@ func (s *Service) planTaskPaneTeardown(ctx context.Context, project store.Projec
 		plan.completedProofs = proofs
 	}
 	childID := ""
-	if project.IsWorkspace() {
-		for _, workspace := range snapshot.Workspaces {
-			if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID || workspace.Label != workerWorkspaceLabel(task) {
-				continue
+	for _, workspace := range snapshot.Workspaces {
+		if workspace.WorkspaceID != task.HerdrWorkspaceID || workspace.WorkspaceID == project.HerdrWorkspaceID {
+			continue
+		}
+		newLayout := workspace.Label == workerWorkspaceLabel(task) && (workspace.Root == "" || filepath.Clean(workspace.Root) == filepath.Clean(task.WorktreePath))
+		legacyLayout := workspace.Worktree.IsLinkedWorktree && filepath.Clean(workspace.Worktree.CheckoutPath) == filepath.Clean(task.WorktreePath)
+		if !newLayout && !legacyLayout {
+			continue
+		}
+		matchedPane := false
+		for _, pane := range snapshot.Panes {
+			if pane.WorkspaceID == workspace.WorkspaceID && (pane.Label == task.PaneLabel || legacyLayout) && (pane.Label == task.PaneLabel || ownsTaskPane(snapshot, project, task, plan.tabs, pane)) {
+				matchedPane = true
+				break
 			}
+		}
+		if matchedPane || newLayout && workspace.Label == workerWorkspaceLabel(task) {
 			childID = workspace.WorkspaceID
 			plan.workspaces[childID] = true
 			plan.workspaceLabels[childID] = workspace.Label
 		}
-	} else if !project.IsDirectory() {
-		for _, workspace := range snapshot.Workspaces {
-			if workspace.Worktree.CheckoutPath != "" && workspace.Worktree.CheckoutPath == task.WorktreePath {
-				for _, pane := range snapshot.Panes {
-					if pane.WorkspaceID == workspace.WorkspaceID && pane.Label == task.PaneLabel && ownsTaskPane(snapshot, project, task, plan.tabs, pane) {
-						childID = workspace.WorkspaceID
-						plan.workspaces[childID] = true
-					}
-				}
-			}
-		}
+	}
+	if !project.IsDirectory() {
 		if task.ShortName != "" {
 			for _, workspace := range snapshot.Workspaces {
 				if workspace.Label != task.ShortName || workspace.Worktree.CheckoutPath != task.WorktreePath || !workspace.Worktree.IsLinkedWorktree {
@@ -1161,31 +1164,29 @@ func (s *Service) verifyTaskPanesClosed(ctx context.Context, project store.Proje
 	}
 	result.Closed = uniqueSorted(result.Closed)
 	result.Foreign = uniqueSorted(result.Foreign)
-	if project.IsWorkspace() {
-		for workspaceID, expectedLabel := range plan.workspaceLabels {
-			workspaceExists := false
-			for _, workspace := range snapshot.Workspaces {
-				if workspace.WorkspaceID == workspaceID && workspace.Label == expectedLabel {
-					workspaceExists = true
-					break
-				}
+	for workspaceID, expectedLabel := range plan.workspaceLabels {
+		workspaceExists := false
+		for _, workspace := range snapshot.Workspaces {
+			if workspace.WorkspaceID == workspaceID && workspace.Label == expectedLabel {
+				workspaceExists = true
+				break
 			}
-			if !workspaceExists {
-				continue
+		}
+		if !workspaceExists {
+			continue
+		}
+		hasPanes := false
+		for _, pane := range snapshot.Panes {
+			if pane.WorkspaceID == workspaceID {
+				hasPanes = true
+				break
 			}
-			hasPanes := false
-			for _, pane := range snapshot.Panes {
-				if pane.WorkspaceID == workspaceID {
-					hasPanes = true
-					break
-				}
-			}
-			if hasPanes {
-				continue
-			}
-			if _, err := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": workspaceID}); err != nil && !missingPaneError(err) {
-				return result, err
-			}
+		}
+		if hasPanes {
+			continue
+		}
+		if _, err := s.herdrCall(ctx, "workspace.close", map[string]any{"workspace_id": workspaceID}); err != nil && !missingPaneError(err) {
+			return result, err
 		}
 	}
 	if plan.returnFocusToLead {

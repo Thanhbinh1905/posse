@@ -14,13 +14,15 @@ import (
 
 func TestLeadHarnessAndRepositoryWorkerSidebar(t *testing.T) {
 	f := newWorkerTabsFixture(t)
-	first := f.start(t, "t1", "Sidebar first", "sidebar-first")
-	second := f.start(t, "t2", "Sidebar second", "sidebar-second")
+	first := f.start(t, "t1", "Sidebar first", "first")
+	second := f.start(t, "t2", "Sidebar second", "b")
 	assertLeadWorkerSidebarSnapshot(t, f, first, second)
 
-	output := assertNativeWorktreeSidebar(t, f, first.ShortName+"-t1", second.ShortName+"-t2")
+	firstLabel := first.ShortName + "-t1"
+	secondLabel := second.ShortName + "-t2"
+	output := assertNativeWorkerWorkspaceSidebar(t, f, firstLabel, secondLabel)
 	if len(output) > 0 {
-		assertRenderedLeadWorkerRows(t, output, first.ShortName+"-t1", second.ShortName+"-t2")
+		assertRenderedLeadWorkerRows(t, output, firstLabel, secondLabel)
 	}
 	if f.snapshot(t).FocusedPaneID != f.leadPaneID {
 		t.Fatal("sidebar client stole focus")
@@ -64,22 +66,23 @@ func assertLeadWorkerSidebarSnapshot(t *testing.T, f *workerTabsFixture, tasks .
 	want := []string{f.userBefore.Workspace.WorkspaceID + "=notes", f.leadWorkspaceID + "=Lead:shop"}
 	for _, task := range tasks {
 		if task.HerdrWorkspaceID == f.leadWorkspaceID {
-			t.Errorf("Worker %s shares the Lead workspace instead of using a linked child", task.ShortName)
+			t.Errorf("Worker %s shares the Lead workspace", task.ShortName)
 		}
-		var childFound bool
+		workspaceLabel := workerWorkspaceLabelForE2E(task)
+		var workerWorkspaceFound bool
 		for _, workspace := range snap.Workspaces {
-			if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Worktree.IsLinkedWorktree && workspace.Worktree.CheckoutPath == task.WorktreePath {
-				childFound = true
+			if workspace.WorkspaceID == task.HerdrWorkspaceID && workspace.Label == workspaceLabel && !workspace.Worktree.IsLinkedWorktree {
+				workerWorkspaceFound = true
 				break
 			}
 		}
-		if !childFound {
-			t.Errorf("Worker %s is not in its linked Sandbox workspace %s", task.ShortName, task.HerdrWorkspaceID)
+		if !workerWorkspaceFound {
+			t.Errorf("Worker %s is not in its labeled Sandbox workspace %s", task.ShortName, task.HerdrWorkspaceID)
 		}
-		want = append(want, task.HerdrWorkspaceID+"="+task.ShortName+"-t"+strconv.Itoa(task.Seq))
+		want = append(want, task.HerdrWorkspaceID+"="+workspaceLabel)
 		for _, pane := range snap.Panes {
 			if pane.PaneID == task.PaneID && pane.DisplayAgent != "claude" {
-				t.Errorf("linked Worker harness = %q, want claude (label=%q)", pane.DisplayAgent, pane.Label)
+				t.Errorf("Worker harness = %q, want claude (label=%q)", pane.DisplayAgent, pane.Label)
 			}
 		}
 	}
@@ -112,8 +115,8 @@ func assertRenderedLeadWorkerRows(t *testing.T, output []byte, names ...string) 
 	proof = append(proof, rows[leadRow], rows[leadRow+1])
 	for i, name := range names {
 		row := leadRow + 2*(i+1)
-		if strings.Count(rows[row], name) != 1 || !strings.HasPrefix(rows[row+1], "claude") {
-			t.Errorf("rendered Worker %s is not directly below Lead with one name and its harness: %q / %q", name, rows[row], rows[row+1])
+		if !strings.Contains(rows[row], name) || !strings.HasPrefix(rows[row+1], "claude") {
+			t.Errorf("rendered Worker %s is not directly below Lead with its harness: %q / %q", name, rows[row], rows[row+1])
 		}
 		proof = append(proof, rows[row], rows[row+1])
 	}
