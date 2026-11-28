@@ -761,14 +761,20 @@ func TestGreenhouseBlockingVerdictQueuesEveryFindingPattern(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verdict := store.Verdict{
+	firstVerdict := store.Verdict{
 		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider,
 		Protocol: "2", Grant: "shop/t1/shop/r1", Head: f.headSHA, Target: f.headSHA,
-		ReviewBase: f.headSHA, Outcome: "findings", Blocking: 2, FindingsPath: "findings.md", Mode: "gate",
-		Findings: []store.ProviderFinding{
-			{Key: "first", Severity: "P1", Origin: "introduced", Path: "one.go", Line: 1, Excerpt: "first", Guidance: "fix first", Rule: "First rule", Head: f.headSHA},
-			{Key: "second", Severity: "P2", Origin: "introduced", Path: "two.go", Line: 2, Excerpt: "second", Guidance: "fix second", Rule: "Second rule", Head: f.headSHA},
-		},
+		ReviewBase: f.headSHA, Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{{Key: "first", Severity: "P1", Origin: "introduced", Path: "one.go", Line: 1, Excerpt: "first", Guidance: "guidance from first Verdict", Rule: "Shared rule", Head: f.headSHA}},
+	}
+	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), firstVerdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
+		t.Fatalf("record first findings Verdict: recorded=%v err=%v", recorded, err)
+	}
+	verdict := store.Verdict{
+		TaskID: f.task.ID, Repository: f.project.Name, Provider: store.GreenhouseReviewProvider,
+		Protocol: "2", Grant: "shop/t1/shop/r2", Head: f.headSHA, Target: f.headSHA,
+		ReviewBase: f.headSHA, Outcome: "findings", Blocking: 1, FindingsPath: "findings.md", Mode: "gate",
+		Findings: []store.ProviderFinding{{Key: "second", Severity: "P1", Origin: "introduced", Path: "two.go", Line: 2, Excerpt: "second", Guidance: "guidance from later Verdict", Rule: "Shared rule", Head: f.headSHA}},
 	}
 	if recorded, err := f.db.RecordGreenhouseVerdict(context.Background(), verdict, func(context.Context) (string, error) { return f.headSHA, nil }); err != nil || !recorded {
 		t.Fatalf("record findings Verdict: recorded=%v err=%v", recorded, err)
@@ -780,8 +786,8 @@ func TestGreenhouseBlockingVerdictQueuesEveryFindingPattern(t *testing.T) {
 		t.Fatalf("Watch retry with a pending whole-pattern Review fix: %v", err)
 	}
 	messages, err := f.db.UndeliveredTaskMessages(context.Background(), f.task.ID)
-	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "P-1") || !strings.Contains(messages[0].Body, "P-2") {
-		t.Fatalf("Review fix instructions = %+v, err=%v; want both finding patterns", messages, err)
+	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "P-1") || !strings.Contains(messages[0].Body, "guidance from later Verdict") || strings.Contains(messages[0].Body, "guidance from first Verdict") {
+		t.Fatalf("Review fix instructions = %+v, err=%v; want the later finding's own guidance", messages, err)
 	}
 	notices, err := f.db.Notices(context.Background(), f.project.ID, false)
 	if err != nil {
