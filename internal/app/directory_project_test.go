@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -422,6 +423,25 @@ func TestProjectInitRefusesUnsafeFolderShapes(t *testing.T) {
 	if err := validateProjectInitRoot(context.Background(), filepath.Clean(home)); err == nil || !strings.Contains(err.Error(), "User home directory") {
 		t.Fatalf("User home check = %v", err)
 	}
+}
+
+func TestProjectInitChecksUnbornTaskGitSupportBeforeCreatingRepository(t *testing.T) {
+	harness, dir := startDirectoryLead(t, nil)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := t.TempDir()
+	shim := filepath.Join(shimDir, "git")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'git version 2.35.9\\n'; exit 0; fi\nexec %q \"$@\"\n", realGit)
+	if err := os.WriteFile(shim, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if code := harness.run("project", "init", "--user-approved", "initialize this Directory Project"); code == 0 || !strings.Contains(harness.out.String(), "git_version_unsupported") {
+		t.Fatalf("project init with Git 2.35: %d\n%s", code, harness.out.String())
+	}
+	assertNoGit(t, dir)
 }
 
 func TestProjectInitRequiresExplicitConsent(t *testing.T) {

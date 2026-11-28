@@ -51,7 +51,7 @@ func (s *Service) projectInit(ctx *axi.Context, args []string) error {
 		return err
 	}
 	if _, err := os.Lstat(filepath.Join(root, ".git")); os.IsNotExist(err) {
-		if err := requireGitInitialBranch(ctx.Context); err != nil {
+		if err := requireGitUnbornTaskSupport(ctx.Context); err != nil {
 			return err
 		}
 		if _, err := commandOutputArgs(ctx.Context, "", "git", "-C", root, "init", "--initial-branch=main"); err != nil {
@@ -103,10 +103,6 @@ func validateProjectInitRoot(ctx context.Context, root string) error {
 		return axi.Failure("project_init_workspace_parent", "Git init is refused because the parent contains repositories and may be a Workspace", false)
 	}
 	return nil
-}
-
-func requireGitInitialBranch(ctx context.Context) error {
-	return requireGitVersion(ctx, 28, "Git 2.28 or newer is required to select the initial branch")
 }
 
 func requireGitUnbornTaskSupport(ctx context.Context) error {
