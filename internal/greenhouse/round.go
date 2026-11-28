@@ -2,6 +2,7 @@ package greenhouse
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +27,7 @@ type Settings struct {
 type Round struct {
 	Worktree string
 	Host     Host
-	// GrantPrefix is "<project>/t<seq>/<member>"; round n uses GrantPrefix/r<n>.
+	// Round n uses GrantPrefix/r<n>.
 	GrantPrefix        string
 	MinimumGrantNumber int
 	Intent             string
@@ -74,9 +75,34 @@ type RoundResult struct {
 	Replayed bool
 }
 
+type ReviewRuntime struct {
+	Binary string `json:"binary"`
+	Home   string `json:"home"`
+}
+
 type pendingReview struct {
 	Grant   string          `json:"grant"`
 	Request json.RawMessage `json:"request"`
+	Runtime *ReviewRuntime  `json:"runtime,omitempty"`
+}
+
+func PendingRuntime(path string) (ReviewRuntime, bool, error) {
+	var runtime ReviewRuntime
+	pending, err := readPending(path)
+	if err != nil || pending == nil {
+		return runtime, false, err
+	}
+	if pending.Runtime != nil {
+		runtime = *pending.Runtime
+	}
+	return runtime, true, nil
+}
+
+func (d *Daemon) GrantPrefix(host Host) string {
+	if !d.Isolated {
+		return host.ID
+	}
+	return fmt.Sprintf("%s/isolated-%x", host.ID, sha256.Sum256([]byte(d.Home)))
 }
 
 // Review continues the Member's round in flight, or starts the next one.
@@ -214,7 +240,11 @@ func (d *Daemon) startReviewWithRecovery(ctx context.Context, round Round, v res
 	if err != nil {
 		return RoundResult{}, err
 	}
-	record, err := json.Marshal(pendingReview{Grant: grant, Request: request})
+	pending := pendingReview{Grant: grant, Request: request}
+	if d.Isolated {
+		pending.Runtime = &ReviewRuntime{Binary: d.Binary, Home: d.Home}
+	}
+	record, err := json.Marshal(pending)
 	if err != nil {
 		return RoundResult{}, err
 	}

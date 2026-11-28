@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Service) reviewRecover(out *axi.Context, args []string) error {
-	parsed, err := parseArgs("review recover", args, map[string]flagSpec{"repo": {}, "head": {}, "recovery": {}})
+	parsed, err := parseArgs("review recover", args, map[string]flagSpec{"repo": {}, "head": {}, "recovery": {}, "greenhouse-binary": {}, "greenhouse-home": {}})
 	if err != nil {
 		return err
 	}
@@ -37,6 +37,10 @@ func (s *Service) reviewRecover(out *axi.Context, args []string) error {
 	}
 	if s.workerCaller(ctx, home) {
 		return axi.Failure("lead_only", "a Worker never calls Greenhouse", false, "Run this from the Project Lead pane")
+	}
+	override, err := parseGreenhouseRuntime(home, parsed.Flags)
+	if err != nil {
+		return err
 	}
 	if project.IsDirectory() {
 		return executionUnavailable(project)
@@ -84,6 +88,9 @@ func (s *Service) reviewRecover(out *axi.Context, args []string) error {
 	} else if !hasPending {
 		return axi.Failure("greenhouse_recovery_refused", "this Task Member has no pending Greenhouse review", false)
 	}
+	if err := checkPendingGreenhouseRuntime(pending, override); err != nil {
+		return err
+	}
 	scratch, err := validatedTaskScratchRoot(home, project, task)
 	if err != nil {
 		return err
@@ -111,11 +118,7 @@ func (s *Service) reviewRecover(out *axi.Context, args []string) error {
 	if pinnedHead != head {
 		return axi.Failure("greenhouse_head_mismatch", "the pinned Greenhouse review does not match the requested head", false)
 	}
-	binary, err := greenhouseBinary()
-	if err != nil {
-		return axi.Failure("greenhouse_missing", err.Error(), false, "Install Greenhouse, then retry")
-	}
-	daemon, err := newGreenhouseDaemon(ctx, db, home, binary)
+	daemon, err := newGreenhouseDaemon(ctx, db, home, override)
 	if err != nil {
 		return err
 	}
@@ -131,10 +134,14 @@ func (s *Service) reviewRecover(out *axi.Context, args []string) error {
 	}); err != nil {
 		return err
 	}
+	help := "Posse Watch checks the result. To request it now, run `posse review start " + taskIDString(task.Seq) + "`"
+	if daemon.Isolated {
+		help = "Continue the review with `posse _greenhouse review " + taskIDString(task.Seq) + " --repo " + shellQuote(member.name) + " --greenhouse-binary " + shellQuote(daemon.Binary) + " --greenhouse-home " + shellQuote(daemon.Home) + "`"
+	}
 	return out.Print(axi.Object{
 		{Key: "task", Value: taskIDString(task.Seq)}, {Key: "repo", Value: member.name}, {Key: "head", Value: head},
 		{Key: "run", Value: result.RunID}, {Key: "recovery", Value: recovery}, {Key: "grant", Value: result.Grant},
 		{Key: "outcome", Value: result.Status}, {Key: "detail", Value: result.Detail},
-		{Key: "help", Value: []string{"Posse Watch checks the result. To request it now, run `posse review start " + taskIDString(task.Seq) + "`"}},
+		{Key: "help", Value: []string{help}},
 	})
 }

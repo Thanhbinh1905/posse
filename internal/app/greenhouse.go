@@ -40,7 +40,7 @@ type greenhouseMember struct {
 // Change Task Member and records the result. A Project Lead or its verified
 // Watch may request it.
 func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
-	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "head": {}, "follow-grant": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "parallel-owner": {}, "parallel-lock-fd": {}, "watch-project-id": {}, "watch-token": {}, "watch-started-at": {}, "watch-pid": {}})
+	parsed, err := parseArgs("_greenhouse review", args, map[string]flagSpec{"repo": {}, "head": {}, "follow-grant": {}, "rule": {repeatable: true}, "reviewer-backend": {}, "reviewer-model": {}, "timeout": {}, "greenhouse-binary": {}, "greenhouse-home": {}, "parallel-owner": {}, "parallel-lock-fd": {}, "watch-project-id": {}, "watch-token": {}, "watch-started-at": {}, "watch-pid": {}})
 	if err != nil {
 		return err
 	}
@@ -67,6 +67,15 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 	}
 	if !watchChild && s.workerCaller(ctx.Context, home) {
 		return axi.Failure("lead_only", "a Worker never calls Greenhouse", false, "Run this from the Project Lead pane")
+	}
+	_, hasBinary := parsed.Flags["greenhouse-binary"]
+	_, hasHome := parsed.Flags["greenhouse-home"]
+	if watchChild && (hasBinary || hasHome) {
+		return axi.Failure("lead_only", "only the Project Lead can select an isolated Greenhouse runtime", false)
+	}
+	override, err := parseGreenhouseRuntime(home, parsed.Flags)
+	if err != nil {
+		return err
 	}
 	if project.IsDirectory() {
 		return executionUnavailable(project)
@@ -170,22 +179,6 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		}
 		return notifyFailure(requestedHead, reason)
 	}
-	binary, err := greenhouseBinary()
-	if err != nil {
-		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
-			return recordErr
-		}
-		return axi.Failure("greenhouse_missing", "greenhouse is not installed on PATH", false, "Install Greenhouse, then retry")
-	}
-	daemon, err := newGreenhouseDaemon(ctx.Context, db, home, binary)
-	if err != nil {
-		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
-			return recordErr
-		}
-		return err
-	}
-	host := greenhouseReviewHost(project, task, member)
-	hostID := host.ID
 	if err := os.MkdirAll(roundDir, 0o700); err != nil {
 		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
 			return recordErr
@@ -193,7 +186,7 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	round := greenhouse.Round{
-		Worktree: member.worktree, Host: host, GrantPrefix: hostID, MinimumGrantNumber: 1,
+		Worktree: member.worktree, MinimumGrantNumber: 1,
 		Intent:   greenhouseIntent(task, plan),
 		Settings: greenhouse.Settings{Rules: parsed.Repeated["rule"], ReviewerBackend: parsed.Flags["reviewer-backend"], ReviewerModel: parsed.Flags["reviewer-model"]},
 		Pending:  pendingPath, Wait: wait,
@@ -229,6 +222,18 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		return err
 	}
 	defer releaseParallelReviewLock(parallelLock)
+	if err := checkPendingGreenhouseRuntime(pendingPath, override); err != nil {
+		return err
+	}
+	daemon, err := newGreenhouseDaemon(ctx.Context, db, home, override)
+	if err != nil {
+		if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
+			return recordErr
+		}
+		return err
+	}
+	round.Host = greenhouseReviewHost(project, task, member)
+	round.GrantPrefix = daemon.GrantPrefix(round.Host)
 	if followGrant != "" {
 		pendingGrant, err := parallelPendingGrant(pendingPath)
 		if err != nil {
@@ -237,13 +242,27 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 		if pendingGrant != followGrant {
 			return axi.Failure("greenhouse_recovery_refused", "the restarted grant is no longer pending", false)
 		}
+	} else if daemon.Isolated {
+		pendingGrant, err := parallelPendingGrant(pendingPath)
+		if err != nil {
+			return err
+		}
+		if pendingGrant != "" {
+			restarted, err := db.GreenhouseReviewRestartedSince(ctx.Context, task.ID, member.name, requestedHead, pendingGrant, 0)
+			if err != nil {
+				return err
+			}
+			if restarted {
+				followGrant = pendingGrant
+			}
+		}
 	}
 	if parallelMode {
 		requests, err := db.GreenhouseReviewRequests(ctx.Context, project.ID)
 		if err != nil {
 			return err
 		}
-		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, hostID)
+		round.MinimumGrantNumber = nextGreenhouseLedgerGrant(requests, task.ID, member.name, round.GrantPrefix)
 		ownerHead, ownerStarted := parallelRequestMetadata(requestedHead, requestStartedAt, hasPending, requestOwner)
 		if err := writeParallelReviewOwner(ownerPath, parallelReviewOwner{PID: os.Getpid(), Head: ownerHead, RequestedAt: ownerStarted}); err != nil {
 			if recordErr := recordInitialFailure(err.Error()); recordErr != nil {
@@ -364,6 +383,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			}
 		}
 		requestSettledAt = time.Now().UnixMilli()
+		if errors.Is(err, greenhouse.ErrRuntimeMismatch) {
+			return axi.Failure("greenhouse_runtime_conflict", err.Error(), false)
+		}
 		var protocolErr *greenhouse.ProtocolError
 		if errors.As(err, &protocolErr) {
 			if recordErr := recordRequest("refused", "", time.Now().UnixMilli()); recordErr != nil {
@@ -510,6 +532,9 @@ func (s *Service) greenhouseReview(ctx *axi.Context, args []string) error {
 			continue
 		case greenhouse.RecoveryRequired:
 			command := fmt.Sprintf("posse review recover %s --repo %s --head %s --recovery %s", taskIDString(task.Seq), member.name, requestHead, result.Recovery.ID)
+			if daemon.Isolated {
+				command += " --greenhouse-binary " + shellQuote(daemon.Binary) + " --greenhouse-home " + shellQuote(daemon.Home)
+			}
 			summary := fmt.Sprintf("%s: Greenhouse review %s of %s parked after an interruption (%s). Run `%s` after the interrupted executor exits", taskIDString(task.Seq), result.Grant, member.name, result.Recovery.Reason, command)
 			created, err := db.CreateGreenhouseRecoveryNoticeOnce(ctx.Context, project.ID, task.ID, member.name, result.Recovery.ID, summary)
 			if err != nil {
@@ -1469,12 +1494,20 @@ func greenhouseReviewHost(project store.Project, task store.Task, member greenho
 	return greenhouse.Host{Name: "posse", ID: project.Name + "/" + taskIDString(task.Seq) + "/" + member.name}
 }
 
-func newGreenhouseDaemon(ctx context.Context, db *store.DB, home, binary string) (*greenhouse.Daemon, error) {
+func newGreenhouseDaemon(ctx context.Context, db *store.DB, home string, runtime greenhouse.ReviewRuntime) (*greenhouse.Daemon, error) {
+	isolated := runtime != (greenhouse.ReviewRuntime{})
+	if !isolated {
+		binary, err := greenhouseBinary()
+		if err != nil {
+			return nil, axi.Failure("greenhouse_missing", err.Error(), false, "Install Greenhouse, then retry")
+		}
+		runtime = greenhouse.ReviewRuntime{Binary: binary, Home: greenhouse.HomeFor(home)}
+	}
 	tasks, err := posseTasks(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	return &greenhouse.Daemon{Binary: binary, Home: greenhouse.HomeFor(home), Env: os.Environ(), InTask: func(pid int) bool {
+	return &greenhouse.Daemon{Binary: runtime.Binary, Home: runtime.Home, Isolated: isolated, Env: os.Environ(), InTask: func(pid int) bool {
 		for _, task := range tasks {
 			if processInTaskContainment(pid, task) {
 				return true

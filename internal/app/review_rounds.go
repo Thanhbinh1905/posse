@@ -21,6 +21,7 @@ import (
 	"github.com/thanhbinh1905/posse/internal/axi"
 	"github.com/thanhbinh1905/posse/internal/config"
 	"github.com/thanhbinh1905/posse/internal/dispatch"
+	"github.com/thanhbinh1905/posse/internal/greenhouse"
 	"github.com/thanhbinh1905/posse/internal/store"
 	"github.com/thanhbinh1905/posse/internal/taskplan"
 )
@@ -1212,6 +1213,17 @@ func (s *Service) startParallelGreenhouseReviewsTracked(ctx context.Context, db 
 		}
 		restarted := false
 		if pendingGrant != "" {
+			runtime, _, err := greenhouse.PendingRuntime(pendingPath)
+			if err != nil || runtime != (greenhouse.ReviewRuntime{}) {
+				_ = releaseParallelReviewLock(lock)
+				if err != nil {
+					return err
+				}
+				if explicitStart {
+					return axi.Failure("greenhouse_runtime_conflict", "this Member has a pending isolated Greenhouse review", false, "Continue with `posse _greenhouse review` and the original --greenhouse-binary and --greenhouse-home")
+				}
+				continue
+			}
 			restarted, err = db.GreenhouseReviewRestartedSince(ctx, change.ID, target.Repository, target.Commit, pendingGrant, lastFailedAt)
 			if err != nil {
 				_ = releaseParallelReviewLock(lock)
