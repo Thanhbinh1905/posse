@@ -712,10 +712,18 @@ func TestReleasedPRMergeDoesNotTouchReusedSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	foundPR := false
 	for _, delivery := range deliveries {
-		if delivery.PRURL == fixture.task.PRURL && delivery.ID == fixture.task.ID {
+		if delivery.PRURL != fixture.task.PRURL {
+			continue
+		}
+		foundPR = true
+		if delivery.ID == fixture.task.ID {
 			t.Fatalf("regression fixture must separate Task ID %d from its Delivery ID", fixture.task.ID)
 		}
+	}
+	if !foundPR {
+		t.Fatalf("PR delivery %q was not recorded", fixture.task.PRURL)
 	}
 	otherID, err := fixture.db.CreateTask(ctx, fixture.project.ID, store.Task{Seq: 2, Type: "change", Title: "reuse released Sandbox", State: store.StateSpawning, MergeMode: "pr", Branch: "posse/t2", BaseRef: "main"})
 	if err != nil {
