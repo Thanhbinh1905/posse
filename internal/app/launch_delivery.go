@@ -378,7 +378,7 @@ func (s *Service) admitQueuedTask(ctx context.Context, db *store.DB, home string
 	if !inline && s.DetachQueuedLaunch {
 		return s.launchQueuedTaskDetached(ctx, db, home, project, queued)
 	}
-	claimed, err := db.ClaimQueuedTask(ctx, project.ID, queued.ID, cfg.Defaults.MaxWorkers, branch, os.Getpid())
+	claimed, err := db.ClaimQueuedTask(ctx, project.ID, queued.ID, queued.PlanRevision, cfg.Defaults.MaxWorkers, branch, os.Getpid())
 	if err != nil {
 		if errors.Is(err, store.ErrTaskBranchExists) {
 			return false, nil

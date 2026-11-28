@@ -560,6 +560,114 @@ func TestCascadeTeardownSkipsTaskWhosePlanChangedAfterClosureSelection(t *testin
 	}
 }
 
+func TestDependencyPlanRevisionRequiresQueuedTaskAndValidPrerequisites(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project, err := db.CreateProject(ctx, "shop", filepath.Join(home, "repo"), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorPlan := admittedStorePlan(t, home).Bind("t1")
+	predecessorData, err := predecessorPlan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessorID, err := db.CreateTask(ctx, project.ID, Task{Seq: 1, Type: "change", Title: "Predecessor", State: StateQueued, PlanJSON: predecessorData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependentPlan := admittedStorePlan(t, home).Bind("t2")
+	dependentData, err := dependentPlan.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependentID, err := db.CreateTask(ctx, project.ID, Task{Seq: 2, Type: "change", Title: "Dependent", State: StateQueued, PlanJSON: dependentData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependent, err := db.TaskByID(ctx, project.ID, dependentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := dependentPlan.WithDependencies([]dispatch.Dependency{{TaskID: "t1", Milestone: "landed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlan(ctx, dependent, revision); err != nil {
+		t.Fatalf("revise queued dependency: %v", err)
+	}
+	updated, err := db.TaskByID(ctx, project.ID, dependentID)
+	if err != nil || updated.State != StateQueued || updated.PlanRevision != 2 {
+		t.Fatalf("queued dependency revision = %+v, %v", updated, err)
+	}
+	claimed, err := db.ClaimQueuedTask(ctx, project.ID, dependent.ID, dependent.PlanRevision, 1, TaskBranchName(dependent.Seq), os.Getpid())
+	if err != nil || claimed {
+		t.Fatalf("stale queued observation claimed revised plan: claimed=%v err=%v", claimed, err)
+	}
+	invalid := revision
+	invalid.PreviousSHA256 = revision.SHA256()
+	invalid.AdmittedSHA256 = ""
+	invalid.Revision++
+	invalid.Dependencies = []dispatch.Dependency{{TaskID: "t1", Milestone: "accepted"}}
+	invalidData, err := invalid.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid, err = taskplan.Decode(invalidData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReviseTaskPlan(ctx, updated, invalid); err == nil {
+		t.Fatal("revision accepted a milestone the prerequisite cannot satisfy")
+	}
+	revisedAgain, err := revision.WithoutDependency("t1", "landed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	type editResult struct {
+		err error
+	}
+	claims := make(chan bool, 1)
+	edits := make(chan editResult, 1)
+	go func() {
+		<-start
+		claimed, claimErr := db.ClaimQueuedTask(ctx, project.ID, dependentID, revision.Revision, 1, TaskBranchName(dependent.Seq), os.Getpid())
+		if claimErr != nil {
+			t.Errorf("claim queued Task: %v", claimErr)
+		}
+		claims <- claimed
+	}()
+	go func() {
+		<-start
+		edits <- editResult{err: db.ReviseTaskPlan(ctx, updated, revisedAgain)}
+	}()
+	close(start)
+	claimed = <-claims
+	editErr := (<-edits).err
+	if claimed == (editErr == nil) {
+		t.Fatalf("launch/edit race claimed=%t editErr=%v; exactly one operation must win", claimed, editErr)
+	}
+	updated, err = db.TaskByID(ctx, project.ID, dependentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed && (updated.State != StateSpawning || updated.PlanRevision != revision.Revision) {
+		t.Fatalf("launch winner has inconsistent plan state: %+v", updated)
+	}
+	if !claimed && (updated.State != StateQueued || updated.PlanRevision != revisedAgain.Revision) {
+		t.Fatalf("edit winner has inconsistent plan state: %+v", updated)
+	}
+	if _, err := db.TaskByID(ctx, project.ID, predecessorID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReviseTaskPlansRollsBackEveryRevisionWhenOneTaskRaces(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()

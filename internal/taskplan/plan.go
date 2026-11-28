@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/thanhbinh1905/posse/internal/config"
@@ -809,6 +810,26 @@ func (p Plan) Bind(taskID string) Plan {
 		p.Paths.Output = filepath.Join(filepath.Dir(p.Paths.Output), taskID)
 	}
 	return p
+}
+
+// WithDependencies replaces the declared prerequisites as an explicit plan revision.
+func (p Plan) WithDependencies(dependencies []dispatch.Dependency) (Plan, error) {
+	if err := p.Validate(); err != nil {
+		return Plan{}, err
+	}
+	if slices.Equal(p.Dependencies, dependencies) {
+		return Plan{}, fmt.Errorf("prerequisites are unchanged")
+	}
+	p.PreviousSHA256 = p.SHA256()
+	p.AdmittedSHA256 = ""
+	p.legacyJSON = ""
+	p.Revision++
+	p.Dependencies = append([]dispatch.Dependency(nil), dependencies...)
+	data, err := p.Encode()
+	if err != nil {
+		return Plan{}, err
+	}
+	return Decode(data)
 }
 
 // WithoutDependency removes one declared prerequisite as an explicit plan revision.

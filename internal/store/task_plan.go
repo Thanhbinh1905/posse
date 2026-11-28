@@ -110,6 +110,10 @@ func (db *DB) ReviseTaskPlans(ctx context.Context, revisions []TaskPlanRevision)
 			return fmt.Errorf("execution plan revision does not extend the admitted plan")
 		}
 		plan := revision.Plan
+		dependenciesChanged := !slices.Equal(plan.Dependencies, previous.Dependencies)
+		if dependenciesChanged && revision.Task.State != StateQueued {
+			return fmt.Errorf("Task prerequisites can only be revised while queued")
+		}
 		count := len(previous.ScopeAmendments)
 		if len(plan.ScopeAmendments) < count || !slices.Equal(plan.ScopeAmendments[:count], previous.ScopeAmendments) {
 			return fmt.Errorf("execution plan revision cannot alter the approved scope history")
@@ -138,6 +142,11 @@ func (db *DB) ReviseTaskPlans(ctx context.Context, revisions []TaskPlanRevision)
 	defer tx.Rollback()
 	for _, revision := range prepared {
 		task, plan, data := revision.Task, revision.Plan, revision.Data
+		if !slices.Equal(plan.Dependencies, revision.Previous.Dependencies) {
+			if err := validateTaskDependenciesTx(ctx, tx.Tx, task.ProjectID, task.Seq, task.Type, data); err != nil {
+				return err
+			}
+		}
 		amendedRepository := ""
 		if len(plan.ScopeAmendments) > len(revision.Previous.ScopeAmendments) {
 			amendedRepository = plan.ScopeAmendments[len(plan.ScopeAmendments)-1].Repository

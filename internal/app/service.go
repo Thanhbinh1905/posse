@@ -161,6 +161,7 @@ func (s *Service) commands() *axi.Command {
 		{Name: "list", Usage: "$ list [--all] [--full]", Summary: "List Tasks in this Project or every Project.", Handler: s.ls},
 		{Name: "queue", Summary: "Manage queued Tasks.", Subcommands: []*axi.Command{
 			{Name: "move", Usage: "$ queue move <task>", Summary: "Move a queued Task to the front without changing Worker capacity.", Handler: s.moveQueuedTask},
+			{Name: "prerequisites", Usage: "$ queue prerequisites <task> [--after <task:milestone>]... | --clear", Summary: "Revise the complete prerequisite set of a queued Task without changing its admitted identity or frozen inputs.", Handler: s.reviseQueuedPrerequisites},
 		}},
 		{Name: "heavy", Usage: "$ heavy --status | heavy [--class cpu|reviewer] -- <command>", Summary: "Run a command after acquiring a machine-wide slot, or list current holders.", Handler: s.heavyCommand},
 		{Name: "show", Usage: "$ show <task> [--full]", Summary: "Inspect a Task, model-error recovery episode, undelivered messages, Signals and transitions.", Handler: s.show},

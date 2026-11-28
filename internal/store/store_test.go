@@ -70,7 +70,7 @@ func TestQueuedTaskClaimIsAtomicCapacityBoundAndSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := db.ClaimQueuedTask(ctx, project.ID, queuedID, 1, TaskBranchName(queuedSeq), os.Getpid())
+	claimed, err := db.ClaimQueuedTask(ctx, project.ID, queuedID, 0, 1, TaskBranchName(queuedSeq), os.Getpid())
 	if err != nil || claimed {
 		t.Fatalf("queued Task claimed while capacity was full: claimed=%v err=%v", claimed, err)
 	}
@@ -86,7 +86,7 @@ func TestQueuedTaskClaimIsAtomicCapacityBoundAndSingleUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			claimed, err := db.ClaimQueuedTask(ctx, project.ID, queuedID, 1, TaskBranchName(queuedSeq), os.Getpid())
+			claimed, err := db.ClaimQueuedTask(ctx, project.ID, queuedID, 0, 1, TaskBranchName(queuedSeq), os.Getpid())
 			claimResults <- struct {
 				claimed bool
 				err     error
@@ -115,7 +115,7 @@ func TestQueuedTaskClaimIsAtomicCapacityBoundAndSingleUse(t *testing.T) {
 	if err != nil || intent.Command != "start" {
 		t.Fatalf("claim did not create normal start intent: intent=%+v err=%v", intent, err)
 	}
-	claimed, err = db.ClaimQueuedTask(ctx, project.ID, queuedID, 1, TaskBranchName(queuedSeq), os.Getpid())
+	claimed, err = db.ClaimQueuedTask(ctx, project.ID, queuedID, 0, 1, TaskBranchName(queuedSeq), os.Getpid())
 	if err != nil || claimed {
 		t.Fatalf("claim was not single-use: claimed=%v err=%v", claimed, err)
 	}

@@ -435,7 +435,7 @@ var transitions = map[State]map[State]bool{
 // ClaimQueuedTask atomically reserves a Worker slot, assigns the Task-bound
 // branch and creates the normal start intent. Queued Tasks hold none of these
 // resources before this transaction succeeds.
-func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxWorkers int, branch string, processID int) (bool, error) {
+func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, expectedPlanRevision, maxWorkers int, branch string, processID int) (bool, error) {
 	if maxWorkers < 1 || processID < 1 {
 		return false, fmt.Errorf("worker limit and process id are required")
 	}
@@ -449,11 +449,11 @@ func (db *DB) ClaimQueuedTask(ctx context.Context, projectID, taskID int64, maxW
 	}
 	defer tx.Rollback()
 	var state State
-	var taskSequence int
-	if err := tx.QueryRowContext(ctx, `SELECT state,seq FROM tasks WHERE id=? AND project_id=?`, taskID, projectID).Scan(&state, &taskSequence); err != nil {
+	var taskSequence, planRevision int
+	if err := tx.QueryRowContext(ctx, `SELECT state,seq,plan_revision FROM tasks WHERE id=? AND project_id=?`, taskID, projectID).Scan(&state, &taskSequence, &planRevision); err != nil {
 		return false, err
 	}
-	if state != StateQueued || branch != "" && sequence != taskSequence {
+	if state != StateQueued || planRevision != expectedPlanRevision || branch != "" && sequence != taskSequence {
 		return false, nil
 	}
 	q := db.queries.WithTx(tx.Tx)

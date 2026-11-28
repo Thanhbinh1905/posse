@@ -282,6 +282,168 @@ func TestConcurrentWritesNeverReturnBusy(t *testing.T) {
 	}
 }
 
+func TestTwoProjectsConcurrentSignalsQueueAdmissionsAndStatusReadsConverge(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenAt(filepath.Join(t.TempDir(), "posse.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	projects := make([]Project, 2)
+	active := make([][]Task, 2)
+	for projectIndex := range projects {
+		project, err := db.CreateProject(ctx, fmt.Sprintf("shop-%d", projectIndex), filepath.Join(t.TempDir(), fmt.Sprintf("repo-%d", projectIndex)), "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		projects[projectIndex] = project
+		for taskIndex := 0; taskIndex < 4; taskIndex++ {
+			taskID, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: fmt.Sprintf("Active %d", taskIndex), ShortName: fmt.Sprintf("active-%d", taskIndex)}, func(int) (bool, error) { return false, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transition(ctx, taskID, StateSpawning, StateWorking, "cli", "fixture Worker started"); err != nil {
+				t.Fatal(err)
+			}
+			task, err := db.TaskByID(ctx, project.ID, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			active[projectIndex] = append(active[projectIndex], task)
+		}
+	}
+
+	writer, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `UPDATE projects SET last_activity_at=last_activity_at`); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = writer.Rollback()
+		close(released)
+	}()
+
+	start := make(chan struct{})
+	errorsCh := make(chan error, 64)
+	var wg sync.WaitGroup
+	for projectIndex, project := range projects {
+		projectIndex, project := projectIndex, project
+		for _, task := range active[projectIndex] {
+			task := task
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				for signal := 0; signal < 5; signal++ {
+					if _, err := db.RecordWorkerSignal(ctx, task, "working", fmt.Sprintf("signal-%d-%d", task.ID, signal), nil, ""); err != nil {
+						errorsCh <- err
+						return
+					}
+				}
+			}()
+		}
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := db.CreateTaskWithSequence(ctx, project.ID, project.Name, Task{Type: "change", Title: "Queued", ShortName: "queued", State: StateQueued}, func(int) (bool, error) { return false, nil })
+			if err != nil {
+				errorsCh <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			for pass := 0; pass < 10; pass++ {
+				if _, err := db.Tasks(ctx, project.ID, true); err != nil {
+					errorsCh <- err
+					return
+				}
+				if _, err := db.QueuedTaskIDs(ctx, project.ID); err != nil {
+					errorsCh <- err
+					return
+				}
+				if _, err := db.ActiveWorkerCount(ctx, project.ID); err != nil {
+					errorsCh <- err
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	<-released
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatalf("concurrent Project activity: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for pass := 0; pass < 2; pass++ {
+		for projectIndex, project := range projects {
+			tasks, err := db.Tasks(ctx, project.ID, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			queuedIDs, err := db.QueuedTaskIDs(ctx, project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tasks) != 5 || len(queuedIDs) != 1 || time.Now().After(deadline) {
+				t.Fatalf("Project %s pass %d has Tasks=%d queued=%d after %s", project.Name, pass+1, len(tasks), len(queuedIDs), 30*time.Second)
+			}
+			if pass == 0 {
+				var decisions sync.WaitGroup
+				decisionErrors := make(chan error, 8)
+				for range 8 {
+					decisions.Add(1)
+					go func(taskID int64) {
+						defer decisions.Done()
+						_, err := db.RaiseDecision(ctx, DecisionRequest{ProjectID: project.ID, TaskID: taskID, Origin: "dependency:stress", Kind: "dependency", Question: "Resolve the queued prerequisite", Options: []string{"cancel", "continue"}})
+						if err != nil {
+							decisionErrors <- err
+						}
+					}(queuedIDs[0])
+				}
+				decisions.Wait()
+				close(decisionErrors)
+				for err := range decisionErrors {
+					if err != nil {
+						t.Fatalf("concurrent Decision admission: %v", err)
+					}
+				}
+				pending, err := db.Decisions(ctx, project.ID, false)
+				if err != nil || len(pending) != 1 || pending[0].TaskID != queuedIDs[0] {
+					t.Fatalf("Project %s pending Decisions=%#v err=%v, want one for queued Task %d", project.Name, pending, err, queuedIDs[0])
+				}
+			}
+			for _, task := range active[projectIndex] {
+				current, err := db.TaskByID(ctx, project.ID, task.ID)
+				if err != nil || current.State != StateWorking {
+					t.Fatalf("active Task %d state=%s err=%v", task.ID, current.State, err)
+				}
+				signals, err := db.TaskSignals(ctx, task.ID, 100)
+				if err != nil || len(signals) != 5 {
+					t.Fatalf("active Task %d signals=%d err=%v, want five", task.ID, len(signals), err)
+				}
+				seen := make(map[string]bool, len(signals))
+				for _, signal := range signals {
+					if seen[signal.Note] {
+						t.Fatalf("active Task %d duplicated Signal %q", task.ID, signal.Note)
+					}
+					seen[signal.Note] = true
+				}
+			}
+		}
+	}
+}
+
 // A bounded autocommit write, such as the Watch progress heartbeat, waits on
 // the lock in short steps but must keep retrying until its own deadline, as
 // bounded transactions do, rather than fail after the first short wait.
